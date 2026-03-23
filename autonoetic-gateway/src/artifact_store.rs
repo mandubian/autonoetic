@@ -57,6 +57,42 @@ impl ArtifactStore {
         format!("{}{}", ARTIFACT_ID_PREFIX, &uuid_hex[..8])
     }
 
+    /// Computes a deterministic artifact ID from sorted inputs and entrypoints.
+    /// Same inputs + entrypoints always produce the same artifact ID.
+    fn compute_deterministic_artifact_id(
+        file_handles: &[String],
+        entrypoints: Option<&[String]>,
+    ) -> String {
+        let mut hasher = Sha256::new();
+
+        // Sort file handles for determinism
+        let mut sorted_handles = file_handles.to_vec();
+        sorted_handles.sort();
+        for handle in sorted_handles {
+            hasher.update(handle.as_bytes());
+            hasher.update(b"\0"); // Separator
+        }
+
+        // Sort entrypoints for determinism
+        if let Some(eps) = entrypoints {
+            let mut sorted_eps = eps.to_vec();
+            sorted_eps.sort();
+            for ep in sorted_eps {
+                hasher.update(ep.as_bytes());
+                hasher.update(b"\0");
+            }
+        }
+
+        let hash = hasher.finalize();
+        // Use first 8 hex chars for short ID (same length as UUID-based)
+        format!("{}{:08x}", ARTIFACT_ID_PREFIX, u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]))
+    }
+
+    /// Checks if an artifact with the given ID exists.
+    fn artifact_exists(&self, artifact_id: &str) -> bool {
+        self.artifacts_dir.join(artifact_id).join("manifest.json").exists()
+    }
+
     /// Computes SHA-256 digest of the manifest JSON.
     fn compute_digest(bundle_json: &str) -> String {
         let mut hasher = Sha256::new();
@@ -85,6 +121,9 @@ impl ArtifactStore {
 
     /// Builds an artifact from session-visible content.
     ///
+    /// With deduplication: if an artifact with the same inputs + entrypoints already exists,
+    /// returns the existing artifact (with `reused: true`). Otherwise creates a new artifact.
+    ///
     /// - `inputs`: list of content names or handles to include
     /// - `entrypoints`: optional list of entrypoint filenames
     /// - `builder_session_id`: session that is building this artifact
@@ -97,7 +136,9 @@ impl ArtifactStore {
         anyhow::ensure!(!inputs.is_empty(), "artifact inputs must not be empty");
 
         let mut files = Vec::new();
+        let mut file_handles = Vec::new();
 
+        // Phase 1: Resolve all inputs to file handles
         for input_name in inputs {
             // Resolve content: try as name first, then as handle (with visibility check)
             let (handle, content) = if input_name.starts_with("sha256:") {
@@ -131,6 +172,7 @@ impl ArtifactStore {
                 input_name
             );
 
+            file_handles.push(handle.clone());
             files.push(ArtifactFileEntry {
                 name: input_name.clone(),
                 handle,
@@ -138,7 +180,25 @@ impl ArtifactStore {
             });
         }
 
-        let artifact_id = Self::generate_artifact_id();
+        // Phase 2: Compute deterministic artifact ID from handles + entrypoints
+        let artifact_id = Self::compute_deterministic_artifact_id(&file_handles, entrypoints);
+
+        // Phase 3: Check if artifact already exists (deduplication)
+        if self.artifact_exists(&artifact_id) {
+            let existing_bundle = self.inspect(&artifact_id)?;
+            tracing::info!(
+                target: "artifact_store",
+                artifact_id = %artifact_id,
+                "Reused existing artifact (deduplication)"
+            );
+            // Return existing artifact with reused: true
+            return Ok(ArtifactBundle {
+                reused: true,
+                ..existing_bundle
+            });
+        }
+
+        // Phase 4: Create new artifact
         let created_at = chrono::Utc::now().to_rfc3339();
 
         // Build entrypoints - validate they exist in the file list
@@ -162,6 +222,7 @@ impl ArtifactStore {
             digest: String::new(), // computed below
             created_at,
             builder_session_id: builder_session_id.to_string(),
+            reused: false,
         };
 
         // Compute digest from canonical JSON
@@ -177,7 +238,7 @@ impl ArtifactStore {
             target: "artifact_store",
             artifact_id = %bundle.artifact_id,
             file_count = bundle.files.len(),
-            "Built artifact"
+            "Built new artifact"
         );
 
         Ok(bundle)
