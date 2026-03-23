@@ -1050,7 +1050,7 @@ fn print_workflow_events_table(
     println!();
 
     if events.is_empty() {
-        println!("{}No events in events.jsonl.{}", color::DIM, color::RESET);
+        println!("{}No workflow events in gateway store.{}", color::DIM, color::RESET);
         return Ok(());
     }
 
@@ -1071,7 +1071,7 @@ fn print_workflow_events_table(
     Ok(())
 }
 
-/// Print durable workflow store events (`events.jsonl`), optionally following new lines.
+/// Print durable workflow store events (SQLite), optionally following new events.
 pub async fn handle_trace_workflow(
     config_path: &Path,
     workflow_or_root: &str,
