@@ -80,4 +80,7 @@ pub struct ArtifactBundle {
     pub created_at: String,
     /// Session that built this artifact
     pub builder_session_id: String,
+    /// True if this artifact was reused from an existing artifact with same inputs
+    #[serde(default)]
+    pub reused: bool,
 }
