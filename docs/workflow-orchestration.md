@@ -186,6 +186,69 @@ workflows/
 
 **Note:** `WorkflowEventRecord` streams are stored in the Gateway's embedded SQLite database (`.gateway/gateway.db`) rather than as `events.jsonl` file appends, ensuring high concurrency and reliability.
 
+## Workflow Event Types
+
+The workflow system emits structured events for all state transitions. These events are consumed by the chat CLI to display real-time progress and by other tools for monitoring.
+
+### Workflow-Level Events
+
+| Event Type | Description |
+|-----------|-------------|
+| `workflow.started` | A new workflow has been created for a root session |
+| `workflow.join.satisfied` | All tasks in a join group have completed |
+
+### Task Lifecycle Events
+
+| Event Type | Description | Payload |
+|-----------|-------------|---------|
+| `task.spawned` | A task has been created and queued for execution | `{ task_id, agent_id, message }` |
+| `task.started` | A task has started executing (agent spawned) | `{ status: "Running" }` |
+| `task.completed` | A task completed successfully | `{ status: "Succeeded" }` |
+| `task.failed` | A task failed | `{ status: "Failed" }` |
+| `task.updated` | Generic task status update (catch-all) | `{ status: ... }` |
+| `task.awaiting_approval` | Task requires approval before proceeding | `{ status: "AwaitingApproval" }` |
+
+### Approval Events (New)
+
+| Event Type | Description | Payload |
+|-----------|-------------|---------|
+| `task.awaiting_approval` | Task is waiting for approval approval | `{ status: "AwaitingApproval", approval: "sandbox_exec\|agent_install" }` |
+| `task.approved` | Approval was granted, task is now runnable | `{ status: "Runnable", approval: "approval_approved" }` |
+| `task.rejected` | Approval was rejected, task has failed | `{ status: "Failed", approval: "approval_rejected" }` |
+
+### Chat CLI Display
+
+The chat CLI polls workflow events and displays them with appropriate icons:
+
+```
+📋 [2026-03-23T13:41:00] Workflow started
+🚀 [2026-03-23T13:41:05] Task spawned: task-94c19ac6
+▶ [2026-03-23T13:41:10] Task started: task-94c19ac6
+⏸ [2026-03-23T13:41:15] Approval required: task-94c19ac6 (sandbox.exec)
+✅ [2026-03-23T13:42:30] Approval approved: task-94c19ac6
+🔁 [2026-03-23T13:42:35] Task resumed: task-94c19ac6
+✅ [2026-03-23T13:43:00] Task completed: task-94c19ac6
+✅ [2026-03-23T13:43:05] Workflow join satisfied
+```
+
+### Approval Flow via Workflow Events
+
+Approval tracking is now unified through workflow events only:
+
+1. **Tool requires approval** → Task status set to `AwaitingApproval` → `task.awaiting_approval` event emitted
+2. **Chat CLI polls events** → Shows "⏸ Approval required: task-xxx (sandbox.exec)"
+3. **User approves via CLI** → `autonoetic gateway approve apr-xxx`
+4. **Task status updated** → Status changed to `Runnable` → `task.approved` event emitted
+5. **Chat CLI polls events** → Shows "✅ Approval approved: task-xxx"
+6. **Agent wakes up** → Receives `approval_resolved` signal → Retries tool with `approval_ref`
+7. **Task executes** → Returns to `Running` → Eventually completes
+
+This unified approach means:
+- **No SQLite approval polling** in chat CLI
+- **Single source of truth**: workflow events
+- **Consistent visibility**: All state transitions visible through events
+- **Approvals persist** in SQLite for the approval command, but chat uses events for display
+
 ## Causal Chain Relationship
 
 Workflow orchestration and causal chain are separate layers:
@@ -210,9 +273,22 @@ Important: Every significant workflow transition emits a causal chain entry (`wo
 
 **Fix**: `TaskRun` now stores `message` and `metadata` fields. These are populated on spawn and preserved through the `AwaitingApproval` → `Runnable` transition. Resume uses the original values.
 
+### Bug 3: Inverted event deduplication logic prevented workflow events from displaying
+
+**Problem**: The chat CLI's event filtering logic had an inverted condition (`!insert()` instead of `insert()`), causing it to skip actually new events and only show duplicates. This prevented workflow events like `task.awaiting_approval`, `task.approved`, etc. from appearing in the chat interface.
+
+**Fix**: Corrected the deduplication logic to use `insert()` directly, which returns `true` for newly inserted events. Also improved workflow change detection to reset the bootstrap flag when a workflow is created mid-session.
+
+### Bug 4: Short alias used as full handle prevented content.read from working
+
+**Problem**: When `content.write` returns an alias (e.g., `"8b40c8e1"`), the LLM sometimes mistakenly treats it as a full SHA-256 handle by prepending `sha256:`, resulting in `content.read("sha256:8b40c8e1")`. The lookup logic treated this as a full handle lookup (expecting 64 hex chars) rather than an alias lookup (8 chars), causing "Content not found" errors.
+
+**Fix**: Enhanced `ContentStore::read_by_name_or_handle` to detect the pattern `sha256:SHORT_ALIAS` (exactly 8 hex chars after the prefix) and redirect it to alias lookup. This makes content.read more resilient to LLM misinterpretations of the alias value.
+
 ## Files
 
 - `autonoetic-gateway/src/scheduler.rs` — Scheduler tick, spawn logic, crash recovery
 - `autonoetic-gateway/src/scheduler/workflow_store.rs` — Durable store, task/workflow updates, join conditions
 - `autonoetic-types/src/workflow.rs` — Core types (`WorkflowRun`, `TaskRun`, `QueuedTaskRun`, etc.)
 - `autonoetic-gateway/src/scheduler/workflow_causal.rs` — Causal chain mirroring
+- `autonoetic-gateway/src/runtime/content_store.rs` — Content addressing, visibility, alias/handle resolution
