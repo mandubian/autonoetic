@@ -316,7 +316,7 @@ pub enum TraceCommands {
         /// Emit machine-readable JSON (pretty document once; with `--follow`, one JSON object per new event line)
         #[arg(long)]
         json: bool,
-        /// Poll `events.jsonl` and print new lines (Ctrl+C to stop)
+        /// Poll workflow events from the gateway store and print new lines (Ctrl+C to stop)
         #[arg(long)]
         follow: bool,
     },
