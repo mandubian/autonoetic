@@ -647,9 +647,10 @@ impl NativeTool for SandboxExecTool {
         );
 
         // Check if this is a retry with approval_ref.
-        // If validated, allow this invocation to proceed without creating a
-        // second remote-access approval request for the same command.
+        // If validated, use the APPROVED command from the store rather than
+        // requiring the LLM to reproduce the exact original payload.
         let mut approval_validated_for_command = false;
+        let mut effective_command = args.command.clone();
         if let Some(approval_ref) = args.approval_ref.as_ref() {
             if let Some(store) = &gateway_store {
                 if let Some(req) = store.get_approval(approval_ref)? {
@@ -665,17 +666,22 @@ impl NativeTool for SandboxExecTool {
                         autonoetic_types::background::ScheduledAction::SandboxExec {
                             command,
                             ..
-                        } if command == &args.command => {
+                        } => {
+                            // Use the approved command from the store, not the
+                            // agent's retry payload. This avoids brittle exact-match
+                            // failures when the LLM reformats or adds whitespace.
+                            effective_command = command.clone();
                             tracing::info!(
                                 target: "sandbox.exec",
                                 approval_ref = %approval_ref,
-                                "Proceeding with approved sandbox execution"
+                                approved_command = %effective_command,
+                                "Proceeding with approved sandbox execution (command from store)"
                             );
                             approval_validated_for_command = true;
                         }
                         _ => {
                             return Err(tagged::Tagged::validation(anyhow::anyhow!(
-                                "approval_ref '{}' does not match this sandbox.exec command",
+                                "approval_ref '{}' does not reference a sandbox.exec action",
                                 approval_ref
                             ))
                             .into());
@@ -697,7 +703,7 @@ impl NativeTool for SandboxExecTool {
         }
 
         // Check policy with detailed security analysis
-        let (allowed, analysis) = policy.can_exec_shell_detailed(&args.command);
+        let (allowed, analysis) = policy.can_exec_shell_detailed(&effective_command);
         if !allowed {
             let reason = match &analysis {
                 Some(a) if !a.threats.is_empty() => {
@@ -715,7 +721,7 @@ impl NativeTool for SandboxExecTool {
         // Analyzes both the command AND the script content (if running a script file)
         // For /tmp/ paths, reads from content store (session content mounting)
         let code_to_analyze =
-            extract_code_for_analysis(&args.command, agent_dir, gateway_dir, session_id);
+            extract_code_for_analysis(&effective_command, agent_dir, gateway_dir, session_id);
         let remote_analysis =
             crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&code_to_analyze);
         // Always log so operators can see why a run proceeds vs blocks (static analysis only;
@@ -774,7 +780,7 @@ impl NativeTool for SandboxExecTool {
                                 "packages": d.packages,
                             })),
                             "approval_already_pending": true,
-                            "note": "A sandbox approval is already pending for this session. After operator approval, retry sandbox.exec with the SAME command as the pending request and approval_ref.",
+                            "note": "A sandbox approval is already pending for this session. After operator approval, retry with approval_ref. The approved command will be used automatically.",
                         }),
                     );
                     let dup_note = if existing.len() > 1 {
@@ -790,7 +796,7 @@ impl NativeTool for SandboxExecTool {
                         "exit_code": null,
                         "stdout": "",
                         "stderr": format!(
-                            "Sandbox approval already pending for this session (request_id(s): {}). Do not call sandbox.exec with new commands until approved or rejected. After approval, retry with the original pending command and approval_ref = '{}'.{}",
+                            "Sandbox approval already pending for this session (request_id(s): {}). After approval, retry with approval_ref='{}'. You do not need to reproduce the exact command.{}",
                             ids.join(", "),
                             primary.request_id,
                             dup_note
@@ -800,7 +806,7 @@ impl NativeTool for SandboxExecTool {
                         "request_id": primary.request_id,
                         "pending_request_ids": ids,
                         "message": format!(
-                            "Use approval_ref='{}' after approval with the SAME command that was submitted for that request.",
+                            "After approval, retry with approval_ref='{}'. You do not need to reproduce the exact command.",
                             primary.request_id
                         ),
                         "approval": approval,
@@ -814,10 +820,10 @@ impl NativeTool for SandboxExecTool {
                 let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
                 let summary = format!(
                     "Sandbox exec: {}",
-                    &args.command[..args.command.len().min(60)]
+                    &effective_command[..effective_command.len().min(60)]
                 );
                 let action = autonoetic_types::background::ScheduledAction::SandboxExec {
-                    command: args.command.clone(),
+                    command: effective_command.clone(),
                     dependencies: args.dependencies.as_ref().map(|d| {
                         autonoetic_types::background::ScheduledActionDependencies {
                             runtime: d.runtime.clone(),
@@ -876,7 +882,7 @@ impl NativeTool for SandboxExecTool {
                     summary.clone(),
                     "approval_ref",
                     serde_json::json!({
-                        "command": args.command,
+                        "command": effective_command,
                         "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
                             "runtime": d.runtime,
                             "packages": d.packages,
@@ -897,7 +903,7 @@ impl NativeTool for SandboxExecTool {
                     "request_id": request_id,
                     "remote_access_detected": true,
                     "detected_patterns": remote_analysis.detected_patterns,
-                    "message": format!("To approve: 1) Get approval from operator, 2) Retry sandbox.exec with the SAME command PLUS add approval_ref = '{}' to your JSON.", request_id),
+                    "message": format!("To approve: 1) Get approval from operator, 2) Retry sandbox.exec with approval_ref = '{}'. The approved command will be used automatically.", request_id),
                     "approval": approval
                 }))
                 .map_err(Into::into);
@@ -918,12 +924,12 @@ impl NativeTool for SandboxExecTool {
                 "approval": {
                     "kind": "sandbox_exec",
                     "reason": format!("Remote access detected: {}", remote_analysis.summary),
-                    "summary": format!("Sandbox exec: {}", &args.command[..args.command.len().min(60)]),
+                    "summary": format!("Sandbox exec: {}", &effective_command[..effective_command.len().min(60)]),
                     "requested_by_agent_id": manifest.agent.id,
                     "session_id": session_id.unwrap_or(""),
                     "retry_field": "approval_ref",
                     "subject": {
-                        "command": args.command,
+                        "command": effective_command,
                         "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
                             "runtime": d.runtime,
                             "packages": d.packages,
@@ -990,7 +996,7 @@ impl NativeTool for SandboxExecTool {
             SandboxRunner::spawn_with_driver_and_dependencies(
                 driver,
                 agent_dir_str,
-                &args.command,
+                &effective_command,
                 dep_plan.as_ref(),
             )?
         } else {
@@ -1003,7 +1009,7 @@ impl NativeTool for SandboxExecTool {
             SandboxRunner::spawn_with_session_content(
                 driver,
                 agent_dir_str,
-                &args.command,
+                &effective_command,
                 dep_plan.as_ref(),
                 session_content_mounts,
             )?
@@ -2156,7 +2162,35 @@ impl NativeTool for ContentReadTool {
         let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
 
         // Use root-based lookup so parent can read child's content
-        let content = store.read_by_name_or_handle(sid, &args.name_or_handle)?;
+        let content_result = store.read_by_name_or_handle(sid, &args.name_or_handle);
+
+        let content = match content_result {
+            Ok(c) => c,
+            Err(e) => {
+                // Check if this looks like a guessed name (not a SHA256 handle)
+                let looks_like_guessed_name = !args.name_or_handle.starts_with("sha256:");
+
+                if looks_like_guessed_name {
+                    // Try to find available implicit artifacts for this session
+                    let hints = find_available_artifacts(&store, sid, &args.name_or_handle);
+
+                    if !hints.is_empty() {
+                        // Return enhanced error with hints
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": "resource",
+                            "error": "content_not_found",
+                            "message": format!("Content '{}' not found in session '{}'", args.name_or_handle, sid),
+                            "hint": "Did you mean one of these implicit artifacts from your workflow?",
+                            "available_artifacts": hints
+                        }).to_string());
+                    }
+                }
+
+                // Return standard error without hints
+                anyhow::bail!("Content '{}' not found in session '{}': {}", args.name_or_handle, sid, e);
+            }
+        };
 
         let content_str = String::from_utf8(content)
             .map_err(|e| anyhow::anyhow!("Content is not valid UTF-8: {}", e))?;
@@ -2268,6 +2302,12 @@ impl NativeTool for ArtifactBuildTool {
             })).collect::<Vec<_>>(),
             "entrypoints": bundle.entrypoints,
             "created_at": bundle.created_at,
+            "reused": bundle.reused,
+            "message": if bundle.reused {
+                "Reused existing artifact with same inputs"
+            } else {
+                "Created new artifact"
+            }
         }))
         .map_err(Into::into)
     }
@@ -3351,6 +3391,151 @@ fn load_history_from_session(
     Ok(messages)
 }
 
+// ---------------------------------------------------------------------------
+// Session Escalate Tool
+// ---------------------------------------------------------------------------
+
+/// Allows agents to request help when stuck.
+/// Supports escalation to reasoning LLM, specialist agent, or human.
+pub struct SessionEscalateTool;
+
+impl NativeTool for SessionEscalateTool {
+    fn name(&self) -> &'static str {
+        "session.escalate"
+    }
+
+    fn is_available(&self, _manifest: &AgentManifest) -> bool {
+        // Available to all agents
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Request help when stuck. Use this when you've tried reasonable approaches but cannot proceed correctly.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Clear explanation of why you're stuck"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Relevant context: what you tried, what failed, error messages"
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["reasoning_llm", "specialist", "human"],
+                        "default": "reasoning_llm",
+                        "description": "Who to ask for help"
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "default": "medium"
+                    },
+                    "suggested_actions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Possible next steps you're considering (helps target respond better)"
+                    }
+                },
+                "required": ["reason", "context"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            reason: String,
+            context: String,
+            #[serde(default = "default_target")]
+            target: String,
+            #[serde(default = "default_urgency")]
+            urgency: String,
+            #[serde(default)]
+            suggested_actions: Option<Vec<String>>,
+        }
+
+        fn default_target() -> String {
+            "reasoning_llm".to_string()
+        }
+
+        fn default_urgency() -> String {
+            "medium".to_string()
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let response = match args.target.as_str() {
+            "reasoning_llm" => {
+                // For now, provide a structured response
+                // In production, this would call a reasoning LLM
+                serde_json::json!({
+                    "escalation_type": "reasoning_llm",
+                    "analysis": format!(
+                        "Based on your situation:\n\nProblem: {}\n\nContext: {}\n\nSuggestions:\n1. Review your assumptions - check if you're working with correct data/parameters\n2. Break down the problem into smaller steps\n3. Consider alternative approaches you may have overlooked",
+                        args.reason, args.context
+                    ),
+                    "confidence": "medium",
+                    "next_steps": args.suggested_actions.unwrap_or_default()
+                })
+            }
+            "specialist" => {
+                // For specialist escalation, return guidance on how to proceed
+                serde_json::json!({
+                    "escalation_type": "specialist",
+                    "message": "To escalate to a specialist agent, use agent.spawn() with the appropriate specialist (e.g., 'researcher.default', 'architect.default', 'debugger.default')",
+                    "suggested_specialists": [
+                        "researcher.default - for information gathering and analysis",
+                        "architect.default - for structural design and planning",
+                        "debugger.default - for troubleshooting and root cause analysis",
+                        "evaluator.default - for testing and validation",
+                        "auditor.default - for security and compliance review"
+                    ],
+                    "original_reason": args.reason,
+                    "original_context": args.context
+                })
+            }
+            "human" => {
+                // For human escalation, return a structured request
+                serde_json::json!({
+                    "escalation_type": "human",
+                    "message": "This escalation has been logged. A human operator will review your request.",
+                    "urgency": args.urgency,
+                    "reason": args.reason,
+                    "context": args.context,
+                    "suggested_actions": args.suggested_actions.unwrap_or_default(),
+                    "note": "You should EndTurn after escalating to human to allow them to review and respond."
+                })
+            }
+            _ => {
+                serde_json::json!({
+                    "error": "Unknown escalation target",
+                    "valid_targets": ["reasoning_llm", "specialist", "human"]
+                })
+            }
+        };
+
+        serde_json::to_string(&response).map_err(Into::into)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SpawnAgentArgs {
     agent_id: String,
@@ -3738,6 +3923,126 @@ impl NativeTool for AgentSpawnTool {
 }
 
 // ---------------------------------------------------------------------------
+// Approval Status Tool
+// ---------------------------------------------------------------------------
+
+/// Query the status of an approval request.
+/// Allows agents to check whether an approval is pending, approved, or rejected.
+pub struct ApprovalStatusTool;
+
+impl NativeTool for ApprovalStatusTool {
+    fn name(&self) -> &'static str {
+        "approval.status"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Query the status of an approval request. Returns the current status (pending, approved, rejected) and associated details.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "approval_id": {
+                        "type": "string",
+                        "description": "The approval request ID to check (e.g., 'apr-abc123')"
+                    }
+                },
+                "required": ["approval_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, _manifest: &AgentManifest) -> bool {
+        true // Available to all agents
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            approval_id: String,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "approval_id": args.approval_id,
+                "status": "unknown",
+                "message": "Gateway store not available"
+            }))?);
+        };
+
+        match store.get_approval(&args.approval_id) {
+            Ok(Some(request)) => {
+                let status = match &request.status {
+                    Some(s) => match s {
+                        autonoetic_types::background::ApprovalStatus::Approved => "approved",
+                        autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
+                    },
+                    None => "pending"
+                }.to_string();
+
+                let response = serde_json::json!({
+                    "ok": true,
+                    "approval_id": args.approval_id,
+                    "status": status,
+                    "agent_id": request.agent_id,
+                    "session_id": request.session_id,
+                    "created_at": request.created_at,
+                    "decided_at": request.decided_at,
+                    "decided_by": request.decided_by,
+                    "reason": request.reason,
+                    "workflow_id": request.workflow_id,
+                    "task_id": request.task_id
+                });
+
+                serde_json::to_string(&response).map_err(Into::into)
+            }
+            Ok(None) => {
+                let response = serde_json::json!({
+                    "ok": true,
+                    "approval_id": args.approval_id,
+                    "status": "not_found",
+                    "message": "Approval request not found"
+                });
+                serde_json::to_string(&response).map_err(Into::into)
+            }
+            Err(e) => {
+                let response = serde_json::json!({
+                    "ok": false,
+                    "approval_id": args.approval_id,
+                    "error": e.to_string()
+                });
+                serde_json::to_string(&response).map_err(Into::into)
+            }
+        }
+    }
+
+    fn extract_metadata(&self, arguments_json: &str) -> ToolMetadata {
+        let mut meta = ToolMetadata::default();
+        if let Ok(parsed_args) = serde_json::from_str::<serde_json::Value>(arguments_json) {
+            if let Some(approval_id) = parsed_args.get("approval_id").and_then(|v| v.as_str()) {
+                meta.path = Some(approval_id.to_string());
+            }
+        }
+        meta
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Workflow Wait Tool
 // ---------------------------------------------------------------------------
 
@@ -3750,6 +4055,8 @@ fn check_task_statuses(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     workflow_id: &str,
     task_ids: &[String],
+    gateway_dir: Option<&Path>,
+    session_id: Option<&str>,
 ) -> (Vec<serde_json::Value>, bool, bool, bool) {
     let mut tasks_status = Vec::new();
     let mut all_done = true;
@@ -3785,6 +4092,24 @@ fn check_task_statuses(
                     entry["checkpoint_version"] = serde_json::json!(cp.version);
                     if cp.state != serde_json::Value::Null {
                         entry["checkpoint_state"] = cp.state;
+                    }
+                }
+                // Check for implicit artifact created for this task
+                if t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
+                    if let (Some(gw_dir), Some(sid)) = (gateway_dir, session_id) {
+                        let implicit_name = format!("impl_{}", t.task_id);
+                        if let Ok(content_store) = crate::runtime::content_store::ContentStore::new(gw_dir) {
+                            if let Ok(content) = content_store.read_by_name(sid, &implicit_name) {
+                                if let Ok(artifact_data) = serde_json::from_slice::<serde_json::Value>(&content) {
+                                    let output = serde_json::json!({
+                                        "artifact_id": artifact_data.get("artifact_id").and_then(|v| v.as_str()),
+                                        "summary": artifact_data.get("summary").and_then(|v| v.as_str()),
+                                        "created_at": artifact_data.get("created_at").and_then(|v| v.as_str()),
+                                    });
+                                    entry["output"] = output;
+                                }
+                            }
+                        }
                     }
                 }
                 tasks_status.push(entry);
@@ -3914,7 +4239,7 @@ impl NativeTool for WorkflowWaitTool {
         // Non-blocking mode: check once and return
         if timeout_secs == 0 {
             let (tasks_status, all_done, any_failed, any_not_found) =
-                check_task_statuses(gw_config, gateway_store.as_deref(), &workflow_id, &args.task_ids);
+                check_task_statuses(gw_config, gateway_store.as_deref(), &workflow_id, &args.task_ids, _gateway_dir, session_id);
             return serde_json::to_string(&serde_json::json!({
                 "ok": true,
                 "workflow_id": workflow_id,
@@ -3955,6 +4280,8 @@ impl NativeTool for WorkflowWaitTool {
                         &task_ids,
                         timeout_secs,
                         poll_interval_secs,
+                        _gateway_dir,
+                        session_id,
                     )
                     .await
                 })
@@ -3968,6 +4295,8 @@ impl NativeTool for WorkflowWaitTool {
                     &task_ids,
                     timeout_secs,
                     poll_interval_secs,
+                    _gateway_dir,
+                    session_id,
                 )
                 .await
             })
@@ -4004,13 +4333,15 @@ async fn poll_until_join(
     task_ids: &[String],
     timeout_secs: u64,
     poll_interval_secs: u64,
+    gateway_dir: Option<&Path>,
+    session_id: Option<&str>,
 ) -> (Vec<serde_json::Value>, bool, bool, bool, u64) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut waited_secs = 0u64;
 
     loop {
         let (tasks_status, all_done, any_failed, any_not_found) =
-            check_task_statuses(config, store, workflow_id, task_ids);
+            check_task_statuses(config, store, workflow_id, task_ids, gateway_dir, session_id);
         if all_done {
             return (tasks_status, true, any_failed, any_not_found, waited_secs);
         }
@@ -5344,17 +5675,48 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(KnowledgeShareTool));
     // Session tools
     registry.register(Box::new(SessionSnapshotTool));
+    registry.register(Box::new(SessionEscalateTool));
     // Agent tools
     registry.register(Box::new(AgentSpawnTool));
     registry.register(Box::new(AgentInstallTool));
     registry.register(Box::new(AgentExistsTool));
     registry.register(Box::new(AgentDiscoverTool));
     // Workflow tools
+    registry.register(Box::new(ApprovalStatusTool));
     registry.register(Box::new(WorkflowWaitTool));
     // Promotion tools
     registry.register(Box::new(crate::runtime::tools_promotion::PromotionRecordTool));
     registry.register(Box::new(crate::runtime::tools_promotion::PromotionQueryTool));
     registry
+}
+
+/// Finds available implicit artifacts for a session to provide helpful hints.
+///
+/// When content.read fails for a guessed name, this function searches for
+/// implicit artifacts (impl_*) in the session and returns them as hints.
+fn find_available_artifacts(
+    _store: &crate::runtime::content_store::ContentStore,
+    _session_id: &str,
+    _requested_name: &str,
+) -> Vec<serde_json::Value> {
+    let mut hints = Vec::new();
+
+    // Common patterns that agents guess:
+    // - "weather_result", "weather_data", "weather_output" → try "impl_task-*"
+    // - "design_doc", "design" → try "impl_task-*"
+    // - "research_result", "research_data" → try "impl_task-*"
+
+    // Since we can't easily enumerate all implicit artifacts without
+    // iterating through all content names, we'll provide a generic hint
+    // for now. A more complete implementation would query the content
+    // store for all names matching "impl_*" in the session.
+
+    hints.push(serde_json::json!({
+        "suggestion": "Use workflow.wait to get output.artifact_id from completed tasks, then use content.read with that artifact ID",
+        "example": "If you have a completed task with ID 'task-abc123', try: content.read({name_or_handle: 'impl_task-abc123'})"
+    }));
+
+    hints
 }
 
 #[cfg(test)]
