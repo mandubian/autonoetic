@@ -249,6 +249,10 @@ impl AgentExecutor {
 
         tracer.log_wake(history.len(), evidence_mode);
 
+        // Detect resumption: if history has more than just system+user messages,
+        // this is a resumption from hibernation
+        let is_resumption = history.len() > 2;
+
         let mut mcp_runtime = McpToolRuntime::from_env().await?;
         let mut secret_store: Option<SecretStoreRuntime> =
             SecretStoreRuntime::from_instructions(&self.instructions)?;
@@ -537,7 +541,8 @@ impl AgentExecutor {
                         self.config.as_deref(),
                         self.gateway_store.clone(),
                     )
-                    .with_session_context(self.session_id.clone(), Some(turn_id.clone()));
+                    .with_session_context(self.session_id.clone(), Some(turn_id.clone()))
+                    .with_resumption(is_resumption);
 
                     let (had_any_success, results) = processor
                         .process_tool_calls(

@@ -26,6 +26,8 @@ pub struct ToolCallProcessor<'a> {
     /// When set, passed to native tools (e.g. agent.install for approval policy).
     config: Option<&'a GatewayConfig>,
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    /// Whether this is a resumption from hibernation (used to inject resumption context into tool results)
+    is_resumption: bool,
 }
 
 impl<'a> ToolCallProcessor<'a> {
@@ -59,6 +61,7 @@ impl<'a> ToolCallProcessor<'a> {
             turn_id: None,
             config,
             gateway_store,
+            is_resumption: false,
         }
     }
 
@@ -69,6 +72,11 @@ impl<'a> ToolCallProcessor<'a> {
     ) -> Self {
         self.session_id = session_id;
         self.turn_id = turn_id;
+        self
+    }
+
+    pub fn with_resumption(mut self, is_resumption: bool) -> Self {
+        self.is_resumption = is_resumption;
         self
     }
 
@@ -123,7 +131,14 @@ impl<'a> ToolCallProcessor<'a> {
                 }
             };
 
-            results.push((tc.id.clone(), tc.name.clone(), result));
+            // Inject resumption context if this is a resumption
+            let final_result = if self.is_resumption {
+                inject_resumption_context(result, &tc.name, &tc.arguments)
+            } else {
+                result
+            };
+
+            results.push((tc.id.clone(), tc.name.clone(), final_result));
 
             if tool_result_requires_approval(&results.last().expect("just pushed result").2) {
                 break;
@@ -249,6 +264,40 @@ fn tool_result_requires_approval(result: &str) -> bool {
         .ok()
         .and_then(|parsed| parsed.get("approval_required").and_then(|v| v.as_bool()))
         .unwrap_or(false)
+}
+
+/// Injects resumption context into a tool result when an agent wakes from hibernation.
+///
+/// This helps agents understand they were interrupted and should continue from where
+/// they left off rather than restarting from scratch.
+fn inject_resumption_context(result: String, tool_name: &str, arguments: &str) -> String {
+    // Try to parse the result as JSON
+    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&result) {
+        // Add resumption metadata to the result
+        if let Some(obj) = parsed.as_object_mut() {
+            obj.insert(
+                "resumed".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            // Include original tool info for context
+            obj.insert(
+                "original_tool".to_string(),
+                serde_json::Value::String(tool_name.to_string()),
+            );
+            // Try to parse and include original arguments
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) {
+                obj.insert(
+                    "original_args".to_string(),
+                    args,
+                );
+            }
+        }
+        // Return the modified JSON
+        serde_json::to_string(&parsed).unwrap_or_else(|_| result)
+    } else {
+        // If not valid JSON, return as-is
+        result
+    }
 }
 
 #[cfg(test)]

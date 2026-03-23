@@ -9,7 +9,7 @@
 //! when the gateway action starts with `workflow.` (mirrored durable workflow transitions).
 //!
 //! A sibling artifact `workflow_graph.md` in the same directory is rewritten on each workflow
-//! store append (`events.jsonl`) for a quick structural view (tasks + recent events).
+//! store append for a quick structural view (tasks + recent events).
 //!
 //! Both humans and agents can tail or read the file mid-session to understand
 //! what has happened so far.  Errors (DENIED, ERROR) are highlighted in the
@@ -292,7 +292,7 @@ fn extract_details(
             format!("type: {} \\| reply_len={}", evt, len)
         }
         ("gateway", action) if action.starts_with("workflow.") => {
-            // Mirrored orchestration rows (`workflow_causal`); durable source is `events.jsonl`.
+            // Mirrored orchestration rows (`workflow_causal`); durable source is `workflow_events` in SQLite.
             match action {
                 "workflow.started" => {
                     let wf = str_field(payload, "workflow_id");

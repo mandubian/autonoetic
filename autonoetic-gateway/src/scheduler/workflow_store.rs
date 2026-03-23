@@ -3,13 +3,13 @@
 //! Layout (under `<agents_dir>/.gateway/scheduler/workflows/`):
 //! - `index/by_root/<sha256-hex>.json` — maps stable root key → `workflow_id`
 //! - `runs/<workflow_id>/workflow.json` — [`WorkflowRun`](autonoetic_types::workflow::WorkflowRun)
-//! - `runs/<workflow_id>/events.jsonl` — append-only [`WorkflowEventRecord`](autonoetic_types::workflow::WorkflowEventRecord)
 //! - `runs/<workflow_id>/tasks/<task_id>.json` — [`TaskRun`](autonoetic_types::workflow::TaskRun)
+//! - Workflow events are stored in SQLite table `workflow_events` (`gateway.db`).
 
 use crate::execution::gateway_root_dir;
 use crate::runtime::session_timeline::base_session_id;
 use crate::scheduler::gateway_store::GatewayStore;
-use crate::scheduler::store::{append_jsonl_record, read_json_file, write_json_file};
+use crate::scheduler::store::{read_json_file, write_json_file};
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::workflow::{
@@ -53,10 +53,6 @@ pub fn workflow_run_dir(config: &GatewayConfig, workflow_id: &str) -> PathBuf {
 
 pub fn workflow_run_path(config: &GatewayConfig, workflow_id: &str) -> PathBuf {
     workflow_run_dir(config, workflow_id).join("workflow.json")
-}
-
-pub fn workflow_events_path(config: &GatewayConfig, workflow_id: &str) -> PathBuf {
-    workflow_run_dir(config, workflow_id).join("events.jsonl")
 }
 
 pub fn task_run_path(config: &GatewayConfig, workflow_id: &str, task_id: &str) -> PathBuf {
@@ -133,21 +129,37 @@ pub fn resolve_workflow_id_for_root_session(
     Ok(Some(idx.workflow_id))
 }
 
-/// Load append-only workflow events from `events.jsonl` (empty if missing).
+/// Load append-only workflow events from SQLite (`workflow_events`).
 pub fn load_workflow_events(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     workflow_id: &str,
 ) -> anyhow::Result<Vec<WorkflowEventRecord>> {
-    if let Some(store) = store {
-        if let Ok(events) = store.list_workflow_events(workflow_id) {
-            if !events.is_empty() {
-                return Ok(events);
-            }
+    let owned_store;
+    let store = match store {
+        Some(s) => s,
+        None => {
+            let gateway_dir = crate::execution::gateway_root_dir(config);
+            owned_store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+            &owned_store
         }
-    }
-    let path = workflow_events_path(config, workflow_id);
-    crate::scheduler::store::load_jsonl_file(&path)
+    };
+
+    let mut events = store.list_workflow_events(workflow_id)?;
+    tracing::debug!(
+        target: "workflow_store",
+        workflow_id = %workflow_id,
+        event_count = events.len(),
+        "load_workflow_events: SQLite source"
+    );
+
+    // Ensure deterministic ordering for callers.
+    events.sort_by(|a, b| {
+        a.occurred_at
+            .cmp(&b.occurred_at)
+            .then_with(|| a.event_id.cmp(&b.event_id))
+    });
+    Ok(events)
 }
 
 /// Persist full workflow run (creates parent dirs).
@@ -235,7 +247,15 @@ pub fn ensure_workflow_for_root_session(
     )?;
     // Also store in SQLite for reliable lookups
     if let Some(s) = store {
-        let _ = s.set_workflow_index(root_session_id, &workflow_id);
+        if let Err(e) = s.set_workflow_index(root_session_id, &workflow_id) {
+            tracing::warn!(
+                target: "workflow_store",
+                root_session_id = %root_session_id,
+                workflow_id = %workflow_id,
+                error = %e,
+                "Failed to set workflow index in SQLite"
+            );
+        }
     };
 
     append_workflow_event(
@@ -303,7 +323,7 @@ fn task_run_status_snake(s: TaskRunStatus) -> &'static str {
 
 /// Rewrite `.gateway/sessions/{root}/workflow_graph.md` from current workflow + task + event state.
 ///
-/// Called after each append to `events.jsonl` so operators can open it beside `timeline.md`.
+/// Called after each workflow event append so operators can open it beside `timeline.md`.
 pub fn refresh_workflow_graph_markdown(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -327,7 +347,7 @@ pub fn refresh_workflow_graph_markdown(
     writeln!(body)?;
     writeln!(
         body,
-        "_Auto-updated when workflow orchestration events append (`events.jsonl`)._"
+        "_Auto-updated when workflow orchestration events append to the gateway store._"
     )?;
     writeln!(body)?;
     writeln!(body, "| Field | Value |")?;
@@ -396,18 +416,30 @@ pub fn refresh_workflow_graph_markdown(
     Ok(())
 }
 
-/// Append one event to the workflow's `events.jsonl`.
+/// Append one event to the workflow's SQLite store (`workflow_events`).
 pub fn append_workflow_event(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     event: &WorkflowEventRecord,
 ) -> anyhow::Result<()> {
-    if let Some(store) = store {
-        let _ = store.append_workflow_event(event);
-    }
-    let path = workflow_events_path(config, &event.workflow_id);
-    append_jsonl_record(&path, event)?;
-    if let Err(e) = refresh_workflow_graph_markdown(config, store, &event.workflow_id) {
+    let owned_store;
+    let store = match store {
+        Some(s) => s,
+        None => {
+            let gateway_dir = crate::execution::gateway_root_dir(config);
+            owned_store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+            &owned_store
+        }
+    };
+    store.append_workflow_event(event)?;
+    tracing::debug!(
+        target: "workflow_store",
+        workflow_id = %event.workflow_id,
+        event_id = %event.event_id,
+        event_type = %event.event_type,
+        "append_workflow_event: appended to SQLite"
+    );
+    if let Err(e) = refresh_workflow_graph_markdown(config, Some(store), &event.workflow_id) {
         tracing::warn!(
             target: "session_timeline",
             workflow_id = %event.workflow_id,
@@ -494,19 +526,53 @@ pub fn update_task_run_status(
 ) -> anyhow::Result<()> {
     let mut task = load_task_run(config, store, workflow_id, task_id)?
         .ok_or_else(|| anyhow::anyhow!("task '{}' not in workflow '{}'", task_id, workflow_id))?;
+
+    // Store previous status for implicit artifact creation
+    let was_succeeded = task.status == TaskRunStatus::Succeeded;
+    let is_now_succeeded = status == TaskRunStatus::Succeeded;
+
     task.status = status;
     task.updated_at = now_rfc3339();
-    task.result_summary = result_summary;
+    task.result_summary = result_summary.clone();
     save_task_run(config, store, &task)?;
 
-    let event_type = match status {
-        TaskRunStatus::Succeeded => "task.completed",
-        TaskRunStatus::Failed => "task.failed",
-        TaskRunStatus::AwaitingApproval => "task.awaiting_approval",
-        TaskRunStatus::Running => "task.started",
-        TaskRunStatus::Cancelled => "task.failed",
+    // Create implicit artifact when task succeeds (transition to Succeeded)
+    if is_now_succeeded && !was_succeeded {
+        if let Err(e) = create_implicit_artifact(config, &task, result_summary.as_deref()) {
+            tracing::warn!(
+                target: "workflow",
+                task_id = %task_id,
+                error = %e,
+                "Failed to create implicit artifact"
+            );
+        }
+    }
+
+    // Determine event type, with special handling for approval events
+    let event_type = match (&result_summary, &status) {
+        // Check for approval-related result_summary first
+        (Some(summary), _) if summary.contains("approval_approved") => "task.approved",
+        (Some(summary), _) if summary.contains("approval_rejected") => "task.rejected",
+        // Standard status-based events
+        (_, TaskRunStatus::Succeeded) => "task.completed",
+        (_, TaskRunStatus::Failed) => "task.failed",
+        (_, TaskRunStatus::AwaitingApproval) => "task.awaiting_approval",
+        (_, TaskRunStatus::Running) => "task.started",
+        (_, TaskRunStatus::Cancelled) => "task.failed",
         _ => "task.updated",
     };
+
+    // Build payload with approval info if available
+    let mut payload = serde_json::json!({ "status": status });
+    if let Some(summary) = &result_summary {
+        if summary.contains("approval_") {
+            payload = serde_json::json!({
+                "status": status,
+                "approval": summary
+            });
+        }
+    }
+
     append_workflow_event(
         config,
         store,
@@ -516,7 +582,7 @@ pub fn update_task_run_status(
             task_id: Some(task_id.to_string()),
             event_type: event_type.to_string(),
             agent_id: Some(task.agent_id.clone()),
-            payload: serde_json::json!({ "status": status }),
+            payload,
             occurred_at: now_rfc3339(),
         },
     )?;
@@ -613,6 +679,59 @@ pub fn update_task_run_status(
             }
         }
     }
+    Ok(())
+}
+
+/// Creates an implicit artifact reference for a completed task.
+///
+/// This stores a minimal JSON structure with task output information
+/// that can be retrieved via workflow.wait by the parent session.
+fn create_implicit_artifact(
+    config: &GatewayConfig,
+    task: &TaskRun,
+    result_summary: Option<&str>,
+) -> anyhow::Result<()> {
+    use crate::runtime::content_store::{ContentStore, ContentVisibility};
+
+    let gw_dir = crate::execution::gateway_root_dir(config);
+    let content_store = ContentStore::new(&gw_dir)?;
+
+    // Generate implicit artifact ID
+    let artifact_id = format!("impl_{}", task.task_id);
+
+    // Build implicit artifact metadata
+    let implicit_data = serde_json::json!({
+        "artifact_id": artifact_id,
+        "artifact_type": "implicit",
+        "task_id": task.task_id,
+        "agent_id": task.agent_id,
+        "session_id": task.session_id,
+        "parent_session": task.parent_session_id,
+        "created_at": task.updated_at,
+        "summary": result_summary.unwrap_or("Task completed"),
+    });
+
+    // Write as session-visible content in parent session
+    let json_bytes = serde_json::to_vec_pretty(&implicit_data)?;
+    let handle = content_store.write(&json_bytes)?;
+
+    // Register with session visibility for parent session access
+    let parent_session = &task.parent_session_id;
+    content_store.register_name_with_visibility(
+        parent_session,
+        &artifact_id,
+        &handle,
+        ContentVisibility::Session,
+    )?;
+
+    tracing::debug!(
+        target: "workflow",
+        task_id = %task.task_id,
+        artifact_id = %artifact_id,
+        parent_session = %parent_session,
+        "Created implicit artifact for completed task"
+    );
+
     Ok(())
 }
 
@@ -1015,7 +1134,7 @@ pub struct WorkflowEventStream {
 }
 
 impl WorkflowEventStream {
-    /// Start streaming events for a workflow. Polls the JSONL file at the given interval.
+    /// Start streaming events for a workflow. Polls the SQLite workflow store at the given interval.
     pub fn start(
         config: GatewayConfig,
         workflow_id: String,
@@ -1025,23 +1144,23 @@ impl WorkflowEventStream {
         let (tx, rx) = mpsc::channel();
         let wf_id = workflow_id.clone();
         let poller = std::thread::spawn(move || {
-            let mut last_offset = 0usize;
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(poll_secs.max(1)));
-                let path = workflow_events_path(&config, &wf_id);
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let lines: Vec<&str> = content.lines().collect();
-                    for line in &lines[last_offset..] {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        if let Ok(event) = serde_json::from_str::<WorkflowEventRecord>(line) {
+                match load_workflow_events(&config, None, &wf_id) {
+                    Ok(events) => {
+                        for event in events {
+                            if !seen.insert(event.event_id.clone()) {
+                                continue;
+                            }
                             if tx.send(event).is_err() {
                                 return; // receiver dropped
                             }
                         }
                     }
-                    last_offset = lines.len();
+                    Err(_) => {
+                        // Keep polling on transient store errors.
+                    }
                 }
             }
         });
@@ -2382,5 +2501,132 @@ mod tests {
         assert!(new_events
             .iter()
             .any(|e| e.event_type == "task.checkpoint.saved"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SQLite workflow event tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_events_reads_from_sqlite() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "sqlite-root", None).unwrap();
+
+        // Events from ensure_workflow_for_root_session are written to SQLite.
+        let events = load_workflow_events(&cfg, Some(&store), &wf.workflow_id).unwrap();
+        assert!(!events.is_empty());
+        assert_eq!(events[0].event_type, "workflow.started");
+
+        // Append through normal path
+        append_workflow_event(
+            &cfg,
+            Some(&store),
+            &WorkflowEventRecord {
+                event_id: new_event_id(),
+                workflow_id: wf.workflow_id.clone(),
+                task_id: None,
+                event_type: "test.event".to_string(),
+                agent_id: None,
+                payload: serde_json::json!({}),
+                occurred_at: now_rfc3339(),
+            },
+        )
+        .unwrap();
+
+        let events = load_workflow_events(&cfg, Some(&store), &wf.workflow_id).unwrap();
+        assert!(events.iter().any(|e| e.event_type == "test.event"));
+    }
+
+    #[test]
+    fn load_events_without_explicit_store_opens_gateway_db() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "implicit-store-root", None).unwrap();
+
+        // Without explicit store arg, loader opens GatewayStore from config.
+        let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        assert!(!events.is_empty());
+        assert_eq!(events[0].event_type, "workflow.started");
+    }
+
+    #[test]
+    fn approval_resume_emits_visible_event() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "resume-vis-root", None).unwrap();
+
+        let task = TaskRun {
+            task_id: "task-resume-vis".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "resume-vis-root/coder-x".to_string(),
+            parent_session_id: "resume-vis-root".to_string(),
+            status: TaskRunStatus::AwaitingApproval,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        // Simulate approval → Runnable transition
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf.workflow_id,
+            "task-resume-vis",
+            TaskRunStatus::Runnable,
+            Some("approval_approved".to_string()),
+        )
+        .unwrap();
+
+        let events = load_workflow_events(&cfg, Some(&store), &wf.workflow_id).unwrap();
+
+        // Should have task.updated event with runnable status
+        let resume_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == "task.updated")
+            .collect();
+        assert!(
+            !resume_events.is_empty(),
+            "Expected task.updated event for Runnable transition, got: {:?}",
+            events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+        );
+
+        // Verify the event has runnable status in payload
+        let resume_event = resume_events.last().unwrap();
+        let status = resume_event.payload.get("status").and_then(|v| v.as_str());
+        assert_eq!(
+            status,
+            Some("runnable"),
+            "Expected runnable status in event payload"
+        );
+
+        // Verify event is readable when store is opened implicitly.
+        let events_from_implicit_store = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        assert!(
+            events_from_implicit_store
+                .iter()
+                .any(|e| e.event_type == "task.updated"),
+            "task.updated event should be in SQLite"
+        );
     }
 }
