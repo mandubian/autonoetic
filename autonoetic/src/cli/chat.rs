@@ -81,8 +81,6 @@ struct App {
     sel_end: Option<(usize, usize)>,     // (content_row, content_col)
     signal_resume_by_internal_id: HashMap<u64, SignalResumeRef>,
     signal_resume_inflight: HashSet<String>,
-    awaiting_approvals: HashSet<String>,
-    announced_pending_approvals: HashSet<String>,
     seen_workflow_event_ids: HashSet<String>,
     workflow_events_bootstrapped: bool,
     workflow_status_line: String,
@@ -108,8 +106,6 @@ impl App {
             sel_end: None,
             signal_resume_by_internal_id: HashMap::new(),
             signal_resume_inflight: HashSet::new(),
-            awaiting_approvals: HashSet::new(),
-            announced_pending_approvals: HashSet::new(),
             seen_workflow_event_ids: HashSet::new(),
             workflow_events_bootstrapped: false,
             workflow_status_line: "workflow: n/a".to_string(),
@@ -120,7 +116,7 @@ impl App {
 
     fn add_message(&mut self, role: MessageRole, content: String) {
         self.messages.push(ChatMessage { role, content });
-        // Auto-scroll to bottom
+        // Keep scroll at 0 to show from top - this was the original behavior
         self.scroll_offset = 0;
     }
 
@@ -155,26 +151,6 @@ impl App {
 
     fn spinner(&self) -> &'static str {
         SPINNER_FRAMES[self.spinner_frame]
-    }
-
-    fn add_awaiting_approval(&mut self, request_id: String) {
-        self.awaiting_approvals.insert(request_id);
-    }
-
-
-
-    fn awaiting_approval_preview(&self) -> String {
-        if self.awaiting_approvals.is_empty() {
-            return String::new();
-        }
-        let mut ids: Vec<&str> = self.awaiting_approvals.iter().map(|s| s.as_str()).collect();
-        ids.sort_unstable();
-        let shown: Vec<&str> = ids.iter().take(2).copied().collect();
-        if ids.len() > shown.len() {
-            format!("{}, +{}", shown.join(", "), ids.len() - shown.len())
-        } else {
-            shown.join(", ")
-        }
     }
 
     fn insert_char(&mut self, c: char) {
@@ -264,17 +240,34 @@ fn format_workflow_event_card(event: &autonoetic_types::workflow::WorkflowEventR
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let approval = event
+        .payload
+        .get("approval")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let text = match event.event_type.as_str() {
         "workflow.started" => Some(format!("📋 [{}] Workflow started", ts_short)),
         "task.spawned" => Some(format!("🚀 [{}] Task spawned: {}", ts_short, task)),
-        "task.awaiting_approval" => Some(format!("⏸ [{}] Task awaiting approval: {}", ts_short, task)),
+        "task.awaiting_approval" => {
+            // Show what kind of approval is needed
+            let kind = if approval.contains("sandbox") {
+                "sandbox.exec".to_string()
+            } else if approval.contains("agent_install") {
+                "agent.install".to_string()
+            } else {
+                "tool execution".to_string()
+            };
+            Some(format!("⏸ [{}] Approval required: {} ({})", ts_short, task, kind))
+        }
+        "task.approved" => Some(format!("✅ [{}] Approval approved: {}", ts_short, task)),
+        "task.rejected" => Some(format!("❌ [{}] Approval rejected: {}", ts_short, task)),
         "task.started" => Some(format!("▶ [{}] Task started: {}", ts_short, task)),
         "task.completed" => Some(format!("✅ [{}] Task completed: {}", ts_short, task)),
         "task.failed" => Some(format!("❌ [{}] Task failed: {}", ts_short, task)),
         "workflow.join.satisfied" => Some(format!("✅ [{}] Workflow join satisfied", ts_short)),
         "task.updated" if status == "runnable" => {
-            Some(format!("🔁 [{}] Task resumed after approval: {}", ts_short, task))
+            Some(format!("🔁 [{}] Task resumed: {}", ts_short, task))
         }
         _ => None,
     };
@@ -697,18 +690,6 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::ITALIC),
         )]));
     }
-    if !app.awaiting_approvals.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            format!(
-                "⏸ Waiting operator approval ({}): {}",
-                app.awaiting_approvals.len(),
-                app.awaiting_approval_preview()
-            ),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::ITALIC),
-        )]));
-    }
 
     let p = Paragraph::new(Text::from(lines))
         .scroll((app.scroll_offset as u16, 0))
@@ -723,23 +704,10 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let workflow = &app.workflow_status_line;
     let text = if !app.pending.is_empty() {
-        let waiting = if app.awaiting_approvals.is_empty() {
-            String::new()
-        } else {
-            format!(" | waiting approvals: {}", app.awaiting_approvals.len())
-        };
         format!(
-            "{} {} pending{} | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C",
+            "{} {} pending | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C",
             app.spinner(),
             app.pending.len(),
-            waiting,
-            workflow,
-        )
-    } else if !app.awaiting_approvals.is_empty() {
-        format!(
-            "Waiting approvals: {} ({}) | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C",
-            app.awaiting_approvals.len(),
-            app.awaiting_approval_preview(),
             workflow,
         )
     } else {
@@ -998,12 +966,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         .unwrap_or_else(|| "[No response]".to_string());
 
                                     if let Some(structured) = extract_structured_approval(&reply) {
-                                        if let Some(req_id) = structured.request_id.clone() {
-                                            app.add_awaiting_approval(req_id);
-                                        }
                                         app.add_message(MessageRole::Signal, structured.card);
                                     } else if let Some(req_id) = extract_approval_request_id(&reply) {
-                                        app.add_awaiting_approval(req_id.clone());
                                         app.add_message(
                                             MessageRole::Signal,
                                             format!("Approval required: {}", req_id),
@@ -1240,6 +1204,8 @@ async fn check_signals(
     let root_session_id = autonoetic_gateway::runtime::content_store::root_session_id(session_id);
     let mut processed_any = false;
 
+    tracing::debug!(target: "chat", session_id = %session_id, root_session_id = %root_session_id, "check_signals: starting");
+
     let previous_workflow_status = app.workflow_status_line.clone();
     refresh_workflow_status_line(app, config, &root_session_id);
     if app.workflow_status_line != previous_workflow_status {
@@ -1256,8 +1222,19 @@ async fn check_signals(
         &root_session_id,
     ) {
         Ok(Some(workflow_id)) => {
+            tracing::debug!(target: "chat", workflow_id = %workflow_id, "Resolved workflow ID");
             if let Ok(events) = autonoetic_gateway::scheduler::load_workflow_events(config, store, &workflow_id) {
-                if !app.workflow_events_bootstrapped {
+                tracing::info!(target: "chat", event_count = events.len(), workflow_id = %workflow_id, "Loaded workflow events");
+                // Detect new workflow: reset bootstrap flag if workflow_id changed
+                let current_workflow_count = events.len();
+                let previous_seen_count = app.seen_workflow_event_ids.len();
+
+                // If we have more events than seen, or workflow ID might have changed, reset bootstrap
+                let should_bootstrap = !app.workflow_events_bootstrapped
+                    || current_workflow_count < previous_seen_count
+                    || current_workflow_count > previous_seen_count + 50; // Large jump = new workflow
+
+                if should_bootstrap {
                     let recap_count = events.len().min(20);
                     if recap_count > 0 {
                         app.add_message(MessageRole::System, "── workflow recap ──".to_string());
@@ -1266,20 +1243,61 @@ async fn check_signals(
                             if let Some(card) = format_workflow_event_card(event) {
                                 app.add_message(MessageRole::Signal, card);
                             }
-                            app.seen_workflow_event_ids.insert(event.event_id.clone());
                         }
                         app.add_message(MessageRole::System, "── live updates ──".to_string());
                     }
+                    // Mark ALL fetched events as seen, not just the recap window,
+                    // so events outside the recap don't re-appear as "new" on next poll.
+                    app.seen_workflow_event_ids.clear();
+                    for event in &events {
+                        app.seen_workflow_event_ids.insert(event.event_id.clone());
+                    }
                     app.workflow_events_bootstrapped = true;
+
+                    tracing::debug!(
+                        target: "chat",
+                        workflow_id = %workflow_id,
+                        total_events = events.len(),
+                        recap_shown = recap_count,
+                        "workflow events bootstrapped"
+                    );
                 } else {
+                    let mut new_event_count = 0usize;
                     for event in events {
-                        if !app.seen_workflow_event_ids.insert(event.event_id.clone()) {
-                            continue;
+                        if app.seen_workflow_event_ids.insert(event.event_id.clone()) {
+                            // NEW event - process it (insert returns true if newly added)
+                            tracing::debug!(
+                                target: "chat",
+                                event_id = %event.event_id,
+                                event_type = %event.event_type,
+                                "New workflow event detected"
+                            );
+                            if let Some(card) = format_workflow_event_card(&event) {
+                                tracing::debug!(
+                                    target: "chat",
+                                    card = %card,
+                                    "Formatted workflow event card"
+                                );
+                                app.add_message(MessageRole::Signal, card);
+                                processed_any = true;
+                            } else {
+                                tracing::warn!(
+                                    target: "chat",
+                                    event_type = %event.event_type,
+                                    "Failed to format workflow event card"
+                                );
+                            }
+                            new_event_count += 1;
                         }
-                        if let Some(card) = format_workflow_event_card(&event) {
-                            app.add_message(MessageRole::Signal, card);
-                            processed_any = true;
-                        }
+                        // Existing event - skip (already processed in bootstrap)
+                    }
+                    if new_event_count > 0 {
+                        tracing::debug!(
+                            target: "chat",
+                            new_event_count,
+                            total_seen = app.seen_workflow_event_ids.len(),
+                            "check_signals: processed new workflow events"
+                        );
                     }
                 }
             }
@@ -1292,40 +1310,7 @@ async fn check_signals(
         }
     }
 
-    if let Ok(pending_approvals) =
-        autonoetic_gateway::scheduler::approval::pending_approval_requests_for_root(
-            config,
-            store,
-            &root_session_id,
-        )
-    {
-        let mut still_pending: HashSet<String> = HashSet::new();
-        for request in pending_approvals {
-            still_pending.insert(request.request_id.clone());
-            app.add_awaiting_approval(request.request_id.clone());
-            if app
-                .announced_pending_approvals
-                .insert(request.request_id.clone())
-            {
-                let mut detail = format!(
-                    "⏸ Approval required: {} ({} by {})",
-                    request.request_id,
-                    request.action.kind(),
-                    request.agent_id
-                );
-                if let Some(reason) = request.reason.as_ref().filter(|r| !r.trim().is_empty()) {
-                    detail.push_str(&format!(" - {}", reason));
-                }
-                app.add_message(MessageRole::Signal, detail);
-                processed_any = true;
-            }
-        }
-        app.awaiting_approvals.retain(|id| still_pending.contains(id));
-        app.announced_pending_approvals
-            .retain(|id| still_pending.contains(id));
-    }
-
-
+    tracing::debug!(target: "chat", processed_any = processed_any, total_messages = app.messages.len(), "check_signals: complete");
     processed_any
 }
 
