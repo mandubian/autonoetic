@@ -476,6 +476,7 @@ impl ContentStore {
     ///
     /// Resolution order:
     /// 1. If starts with "sha256:" → check visibility, then read
+    ///    - Exception: if followed by exactly SHORT_ALIAS_LEN chars, treat as alias
     /// 2. If 8 hex chars → short alias lookup (session, then root)
     /// 3. Otherwise → name lookup (session, then root)
     pub fn read_by_name_or_handle(
@@ -483,17 +484,32 @@ impl ContentStore {
         session_id: &str,
         name_or_handle: &str,
     ) -> anyhow::Result<Vec<u8>> {
+        // Check for "sha256:SHORT_ALIAS" pattern (e.g., "sha256:8b40c8e1")
+        // This happens when LLMs mistakenly use the alias value as a full handle
         if name_or_handle.starts_with("sha256:") {
-            self.resolve_handle_with_visibility(session_id, name_or_handle)
-        } else if name_or_handle.len() == SHORT_ALIAS_LEN
+            let after_prefix = &name_or_handle["sha256:".len()..];
+            // If exactly SHORT_ALIAS_LEN hex chars, treat as alias lookup
+            if after_prefix.len() == SHORT_ALIAS_LEN
+                && after_prefix.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                return self.resolve_alias_with_root(session_id, after_prefix)
+                    .and_then(|handle| self.read(&handle));
+            }
+            // Otherwise, treat as full handle
+            return self.resolve_handle_with_visibility(session_id, name_or_handle);
+        }
+
+        // Bare 8-char hex alias
+        if name_or_handle.len() == SHORT_ALIAS_LEN
             && name_or_handle.chars().all(|c| c.is_ascii_hexdigit())
         {
-            self.resolve_alias_with_root(session_id, name_or_handle)
-                .and_then(|handle| self.read(&handle))
-        } else {
-            self.resolve_name_with_root(session_id, name_or_handle)
-                .and_then(|handle| self.read(&handle))
+            return self.resolve_alias_with_root(session_id, name_or_handle)
+                .and_then(|handle| self.read(&handle));
         }
+
+        // Name lookup
+        self.resolve_name_with_root(session_id, name_or_handle)
+            .and_then(|handle| self.read(&handle))
     }
 
     /// Lists all content names in a session.
