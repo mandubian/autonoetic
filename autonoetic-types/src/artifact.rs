@@ -84,3 +84,60 @@ pub struct ArtifactBundle {
     #[serde(default)]
     pub reused: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Artifact Reference Records (short scoped refs -> canonical artifact identity)
+// ---------------------------------------------------------------------------
+
+/// Scope namespace for short artifact references.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRefScopeType {
+    Session,
+    Workflow,
+    Global,
+}
+
+impl ArtifactRefScopeType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Workflow => "workflow",
+            Self::Global => "global",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "session" => Some(Self::Session),
+            "workflow" => Some(Self::Workflow),
+            "global" => Some(Self::Global),
+            _ => None,
+        }
+    }
+}
+
+/// Durable mapping from a short, LLM-friendly ref_id to a canonical artifact identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactRefRecord {
+    /// Short alias used by agents in prompts/tool args (example: "ar.wf9f3.004.k7p2").
+    pub ref_id: String,
+    /// Scope namespace this ref belongs to.
+    pub scope_type: ArtifactRefScopeType,
+    /// Session ID, workflow ID, or "__global__" depending on scope_type.
+    pub scope_id: String,
+    /// Artifact ID (art_*).
+    pub artifact_id: String,
+    /// Canonical SHA-256 digest of artifact manifest for integrity verification.
+    pub artifact_digest: String,
+    /// Agent that created this short reference.
+    pub created_by_agent_id: String,
+    /// RFC3339 creation timestamp.
+    pub created_at: String,
+    /// Optional RFC3339 expiry timestamp.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// Optional RFC3339 revocation timestamp.
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+}
