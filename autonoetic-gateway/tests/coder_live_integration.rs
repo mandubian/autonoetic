@@ -57,7 +57,9 @@ async fn test_live_coder_tool_call_content_write() -> anyhow::Result<()> {
     // Define the content.write tool for the LLM
     let content_write_tool = ToolDefinition {
         name: "content.write".to_string(),
-        description: "Write content to the session's content store. Returns a content handle (sha256:...).".to_string(),
+        description:
+            "Write content to the session's content store. Returns a content handle (sha256:...)."
+                .to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -114,10 +116,14 @@ Always write working, syntactically correct Python code."#
     println!("Text: {:?}", resp.text);
     println!("Tool calls: {:?}", resp.tool_calls);
     println!("Stop reason: {:?}", resp.stop_reason);
-    println!("Usage: in={} out={}", resp.usage.input_tokens, resp.usage.output_tokens);
+    println!(
+        "Usage: in={} out={}",
+        resp.usage.input_tokens, resp.usage.output_tokens
+    );
 
     // Validate we got content.write tool calls
-    let content_writes: Vec<_> = resp.tool_calls
+    let content_writes: Vec<_> = resp
+        .tool_calls
         .iter()
         .filter(|tc| tc.name == "content.write")
         .collect();
@@ -125,8 +131,8 @@ Always write working, syntactically correct Python code."#
     println!("\n=== Content Writes ({} total) ===", content_writes.len());
 
     for (i, tool_call) in content_writes.iter().enumerate() {
-        let args: serde_json::Value = serde_json::from_str(&tool_call.arguments)
-            .unwrap_or(json!({"error": "invalid JSON"}));
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_call.arguments).unwrap_or(json!({"error": "invalid JSON"}));
 
         println!("\nFile #{}:", i + 1);
         println!("  Name: {:?}", args.get("name").and_then(|v| v.as_str()));
@@ -148,11 +154,18 @@ Always write working, syntactically correct Python code."#
     let has_skill_md = content_writes.iter().any(|tc| {
         serde_json::from_str::<serde_json::Value>(&tc.arguments)
             .ok()
-            .and_then(|args| args.get("name").and_then(|n| n.as_str()).map(|n| n.contains("SKILL.md")))
+            .and_then(|args| {
+                args.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.contains("SKILL.md"))
+            })
             .unwrap_or(false)
     });
 
-    assert!(has_skill_md, "Expected at least one content.write for SKILL.md");
+    assert!(
+        has_skill_md,
+        "Expected at least one content.write for SKILL.md"
+    );
 
     println!("\n✅ Test passed: LLM generated files via content.write");
     println!("   - {} files written", content_writes.len());
@@ -171,7 +184,10 @@ async fn test_live_coder_with_content_store_integration() -> anyhow::Result<()> 
 
     // Use a faster model
     let model = "google/gemini-3-flash-preview";
-    println!("=== Testing full content store integration with model: {} ===", model);
+    println!(
+        "=== Testing full content store integration with model: {} ===",
+        model
+    );
 
     // Set up a temp directory with gateway
     let temp = tempfile::tempdir()?;
@@ -273,14 +289,21 @@ python main.py 10
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].name, "fibonacci");
     assert_eq!(artifacts[0].entry_point, Some("main.py".to_string()));
-    assert!(artifacts[0].files.contains(&"fibonacci/main.py".to_string()));
-    assert!(artifacts[0].files.contains(&"fibonacci/SKILL.md".to_string()));
+    assert!(artifacts[0]
+        .files
+        .contains(&"fibonacci/main.py".to_string()));
+    assert!(artifacts[0]
+        .files
+        .contains(&"fibonacci/SKILL.md".to_string()));
 
     println!("\n✅ Test passed: Content store integration works");
 
     // Stats
     let stats = store.stats()?;
-    println!("Content store stats: {} entries, {} bytes", stats.entry_count, stats.total_size_bytes);
+    println!(
+        "Content store stats: {} entries, {} bytes",
+        stats.entry_count, stats.total_size_bytes
+    );
 
     Ok(())
 }

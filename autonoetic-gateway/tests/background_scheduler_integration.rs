@@ -118,7 +118,11 @@ async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Re
 
     let gateway_entries = read_jsonl_entries(&gateway_causal_path(&config))?;
     assert_eq!(
-        count_action(&gateway_entries, &session_id, "background.should_wake.completed"),
+        count_action(
+            &gateway_entries,
+            &session_id,
+            "background.should_wake.completed"
+        ),
         1
     );
     assert_eq!(
@@ -225,17 +229,21 @@ async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result
     let execution = Arc::new(GatewayExecutionService::new(config.clone(), None));
     run_scheduler_tick(execution.clone()).await?;
 
-    let reevaluation_after_first: ReevaluationState = serde_json::from_str(&std::fs::read_to_string(
-        agent_dir.join("state").join("reevaluation.json"),
-    )?)?;
+    let reevaluation_after_first: ReevaluationState = serde_json::from_str(
+        &std::fs::read_to_string(agent_dir.join("state").join("reevaluation.json"))?,
+    )?;
     assert!(reevaluation_after_first.pending_scheduled_action.is_some());
-    assert!(agent_dir.join("state").join("recurring_marker.txt").exists());
+    assert!(agent_dir
+        .join("state")
+        .join("recurring_marker.txt")
+        .exists());
 
     // Force immediate due again to prove the same action remains armed for the next timer tick.
     let mut state_after_first: BackgroundState = serde_json::from_str(&std::fs::read_to_string(
         background_state_path(&config, agent_id),
     )?)?;
-    state_after_first.next_due_at = Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
+    state_after_first.next_due_at =
+        Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
     write_background_state(&config, agent_id, &state_after_first)?;
 
     run_scheduler_tick(execution).await?;
@@ -341,7 +349,8 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
         ),
         1
     );
-    assert_eq!(count_action(&gateway_entries, &session_id, "background.wake.completed"),
+    assert_eq!(
+        count_action(&gateway_entries, &session_id, "background.wake.completed"),
         1
     );
     assert_eq!(decision.agent_id, agent_id);

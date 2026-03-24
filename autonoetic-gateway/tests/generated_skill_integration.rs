@@ -263,8 +263,12 @@ async fn test_generated_skill_approval_and_execution() {
         .await
         .expect("PoC execution failed");
 
+    let poc_reply = match poc_result {
+        autonoetic_gateway::runtime::lifecycle::TurnOutcome::Completed(r) => r,
+        other => panic!("expected Completed, got {:?}", other),
+    };
     assert_eq!(
-        poc_result.unwrap(),
+        poc_reply.unwrap(),
         "42",
         "PoC execution returned wrong value"
     );
@@ -313,7 +317,8 @@ async fn test_generated_skill_approval_and_execution() {
     );
 
     // Tick scheduler to promote to ApprovalRequest
-    let r_state = std::fs::read_to_string(learner_dir.join("state").join("reevaluation.json")).unwrap();
+    let r_state =
+        std::fs::read_to_string(learner_dir.join("state").join("reevaluation.json")).unwrap();
     println!("R_STATE: {}", r_state);
     let draft_request = require_single_pending_approval(execution.clone(), &config)
         .await

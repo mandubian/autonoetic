@@ -350,7 +350,13 @@ pub async fn approve_pending_request_and_tick(
     decided_by: &str,
     reason: Option<String>,
 ) -> anyhow::Result<ApprovalDecision> {
-    let decision = approve_request(config, execution.gateway_store().as_deref(), &request.request_id, decided_by, reason)?;
+    let decision = approve_request(
+        config,
+        execution.gateway_store().as_deref(),
+        &request.request_id,
+        decided_by,
+        reason,
+    )?;
     run_scheduler_tick(execution).await?;
     Ok(decision)
 }

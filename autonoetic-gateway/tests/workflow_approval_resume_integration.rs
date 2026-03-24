@@ -22,9 +22,8 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
         ..GatewayConfig::default()
     };
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    )?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let workflow_id = "wf-testresume".to_string();
     let task_id = "task-testresume".to_string();
@@ -38,8 +37,6 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
         active_task_ids: vec![],
-        blocked_task_ids: vec![],
-        pending_approval_ids: vec![],
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_id.clone()],
@@ -101,16 +98,26 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
     };
     workflow_store::enqueue_task(&config, Some(store.as_ref()), &stale_queued)?;
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
     process_runnable_workflow_tasks(execution).await?;
 
-    let queued_after = workflow_store::load_queued_tasks(&config, Some(store.as_ref()), &workflow_id)?;
+    let queued_after =
+        workflow_store::load_queued_tasks(&config, Some(store.as_ref()), &workflow_id)?;
     assert_eq!(queued_after.len(), 1);
     assert_eq!(queued_after[0].task_id, task_id);
 
     let queued_payload: serde_json::Value = serde_json::from_str(&queued_after[0].message)?;
-    assert_eq!(queued_payload.get("type").and_then(|v| v.as_str()), Some("approval_resolved"));
-    assert_eq!(queued_payload.get("request_id").and_then(|v| v.as_str()), Some("apr-resume1234"));
+    assert_eq!(
+        queued_payload.get("type").and_then(|v| v.as_str()),
+        Some("approval_resolved")
+    );
+    assert_eq!(
+        queued_payload.get("request_id").and_then(|v| v.as_str()),
+        Some("apr-resume1234")
+    );
 
     Ok(())
 }

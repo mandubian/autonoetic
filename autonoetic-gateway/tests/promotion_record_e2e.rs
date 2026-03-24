@@ -321,7 +321,10 @@ async fn test_promotion_record_full_pass_flow() {
         .expect("install should succeed with valid promotion records");
 
     let install_parsed: serde_json::Value = serde_json::from_str(&install_result).unwrap();
-    assert_eq!(install_parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        install_parsed.get("ok").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     assert_eq!(
         install_parsed.get("status").and_then(|v| v.as_str()),
         Some("agent_installed")
@@ -329,7 +332,10 @@ async fn test_promotion_record_full_pass_flow() {
 
     // --- Step 6: Verify agent was installed ---
     let agent_dir = agents_dir.join("weather.fetcher");
-    assert!(agent_dir.exists(), "weather.fetcher agent should be installed");
+    assert!(
+        agent_dir.exists(),
+        "weather.fetcher agent should be installed"
+    );
     assert!(agent_dir.join("SKILL.md").exists(), "SKILL.md should exist");
     assert!(agent_dir.join("main.py").exists(), "main.py should exist");
 }

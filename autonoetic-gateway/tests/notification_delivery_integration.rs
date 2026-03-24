@@ -27,9 +27,8 @@ async fn test_store_only_notification_delivery_is_ordered_and_marked_delivered(
         ..GatewayConfig::default()
     };
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    )?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let received_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let received_ids_server = Arc::clone(&received_ids);
@@ -104,7 +103,10 @@ async fn test_store_only_notification_delivery_is_ordered_and_marked_delivered(
     store.create_notification_record(&n1)?;
     store.create_notification_record(&n2)?;
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
     run_scheduler_tick(execution).await?;
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server).await;
@@ -116,14 +118,17 @@ async fn test_store_only_notification_delivery_is_ordered_and_marked_delivered(
     assert_eq!(delivered_2.status, NotificationStatus::Delivered);
 
     let seen = received_ids.lock().unwrap().clone();
-    assert_eq!(seen, vec!["apr-0001aaaa".to_string(), "apr-0002bbbb".to_string()]);
+    assert_eq!(
+        seen,
+        vec!["apr-0001aaaa".to_string(), "apr-0002bbbb".to_string()]
+    );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn test_pending_notifications_accept_current_payloads_and_fail_invalid(
-) -> anyhow::Result<()> {
+async fn test_pending_notifications_accept_current_payloads_and_fail_invalid() -> anyhow::Result<()>
+{
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");
@@ -139,9 +144,8 @@ async fn test_pending_notifications_accept_current_payloads_and_fail_invalid(
         ..GatewayConfig::default()
     };
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    )?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let received_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let received_ids_server = Arc::clone(&received_ids);
@@ -228,7 +232,10 @@ async fn test_pending_notifications_accept_current_payloads_and_fail_invalid(
     store.create_notification_record(&n_modern)?;
     store.create_notification_record(&n_invalid)?;
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
     run_scheduler_tick(execution).await?;
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server).await;
@@ -243,7 +250,10 @@ async fn test_pending_notifications_accept_current_payloads_and_fail_invalid(
     assert_eq!(failed_invalid.attempt_count, 1);
 
     let seen = received_ids.lock().unwrap().clone();
-    assert_eq!(seen, vec!["apr-mix0001".to_string(), "apr-mix0002".to_string()]);
+    assert_eq!(
+        seen,
+        vec!["apr-mix0001".to_string(), "apr-mix0002".to_string()]
+    );
 
     Ok(())
 }
@@ -266,9 +276,8 @@ async fn test_pending_notifications_with_same_timestamp_are_ordered_by_notificat
         ..GatewayConfig::default()
     };
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    )?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let received_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let received_ids_server = Arc::clone(&received_ids);
@@ -344,13 +353,19 @@ async fn test_pending_notifications_with_same_timestamp_are_ordered_by_notificat
     store.create_notification_record(&n_z)?;
     store.create_notification_record(&n_a)?;
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
     run_scheduler_tick(execution).await?;
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server).await;
 
     let seen = received_ids.lock().unwrap().clone();
-    assert_eq!(seen, vec!["apr-order-a".to_string(), "apr-order-z".to_string()]);
+    assert_eq!(
+        seen,
+        vec!["apr-order-a".to_string(), "apr-order-z".to_string()]
+    );
 
     Ok(())
 }
@@ -374,9 +389,8 @@ async fn test_pending_notification_delivery_retries_then_marks_failed() -> anyho
         ..GatewayConfig::default()
     };
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    )?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let mut n = NotificationRecord::new(
         "ntf-retry0001".to_string(),
@@ -395,7 +409,10 @@ async fn test_pending_notification_delivery_retries_then_marks_failed() -> anyho
     n.created_at = "2026-03-22T17:00:00Z".to_string();
     store.create_notification_record(&n)?;
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
 
     run_scheduler_tick(execution.clone()).await?;
     let after_1 = store.get_notification("ntf-retry0001")?.unwrap();

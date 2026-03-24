@@ -233,7 +233,7 @@ async fn test_promotion_evaluator_fail_rejected() {
         Some("session-reject-failed-eval"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // With evaluator_pass=false AND no auditor record, install should be REJECTED
@@ -406,7 +406,7 @@ async fn test_promotion_auditor_fail_rejected() {
         Some("session-reject-audit-fail"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // Evaluator passed but auditor didn't → REJECT

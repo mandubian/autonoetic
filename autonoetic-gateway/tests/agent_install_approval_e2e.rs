@@ -23,8 +23,8 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
 
     let content_store =
         autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
-    let artifact_store = autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir)
-        .unwrap();
+    let artifact_store =
+        autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
     let promotion_store =
         autonoetic_gateway::runtime::promotion_store::PromotionStore::new(&gateway_dir).unwrap();
 
@@ -339,10 +339,8 @@ async fn test_agent_install_rejects_retry_when_payload_missing() {
     let builder_dir = agents_dir.join("specialized_builder.default");
     std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
 
-    let (artifact_id, gateway_dir) = build_test_artifact(
-        temp.path(),
-        &[("main.py", "print('hello')\n")],
-    );
+    let (artifact_id, gateway_dir) =
+        build_test_artifact(temp.path(), &[("main.py", "print('hello')\n")]);
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
@@ -388,7 +386,10 @@ async fn test_agent_install_rejects_retry_when_payload_missing() {
         .join("approvals")
         .join("pending")
         .join(format!("{}_payload.json", request_id));
-    assert!(payload_path.exists(), "payload file should exist after initial request");
+    assert!(
+        payload_path.exists(),
+        "payload file should exist after initial request"
+    );
     std::fs::remove_file(&payload_path).expect("should be able to delete payload file");
     assert!(!payload_path.exists(), "payload file should be deleted");
 
@@ -446,7 +447,7 @@ async fn test_agent_install_rejects_retry_when_payload_missing() {
         Some("session-payload-test"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // The retry MUST fail — stored payload is missing, so the gateway
@@ -518,7 +519,7 @@ async fn test_agent_install_rejects_invalid_approval_ref() {
         None,
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // Invalid approval_ref returns an error (not a JSON response)

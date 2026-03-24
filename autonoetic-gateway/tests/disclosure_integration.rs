@@ -180,7 +180,7 @@ disclosure:
     // Since we can't easily pre-populate the content store in this test setup,
     // we'll adjust the test to verify the disclosure filtering mechanism works
     // at the filter_reply level by checking that the pattern matching works correctly.
-    
+
     // For now, let's verify the disclosure filtering logic works by testing
     // that the system properly redacts known secret strings in responses
     let resp1 = client
@@ -194,20 +194,24 @@ disclosure:
         )
         .await
         .unwrap();
-    
+
     // Even if content.read fails (because content wasn't pre-populated),
     // we verify the system doesn't crash and returns a valid response
     let text1 = resp1.result.unwrap().to_string();
-    
+
     // The key test: verify that IF a secret was returned, it would be redacted.
     // Since we can't easily pre-populate content store in this test setup,
     // we verify the system handles the flow correctly without panicking.
-    assert!(resp1.error.is_none(), "Secret flow should not error: {:?}", resp1.error);
+    assert!(
+        resp1.error.is_none(),
+        "Secret flow should not error: {:?}",
+        resp1.error
+    );
 
     // Test the filtering directly with the disclosure state
     use autonoetic_gateway::runtime::disclosure::DisclosureState;
-    use autonoetic_types::disclosure::{DisclosurePolicy, DisclosureRule, DisclosureClass};
-    
+    use autonoetic_types::disclosure::{DisclosureClass, DisclosurePolicy, DisclosureRule};
+
     let policy = DisclosurePolicy {
         rules: vec![
             DisclosureRule {
@@ -223,17 +227,33 @@ disclosure:
         ],
         default_class: DisclosureClass::Public,
     };
-    
+
     let mut state = DisclosureState::new(policy);
     state.register_result("content.read", Some("secret.txt"), "super_secret_wahoo");
-    state.register_result("content.read", Some("confidential.txt"), "confidential_business_plan_v2");
-    
+    state.register_result(
+        "content.read",
+        Some("confidential.txt"),
+        "confidential_business_plan_v2",
+    );
+
     let filtered = state.filter_reply("The top secret password is super_secret_wahoo and internal docs say: confidential_business_plan_v2");
-    
-    assert!(filtered.contains("[REDACTED: Secret content]"), "Should contain secret redaction marker");
-    assert!(!filtered.contains("super_secret_wahoo"), "Should not contain secret value");
-    assert!(filtered.contains("[REDACTED: Confidential content]"), "Should contain confidential redaction marker");
-    assert!(!filtered.contains("confidential_business_plan_v2"), "Should not contain confidential value");
+
+    assert!(
+        filtered.contains("[REDACTED: Secret content]"),
+        "Should contain secret redaction marker"
+    );
+    assert!(
+        !filtered.contains("super_secret_wahoo"),
+        "Should not contain secret value"
+    );
+    assert!(
+        filtered.contains("[REDACTED: Confidential content]"),
+        "Should contain confidential redaction marker"
+    );
+    assert!(
+        !filtered.contains("confidential_business_plan_v2"),
+        "Should not contain confidential value"
+    );
 
     server_task.abort();
 }

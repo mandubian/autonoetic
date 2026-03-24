@@ -12,7 +12,7 @@ use support::TestWorkspace;
 fn install_coder_agent(agents_dir: &std::path::Path) -> anyhow::Result<()> {
     let coder_dir = agents_dir.join("coder.default");
     std::fs::create_dir_all(&coder_dir)?;
-    
+
     std::fs::write(
         coder_dir.join("SKILL.md"),
         r#"---
@@ -61,7 +61,7 @@ Report file handles in your response, not full contents.
 fn install_builder_agent(agents_dir: &std::path::Path) -> anyhow::Result<()> {
     let builder_dir = agents_dir.join("specialized_builder.default");
     std::fs::create_dir_all(&builder_dir)?;
-    
+
     std::fs::write(
         builder_dir.join("SKILL.md"),
         r#"---
@@ -114,13 +114,13 @@ fn test_artifact_creation_and_retrieval() {
     let workspace = TestWorkspace::new().unwrap();
     let gateway_dir = workspace.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
-    
+
     use autonoetic_gateway::runtime::content_store::ContentStore;
     let store = ContentStore::new(&gateway_dir).unwrap();
-    
+
     // Simulate coder writing files
     let session_id = "test-session-1";
-    
+
     // Write main.py
     let main_py = r#"
 def get_weather(latitude: float, longitude: float) -> dict:
@@ -129,8 +129,10 @@ def get_weather(latitude: float, longitude: float) -> dict:
     return {"temperature": 22, "condition": "sunny"}
 "#;
     let main_handle = store.write(main_py.as_bytes()).unwrap();
-    store.register_name(session_id, "weather/main.py", &main_handle).unwrap();
-    
+    store
+        .register_name(session_id, "weather/main.py", &main_handle)
+        .unwrap();
+
     // Write SKILL.md
     let skill_md = r#"---
 name: "weather"
@@ -151,24 +153,27 @@ io:
 Retrieves weather data for a given location.
 "#;
     let skill_handle = store.write(skill_md.as_bytes()).unwrap();
-    store.register_name(session_id, "weather/SKILL.md", &skill_handle).unwrap();
-    
+    store
+        .register_name(session_id, "weather/SKILL.md", &skill_handle)
+        .unwrap();
+
     // Verify artifact creation
     let artifacts = autonoetic_gateway::execution::extract_artifacts_from_content_store(
         &gateway_dir,
         session_id,
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert_eq!(artifacts.len(), 1, "Should have one artifact");
     let artifact = &artifacts[0];
     assert_eq!(artifact.name, "weather");
     assert!(artifact.description.contains("Weather"));
     assert_eq!(artifact.entry_point, Some("main.py".to_string()));
-    
+
     // Verify content can be read back
     let content = store.read_by_name(session_id, "weather/main.py").unwrap();
     assert!(String::from_utf8(content).unwrap().contains("get_weather"));
-    
+
     println!("✅ Artifact creation and retrieval works");
 }
 
@@ -178,7 +183,7 @@ fn test_cross_session_content_sharing() {
     let workspace = TestWorkspace::new().unwrap();
     let gateway_dir = workspace.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
-    
+
     use autonoetic_gateway::runtime::content_store::{ContentStore, ContentVisibility};
     let store = ContentStore::new(&gateway_dir).unwrap();
 
@@ -188,22 +193,37 @@ fn test_cross_session_content_sharing() {
 
     // Set up root visibility
     store.set_root_session(coder_session, root_session).unwrap();
-    store.set_root_session(builder_session, root_session).unwrap();
+    store
+        .set_root_session(builder_session, root_session)
+        .unwrap();
 
     // Coder writes session-visible content
     let code = "def process(data): return data.upper()";
     let handle = store.write(code.as_bytes()).unwrap();
-    store.register_name_with_visibility(coder_session, "processor/main.py", &handle, ContentVisibility::Session).unwrap();
-    
+    store
+        .register_name_with_visibility(
+            coder_session,
+            "processor/main.py",
+            &handle,
+            ContentVisibility::Session,
+        )
+        .unwrap();
+
     // Builder reads by handle — visible because session-scoped under same root
-    let content = store.read_by_name_or_handle(builder_session, &handle).unwrap();
+    let content = store
+        .read_by_name_or_handle(builder_session, &handle)
+        .unwrap();
     assert_eq!(String::from_utf8(content).unwrap(), code);
-    
+
     // Builder can also register the handle under its own session
-    store.register_name(builder_session, "imported/processor.py", &handle).unwrap();
-    let content2 = store.read_by_name(builder_session, "imported/processor.py").unwrap();
+    store
+        .register_name(builder_session, "imported/processor.py", &handle)
+        .unwrap();
+    let content2 = store
+        .read_by_name(builder_session, "imported/processor.py")
+        .unwrap();
     assert_eq!(String::from_utf8(content2).unwrap(), code);
-    
+
     println!("✅ Cross-session content sharing works (root-based visibility)");
 }
 
@@ -213,31 +233,36 @@ fn test_knowledge_persistence() {
     let workspace = TestWorkspace::new().unwrap();
     let gateway_dir = workspace.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
-    
+
     use autonoetic_gateway::runtime::memory::Tier2Memory;
-    
+
     // Create Tier2Memory (knowledge store)
     let memory = Tier2Memory::new(&gateway_dir, "test-agent").unwrap();
-    
+
     // Store a fact
-    memory.remember(
-        "weather-api",
-        "api",
-        "test-agent",
-        "test-session",
-        "open-meteo",
-    ).unwrap();
-    
+    memory
+        .remember(
+            "weather-api",
+            "api",
+            "test-agent",
+            "test-session",
+            "open-meteo",
+        )
+        .unwrap();
+
     // Recall the fact
     let recalled = memory.recall("weather-api").unwrap();
     assert_eq!(recalled.content, "open-meteo");
     assert_eq!(recalled.owner_agent_id, "test-agent");
-    
+
     // Search by scope (owner matches, so it should be readable)
     let results = memory.search("api", None).unwrap();
-    assert!(!results.is_empty(), "Search should find the stored knowledge");
+    assert!(
+        !results.is_empty(),
+        "Search should find the stored knowledge"
+    );
     assert_eq!(results[0].content, "open-meteo");
-    
+
     println!("✅ Knowledge persistence works");
 }
 
@@ -245,12 +270,12 @@ fn test_knowledge_persistence() {
 #[test]
 fn test_session_snapshot_fork() {
     use autonoetic_gateway::llm::Message;
-    use autonoetic_gateway::runtime::session_snapshot::{SessionSnapshot, SessionFork};
-    
+    use autonoetic_gateway::runtime::session_snapshot::{SessionFork, SessionSnapshot};
+
     let workspace = TestWorkspace::new().unwrap();
     let gateway_dir = workspace.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
-    
+
     // Create a session with history
     let history = vec![
         Message::user("Hello"),
@@ -258,33 +283,34 @@ fn test_session_snapshot_fork() {
         Message::user("I need a weather app"),
         Message::assistant("I'll create that for you."),
     ];
-    
+
     // Capture snapshot
-    let snapshot = SessionSnapshot::capture(
-        "original-session",
-        &history,
-        2,
-        None,
-        None,
-        &gateway_dir,
-    ).unwrap();
-    
+    let snapshot =
+        SessionSnapshot::capture("original-session", &history, 2, None, None, &gateway_dir)
+            .unwrap();
+
     assert_eq!(snapshot.turn_count, 2);
     assert_eq!(snapshot.history.len(), 4);
-    
+
     // Fork with branch message
     let fork = SessionFork::fork(
         &snapshot,
         Some("forked-session"),
         Some("Try a different approach"),
         &gateway_dir,
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert_eq!(fork.new_session_id, "forked-session");
     assert_eq!(fork.source_session_id, "original-session");
     assert_eq!(fork.initial_history.len(), 5); // 4 original + 1 branch message
-    assert!(fork.initial_history.last().unwrap().content.contains("different approach"));
-    
+    assert!(fork
+        .initial_history
+        .last()
+        .unwrap()
+        .content
+        .contains("different approach"));
+
     println!("✅ Session snapshot and fork works");
 }
 
@@ -294,7 +320,7 @@ fn test_full_artifact_lifecycle() {
     let workspace = TestWorkspace::new().unwrap();
     let gateway_dir = workspace.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
-    
+
     use autonoetic_gateway::runtime::content_store::{ContentStore, ContentVisibility};
     let store = ContentStore::new(&gateway_dir).unwrap();
 
@@ -304,13 +330,22 @@ fn test_full_artifact_lifecycle() {
 
     // Set up root visibility
     store.set_root_session(coder_session, root_session).unwrap();
-    store.set_root_session(builder_session, root_session).unwrap();
-    
+    store
+        .set_root_session(builder_session, root_session)
+        .unwrap();
+
     // Step 1: Coder creates session-visible content
     let main_py = "def calculate(a, b): return a + b";
     let main_handle = store.write(main_py.as_bytes()).unwrap();
-    store.register_name_with_visibility(coder_session, "calculator/main.py", &main_handle, ContentVisibility::Session).unwrap();
-    
+    store
+        .register_name_with_visibility(
+            coder_session,
+            "calculator/main.py",
+            &main_handle,
+            ContentVisibility::Session,
+        )
+        .unwrap();
+
     let skill_md = r#"---
 name: "calculator"
 description: "Simple calculator"
@@ -319,23 +354,39 @@ script_entry: "main.py"
 # Calculator
 "#;
     let skill_handle = store.write(skill_md.as_bytes()).unwrap();
-    store.register_name_with_visibility(coder_session, "calculator/SKILL.md", &skill_handle, ContentVisibility::Session).unwrap();
-    
+    store
+        .register_name_with_visibility(
+            coder_session,
+            "calculator/SKILL.md",
+            &skill_handle,
+            ContentVisibility::Session,
+        )
+        .unwrap();
+
     // Step 2: Builder reads the artifact via handles (visible because session-scoped under same root)
-    let main_content = store.read_by_name_or_handle(builder_session, &main_handle).unwrap();
-    assert!(String::from_utf8(main_content).unwrap().contains("calculate"));
-    
+    let main_content = store
+        .read_by_name_or_handle(builder_session, &main_handle)
+        .unwrap();
+    assert!(String::from_utf8(main_content)
+        .unwrap()
+        .contains("calculate"));
+
     // Step 5: Builder registers handles in its session
-    store.register_name(builder_session, "installed/calc/main.py", &main_handle).unwrap();
-    store.register_name(builder_session, "installed/calc/SKILL.md", &skill_handle).unwrap();
-    
+    store
+        .register_name(builder_session, "installed/calc/main.py", &main_handle)
+        .unwrap();
+    store
+        .register_name(builder_session, "installed/calc/SKILL.md", &skill_handle)
+        .unwrap();
+
     // Step 6: Verify artifact extraction works for builder session
     let artifacts = autonoetic_gateway::execution::extract_artifacts_from_content_store(
         &gateway_dir,
         builder_session,
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     assert!(!artifacts.is_empty(), "Should have at least one artifact");
-    
+
     println!("✅ Full artifact lifecycle works");
 }

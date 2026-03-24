@@ -18,7 +18,11 @@ fn script_path(rel: &str) -> PathBuf {
         .join(rel)
 }
 
-fn run_python_with_stdin(script: &Path, args: &[&str], stdin_json: &serde_json::Value) -> serde_json::Value {
+fn run_python_with_stdin(
+    script: &Path,
+    args: &[&str],
+    stdin_json: &serde_json::Value,
+) -> serde_json::Value {
     let mut child = Command::new("python3")
         .arg(script)
         .args(args)
@@ -174,7 +178,8 @@ async fn test_generated_wrapper_executes_with_io_transformation() {
 
     let skill_content =
         std::fs::read_to_string(wrapper_dir.join("SKILL.md")).expect("wrapper skill should read");
-    let (manifest, instructions) = SkillParser::parse(&skill_content).expect("wrapper should parse");
+    let (manifest, instructions) =
+        SkillParser::parse(&skill_content).expect("wrapper should parse");
     let middleware = manifest
         .middleware
         .clone()
@@ -192,15 +197,21 @@ async fn test_generated_wrapper_executes_with_io_transformation() {
     .with_session_id("session-wrapper-io");
 
     let mut history = vec![Message::user(r#"{"task":"demo"}"#)];
-    let reply = executor
+    let reply = match executor
         .execute_with_history(&mut history)
         .await
         .expect("wrapper execution should succeed")
-        .expect("reply should be present");
+    {
+        autonoetic_gateway::runtime::lifecycle::TurnOutcome::Completed(Some(r)) => r,
+        other => panic!("expected Completed reply, got {:?}", other),
+    };
 
     let parsed_reply: serde_json::Value =
         serde_json::from_str(&reply).expect("post-map should emit JSON");
-    assert_eq!(parsed_reply.get("result"), Some(&serde_json::json!("done:demo")));
+    assert_eq!(
+        parsed_reply.get("result"),
+        Some(&serde_json::json!("done:demo"))
+    );
 }
 
 #[test]
@@ -262,8 +273,14 @@ impl LlmDriver for EchoSummaryConfidenceDriver {
             .expect("user message should exist");
         let parsed: serde_json::Value =
             serde_json::from_str(&user_content).expect("pre-map should produce JSON user content");
-        let query = parsed.get("query").and_then(|v| v.as_str()).unwrap_or_default();
-        let domain = parsed.get("domain").and_then(|v| v.as_str()).unwrap_or_default();
+        let query = parsed
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let domain = parsed
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let text = serde_json::json!({
             "summary": format!("done:{query}:{domain}"),
             "confidence": "high"
@@ -309,7 +326,8 @@ async fn test_generated_wrapper_executes_with_multiple_io_transformations() {
 
     let skill_content =
         std::fs::read_to_string(wrapper_dir.join("SKILL.md")).expect("wrapper skill should read");
-    let (manifest, instructions) = SkillParser::parse(&skill_content).expect("wrapper should parse");
+    let (manifest, instructions) =
+        SkillParser::parse(&skill_content).expect("wrapper should parse");
     let middleware = manifest
         .middleware
         .clone()
@@ -327,11 +345,14 @@ async fn test_generated_wrapper_executes_with_multiple_io_transformations() {
     .with_session_id("session-wrapper-io-multi");
 
     let mut history = vec![Message::user(r#"{"task":"demo","topic":"ops"}"#)];
-    let reply = executor
+    let reply = match executor
         .execute_with_history(&mut history)
         .await
         .expect("wrapper execution should succeed")
-        .expect("reply should be present");
+    {
+        autonoetic_gateway::runtime::lifecycle::TurnOutcome::Completed(Some(r)) => r,
+        other => panic!("expected Completed reply, got {:?}", other),
+    };
 
     let parsed_reply: serde_json::Value =
         serde_json::from_str(&reply).expect("post-map should emit JSON");
