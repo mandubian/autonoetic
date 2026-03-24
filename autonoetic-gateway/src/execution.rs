@@ -838,6 +838,179 @@ impl GatewayExecutionService {
         Ok(result)
     }
 
+    /// Respawn an agent from a previously saved checkpoint.
+    ///
+    /// Loads the checkpoint for the given session, reconstructs the executor state,
+    /// and calls `execute_with_history` with the checkpoint's conversation history.
+    ///
+    /// Returns the same `SpawnResult` as `spawn_agent_once` but with the checkpoint's
+    /// conversation as the starting point instead of a fresh one.
+    pub async fn respawn_from_checkpoint(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        additional_message: Option<&str>,
+        source_agent_id: Option<&str>,
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
+        use crate::runtime::lifecycle::TurnOutcome;
+
+        let span = tracing::info_span!(
+            "respawn_from_checkpoint",
+            agent_id = agent_id,
+            session_id = session_id
+        );
+        let _enter = span.enter();
+
+        let checkpoint = load_latest_checkpoint(&self.config, session_id)?
+            .ok_or_else(|| anyhow::anyhow!("No checkpoint found for session '{}'", session_id))?;
+
+        tracing::info!(
+            target: "checkpoint",
+            agent_id = %agent_id,
+            session_id = %session_id,
+            turn_counter = checkpoint.turn_counter,
+            yield_reason = ?checkpoint.yield_reason,
+            "Respawning agent from checkpoint"
+        );
+
+        // EmergencyStop checkpoints cannot be auto-resumed
+        if matches!(checkpoint.yield_reason, YieldReason::EmergencyStop { .. }) {
+            anyhow::bail!(
+                "Cannot auto-resume from EmergencyStop checkpoint. Manual restart required."
+            );
+        }
+
+        let repo = AgentRepository::from_config(&self.config);
+        let loaded = repo.get_sync(agent_id)?;
+
+        let llm_config = loaded
+            .manifest
+            .llm_config
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Agent '{}' is missing llm_config", agent_id))?;
+        let driver = build_driver(llm_config, self.http_client.clone())?;
+
+        let openrouter_catalog =
+            Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
+        let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
+        let mut runtime = AgentExecutor::new(
+            loaded.manifest,
+            loaded.instructions,
+            driver,
+            loaded.dir,
+            crate::runtime::tools::default_registry(),
+            self.gateway_store.clone(),
+        )
+        .with_gateway_dir(self.config.agents_dir.join(".gateway"))
+        .with_config(self.config.clone())
+        .with_session_budget(Some(self.session_budget.clone()))
+        .with_openrouter_catalog(Some(openrouter_catalog))
+        .with_middleware(middleware)
+        .with_session_id(session_id.to_string())
+        .with_workflow_context(
+            workflow_id.map(String::from),
+            task_id.map(String::from),
+        );
+
+        // Restore executor state from checkpoint
+        runtime.guard = crate::runtime::guard::LoopGuard::restore(
+            checkpoint.loop_guard_state.clone(),
+        );
+        runtime.session_started = true;
+        runtime.turn_counter = checkpoint.turn_counter;
+        runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+
+        // Build history from checkpoint, optionally appending an additional message
+        let mut history = checkpoint.history.clone();
+        if let Some(msg) = additional_message {
+            history.push(Message::user(msg));
+        }
+
+        // Clear the checkpoint file for this session (we're consuming it)
+        if let Err(e) = crate::runtime::checkpoint::delete_checkpoint(
+            &self.config,
+            session_id,
+            &checkpoint.turn_id,
+        ) {
+            tracing::warn!(
+                target: "checkpoint",
+                session_id = %session_id,
+                turn_id = %checkpoint.turn_id,
+                error = %e,
+                "Failed to delete checkpoint after loading"
+            );
+        }
+
+        let outcome = runtime.execute_with_history(&mut history).await?;
+
+        let resolved_session_id = runtime
+            .session_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("runtime session_id missing after execution"))?;
+
+        let (assistant_reply, suspended_for_approval) = match outcome {
+            TurnOutcome::Completed(reply) => (reply, None),
+            TurnOutcome::Suspended {
+                approval_request_id,
+                ..
+            } => (None, Some(approval_request_id)),
+        };
+
+        let initial_msg = history
+            .iter()
+            .find(|m| matches!(m.role, crate::llm::Role::User))
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        persist_session_context_turn(
+            &runtime.agent_dir,
+            &resolved_session_id,
+            &initial_msg,
+            assistant_reply.as_deref(),
+        );
+        let close_reason = if suspended_for_approval.is_some() {
+            "checkpoint_respawn_suspended"
+        } else if assistant_reply.is_some() {
+            "checkpoint_respawn_complete"
+        } else {
+            "checkpoint_respawn_complete_empty"
+        };
+        runtime.close_session(close_reason)?;
+        let llm_usage = runtime.take_llm_usage_last_run();
+
+        let artifacts = extract_artifacts_from_content_store(
+            &self.config.agents_dir.join(".gateway"),
+            &resolved_session_id,
+        )
+        .unwrap_or_default();
+
+        let files = collect_named_content(
+            &self.config.agents_dir.join(".gateway"),
+            &resolved_session_id,
+        );
+
+        let shared_knowledge = collect_shared_knowledge(
+            &self.config.agents_dir.join(".gateway"),
+            source_agent_id.unwrap_or(agent_id),
+            agent_id,
+        );
+
+        Ok(SpawnResult {
+            agent_id: agent_id.to_string(),
+            session_id: resolved_session_id,
+            assistant_reply,
+            should_signal_background: false,
+            artifacts,
+            files,
+            shared_knowledge,
+            llm_usage,
+            suspended_for_approval,
+        })
+    }
+
     pub async fn execute_background_action(
         &self,
         agent_id: &str,

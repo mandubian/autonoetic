@@ -5,6 +5,9 @@
 use crate::llm::{CompletionRequest, LlmDriver, Message, StopReason, ToolDefinition};
 use crate::policy::PolicyEngine;
 use crate::runtime::artifact::extract_artifacts_from_text;
+use crate::runtime::checkpoint::{
+    prune_checkpoints, save_checkpoint, LlmConfigSnapshot, SessionCheckpoint, YieldReason,
+};
 use crate::runtime::disclosure::DisclosureState;
 use crate::runtime::guard::LoopGuard;
 use crate::runtime::mcp::McpToolRuntime;
@@ -111,6 +114,8 @@ pub struct AgentExecutor {
     /// Workflow / task context used to populate `TurnContinuation` on suspension.
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
+    /// SHA-256 of runtime.lock content, captured at session start for reproducibility.
+    pub runtime_lock_hash: Option<String>,
 }
 
 impl AgentExecutor {
@@ -142,6 +147,7 @@ impl AgentExecutor {
             gateway_store,
             workflow_id: None,
             task_id: None,
+            runtime_lock_hash: None,
         }
     }
 
@@ -231,6 +237,60 @@ impl AgentExecutor {
         Ok(())
     }
 
+    /// Build a `SessionCheckpoint` from the current executor state.
+    fn build_checkpoint(
+        &self,
+        history: &[Message],
+        turn_id: &str,
+        yield_reason: YieldReason,
+    ) -> SessionCheckpoint {
+        let llm_config_snapshot = self.manifest.llm_config.as_ref().map(LlmConfigSnapshot::from_config);
+
+        // Gather budget counters from the session budget registry
+        let (llm_rounds, tokens, cost) = self
+            .session_budget
+            .as_ref()
+            .and_then(|b| b.snapshot_counters(&self.session_id.clone().unwrap_or_default()))
+            .unwrap_or((0, 0, 0.0));
+
+        SessionCheckpoint {
+            history: history.to_vec(),
+            turn_counter: self.turn_counter,
+            loop_guard_state: self.guard.snapshot(),
+            agent_id: self.manifest.agent.id.clone(),
+            session_id: self.session_id.clone().unwrap_or_default(),
+            turn_id: turn_id.to_string(),
+            workflow_id: self.workflow_id.clone(),
+            task_id: self.task_id.clone(),
+            runtime_lock_hash: self.runtime_lock_hash.clone(),
+            llm_config_snapshot,
+            tool_registry_version: None,
+            yield_reason,
+            content_store_refs: vec![],
+            created_at: chrono::Utc::now().to_rfc3339(),
+            pending_tool_state: None,
+            llm_rounds_consumed: llm_rounds,
+            tool_invocations_consumed: 0, // tracked separately if needed
+            tokens_consumed: tokens,
+            estimated_cost_usd: cost,
+        }
+    }
+
+    /// Save a checkpoint if config is available. Logs errors as warnings.
+    fn save_checkpoint_if_possible(&self, checkpoint: &SessionCheckpoint) {
+        if let Some(config) = self.config.as_ref() {
+            if let Err(e) = save_checkpoint(config, checkpoint) {
+                tracing::warn!(
+                    target: "checkpoint",
+                    session_id = %checkpoint.session_id,
+                    turn_id = %checkpoint.turn_id,
+                    error = %e,
+                    "Failed to save session checkpoint"
+                );
+            }
+        }
+    }
+
     /// Run the agent loop until completion or guard trip.
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let system_instructions = compose_system_instructions(&self.instructions);
@@ -291,6 +351,12 @@ impl AgentExecutor {
                 .unwrap_or_default();
             tracer.log_session_start("user_input", &trigger, evidence_mode)?;
             self.session_started = true;
+
+            // Capture runtime_lock_hash at session start for reproducibility
+            if self.runtime_lock_hash.is_none() {
+                self.runtime_lock_hash =
+                    crate::runtime::checkpoint::compute_runtime_lock_hash(&self.agent_dir);
+            }
         }
 
         tracer.log_wake(history.len(), evidence_mode);
@@ -328,10 +394,28 @@ impl AgentExecutor {
         let mut empty_other_retries_used = 0usize;
 
         loop {
-            self.guard.check_loop()?;
+            // Loop guard check — save checkpoint before propagating max-turns error
+            if let Err(e) = self.guard.check_loop() {
+                let cp = self.build_checkpoint(
+                    history,
+                    &turn_id,
+                    YieldReason::MaxTurnsReached,
+                );
+                self.save_checkpoint_if_possible(&cp);
+                return Err(e);
+            }
 
+            // Budget check — save checkpoint before propagating budget-exhausted error
             if let Some(budget) = self.session_budget.as_ref() {
-                budget.check_pre_llm(&session_id)?;
+                if let Err(e) = budget.check_pre_llm(&session_id) {
+                    let cp = self.build_checkpoint(
+                        history,
+                        &turn_id,
+                        YieldReason::BudgetExhausted,
+                    );
+                    self.save_checkpoint_if_possible(&cp);
+                    return Err(e);
+                }
             }
 
             // Update system message
@@ -450,12 +534,20 @@ impl AgentExecutor {
 
             if let Some(budget) = self.session_budget.as_ref() {
                 if !skip_llm {
-                    budget.record_llm_completion(
+                    if let Err(e) = budget.record_llm_completion(
                         &session_id,
                         response.usage.input_tokens,
                         response.usage.output_tokens,
                         estimated_cost_usd,
-                    )?;
+                    ) {
+                        let cp = self.build_checkpoint(
+                            history,
+                            &turn_id,
+                            YieldReason::BudgetExhausted,
+                        );
+                        self.save_checkpoint_if_possible(&cp);
+                        return Err(e);
+                    }
                 }
             }
 
@@ -561,10 +653,18 @@ impl AgentExecutor {
                     assistant_msg.tool_calls = response.tool_calls.clone();
 
                     if let Some(budget) = self.session_budget.as_ref() {
-                        budget.reserve_tool_invocations(
+                        if let Err(e) = budget.reserve_tool_invocations(
                             &session_id,
                             response.tool_calls.len() as u64,
-                        )?;
+                        ) {
+                            let cp = self.build_checkpoint(
+                                history,
+                                &turn_id,
+                                YieldReason::BudgetExhausted,
+                            );
+                            self.save_checkpoint_if_possible(&cp);
+                            return Err(e);
+                        }
                     }
 
                     let mut processor = ToolCallProcessor::new(
@@ -659,6 +759,16 @@ impl AgentExecutor {
                             approval_request_id = %request_id,
                             "Turn suspended at approval boundary; continuation saved"
                         );
+
+                        // Also save a checkpoint for general respawn capability
+                        let cp = self.build_checkpoint(
+                            history,
+                            &turn_id,
+                            YieldReason::ApprovalRequired {
+                                approval_request_id: request_id.clone(),
+                            },
+                        );
+                        self.save_checkpoint_if_possible(&cp);
 
                         return Ok(TurnOutcome::Suspended {
                             approval_request_id: request_id,
@@ -755,6 +865,18 @@ impl AgentExecutor {
                         ) {
                             tracing::warn!("Failed to persist history: {}", e);
                         }
+                    }
+
+                    // Save checkpoint at hibernation yield point
+                    let cp = self.build_checkpoint(
+                        history,
+                        &turn_id,
+                        YieldReason::Hibernation,
+                    );
+                    self.save_checkpoint_if_possible(&cp);
+                    if let Some(config) = self.config.as_ref() {
+                        // Prune old checkpoints, keep last 3
+                        let _ = prune_checkpoints(config, &session_id, 3);
                     }
 
                     break;
