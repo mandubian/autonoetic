@@ -1443,7 +1443,26 @@ fn copy_selection_to_clipboard(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_approval_request_id, extract_structured_approval};
+    use super::{
+        extract_approval_request_id, extract_structured_approval, format_workflow_event_card,
+    };
+    use autonoetic_types::workflow::WorkflowEventRecord;
+
+    fn workflow_event(
+        event_type: &str,
+        task_id: Option<&str>,
+        payload: serde_json::Value,
+    ) -> WorkflowEventRecord {
+        WorkflowEventRecord {
+            event_id: "wevt-test".to_string(),
+            workflow_id: "wf-test".to_string(),
+            task_id: task_id.map(str::to_string),
+            event_type: event_type.to_string(),
+            agent_id: Some("tester".to_string()),
+            payload,
+            occurred_at: "2026-03-24T12:34:56Z".to_string(),
+        }
+    }
 
     #[test]
     fn test_extract_approval_request_id_short_form() {
@@ -1515,5 +1534,42 @@ mod tests {
         assert!(parsed.card.contains("kind: agent_install"));
         assert!(parsed.card.contains("agent: weather.fetcher"));
         assert!(parsed.card.contains("retry field: promotion_gate.install_approval_ref"));
+    }
+
+    #[test]
+    fn test_format_workflow_event_card_awaiting_approval() {
+        let event = workflow_event(
+            "task.awaiting_approval",
+            Some("task-42"),
+            serde_json::json!({
+                "status": "awaiting_approval",
+                "approval": "sandbox_exec"
+            }),
+        );
+        let line = format_workflow_event_card(&event).expect("event should render");
+        assert!(line.contains("Approval required: task-42"));
+        assert!(line.contains("sandbox.exec"));
+    }
+
+    #[test]
+    fn test_format_workflow_event_card_task_approved() {
+        let event = workflow_event(
+            "task.approved",
+            Some("task-42"),
+            serde_json::json!({ "status": "runnable" }),
+        );
+        let line = format_workflow_event_card(&event).expect("event should render");
+        assert!(line.contains("Approval approved: task-42"));
+    }
+
+    #[test]
+    fn test_format_workflow_event_card_task_rejected() {
+        let event = workflow_event(
+            "task.rejected",
+            Some("task-42"),
+            serde_json::json!({ "status": "failed" }),
+        );
+        let line = format_workflow_event_card(&event).expect("event should render");
+        assert!(line.contains("Approval rejected: task-42"));
     }
 }
