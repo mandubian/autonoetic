@@ -2610,6 +2610,140 @@ impl NativeTool for ArtifactResolveRefTool {
 }
 
 // ---------------------------------------------------------------------------
+// Execution Search Tool
+// ---------------------------------------------------------------------------
+
+/// Searches execution traces for past tool executions.
+///
+/// Enables agents to learn from previous sessions by querying
+/// execution history (successes, failures, patterns).
+pub struct ExecutionSearchTool;
+
+impl NativeTool for ExecutionSearchTool {
+    fn name(&self) -> &'static str {
+        "execution.search"
+    }
+
+    fn is_available(&self, _manifest: &AgentManifest) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Search past execution traces to learn from previous sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns full execution details including stdout, stderr, exit codes, and duration. Available to all agents for cross-session learning.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Filter by tool name (e.g., 'sandbox.exec', 'agent.install'). Optional."
+                    },
+                    "success": {
+                        "type": "boolean",
+                        "description": "Filter by success (true), failure (false), or both (null). Optional."
+                    },
+                    "error_type": {
+                        "type": "string",
+                        "enum": ["compilation", "runtime", "permission", "timeout", "validation", "resource"],
+                        "description": "Filter by error type. Optional."
+                    },
+                    "command_pattern": {
+                        "type": "string",
+                        "description": "Filter by command pattern (SQL LIKE). Optional."
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Filter by agent ID. Optional."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default: 10)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default)]
+            tool_name: Option<String>,
+            #[serde(default)]
+            success: Option<bool>,
+            #[serde(default)]
+            error_type: Option<String>,
+            #[serde(default)]
+            command_pattern: Option<String>,
+            #[serde(default)]
+            agent_id: Option<String>,
+            #[serde(default)]
+            limit: Option<i64>,
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            anyhow::bail!("execution.search requires GatewayStore to be configured");
+        };
+
+        let limit = args.limit.unwrap_or(10).min(100) as i64;
+
+        let traces = store.search_execution_traces(
+            args.tool_name.as_deref(),
+            args.success,
+            args.error_type.as_deref(),
+            args.command_pattern.as_deref(),
+            args.agent_id.as_deref(),
+            limit,
+        )?;
+
+        let items: Vec<serde_json::Value> = traces
+            .into_iter()
+            .map(|t| serde_json::json!({
+                "trace_id": t.trace_id,
+                "agent_id": t.agent_id,
+                "session_id": t.session_id,
+                "turn_id": t.turn_id,
+                "timestamp": t.timestamp,
+                "tool_name": t.tool_name,
+                "command": t.command,
+                "exit_code": t.exit_code,
+                "stdout": t.stdout,
+                "stderr": t.stderr,
+                "duration_ms": t.duration_ms,
+                "success": t.success == 1,
+                "error_type": t.error_type,
+                "error_summary": t.error_summary,
+                "approval_required": t.approval_required == Some(1),
+                "approval_request_id": t.approval_request_id,
+            }))
+            .collect();
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "results": items,
+            "count": items.len(),
+        }))
+        .map_err(Into::into)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Knowledge Store Tool (renamed from memory.remember)
 // ---------------------------------------------------------------------------
 
@@ -6034,6 +6168,7 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(ArtifactBuildTool));
     registry.register(Box::new(ArtifactInspectTool));
     registry.register(Box::new(ArtifactResolveRefTool));
+    registry.register(Box::new(ExecutionSearchTool));
     // Knowledge tools (durable facts with provenance)
     registry.register(Box::new(KnowledgeStoreTool));
     registry.register(Box::new(KnowledgeRecallTool));
@@ -6262,15 +6397,15 @@ mod tests {
     fn test_native_tool_registry_availability() {
         let registry = default_registry();
         let manifest_none = test_manifest(vec![]);
-        // SessionEscalateTool and ApprovalStatusTool are always available
-        assert_eq!(registry.available_definitions(&manifest_none).len(), 2);
+        // SessionEscalateTool, ApprovalStatusTool, and ExecutionSearchTool are always available
+        assert_eq!(registry.available_definitions(&manifest_none).len(), 3);
 
         let manifest_shell = test_manifest(vec![Capability::CodeExecution {
             patterns: vec!["*".into()],
         }]);
         let defs = registry.available_definitions(&manifest_shell);
-        // sandbox.exec (1) + always-available (2) = 3
-        assert_eq!(defs.len(), 3);
+        // sandbox.exec (1) + SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool (3) = 4
+        assert_eq!(defs.len(), 4);
         assert!(defs.iter().any(|d| d.name == "sandbox.exec"));
 
         let manifest_all = test_manifest(vec![
@@ -6281,15 +6416,16 @@ mod tests {
         let defs_all = registry.available_definitions(&manifest_all);
         // sandbox.exec (1) + content.write, content.read (2) +
         // artifact.build, artifact.inspect, artifact.resolve_ref (3) +
+        // execution.search (1) +
         // knowledge.store, knowledge.recall, knowledge.search (3) +
         // session.snapshot (1) + knowledge.share (1) +
-        // promotion.query (1) + always-available (2) = 14
-        assert_eq!(defs_all.len(), 14);
+        // promotion.query (1) + always-available (2) = 15
+        assert_eq!(defs_all.len(), 15);
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
-        // agent.spawn, agent.exists, agent.discover, workflow.wait, workflow.cancel_task (5) + always-available (2) = 7
-        assert_eq!(defs_spawn.len(), 7);
+        // agent.spawn, agent.exists, agent.discover, workflow.wait, workflow.cancel_task (5) + SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool (3) = 8
+        assert_eq!(defs_spawn.len(), 8);
         assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
         assert!(
             !defs_spawn.iter().any(|d| d.name == "agent.install"),
@@ -6312,8 +6448,8 @@ mod tests {
             hosts: vec!["*".to_string()],
         }]);
         let defs_net = registry.available_definitions(&manifest_net);
-        // web.search, web.fetch (2) + always-available (2) = 4
-        assert_eq!(defs_net.len(), 4);
+        // web.search, web.fetch (2) + SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool (3) = 5
+        assert_eq!(defs_net.len(), 5);
         assert!(defs_net.iter().any(|d| d.name == "web.search"));
         assert!(defs_net.iter().any(|d| d.name == "web.fetch"));
     }

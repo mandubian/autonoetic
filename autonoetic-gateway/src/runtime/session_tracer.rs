@@ -661,6 +661,7 @@ impl SessionTracer {
                 base_dir: None,
             },
             timeline_writer: None,
+            gateway_store: None,
         }
     }
 }
