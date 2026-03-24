@@ -167,6 +167,45 @@ impl GatewayStore {
                 revoked_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS causal_events (
+                event_id     TEXT PRIMARY KEY,
+                agent_id     TEXT NOT NULL,
+                session_id   TEXT NOT NULL,
+                turn_id      TEXT,
+                event_seq    INTEGER NOT NULL,
+                timestamp    TEXT NOT NULL,
+                category     TEXT NOT NULL,
+                action       TEXT NOT NULL,
+                status       TEXT NOT NULL,
+                target       TEXT,
+                payload      TEXT,
+                payload_ref  TEXT,
+                evidence_ref TEXT,
+                reason       TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS execution_traces (
+                trace_id     TEXT PRIMARY KEY,
+                event_id     TEXT,
+                agent_id     TEXT NOT NULL,
+                session_id   TEXT NOT NULL,
+                turn_id      TEXT,
+                timestamp    TEXT NOT NULL,
+                tool_name    TEXT NOT NULL,
+                command      TEXT,
+                exit_code    INTEGER,
+                stdout       TEXT,
+                stderr       TEXT,
+                duration_ms  INTEGER,
+                success      INTEGER NOT NULL,
+                error_type   TEXT,
+                error_summary TEXT,
+                approval_required INTEGER DEFAULT 0,
+                approval_request_id TEXT,
+                arguments    TEXT,
+                result       TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
             CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id);
             CREATE INDEX IF NOT EXISTS idx_approvals_root_session ON approvals(root_session_id);
@@ -179,6 +218,18 @@ impl GatewayStore {
               ON artifact_refs(scope_type, scope_id, ref_id);
             CREATE INDEX IF NOT EXISTS idx_artifact_refs_artifact ON artifact_refs(artifact_id);
             CREATE INDEX IF NOT EXISTS idx_artifact_refs_digest ON artifact_refs(artifact_digest);
+
+            CREATE INDEX IF NOT EXISTS idx_causal_agent_session ON causal_events(agent_id, session_id);
+            CREATE INDEX IF NOT EXISTS idx_causal_category_action ON causal_events(category, action);
+            CREATE INDEX IF NOT EXISTS idx_causal_status ON causal_events(status);
+            CREATE INDEX IF NOT EXISTS idx_causal_target ON causal_events(target);
+            CREATE INDEX IF NOT EXISTS idx_causal_timestamp ON causal_events(timestamp);
+
+            CREATE INDEX IF NOT EXISTS idx_exec_agent_session ON execution_traces(agent_id, session_id);
+            CREATE INDEX IF NOT EXISTS idx_exec_tool ON execution_traces(tool_name);
+            CREATE INDEX IF NOT EXISTS idx_exec_success ON execution_traces(success);
+            CREATE INDEX IF NOT EXISTS idx_exec_error_type ON execution_traces(error_type);
+            CREATE INDEX IF NOT EXISTS idx_exec_command ON execution_traces(command);
 
             CREATE TABLE IF NOT EXISTS workflow_index (
                 root_session_id TEXT PRIMARY KEY,
@@ -870,7 +921,7 @@ impl GatewayStore {
                 trace_id, event_id, agent_id, session_id, turn_id, timestamp,
                 tool_name, command, exit_code, stdout, stderr, duration_ms,
                 success, error_type, error_summary, approval_required, approval_request_id, arguments, result
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &trace.trace_id,
                 trace.event_id.as_deref(),
@@ -1218,6 +1269,94 @@ mod tests {
         let refs = store.list_artifact_refs_for_scope(ArtifactRefScopeType::Workflow, "wf-456")?;
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].ref_id, "ar.wf9f3.010.a1a1");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execution_traces_captures_full_stdout_stderr() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let large_stdout = "A".repeat(10000); // Large stdout
+        let large_stderr = "B".repeat(10000); // Large stderr
+
+        // Test successful execution
+        let success_trace = autonoetic_types::causal_chain::ExecutionTraceRecord {
+            trace_id: "trace-success".to_string(),
+            event_id: None,
+            agent_id: "coder.default".to_string(),
+            session_id: "sess-123".to_string(),
+            turn_id: Some("turn-001".to_string()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            tool_name: "sandbox.exec".to_string(),
+            command: Some("pytest tests/".to_string()),
+            exit_code: Some(0),
+            stdout: Some(large_stdout.clone()),
+            stderr: Some("".to_string()),
+            duration_ms: 1500,
+            success: 1,
+            error_type: None,
+            error_summary: None,
+            approval_required: None,
+            approval_request_id: None,
+            arguments: Some(r#"{"command": "pytest tests/"}"#.to_string()),
+            result: Some(r#"{"ok": true, "exit_code": 0}"#.to_string()),
+        };
+        store.create_execution_trace(&success_trace)?;
+
+        // Test failed execution
+        let fail_trace = autonoetic_types::causal_chain::ExecutionTraceRecord {
+            trace_id: "trace-fail".to_string(),
+            event_id: None,
+            agent_id: "coder.default".to_string(),
+            session_id: "sess-123".to_string(),
+            turn_id: Some("turn-002".to_string()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            tool_name: "sandbox.exec".to_string(),
+            command: Some("python script.py".to_string()),
+            exit_code: Some(1),
+            stdout: Some("Some output".to_string()),
+            stderr: Some(large_stderr.clone()),
+            duration_ms: 500,
+            success: 0,
+            error_type: Some("compilation".to_string()),
+            error_summary: Some("SyntaxError: invalid syntax".to_string()),
+            approval_required: None,
+            approval_request_id: None,
+            arguments: Some(r#"{"command": "python script.py"}"#.to_string()),
+            result: Some(r#"{"ok": false, "exit_code": 1}"#.to_string()),
+        };
+        store.create_execution_trace(&fail_trace)?;
+
+        // Verify successful execution
+        let traces = store.search_execution_traces(
+            Some("sandbox.exec"),
+            Some(true),
+            None,
+            None,
+            None,
+            100,
+        )?;
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].trace_id, "trace-success");
+        assert_eq!(traces[0].stdout.as_ref().unwrap().len(), 10000);
+        assert_eq!(traces[0].exit_code, Some(0));
+
+        // Verify failed execution
+        let fail_traces = store.search_execution_traces(
+            Some("sandbox.exec"),
+            Some(false),
+            Some("compilation"),
+            None,
+            None,
+            100,
+        )?;
+        assert_eq!(fail_traces.len(), 1);
+        assert_eq!(fail_traces[0].trace_id, "trace-fail");
+        assert_eq!(fail_traces[0].stderr.as_ref().unwrap().len(), 10000);
+        assert_eq!(fail_traces[0].exit_code, Some(1));
+        assert_eq!(fail_traces[0].error_type.as_deref(), Some("compilation"));
 
         Ok(())
     }
