@@ -2477,6 +2477,139 @@ impl NativeTool for ArtifactInspectTool {
 }
 
 // ---------------------------------------------------------------------------
+// Artifact Resolve Ref Tool
+// ---------------------------------------------------------------------------
+
+/// Resolves a short scoped artifact reference to its canonical artifact identity.
+///
+/// This tool provides the agent contract for resolving short refs (e.g., "ar.wf9f3.004.k7p2")
+/// that child tasks emit, without requiring inlined file handles in natural language output.
+pub struct ArtifactResolveRefTool;
+
+impl NativeTool for ArtifactResolveRefTool {
+    fn name(&self) -> &'static str {
+        "artifact.resolve_ref"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Resolve a short scoped artifact reference to its canonical artifact identity. Use this to inspect artifacts passed from child tasks without inlined file handles. Fails hard if the ref is missing, expired, revoked, or has a digest mismatch.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ref_id": {
+                        "type": "string",
+                        "description": "The short artifact reference ID (e.g., 'ar.wf9f3.004.k7p2')"
+                    },
+                    "scope_type": {
+                        "type": "string",
+                        "enum": ["session", "workflow", "global"],
+                        "description": "The scope namespace: 'session', 'workflow', or 'global'"
+                    },
+                    "scope_id": {
+                        "type": "string",
+                        "description": "The scope ID: session_id, workflow_id, or '__global__'"
+                    }
+                },
+                "required": ["ref_id", "scope_type", "scope_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            ref_id: String,
+            scope_type: String,
+            scope_id: String,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        anyhow::ensure!(!args.ref_id.trim().is_empty(), "ref_id must not be empty");
+        anyhow::ensure!(!args.scope_id.trim().is_empty(), "scope_id must not be empty");
+
+        let scope_type = autonoetic_types::artifact::ArtifactRefScopeType::from_str(&args.scope_type)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid scope_type '{}'. Must be 'session', 'workflow', or 'global'.",
+                    args.scope_type
+                )
+            })?;
+
+        let Some(store) = gateway_store else {
+            anyhow::bail!("artifact.resolve_ref requires GatewayStore to be configured");
+        };
+
+        let Some(ref_record) = store.resolve_artifact_ref(scope_type, &args.scope_id, &args.ref_id)? else {
+            return Err(anyhow::Error::from(autonoetic_types::tool_error::tagged::Tagged::validation(
+                anyhow::anyhow!(
+                    "Artifact ref '{}' not found in {} scope '{}', or it is expired/revoked.",
+                    args.ref_id,
+                    scope_type.as_str(),
+                    args.scope_id
+                )
+            )).into());
+        };
+
+        let Some(gw_dir) = gateway_dir else {
+            anyhow::bail!("artifact.resolve_ref requires gateway directory to be configured");
+        };
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
+        let bundle = artifact_store.inspect(&ref_record.artifact_id)?;
+
+        if bundle.digest != ref_record.artifact_digest {
+            return Err(anyhow::Error::from(autonoetic_types::tool_error::tagged::Tagged::validation(
+                anyhow::anyhow!(
+                    "Artifact digest mismatch for ref '{}'. Ref claims '{}' but artifact manifest has '{}'. Possible tampering or corruption.",
+                    args.ref_id,
+                    ref_record.artifact_digest,
+                    bundle.digest
+                )
+            )).into());
+        }
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "artifact_id": bundle.artifact_id,
+            "artifact_digest": bundle.digest,
+            "files": bundle.files.iter().map(|f| serde_json::json!({
+                "name": f.name,
+                "handle": f.handle,
+                "alias": f.alias,
+            })).collect::<Vec<_>>(),
+            "entrypoints": bundle.entrypoints,
+            "created_at": bundle.created_at,
+            "builder_session_id": bundle.builder_session_id,
+            "ref_created_at": ref_record.created_at,
+            "ref_created_by": ref_record.created_by_agent_id,
+        }))
+        .map_err(Into::into)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Knowledge Store Tool (renamed from memory.remember)
 // ---------------------------------------------------------------------------
 
@@ -5900,6 +6033,7 @@ pub fn default_registry() -> NativeToolRegistry {
     // Artifact tools
     registry.register(Box::new(ArtifactBuildTool));
     registry.register(Box::new(ArtifactInspectTool));
+    registry.register(Box::new(ArtifactResolveRefTool));
     // Knowledge tools (durable facts with provenance)
     registry.register(Box::new(KnowledgeStoreTool));
     registry.register(Box::new(KnowledgeRecallTool));
@@ -6128,14 +6262,16 @@ mod tests {
     fn test_native_tool_registry_availability() {
         let registry = default_registry();
         let manifest_none = test_manifest(vec![]);
-        assert_eq!(registry.available_definitions(&manifest_none).len(), 0);
+        // SessionEscalateTool and ApprovalStatusTool are always available
+        assert_eq!(registry.available_definitions(&manifest_none).len(), 2);
 
         let manifest_shell = test_manifest(vec![Capability::CodeExecution {
             patterns: vec!["*".into()],
         }]);
         let defs = registry.available_definitions(&manifest_shell);
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "sandbox.exec");
+        // sandbox.exec (1) + always-available (2) = 3
+        assert_eq!(defs.len(), 3);
+        assert!(defs.iter().any(|d| d.name == "sandbox.exec"));
 
         let manifest_all = test_manifest(vec![
             Capability::CodeExecution { patterns: vec![] },
@@ -6144,16 +6280,16 @@ mod tests {
         ]);
         let defs_all = registry.available_definitions(&manifest_all);
         // sandbox.exec (1) + content.write, content.read (2) +
-        // artifact.build, artifact.inspect (2) +
+        // artifact.build, artifact.inspect, artifact.resolve_ref (3) +
         // knowledge.store, knowledge.recall, knowledge.search (3) +
         // session.snapshot (1) + knowledge.share (1) +
-        // promotion.query (1) = 11
-        assert_eq!(defs_all.len(), 11);
+        // promotion.query (1) + always-available (2) = 14
+        assert_eq!(defs_all.len(), 14);
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
-        // agent.spawn, agent.exists, agent.discover, workflow.wait = 4 (agent.install is evolution-role only)
-        assert_eq!(defs_spawn.len(), 4);
+        // agent.spawn, agent.exists, agent.discover, workflow.wait, workflow.cancel_task (5) + always-available (2) = 7
+        assert_eq!(defs_spawn.len(), 7);
         assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
         assert!(
             !defs_spawn.iter().any(|d| d.name == "agent.install"),
@@ -6176,7 +6312,8 @@ mod tests {
             hosts: vec!["*".to_string()],
         }]);
         let defs_net = registry.available_definitions(&manifest_net);
-        assert_eq!(defs_net.len(), 2);
+        // web.search, web.fetch (2) + always-available (2) = 4
+        assert_eq!(defs_net.len(), 4);
         assert!(defs_net.iter().any(|d| d.name == "web.search"));
         assert!(defs_net.iter().any(|d| d.name == "web.fetch"));
     }
