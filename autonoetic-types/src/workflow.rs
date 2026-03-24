@@ -63,10 +63,6 @@ pub struct WorkflowRun {
     pub updated_at: String,
     #[serde(default)]
     pub active_task_ids: Vec<String>,
-    #[serde(default)]
-    pub blocked_task_ids: Vec<String>,
-    #[serde(default)]
-    pub pending_approval_ids: Vec<String>,
     /// Task IDs currently queued for async execution (not yet running).
     #[serde(default)]
     pub queued_task_ids: Vec<String>,

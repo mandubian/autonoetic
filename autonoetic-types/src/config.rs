@@ -184,6 +184,12 @@ pub struct GatewayConfig {
     /// Optional per-session budgets (LLM rounds, tools, tokens, wall clock).
     #[serde(default)]
     pub session_budget: SessionBudgetConfig,
+
+    /// Maximum seconds a workflow task may remain in `AwaitingApproval` before it is
+    /// automatically marked `Failed`. Set to 0 to disable (not recommended for production).
+    /// Default: 600 (10 minutes).
+    #[serde(default = "default_approval_timeout_secs")]
+    pub approval_timeout_secs: u64,
 }
 
 /// Configuration for pluggable code analysis.
@@ -321,6 +327,10 @@ fn default_max_background_due_per_tick() -> usize {
     32
 }
 
+fn default_approval_timeout_secs() -> u64 {
+    600
+}
+
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
@@ -341,6 +351,7 @@ impl Default for GatewayConfig {
             llm_preset_mapping: HashMap::new(),
             code_analysis: CodeAnalysisConfig::default(),
             session_budget: SessionBudgetConfig::default(),
+            approval_timeout_secs: default_approval_timeout_secs(),
         }
     }
 }
