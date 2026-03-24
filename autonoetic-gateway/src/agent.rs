@@ -2,4 +2,4 @@
 
 pub mod repository;
 
-pub use repository::{scan_agents, AgentRepository, LoadedAgent, cached};
+pub use repository::{cached, scan_agents, AgentRepository, LoadedAgent};

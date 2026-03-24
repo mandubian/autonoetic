@@ -1022,8 +1022,14 @@ mod tests {
         assert_eq!(parse_bwrap_dev_mode(Some("minimal")), BwrapDevMode::Minimal);
         assert_eq!(parse_bwrap_dev_mode(Some("dev")), BwrapDevMode::Minimal);
         assert_eq!(parse_bwrap_dev_mode(Some("host")), BwrapDevMode::HostBind);
-        assert_eq!(parse_bwrap_dev_mode(Some("host-bind")), BwrapDevMode::HostBind);
-        assert_eq!(parse_bwrap_dev_mode(Some("dev-bind")), BwrapDevMode::HostBind);
+        assert_eq!(
+            parse_bwrap_dev_mode(Some("host-bind")),
+            BwrapDevMode::HostBind
+        );
+        assert_eq!(
+            parse_bwrap_dev_mode(Some("dev-bind")),
+            BwrapDevMode::HostBind
+        );
         assert_eq!(parse_bwrap_dev_mode(Some("unknown")), BwrapDevMode::Legacy);
     }
 

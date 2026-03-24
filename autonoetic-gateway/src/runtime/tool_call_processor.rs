@@ -26,8 +26,6 @@ pub struct ToolCallProcessor<'a> {
     /// When set, passed to native tools (e.g. agent.install for approval policy).
     config: Option<&'a GatewayConfig>,
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-    /// Whether this is a resumption from hibernation (used to inject resumption context into tool results)
-    is_resumption: bool,
 }
 
 impl<'a> ToolCallProcessor<'a> {
@@ -61,7 +59,6 @@ impl<'a> ToolCallProcessor<'a> {
             turn_id: None,
             config,
             gateway_store,
-            is_resumption: false,
         }
     }
 
@@ -72,11 +69,6 @@ impl<'a> ToolCallProcessor<'a> {
     ) -> Self {
         self.session_id = session_id;
         self.turn_id = turn_id;
-        self
-    }
-
-    pub fn with_resumption(mut self, is_resumption: bool) -> Self {
-        self.is_resumption = is_resumption;
         self
     }
 
@@ -131,14 +123,7 @@ impl<'a> ToolCallProcessor<'a> {
                 }
             };
 
-            // Inject resumption context if this is a resumption
-            let final_result = if self.is_resumption {
-                inject_resumption_context(result, &tc.name, &tc.arguments)
-            } else {
-                result
-            };
-
-            results.push((tc.id.clone(), tc.name.clone(), final_result));
+            results.push((tc.id.clone(), tc.name.clone(), result));
 
             if tool_result_requires_approval(&results.last().expect("just pushed result").2) {
                 break;
@@ -266,47 +251,13 @@ fn tool_result_requires_approval(result: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Injects resumption context into a tool result when an agent wakes from hibernation.
-///
-/// This helps agents understand they were interrupted and should continue from where
-/// they left off rather than restarting from scratch.
-fn inject_resumption_context(result: String, tool_name: &str, arguments: &str) -> String {
-    // Try to parse the result as JSON
-    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&result) {
-        // Add resumption metadata to the result
-        if let Some(obj) = parsed.as_object_mut() {
-            obj.insert(
-                "resumed".to_string(),
-                serde_json::Value::Bool(true),
-            );
-            // Include original tool info for context
-            obj.insert(
-                "original_tool".to_string(),
-                serde_json::Value::String(tool_name.to_string()),
-            );
-            // Try to parse and include original arguments
-            if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) {
-                obj.insert(
-                    "original_args".to_string(),
-                    args,
-                );
-            }
-        }
-        // Return the modified JSON
-        serde_json::to_string(&parsed).unwrap_or_else(|_| result)
-    } else {
-        // If not valid JSON, return as-is
-        result
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm::ToolDefinition;
     use crate::policy::PolicyEngine;
-    use crate::runtime::tools::{NativeTool, NativeToolRegistry};
     use crate::runtime::tools::default_registry;
+    use crate::runtime::tools::{NativeTool, NativeToolRegistry};
     use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
     use autonoetic_types::capability::Capability;
     use autonoetic_types::tool_error::{tagged, ToolErrorType};
@@ -392,19 +343,24 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(tool_result).unwrap();
         assert_eq!(parsed.get("ok").unwrap(), false);
         // The error could be "resource" (unknown tool) or "validation" depending on tool availability
-        assert!(parsed.get("error_type").unwrap().as_str().unwrap() == "resource" || 
-                parsed.get("error_type").unwrap().as_str().unwrap() == "validation");
-        assert!(parsed
-            .get("message")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .contains("must not be empty") || parsed
-            .get("message")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .contains("not found"));
+        assert!(
+            parsed.get("error_type").unwrap().as_str().unwrap() == "resource"
+                || parsed.get("error_type").unwrap().as_str().unwrap() == "validation"
+        );
+        assert!(
+            parsed
+                .get("message")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("must not be empty")
+                || parsed
+                    .get("message")
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .contains("not found")
+        );
     }
 
     #[tokio::test]
@@ -499,15 +455,21 @@ mod tests {
         let parsed1: serde_json::Value = serde_json::from_str(&result[0].2).unwrap();
         assert_eq!(parsed1.get("ok").unwrap(), false);
         let error_type1 = parsed1.get("error_type").unwrap().as_str().unwrap();
-        assert!(error_type1 == "resource" || error_type1 == "validation" || error_type1 == "execution",
-                "error_type1 was: {}", error_type1);
+        assert!(
+            error_type1 == "resource" || error_type1 == "validation" || error_type1 == "execution",
+            "error_type1 was: {}",
+            error_type1
+        );
 
         // Second is execution/resource error for missing gateway_dir
         let parsed2: serde_json::Value = serde_json::from_str(&result[1].2).unwrap();
         assert_eq!(parsed2.get("ok").unwrap(), false);
         let error_type2 = parsed2.get("error_type").unwrap().as_str().unwrap();
-        assert!(error_type2 == "resource" || error_type2 == "execution",
-                "error_type2 was: {}", error_type2);
+        assert!(
+            error_type2 == "resource" || error_type2 == "execution",
+            "error_type2 was: {}",
+            error_type2
+        );
     }
 
     struct ApprovalRequiredTool;
@@ -640,7 +602,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(had_success, "approval-required tool result should still count as progress");
+        assert!(
+            had_success,
+            "approval-required tool result should still count as progress"
+        );
         assert_eq!(results.len(), 1, "remaining tool calls should be skipped");
         assert_eq!(counting_calls.load(Ordering::SeqCst), 0);
         let parsed: serde_json::Value = serde_json::from_str(&results[0].2).unwrap();
@@ -707,8 +672,7 @@ mod tests {
         let tool_calls_turn2 = vec![ToolCall {
             id: "tc2".to_string(),
             name: "knowledge.store".to_string(),
-            arguments: r#"{"id":"valid-id-123","content":"hello world"}"#
-                .to_string(),
+            arguments: r#"{"id":"valid-id-123","content":"hello world"}"#.to_string(),
         }];
 
         let (had_success_turn2, result_turn2) = processor

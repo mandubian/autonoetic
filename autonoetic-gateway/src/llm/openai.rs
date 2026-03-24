@@ -116,7 +116,10 @@ impl OpenAiDriver {
 
         // Only include tools if provider supports them AND the model supports them
         let model_supports_tools = model_supports_tools(&self.provider.model);
-        if !req.tools.is_empty() && self.provider.capabilities.supports_tools && model_supports_tools {
+        if !req.tools.is_empty()
+            && self.provider.capabilities.supports_tools
+            && model_supports_tools
+        {
             body["tools"] = json!(req
                 .tools
                 .iter()

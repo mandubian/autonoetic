@@ -66,10 +66,13 @@ mod tests {
 
     fn test_router() -> (TempDir, JsonRpcRouter) {
         let temp = tempfile::tempdir().expect("tempdir should create");
-        let router = JsonRpcRouter::new(GatewayConfig {
-            agents_dir: temp.path().join("agents"),
-            ..GatewayConfig::default()
-        }, None);
+        let router = JsonRpcRouter::new(
+            GatewayConfig {
+                agents_dir: temp.path().join("agents"),
+                ..GatewayConfig::default()
+            },
+            None,
+        );
         (temp, router)
     }
 

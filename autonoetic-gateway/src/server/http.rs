@@ -12,7 +12,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -49,10 +49,11 @@ fn is_valid_session_id(s: &str) -> bool {
 
 /// Valid content name pattern (alphanumeric, dash, underscore, dot, slash for paths)
 fn is_valid_content_name(s: &str) -> bool {
-    s.len() <= 512 
-        && !s.starts_with('/') 
+    s.len() <= 512
+        && !s.starts_with('/')
         && !s.contains("..")
-        && s.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
 }
 
 /// Validate Bearer token from Authorization header
@@ -121,7 +122,8 @@ impl WriteRequest {
     fn validate(&self) -> Result<(), ErrorResponse> {
         validate_session_id(&self.session_id)?;
         validate_content_name(&self.name)?;
-        if self.content.len() > 10_000_000 { // 10MB limit
+        if self.content.len() > 10_000_000 {
+            // 10MB limit
             return Err(ErrorResponse {
                 error: "Content too large (max 10MB)".to_string(),
                 code: 413,
@@ -191,23 +193,23 @@ impl IntoResponse for ErrorResponse {
 pub fn create_router(state: HttpState) -> Router {
     Router::new()
         .route("/api/content/write", post(handle_write))
-        .route("/api/content/read/{session_id}/{name_or_handle}", get(handle_read_get))
+        .route(
+            "/api/content/read/{session_id}/{name_or_handle}",
+            get(handle_read_get),
+        )
         .route("/api/content/read", post(handle_read_post))
         .route("/api/content/names", get(handle_list_names))
-        .layer(CorsLayer::very_permissive())  // More restrictive than permissive
+        .layer(CorsLayer::very_permissive()) // More restrictive than permissive
         .with_state(Arc::new(state))
 }
 
 /// Start the HTTP server on the given address
-pub async fn start_http_server(
-    addr: std::net::SocketAddr,
-    state: HttpState,
-) -> anyhow::Result<()> {
+pub async fn start_http_server(addr: std::net::SocketAddr, state: HttpState) -> anyhow::Result<()> {
     let app = create_router(state);
-    
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("HTTP content API listening on {}", listener.local_addr()?);
-    
+
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -235,7 +237,7 @@ async fn handle_write(
 ) -> Result<Json<WriteResponse>, ErrorResponse> {
     // Authentication
     validate_auth(&headers, &state.shared_secret)?;
-    
+
     // Validation
     req.validate()?;
 
@@ -247,7 +249,10 @@ async fn handle_write(
             use base64::Engine;
             base64::engine::general_purpose::STANDARD
                 .decode(&req.content)
-                .map_err(|e| ErrorResponse { error: format!("Invalid base64: {}", e), code: 400 })?
+                .map_err(|e| ErrorResponse {
+                    error: format!("Invalid base64: {}", e),
+                    code: 400,
+                })?
         }
         _ => req.content.into_bytes(), // UTF-8 default
     };
@@ -259,19 +264,30 @@ async fn handle_write(
         Some("private") => crate::runtime::content_store::ContentVisibility::Private,
         Some("session") | None => crate::runtime::content_store::ContentVisibility::Session,
         Some("global") => crate::runtime::content_store::ContentVisibility::Global,
-        Some(other) => return Err(ErrorResponse {
-            error: format!("Invalid visibility '{}'. Must be one of: private, session, global", other),
-            code: 400,
-        }),
+        Some(other) => {
+            return Err(ErrorResponse {
+                error: format!(
+                    "Invalid visibility '{}'. Must be one of: private, session, global",
+                    other
+                ),
+                code: 400,
+            })
+        }
     };
 
     // Write to content store
-    let handle = store.write(&content_bytes)
-        .map_err(|e| ErrorResponse { error: e.to_string(), code: 500 })?;
+    let handle = store.write(&content_bytes).map_err(|e| ErrorResponse {
+        error: e.to_string(),
+        code: 500,
+    })?;
 
     // Register name in session with visibility
-    store.register_name_with_visibility(&req.session_id, &req.name, &handle, content_visibility)
-        .map_err(|e| ErrorResponse { error: e.to_string(), code: 500 })?;
+    store
+        .register_name_with_visibility(&req.session_id, &req.name, &handle, content_visibility)
+        .map_err(|e| ErrorResponse {
+            error: e.to_string(),
+            code: 500,
+        })?;
 
     Ok(Json(WriteResponse {
         handle,
@@ -288,10 +304,10 @@ async fn handle_read_get(
 ) -> Result<Json<ReadResponse>, ErrorResponse> {
     // Authentication
     validate_auth(&headers, &state.shared_secret)?;
-    
+
     // Validation
     validate_session_id(&session_id)?;
-    
+
     read_content(&state, &session_id, &name_or_handle).await
 }
 
@@ -303,7 +319,7 @@ async fn handle_read_post(
 ) -> Result<Json<ReadResponse>, ErrorResponse> {
     // Authentication
     validate_auth(&headers, &state.shared_secret)?;
-    
+
     // Validation
     validate_session_id(&req.session_id)?;
 
@@ -317,12 +333,18 @@ async fn read_content(
 ) -> Result<Json<ReadResponse>, ErrorResponse> {
     let store = state.store.lock().await;
 
-    let content_bytes = store.read_by_name_or_handle(session_id, name_or_handle)
-        .map_err(|e| ErrorResponse { error: e.to_string(), code: 404 })?;
+    let content_bytes = store
+        .read_by_name_or_handle(session_id, name_or_handle)
+        .map_err(|e| ErrorResponse {
+            error: e.to_string(),
+            code: 404,
+        })?;
 
     let size_bytes = content_bytes.len();
-    let handle = store.write(&content_bytes)
-        .map_err(|e| ErrorResponse { error: e.to_string(), code: 500 })?;
+    let handle = store.write(&content_bytes).map_err(|e| ErrorResponse {
+        error: e.to_string(),
+        code: 500,
+    })?;
 
     // Encode as base64 for safe transport
     use base64::Engine;
@@ -344,14 +366,18 @@ async fn handle_list_names(
 ) -> Result<Json<ListResponse>, ErrorResponse> {
     // Authentication
     validate_auth(&headers, &state.shared_secret)?;
-    
+
     // Validation
     validate_session_id(&query.session_id)?;
 
     let store = state.store.lock().await;
 
-    let entries = store.list_names_with_handles(&query.session_id)
-        .map_err(|e| ErrorResponse { error: e.to_string(), code: 500 })?;
+    let entries = store
+        .list_names_with_handles(&query.session_id)
+        .map_err(|e| ErrorResponse {
+            error: e.to_string(),
+            code: 500,
+        })?;
 
     let names: Vec<ContentName> = entries
         .into_iter()
@@ -368,11 +394,15 @@ mod tests {
 
     const TEST_SECRET: &str = "test-secret-token";
 
-    async fn setup_test_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+    async fn setup_test_server() -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
         let dir = tempdir().unwrap();
         let gateway_dir = dir.path().join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
-        
+
         let store = ContentStore::new(&gateway_dir).unwrap();
         let state = HttpState {
             store: Arc::new(Mutex::new(store)),
@@ -380,22 +410,25 @@ mod tests {
             max_body_size: DEFAULT_MAX_BODY_SIZE,
         };
         let app = create_router(state);
-        
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        
+
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        
+
         // Give server time to start
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        
+
         (addr, handle, dir)
     }
 
     fn auth_header() -> (String, String) {
-        ("Authorization".to_string(), format!("Bearer {}", TEST_SECRET))
+        (
+            "Authorization".to_string(),
+            format!("Bearer {}", TEST_SECRET),
+        )
     }
 
     #[tokio::test]
@@ -404,7 +437,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base = format!("http://{}", addr);
         let (auth_name, auth_value) = auth_header();
-        
+
         // Write content
         let write_req = WriteRequest {
             session_id: "test-session".to_string(),
@@ -413,7 +446,7 @@ mod tests {
             encoding: None,
             visibility: None,
         };
-        
+
         let resp = client
             .post(&format!("{}/api/content/write", base))
             .header(&auth_name, &auth_value)
@@ -422,11 +455,11 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.status().is_success());
-        
+
         let write_resp: WriteResponse = resp.json().await.unwrap();
         assert!(!write_resp.handle.is_empty());
         assert_eq!(write_resp.size_bytes, 13);
-        
+
         // Read content back via GET
         let resp = client
             .get(&format!("{}/api/content/read/test-session/test.txt", base))
@@ -435,15 +468,17 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.status().is_success());
-        
+
         let read_resp: ReadResponse = resp.json().await.unwrap();
         assert_eq!(read_resp.encoding, "base64");
-        
+
         // Decode and verify
         use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&read_resp.content).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&read_resp.content)
+            .unwrap();
         assert_eq!(String::from_utf8(decoded).unwrap(), "Hello, World!");
-        
+
         handle.abort();
     }
 
@@ -452,7 +487,7 @@ mod tests {
         let (addr, handle, _dir) = setup_test_server().await;
         let client = reqwest::Client::new();
         let base = format!("http://{}", addr);
-        
+
         // Try without auth
         let write_req = WriteRequest {
             session_id: "test-session".to_string(),
@@ -461,7 +496,7 @@ mod tests {
             encoding: None,
             visibility: None,
         };
-        
+
         let resp = client
             .post(&format!("{}/api/content/write", base))
             .json(&write_req)
@@ -469,7 +504,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 401, "Should require authentication");
-        
+
         handle.abort();
     }
 
@@ -478,7 +513,7 @@ mod tests {
         let (addr, handle, _dir) = setup_test_server().await;
         let client = reqwest::Client::new();
         let base = format!("http://{}", addr);
-        
+
         let write_req = WriteRequest {
             session_id: "test-session".to_string(),
             name: "test.txt".to_string(),
@@ -486,7 +521,7 @@ mod tests {
             encoding: None,
             visibility: None,
         };
-        
+
         let resp = client
             .post(&format!("{}/api/content/write", base))
             .header("Authorization", "Bearer wrong-token")
@@ -495,7 +530,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 403, "Should reject invalid token");
-        
+
         handle.abort();
     }
 
@@ -505,7 +540,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base = format!("http://{}", addr);
         let (auth_name, auth_value) = auth_header();
-        
+
         let write_req = WriteRequest {
             session_id: "../../../etc/passwd".to_string(), // Path traversal attempt
             name: "test.txt".to_string(),
@@ -513,7 +548,7 @@ mod tests {
             encoding: None,
             visibility: None,
         };
-        
+
         let resp = client
             .post(&format!("{}/api/content/write", base))
             .header(&auth_name, &auth_value)
@@ -522,7 +557,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 400, "Should reject invalid session_id");
-        
+
         handle.abort();
     }
 
@@ -532,7 +567,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base = format!("http://{}", addr);
         let (auth_name, auth_value) = auth_header();
-        
+
         // Write first file
         let write_req1 = WriteRequest {
             session_id: "test-session-list".to_string(),
@@ -549,7 +584,7 @@ mod tests {
             .await
             .unwrap();
         assert!(resp1.status().is_success(), "Write 1 failed");
-        
+
         // Write second file
         let write_req2 = WriteRequest {
             session_id: "test-session-list".to_string(),
@@ -566,23 +601,39 @@ mod tests {
             .await
             .unwrap();
         assert!(resp2.status().is_success(), "Write 2 failed");
-        
+
         // List names
         let resp = client
-            .get(&format!("{}/api/content/names?session_id=test-session-list", base))
+            .get(&format!(
+                "{}/api/content/names?session_id=test-session-list",
+                base
+            ))
             .header(&auth_name, &auth_value)
             .send()
             .await
             .unwrap();
         assert!(resp.status().is_success(), "List failed");
-        
+
         let list_resp: ListResponse = resp.json().await.unwrap();
-        assert_eq!(list_resp.names.len(), 2, "Expected 2 names, got: {:?}", list_resp.names);
-        
+        assert_eq!(
+            list_resp.names.len(),
+            2,
+            "Expected 2 names, got: {:?}",
+            list_resp.names
+        );
+
         let names: Vec<&str> = list_resp.names.iter().map(|n| n.name.as_str()).collect();
-        assert!(names.contains(&"file1.txt"), "Missing file1.txt in {:?}", names);
-        assert!(names.contains(&"file2.txt"), "Missing file2.txt in {:?}", names);
-        
+        assert!(
+            names.contains(&"file1.txt"),
+            "Missing file1.txt in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"file2.txt"),
+            "Missing file2.txt in {:?}",
+            names
+        );
+
         handle.abort();
     }
 }

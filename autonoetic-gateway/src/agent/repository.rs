@@ -360,7 +360,9 @@ capabilities: []
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("execution_mode=script but is missing script_entry"));
+        assert!(err
+            .to_string()
+            .contains("execution_mode=script but is missing script_entry"));
     }
 
     #[tokio::test]
@@ -431,5 +433,4 @@ Test instructions.
             err
         );
     }
-
 }

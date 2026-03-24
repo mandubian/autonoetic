@@ -68,6 +68,35 @@ impl LoopGuard {
         self.last_failure_hash = None;
         self.consecutive_failures = 0;
     }
+
+    /// Capture the current guard state for serialization (e.g. turn continuation checkpoint).
+    pub fn snapshot(&self) -> LoopGuardState {
+        LoopGuardState {
+            max_loops_without_progress: self.max_loops_without_progress,
+            current_loops: self.current_loops,
+            last_failure_hash: self.last_failure_hash,
+            consecutive_failures: self.consecutive_failures,
+        }
+    }
+
+    /// Restore guard state from a previously captured snapshot.
+    pub fn restore(state: LoopGuardState) -> Self {
+        Self {
+            max_loops_without_progress: state.max_loops_without_progress,
+            current_loops: state.current_loops,
+            last_failure_hash: state.last_failure_hash,
+            consecutive_failures: state.consecutive_failures,
+        }
+    }
+}
+
+/// Serializable snapshot of a [`LoopGuard`] for turn continuation checkpoints.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LoopGuardState {
+    pub max_loops_without_progress: u32,
+    pub current_loops: u32,
+    pub last_failure_hash: Option<u64>,
+    pub consecutive_failures: u32,
 }
 
 #[cfg(test)]

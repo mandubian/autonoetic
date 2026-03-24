@@ -35,7 +35,9 @@ impl GatewayServer {
             .map_err(|e| anyhow::anyhow!("Invalid OFP bind address: {}", e))?;
 
         let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-        let gateway_store = Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+        let gateway_store = Arc::new(crate::scheduler::gateway_store::GatewayStore::open(
+            &gateway_dir,
+        )?);
 
         let jsonrpc_router = Arc::new(crate::router::JsonRpcRouter::new(
             self.config.as_ref().clone(),

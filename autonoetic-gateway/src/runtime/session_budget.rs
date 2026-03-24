@@ -191,8 +191,7 @@ mod tests {
             ..Default::default()
         });
         reg.check_pre_llm("s1").unwrap();
-        reg.record_llm_completion("s1", 60, 50, None)
-            .unwrap_err(); // 110 > 100
+        reg.record_llm_completion("s1", 60, 50, None).unwrap_err(); // 110 > 100
     }
 
     #[test]
@@ -213,7 +212,8 @@ mod tests {
             ..Default::default()
         });
         reg.check_pre_llm("s1").unwrap();
-        reg.record_llm_completion("s1", 100, 100, Some(0.005)).unwrap();
+        reg.record_llm_completion("s1", 100, 100, Some(0.005))
+            .unwrap();
         assert!(reg
             .record_llm_completion("s1", 100, 100, Some(0.02))
             .is_err());

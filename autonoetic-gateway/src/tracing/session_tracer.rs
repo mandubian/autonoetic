@@ -86,7 +86,6 @@ impl EventSeq {
     }
 }
 
-
 pub struct TraceSession {
     session_id: SessionId,
     event_seq: EventSeq,
@@ -255,8 +254,8 @@ impl TraceSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::causal_chain::CausalLogger;
+    use tempfile::tempdir;
 
     fn create_test_logger() -> CausalLogger {
         let dir = tempdir().expect("tempdir should create");
@@ -296,41 +295,57 @@ mod tests {
         // not event_seq order (since event_seq resets per TraceSession)
         let temp = tempfile::tempdir().expect("tempdir should create");
         let path = temp.path().join("causal_chain.jsonl");
-        
+
         // Create logger with explicit path
         let logger = Arc::new(CausalLogger::new(&path).expect("logger should create"));
-        
+
         // Create two TraceSessions with the same logger (shared Arc)
         let mut trace1 = TraceSession::create(logger.clone(), "actor", EventScope::Request);
         let mut trace2 = TraceSession::create(logger.clone(), "actor", EventScope::Request);
-        
+
         // Simulate sequential events from different sessions with same event_seq
         let _ = trace1.log_requested("action.1", None);
         let _ = trace2.log_requested("action.2", None);
         let _ = trace1.log_completed("action.1", None, None);
         let _ = trace2.log_completed("action.2", None, None);
-        
+
         // Verify file was written
         let entries = CausalLogger::read_entries(&path).expect("should read entries");
         assert_eq!(entries.len(), 4, "all entries should be written");
-        
+
         // Verify entries are sorted by timestamp (not event_seq)
         // Since event_seq resets per TraceSession, timestamp is the only stable sort key
         for i in 1..entries.len() {
             let prev_ts = &entries[i - 1].timestamp;
             let curr_ts = &entries[i].timestamp;
-            assert!(prev_ts <= curr_ts, 
-                "Entries must be ordered by timestamp: {:?} > {:?}", prev_ts, curr_ts);
+            assert!(
+                prev_ts <= curr_ts,
+                "Entries must be ordered by timestamp: {:?} > {:?}",
+                prev_ts,
+                curr_ts
+            );
         }
-        
+
         // Verify event_seq values - they should be [1, 1, 2, 2] (resets per session)
         let event_seqs: Vec<u64> = entries.iter().map(|e| e.event_seq).collect();
-        assert_eq!(event_seqs, vec![1, 1, 2, 2], 
-            "event_seq should reset per session: {:?}", event_seqs);
-        
+        assert_eq!(
+            event_seqs,
+            vec![1, 1, 2, 2],
+            "event_seq should reset per session: {:?}",
+            event_seqs
+        );
+
         // Verify actions are in correct timestamp order (not event_seq order)
         let actions: Vec<&str> = entries.iter().map(|e| e.action.as_str()).collect();
-        assert_eq!(actions, vec!["action.1.requested", "action.2.requested", "action.1.completed", "action.2.completed"],
-            "Actions should be in timestamp order");
+        assert_eq!(
+            actions,
+            vec![
+                "action.1.requested",
+                "action.2.requested",
+                "action.1.completed",
+                "action.2.completed"
+            ],
+            "Actions should be in timestamp order"
+        );
     }
 }

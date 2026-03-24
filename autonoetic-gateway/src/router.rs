@@ -13,9 +13,9 @@ use autonoetic_types::task_board::{TaskBoardEntry, TaskStatus};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 #[cfg(test)]
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -93,7 +93,10 @@ pub struct JsonRpcRouter {
 }
 
 impl JsonRpcRouter {
-    pub fn new(config: GatewayConfig, gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>) -> Self {
+    pub fn new(
+        config: GatewayConfig,
+        gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> Self {
         let execution = Arc::new(GatewayExecutionService::new(config.clone(), gateway_store));
         Self {
             config: Arc::new(config),
@@ -169,7 +172,10 @@ impl JsonRpcRouter {
             Ok(logger) => logger,
             Err(e) => {
                 return Err((
-                    format!("{} failed: unable to initialize gateway causal logger: {}", action_name, e),
+                    format!(
+                        "{} failed: unable to initialize gateway causal logger: {}",
+                        action_name, e
+                    ),
                     None,
                 ));
             }
@@ -199,7 +205,16 @@ impl JsonRpcRouter {
                 "message_sha256": sha256_hex(message),
                 "metadata_sha256": metadata.as_ref().map(|v| sha256_hex(&v.to_string())),
             }),
-            (IngressType::Ingest { target_agent_id, source_agent_id, event_type, message, metadata }, _) => serde_json::json!({
+            (
+                IngressType::Ingest {
+                    target_agent_id,
+                    source_agent_id,
+                    event_type,
+                    message,
+                    metadata,
+                },
+                _,
+            ) => serde_json::json!({
                 "event_type": event_type,
                 "target_agent_id": target_agent_id,
                 "source_agent_id": source_agent_id,
@@ -233,14 +248,29 @@ impl JsonRpcRouter {
         // Background signal already sent in execution layer if needed (result.should_signal_background)
 
         let completed_data = match (&ingress, &event_type_str) {
-            (IngressType::Spawn { source_agent_id, metadata, .. }, _) => serde_json::json!({
+            (
+                IngressType::Spawn {
+                    source_agent_id,
+                    metadata,
+                    ..
+                },
+                _,
+            ) => serde_json::json!({
                 "agent_id": result.agent_id,
                 "source_agent_id": source_agent_id,
                 "assistant_reply_len": result.assistant_reply.as_ref().map(|s| s.len()).unwrap_or(0),
                 "assistant_reply_sha256": result.assistant_reply.as_ref().map(|s| sha256_hex(s)),
                 "metadata_sha256": metadata.as_ref().map(|v| sha256_hex(&v.to_string())),
             }),
-            (IngressType::Ingest { target_agent_id, source_agent_id, event_type, .. }, _) => serde_json::json!({
+            (
+                IngressType::Ingest {
+                    target_agent_id,
+                    source_agent_id,
+                    event_type,
+                    ..
+                },
+                _,
+            ) => serde_json::json!({
                 "event_type": event_type,
                 "target_agent_id": target_agent_id,
                 "source_agent_id": source_agent_id,
@@ -274,15 +304,18 @@ impl JsonRpcRouter {
                     .session_id
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 let agent_id = params.agent_id.clone();
-                
+
                 let ingress = IngressType::Spawn {
                     agent_id: params.agent_id.clone(),
                     source_agent_id: params.source_agent_id.clone(),
                     message: params.message.clone(),
                     metadata: params.metadata.clone(),
                 };
-                
-                match self.execute_agent_request(ingress, session_id.clone()).await {
+
+                match self
+                    .execute_agent_request(ingress, session_id.clone())
+                    .await
+                {
                     Ok((result, _trace_session)) => {
                         // Persist binding on successful spawn so future
                         // event.ingest to this session routes to the spawned
@@ -382,7 +415,7 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                
+
                 let ingress = IngressType::Ingest {
                     target_agent_id: target_agent_id.clone(),
                     source_agent_id: params.source_agent_id.clone(),
@@ -390,8 +423,11 @@ impl JsonRpcRouter {
                     message: params.message.clone(),
                     metadata: params.metadata.clone(),
                 };
-                
-                match self.execute_agent_request(ingress, session_id.clone()).await {
+
+                match self
+                    .execute_agent_request(ingress, session_id.clone())
+                    .await
+                {
                     Ok((result, _trace_session)) => {
                         if let Some(source_agent_id) = params.source_agent_id.as_deref() {
                             let _ = append_delegation_task_entry(
@@ -483,19 +519,23 @@ impl JsonRpcRouter {
                 let gateway_dir = self.config.agents_dir.join(".gateway");
 
                 // Load snapshot from source session
-                let snapshot = match crate::runtime::session_snapshot::SessionSnapshot::load_from_session(
-                    &params.source_session_id,
-                    &gateway_dir,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return JsonRpcResponse::error(
-                            req.id,
-                            -32000,
-                            format!("Failed to load snapshot from session '{}': {}", params.source_session_id, e),
-                        );
-                    }
-                };
+                let snapshot =
+                    match crate::runtime::session_snapshot::SessionSnapshot::load_from_session(
+                        &params.source_session_id,
+                        &gateway_dir,
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!(
+                                    "Failed to load snapshot from session '{}': {}",
+                                    params.source_session_id, e
+                                ),
+                            );
+                        }
+                    };
 
                 // Fork the session
                 let fork = match crate::runtime::session_snapshot::SessionFork::fork(
@@ -524,7 +564,7 @@ impl JsonRpcRouter {
                     crate::execution::init_gateway_causal_logger(&self.config);
                 if let Ok(causal_logger) = causal_logger_result {
                     let branch_message_sha256 = params.branch_message.as_ref().map(|m| {
-                        use sha2::{Sha256, Digest};
+                        use sha2::{Digest, Sha256};
                         let mut hasher = Sha256::new();
                         hasher.update(m.as_bytes());
                         format!("{:x}", hasher.finalize())
@@ -580,6 +620,8 @@ impl JsonRpcRouter {
                 is_message,
                 ingest_event_type,
                 metadata,
+                None,
+                None,
             )
             .await
     }
@@ -598,7 +640,8 @@ impl JsonRpcRouter {
             return Ok(explicit_target.to_string());
         }
 
-        if let Some(bound_agent_id) = load_session_lead_agent_binding(self.config.as_ref(), session_id)?
+        if let Some(bound_agent_id) =
+            load_session_lead_agent_binding(self.config.as_ref(), session_id)?
         {
             return Ok(bound_agent_id);
         }
@@ -636,8 +679,7 @@ impl JsonRpcRouter {
     fn execution_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
         self.execution.execution_semaphore()
     }
-
-  }
+}
 
 #[derive(Debug, Deserialize)]
 struct AgentSpawnParams {
@@ -673,7 +715,9 @@ struct SessionLeadBinding {
 }
 
 fn session_lead_bindings_dir(config: &GatewayConfig) -> PathBuf {
-    gateway_root_dir(config).join("sessions").join("lead_bindings")
+    gateway_root_dir(config)
+        .join("sessions")
+        .join("lead_bindings")
 }
 
 fn session_lead_binding_path(config: &GatewayConfig, session_id: &str) -> PathBuf {
@@ -785,10 +829,13 @@ mod tests {
 
     fn test_router() -> (TempDir, JsonRpcRouter) {
         let temp = tempfile::tempdir().expect("tempdir should create");
-        let router = JsonRpcRouter::new(GatewayConfig {
-            agents_dir: temp.path().join("agents"),
-            ..GatewayConfig::default()
-        }, None);
+        let router = JsonRpcRouter::new(
+            GatewayConfig {
+                agents_dir: temp.path().join("agents"),
+                ..GatewayConfig::default()
+            },
+            None,
+        );
         (temp, router)
     }
 
@@ -860,7 +907,9 @@ mod tests {
             }),
         };
         let resp = router.dispatch(req).await;
-        let err = resp.error.expect("event.ingest should fail on missing agent");
+        let err = resp
+            .error
+            .expect("event.ingest should fail on missing agent");
         assert_eq!(err.code, -32000);
         assert!(err.message.contains("planner.default"));
         assert!(err.message.contains("not found"));
@@ -881,7 +930,9 @@ mod tests {
             }),
         };
         let first_resp = router.dispatch(first).await;
-        let first_err = first_resp.error.expect("first event.ingest should fail on missing agent");
+        let first_err = first_resp
+            .error
+            .expect("first event.ingest should fail on missing agent");
         assert_eq!(first_err.code, -32000);
         assert!(first_err.message.contains("researcher.default"));
 
@@ -1242,12 +1293,15 @@ mod tests {
     #[tokio::test]
     async fn test_reliability_controls_reject_agent_queue_overflow() {
         let temp = tempfile::tempdir().expect("tempdir should create");
-        let router = JsonRpcRouter::new(GatewayConfig {
-            agents_dir: temp.path().join("agents"),
-            max_concurrent_spawns: 2,
-            max_pending_spawns_per_agent: 2,
-            ..GatewayConfig::default()
-        }, None);
+        let router = JsonRpcRouter::new(
+            GatewayConfig {
+                agents_dir: temp.path().join("agents"),
+                max_concurrent_spawns: 2,
+                max_pending_spawns_per_agent: 2,
+                ..GatewayConfig::default()
+            },
+            None,
+        );
 
         let admission = router.agent_admission_semaphore("agent-a").await;
         let _permit1 = admission
@@ -1275,12 +1329,15 @@ mod tests {
     #[tokio::test]
     async fn test_reliability_controls_reject_global_execution_overflow() {
         let temp = tempfile::tempdir().expect("tempdir should create");
-        let router = JsonRpcRouter::new(GatewayConfig {
-            agents_dir: temp.path().join("agents"),
-            max_concurrent_spawns: 1,
-            max_pending_spawns_per_agent: 2,
-            ..GatewayConfig::default()
-        }, None);
+        let router = JsonRpcRouter::new(
+            GatewayConfig {
+                agents_dir: temp.path().join("agents"),
+                max_concurrent_spawns: 1,
+                max_pending_spawns_per_agent: 2,
+                ..GatewayConfig::default()
+            },
+            None,
+        );
 
         let _permit = router
             .execution_semaphore()

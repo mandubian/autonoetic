@@ -184,11 +184,7 @@ fn nested_u64(payload: Option<&serde_json::Value>, outer: &str, inner: &str) -> 
 }
 
 /// Build the human-readable details cell from the event category/action and payload.
-fn extract_details(
-    category: &str,
-    action: &str,
-    payload: Option<&serde_json::Value>,
-) -> String {
+fn extract_details(category: &str, action: &str, payload: Option<&serde_json::Value>) -> String {
     match (category, action) {
         ("session", "start") => {
             let preview = str_field(payload, "trigger_preview");
@@ -200,7 +196,11 @@ fn extract_details(
         ("session", "history.persisted") => {
             let msgs = u64_field(payload, "message_count");
             let handle = str_field(payload, "content_handle");
-            format!("msgs: {} \\| handle: `{}`", msgs, &handle[..handle.len().min(14)])
+            format!(
+                "msgs: {} \\| handle: `{}`",
+                msgs,
+                &handle[..handle.len().min(14)]
+            )
         }
         ("lifecycle", "wake") => {
             let msgs = u64_field(payload, "history_messages");
@@ -247,7 +247,10 @@ fn extract_details(
             let evidence_suffix = if evidence_ref.is_empty() {
                 String::new()
             } else {
-                format!(" \\| evidence: `{}`", cell(&short_evidence_ref(evidence_ref)))
+                format!(
+                    " \\| evidence: `{}`",
+                    cell(&short_evidence_ref(evidence_ref))
+                )
             };
 
             if let Some(exit_code) = parse_result_exit_code(preview) {
@@ -264,7 +267,11 @@ fn extract_details(
             {
                 let apr_id = find_approval_id_in_payload(payload);
                 if apr_id.is_empty() {
-                    format!("tool: `{}` **[APPROVAL NEEDED]**{}", cell(tool), evidence_suffix)
+                    format!(
+                        "tool: `{}` **[APPROVAL NEEDED]**{}",
+                        cell(tool),
+                        evidence_suffix
+                    )
                 } else {
                     format!("tool: `{}` **[APPROVAL NEEDED: `{}`]**", cell(tool), apr_id)
                         + &evidence_suffix
@@ -477,7 +484,7 @@ fn count_data_rows(path: &Path) -> u32 {
         .filter(|l| {
             l.starts_with("| ")
                 && !l.contains("| # |")   // header row
-                && !l.contains("|---|")    // separator row
+                && !l.contains("|---|") // separator row
         })
         .count() as u32
 }
@@ -555,12 +562,7 @@ mod tests {
 
     #[test]
     fn test_workflow_task_failed_uses_fail_status() {
-        let s = format_status(
-            &EntryStatus::Error,
-            "gateway",
-            "workflow.task.failed",
-            None,
-        );
+        let s = format_status(&EntryStatus::Error, "gateway", "workflow.task.failed", None);
         assert!(s.contains("FAIL"));
     }
 
@@ -751,11 +753,8 @@ mod tests {
         .unwrap();
         let content = std::fs::read_to_string(w.path()).unwrap();
         assert!(content.contains("exit_code=1"));
-        assert!(
-            content.contains(
-                "evidence: `.../evidence/fail-session/20260318-tool_invoke-completed.json`"
-            )
-        );
+        assert!(content
+            .contains("evidence: `.../evidence/fail-session/20260318-tool_invoke-completed.json`"));
         assert!(content.contains("**[FAIL]**"));
     }
 

@@ -4,8 +4,8 @@ use crate::agent::AgentRepository;
 use crate::causal_chain::CausalLogger;
 use crate::llm::{build_driver, Message};
 use crate::runtime::lifecycle::{compose_system_instructions, AgentExecutor};
-use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
+use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
 use crate::runtime::session_timeline::{base_session_id, SessionTimelineWriter};
@@ -23,10 +23,10 @@ use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactMetadata {
-    pub id: String,           // content handle (sha256:...)
-    pub name: String,         // agent name from SKILL.md frontmatter
+    pub id: String,   // content handle (sha256:...)
+    pub name: String, // agent name from SKILL.md frontmatter
     pub description: String,
-    pub files: Vec<String>,   // list of file names in the artifact
+    pub files: Vec<String>, // list of file names in the artifact
     pub entry_point: Option<String>,
     pub io: Option<serde_json::Value>,
 }
@@ -49,7 +49,7 @@ pub struct ContentFile {
 /// Knowledge shared during execution that the caller can access.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedKnowledge {
-    pub id: String,           // memory_id
+    pub id: String, // memory_id
     pub scope: String,
     pub content_preview: String, // first 100 chars
     pub writer_agent_id: String,
@@ -69,16 +69,18 @@ pub fn extract_artifacts_from_content_store(
 ) -> anyhow::Result<Vec<ArtifactMetadata>> {
     let store = crate::runtime::content_store::ContentStore::new(gateway_dir)?;
     let names = store.list_names(session_id)?;
-    
+
     let mut artifacts = Vec::new();
-    
+
     for name in &names {
         // Look for SKILL.md files
         if name.ends_with("SKILL.md") || name == "SKILL.md" {
             match store.read_by_name(session_id, name) {
                 Ok(content_bytes) => {
                     if let Ok(content) = String::from_utf8(content_bytes) {
-                        if let Some(metadata) = parse_skill_md_artifact(&store, session_id, name, &content) {
+                        if let Some(metadata) =
+                            parse_skill_md_artifact(&store, session_id, name, &content)
+                        {
                             artifacts.push(metadata);
                         }
                     }
@@ -94,7 +96,7 @@ pub fn extract_artifacts_from_content_store(
             }
         }
     }
-    
+
     Ok(artifacts)
 }
 
@@ -107,10 +109,7 @@ pub fn extract_artifacts_from_content_store(
 /// This gives the calling agent (planner) a structured manifest of everything the
 /// child produced — with names, handles, and short aliases — without having to parse
 /// the child's free-text reply.
-pub fn collect_named_content(
-    gateway_dir: &std::path::Path,
-    session_id: &str,
-) -> Vec<ContentFile> {
+pub fn collect_named_content(gateway_dir: &std::path::Path, session_id: &str) -> Vec<ContentFile> {
     let Ok(store) = crate::runtime::content_store::ContentStore::new(gateway_dir) else {
         return Vec::new();
     };
@@ -139,7 +138,11 @@ pub fn collect_named_content(
                 }
             }
             let alias = crate::runtime::content_store::ContentStore::get_short_alias(&handle);
-            Some(ContentFile { name, handle, alias })
+            Some(ContentFile {
+                name,
+                handle,
+                alias,
+            })
         })
         .collect()
 }
@@ -167,14 +170,12 @@ pub fn collect_shared_knowledge(
     // Filter to those shared with the target agent
     all_memories
         .into_iter()
-        .filter(|m| {
-            match &m.visibility {
-                autonoetic_types::memory::MemoryVisibility::Global => true,
-                autonoetic_types::memory::MemoryVisibility::Shared => {
-                    m.allowed_agents.contains(&target_agent_id.to_string())
-                }
-                autonoetic_types::memory::MemoryVisibility::Private => false,
+        .filter(|m| match &m.visibility {
+            autonoetic_types::memory::MemoryVisibility::Global => true,
+            autonoetic_types::memory::MemoryVisibility::Shared => {
+                m.allowed_agents.contains(&target_agent_id.to_string())
             }
+            autonoetic_types::memory::MemoryVisibility::Private => false,
         })
         .map(|m| {
             let preview = if m.content.len() > 100 {
@@ -207,21 +208,24 @@ fn parse_skill_md_artifact(
 ) -> Option<ArtifactMetadata> {
     // Get all files in the session (needed regardless of parsing)
     let files = store.list_names(session_id).unwrap_or_default();
-    
+
     // Use the directory of SKILL.md as the artifact ID prefix
     let artifact_dir = if skill_md_name.contains('/') {
-        skill_md_name.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
+        skill_md_name
+            .rsplit_once('/')
+            .map(|(dir, _)| dir)
+            .unwrap_or("")
     } else {
         ""
     };
-    
+
     // Derive default name from directory
     let default_name = artifact_dir
         .split('/')
         .last()
         .unwrap_or("unknown")
         .to_string();
-    
+
     // Try to parse frontmatter, but use defaults if it fails
     #[derive(Deserialize)]
     struct SkillFrontmatter {
@@ -230,39 +234,40 @@ fn parse_skill_md_artifact(
         script_entry: Option<String>,
         io: Option<serde_json::Value>,
     }
-    
-    let (name, description, script_entry, io) = match content.split("---").collect::<Vec<&str>>().get(1) {
-        Some(frontmatter) => {
-            // Attempt to parse YAML - if it fails, use defaults
-            match serde_yaml::from_str::<SkillFrontmatter>(frontmatter) {
-                Ok(fm) => (
-                    fm.name.unwrap_or(default_name),
-                    fm.description.unwrap_or_default(),
-                    fm.script_entry,
-                    fm.io,
-                ),
-                Err(e) => {
-                    tracing::debug!(
-                        target: "artifacts",
-                        skill_md = %skill_md_name,
-                        error = %e,
-                        "Could not parse SKILL.md frontmatter, using defaults"
-                    );
-                    (default_name, String::new(), None, None)
+
+    let (name, description, script_entry, io) =
+        match content.split("---").collect::<Vec<&str>>().get(1) {
+            Some(frontmatter) => {
+                // Attempt to parse YAML - if it fails, use defaults
+                match serde_yaml::from_str::<SkillFrontmatter>(frontmatter) {
+                    Ok(fm) => (
+                        fm.name.unwrap_or(default_name),
+                        fm.description.unwrap_or_default(),
+                        fm.script_entry,
+                        fm.io,
+                    ),
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "artifacts",
+                            skill_md = %skill_md_name,
+                            error = %e,
+                            "Could not parse SKILL.md frontmatter, using defaults"
+                        );
+                        (default_name, String::new(), None, None)
+                    }
                 }
             }
-        }
-        None => {
-            // No frontmatter markers - still create artifact with defaults
-            tracing::debug!(
-                target: "artifacts",
-                skill_md = %skill_md_name,
-                "SKILL.md has no frontmatter, using defaults"
-            );
-            (default_name, String::new(), None, None)
-        }
-    };
-    
+            None => {
+                // No frontmatter markers - still create artifact with defaults
+                tracing::debug!(
+                    target: "artifacts",
+                    skill_md = %skill_md_name,
+                    "SKILL.md has no frontmatter, using defaults"
+                );
+                (default_name, String::new(), None, None)
+            }
+        };
+
     // Filter files that are in the same directory as SKILL.md
     let artifact_files: Vec<String> = files
         .iter()
@@ -275,7 +280,7 @@ fn parse_skill_md_artifact(
         })
         .cloned()
         .collect();
-    
+
     // Compute a combined handle for the artifact (hash of all file handles)
     let mut combined_hash = Sha256::new();
     for file in &artifact_files {
@@ -284,7 +289,7 @@ fn parse_skill_md_artifact(
         }
     }
     let artifact_id = format!("sha256:{:x}", combined_hash.finalize());
-    
+
     // Always return an artifact if we found the SKILL.md file
     Some(ArtifactMetadata {
         id: artifact_id,
@@ -310,6 +315,10 @@ pub struct SpawnResult {
     pub shared_knowledge: Vec<SharedKnowledge>,
     /// Per–LLM-round token usage for this run (JSON-RPC / CLI can surface this).
     pub llm_usage: Vec<LlmExchangeUsage>,
+    /// Set when the turn ended by suspending at an approval gate rather than completing.
+    /// The continuation has been saved to disk; callers should transition the task to
+    /// `AwaitingApproval` using this request ID and release the tokio claim.
+    pub suspended_for_approval: Option<String>,
 }
 
 #[derive(Clone)]
@@ -325,7 +334,10 @@ pub struct GatewayExecutionService {
 }
 
 impl GatewayExecutionService {
-    pub fn new(config: GatewayConfig, gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>) -> Self {
+    pub fn new(
+        config: GatewayConfig,
+        gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> Self {
         let session_budget = Arc::new(SessionBudgetRegistry::new(config.session_budget.clone()));
         Self {
             execution_semaphore: Arc::new(Semaphore::new(config.max_concurrent_spawns.max(1))),
@@ -355,6 +367,9 @@ impl GatewayExecutionService {
         is_message: bool,
         ingest_event_type: Option<&str>,
         _metadata: Option<&serde_json::Value>,
+        // Workflow / task context for turn continuation saves on approval suspension.
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
     ) -> anyhow::Result<SpawnResult> {
         let span = tracing::info_span!(
             "spawn_agent_once",
@@ -563,6 +578,7 @@ impl GatewayExecutionService {
                     files,
                     shared_knowledge,
                     llm_usage: Vec::new(),
+                    suspended_for_approval: None,
                 });
             }
 
@@ -590,25 +606,186 @@ impl GatewayExecutionService {
             .with_openrouter_catalog(Some(openrouter_catalog))
             .with_middleware(middleware)
             .with_initial_user_message(message.to_string())
-            .with_session_id(session_id.to_string());
-            let mut history = build_initial_history(
-                &runtime.agent_dir,
-                &runtime.instructions,
-                &runtime.initial_user_message,
-                session_id,
+            .with_session_id(session_id.to_string())
+            .with_workflow_context(
+                workflow_id.map(String::from),
+                task_id.map(String::from),
             );
-            let assistant_reply = runtime.execute_with_history(&mut history).await?;
+
+            use crate::runtime::lifecycle::TurnOutcome;
+
+            // --- Turn continuation resume (approval-unblocked tasks) ---
+            // When a task_id is provided and a continuation file exists on disk,
+            // this run is a resume after operator approval rather than a fresh start.
+            let (outcome, resume_initial_message) = if let Some(t_id) = task_id {
+                if let Ok(Some(cont)) = crate::runtime::continuation::load_continuation(&self.config, t_id) {
+                    tracing::info!(
+                        target: "continuation",
+                        task_id = %t_id,
+                        approval_request_id = %cont.approval_request_id,
+                        "Resuming turn from continuation after approval resolution"
+                    );
+
+                    // Fetch the approval decision from the gateway store.
+                    let approval_req = self.gateway_store
+                        .as_ref()
+                        .and_then(|store| store.get_approval(&cont.approval_request_id).ok().flatten());
+
+                    let approved_result = match approval_req {
+                        Some(ref req) if req.status == Some(autonoetic_types::background::ApprovalStatus::Approved) => {
+                            let decision = autonoetic_types::background::ApprovalDecision {
+                                request_id: req.request_id.clone(),
+                                agent_id: req.agent_id.clone(),
+                                session_id: req.session_id.clone(),
+                                action: req.action.clone(),
+                                status: autonoetic_types::background::ApprovalStatus::Approved,
+                                decided_at: req.decided_at.clone().unwrap_or_default(),
+                                decided_by: req.decided_by.clone().unwrap_or_default(),
+                                reason: req.reason.clone(),
+                                root_session_id: req.root_session_id.clone(),
+                                workflow_id: req.workflow_id.clone(),
+                                task_id: req.task_id.clone(),
+                            };
+                            match crate::runtime::continuation::execute_approved_action(
+                                &decision,
+                                &runtime.manifest,
+                                &runtime.agent_dir,
+                                runtime.gateway_dir.as_deref(),
+                                Some(&cont.session_id),
+                                &self.config,
+                                self.gateway_store.clone(),
+                            ) {
+                                Ok(r) => r,
+                                Err(e) => serde_json::json!({
+                                    "ok": false,
+                                    "error": e.to_string(),
+                                    "approval_ref": cont.approval_request_id,
+                                }).to_string(),
+                            }
+                        }
+                        Some(_) => {
+                            // Rejected
+                            serde_json::json!({
+                                "ok": false,
+                                "approval_rejected": true,
+                                "request_id": cont.approval_request_id,
+                            }).to_string()
+                        }
+                        None => {
+                            serde_json::json!({
+                                "ok": false,
+                                "error": "approval_decision_not_found",
+                                "request_id": cont.approval_request_id,
+                            }).to_string()
+                        }
+                    };
+
+                    // Execute remaining tool calls from the original batch.
+                    let remaining_results = if !cont.remaining_tool_calls.is_empty() {
+                        let mut mcp_rt = crate::runtime::mcp::McpToolRuntime::from_env().await?;
+                        let registry = crate::runtime::tools::default_registry();
+                        let mut ds = crate::runtime::disclosure::DisclosureState::default();
+                        let mut proc = crate::runtime::tool_call_processor::ToolCallProcessor::new(
+                            &mut mcp_rt,
+                            &registry,
+                            &runtime.manifest,
+                            &mut ds,
+                            None,
+                            Some(&self.config),
+                            self.gateway_store.clone(),
+                        ).with_session_context(
+                            Some(cont.session_id.clone()),
+                            Some(cont.turn_id.clone()),
+                        );
+                        let mut tracer = crate::runtime::session_tracer::SessionTracer::new(
+                            &runtime.agent_dir,
+                            &runtime.manifest.agent.id,
+                            &cont.session_id,
+                        )?;
+                        let (_, results) = proc
+                            .process_tool_calls(
+                                &cont.remaining_tool_calls,
+                                &runtime.agent_dir,
+                                runtime.gateway_dir.as_deref(),
+                                &mut tracer,
+                            )
+                            .await
+                            .unwrap_or_default();
+                        results
+                    } else {
+                        vec![]
+                    };
+
+                    // Reconstruct conversation history and restore guard state.
+                    let mut history = crate::runtime::continuation::reconstruct_history(
+                        &cont,
+                        approved_result,
+                        remaining_results,
+                    );
+
+                    let initial_msg = cont.history
+                        .iter()
+                        .find(|m| matches!(m.role, crate::llm::Role::User))
+                        .map(|m| m.content.clone())
+                        .unwrap_or_default();
+
+                    runtime.guard = crate::runtime::guard::LoopGuard::restore(cont.loop_guard_state.clone());
+                    runtime.session_id = Some(cont.session_id.clone());
+                    runtime.session_started = true;
+                    runtime.turn_counter = cont.turn_id
+                        .trim_start_matches("turn-")
+                        .parse()
+                        .unwrap_or(0);
+
+                    // Delete the continuation file — we are now live.
+                    let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
+
+                    let outcome = runtime.execute_with_history(&mut history).await?;
+                    (outcome, initial_msg)
+                } else {
+                    // No continuation on disk — normal first run.
+                    let mut history = build_initial_history(
+                        &runtime.agent_dir,
+                        &runtime.instructions,
+                        &runtime.initial_user_message,
+                        session_id,
+                    );
+                    let outcome = runtime.execute_with_history(&mut history).await?;
+                    (outcome, runtime.initial_user_message.clone())
+                }
+            } else {
+                let mut history = build_initial_history(
+                    &runtime.agent_dir,
+                    &runtime.instructions,
+                    &runtime.initial_user_message,
+                    session_id,
+                );
+                let outcome = runtime.execute_with_history(&mut history).await?;
+                (outcome, runtime.initial_user_message.clone())
+            };
+
             let resolved_session_id = runtime
                 .session_id
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("runtime session_id missing after execution"))?;
+
+            let (assistant_reply, suspended_for_approval) = match outcome {
+                TurnOutcome::Completed(reply) => (reply, None),
+                TurnOutcome::Suspended { approval_request_id, .. } => {
+                    // Continuation already saved by execute_with_history.
+                    (None, Some(approval_request_id))
+                }
+            };
+
             persist_session_context_turn(
                 &runtime.agent_dir,
                 &resolved_session_id,
-                &runtime.initial_user_message,
+                &resume_initial_message,
                 assistant_reply.as_deref(),
             );
-            let close_reason = if assistant_reply.is_some() {
+            let close_reason = if suspended_for_approval.is_some() {
+                "jsonrpc_spawn_suspended_approval"
+            } else if assistant_reply.is_some() {
                 "jsonrpc_spawn_complete"
             } else {
                 "jsonrpc_spawn_complete_empty"
@@ -644,6 +821,7 @@ impl GatewayExecutionService {
                 files,
                 shared_knowledge,
                 llm_usage,
+                suspended_for_approval,
             })
         })
         .await?;
@@ -894,12 +1072,27 @@ pub fn log_gateway_causal_event(
 ) {
     let status_clone = status.clone();
     if let Err(e) = logger.log(
-        actor_id, session_id, None, event_seq, "gateway", action, status, payload.clone(),
+        actor_id,
+        session_id,
+        None,
+        event_seq,
+        "gateway",
+        action,
+        status,
+        payload.clone(),
     ) {
         tracing::warn!(error = %e, action, "Failed to append gateway causal log entry");
     }
 
-    if let Err(e) = update_session_index(logger, actor_id, session_id, event_seq, action, &status_clone, payload.as_ref()) {
+    if let Err(e) = update_session_index(
+        logger,
+        actor_id,
+        session_id,
+        event_seq,
+        action,
+        &status_clone,
+        payload.as_ref(),
+    ) {
         tracing::warn!(error = %e, action, "Failed to update session index");
     }
 
@@ -944,13 +1137,7 @@ fn append_workflow_gateway_timeline_best_effort(
     };
     let ts = chrono::Utc::now().to_rfc3339();
     if let Err(e) = writer.append(
-        actor_id,
-        session_id,
-        &ts,
-        "gateway",
-        action,
-        status,
-        payload,
+        actor_id, session_id, &ts, "gateway", action, status, payload,
     ) {
         tracing::warn!(
             target: "session_timeline",
@@ -970,7 +1157,8 @@ fn update_session_index(
     status: &EntryStatus,
     payload: Option<&serde_json::Value>,
 ) -> anyhow::Result<()> {
-    let index_path = logger.path()
+    let index_path = logger
+        .path()
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Logger path has no parent"))?
         .parent()
@@ -997,7 +1185,7 @@ fn update_session_index(
     index.last_timestamp = Some(timestamp.clone());
 
     let log_id = format!("{}:{}:{}", actor_id, session_id, event_seq);
-    
+
     let event_ref = SessionEventRef {
         log_id: log_id.clone(),
         agent_id: actor_id.to_string(),
@@ -1005,7 +1193,9 @@ fn update_session_index(
         category: "gateway".to_string(),
         action: action.to_string(),
         status: status.clone(),
-        causal_hash: payload.and_then(|p| p.get("causal_hash").and_then(|h| h.as_str())).map(String::from),
+        causal_hash: payload
+            .and_then(|p| p.get("causal_hash").and_then(|h| h.as_str()))
+            .map(String::from),
     };
     index.events.push(event_ref);
 
@@ -1013,7 +1203,7 @@ fn update_session_index(
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&index_path, serde_json::to_string_pretty(&index)?)?;
-    
+
     Ok(())
 }
 
@@ -1257,7 +1447,11 @@ mod tests {
         });
         let input = r#"{"query": "test search"}"#;
         let result = validate_against_schema(input, &schema);
-        assert!(result.valid, "Expected valid, got issues: {:?}", result.issues);
+        assert!(
+            result.valid,
+            "Expected valid, got issues: {:?}",
+            result.issues
+        );
     }
 
     #[test]
@@ -1358,18 +1552,10 @@ async fn execute_script_in_sandbox(
 
     // Build the command based on sandbox type
     let (program, args) = match sandbox_type {
-        "bubblewrap" | "bwrap" => {
-            bubblewrap_command(agent_dir, script_path)?
-        }
-        "docker" => {
-            docker_command(agent_dir, script_path)?
-        }
-        "microvm" => {
-            microvm_command(script_path)?
-        }
-        _ => {
-            bubblewrap_command(agent_dir, script_path)?
-        }
+        "bubblewrap" | "bwrap" => bubblewrap_command(agent_dir, script_path)?,
+        "docker" => docker_command(agent_dir, script_path)?,
+        "microvm" => microvm_command(script_path)?,
+        _ => bubblewrap_command(agent_dir, script_path)?,
     };
 
     // Create command with environment variables and pass input via stdin
@@ -1380,7 +1566,7 @@ async fn execute_script_in_sandbox(
         input_preview = %input_payload.chars().take(100).collect::<String>(),
         "Spawning script process"
     );
-    
+
     let mut cmd = Command::new(&program);
     cmd.args(&args)
         .env_clear()
@@ -1393,29 +1579,36 @@ async fn execute_script_in_sandbox(
         .stderr(Stdio::piped());
 
     // Start the process and write input to stdin
-    let mut child = cmd.spawn().map_err(|e| {
-        anyhow::anyhow!("Failed to spawn script: {}", e)
-    })?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn script: {}", e))?;
 
     // Write input to stdin and close it
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
-        stdin.write_all(input_payload.as_bytes()).await.map_err(|e| {
-            anyhow::anyhow!("Failed to write to script stdin: {}", e)
-        })?;
+        stdin
+            .write_all(input_payload.as_bytes())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to write to script stdin: {}", e))?;
         // stdin is dropped here, closing the pipe
     }
 
     // Wait for output
-    let output = child.wait_with_output().await.map_err(|e| {
-        anyhow::anyhow!("Failed to execute script: {}", e)
-    })?;
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to execute script: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         tracing::error!(stderr = %stderr, stdout = %stdout, status = ?output.status.code(), "Script execution failed");
-        anyhow::bail!("Script execution failed with code {:?}: stdout={}, stderr={}", output.status.code(), stdout, stderr);
+        anyhow::bail!(
+            "Script execution failed with code {:?}: stdout={}, stderr={}",
+            output.status.code(),
+            stdout,
+            stderr
+        );
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1425,11 +1618,14 @@ async fn execute_script_in_sandbox(
 }
 
 /// Build bubblewrap command for executing a script.
-/// 
+///
 /// NOTE: Full sandbox isolation requires bind-mounting Python's standard library.
 /// For now, we use a simplified sandbox that shares the host filesystem.
 /// TODO: Implement proper sandbox with minimal bind mounts.
-fn bubblewrap_command(_agent_dir: &PathBuf, script_path: &PathBuf) -> anyhow::Result<(String, Vec<String>)> {
+fn bubblewrap_command(
+    _agent_dir: &PathBuf,
+    script_path: &PathBuf,
+) -> anyhow::Result<(String, Vec<String>)> {
     // Determine interpreter based on script extension
     let interpreter = match script_path.extension().and_then(|e| e.to_str()) {
         Some("py") => "python3",
@@ -1439,27 +1635,31 @@ fn bubblewrap_command(_agent_dir: &PathBuf, script_path: &PathBuf) -> anyhow::Re
         Some("bash") => "bash",
         _ => "python3", // Default to python3
     };
-    
+
     // For now, just run the script directly without sandbox isolation
     // This allows the demo to work while we implement proper sandboxing
-    let args = vec![
-        script_path.to_string_lossy().to_string(),
-    ];
-    
+    let args = vec![script_path.to_string_lossy().to_string()];
+
     Ok((interpreter.to_string(), args))
 }
 
 /// Build docker command for executing a script.
-fn docker_command(agent_dir: &PathBuf, script_path: &PathBuf) -> anyhow::Result<(String, Vec<String>)> {
-    let image = std::env::var("AUTONOETIC_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.11".to_string());
+fn docker_command(
+    agent_dir: &PathBuf,
+    script_path: &PathBuf,
+) -> anyhow::Result<(String, Vec<String>)> {
+    let image =
+        std::env::var("AUTONOETIC_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.11".to_string());
     Ok((
         "docker".to_string(),
         vec![
             "run".to_string(),
             "--rm".to_string(),
             "-i".to_string(),
-            "--network".to_string(), "none".to_string(),
-            "-v".to_string(), format!("{}:/workspace", agent_dir.to_string_lossy()),
+            "--network".to_string(),
+            "none".to_string(),
+            "-v".to_string(),
+            format!("{}:/workspace", agent_dir.to_string_lossy()),
             image,
             script_path.to_string_lossy().to_string(),
         ],
@@ -1472,8 +1672,6 @@ fn microvm_command(_script_path: &PathBuf) -> anyhow::Result<(String, Vec<String
         .map_err(|_| anyhow::anyhow!("MicroVM requires AUTONOETIC_FIRECRACKER_CONFIG to be set"))?;
     Ok((
         "firecracker".to_string(),
-        vec![
-            "--config-file".to_string(), config,
-        ],
+        vec!["--config-file".to_string(), config],
     ))
 }

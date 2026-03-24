@@ -10,7 +10,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-
 use super::gateway_store::GatewayStore;
 use autonoetic_types::notification::{NotificationRecord, NotificationType};
 
@@ -53,34 +52,38 @@ pub struct PendingSignal {
 }
 
 /// Deliver a single signal via JSON-RPC event.ingest to the gateway.
-pub async fn deliver_signal(pending: &PendingSignal, session_id: &str, port: u16) -> anyhow::Result<()> {
+pub async fn deliver_signal(
+    pending: &PendingSignal,
+    session_id: &str,
+    port: u16,
+) -> anyhow::Result<()> {
     let request_id = &pending.request_id;
-    
+
     tracing::info!(
         target: "signal",
         request_id = %request_id,
         session_id = %session_id,
         "Delivering signal via JSON-RPC"
     );
-    
+
     let request = build_delivery_request(pending, session_id);
     let addr = format!("127.0.0.1:{}", port);
-    
+
     // Connect with retry (3 attempts)
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
         match tokio::net::TcpStream::connect(&addr).await {
             Ok(stream) => {
-                use tokio::io::{AsyncWriteExt, BufWriter, AsyncBufReadExt};
+                use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufWriter};
                 let (read_half, write_half) = stream.into_split();
                 let mut writer = BufWriter::new(write_half);
                 let mut reader = tokio::io::BufReader::new(read_half);
-                
+
                 let encoded = serde_json::to_string(&request).unwrap_or_default();
                 writer.write_all(encoded.as_bytes()).await?;
                 writer.write_all(b"\n").await?;
                 writer.flush().await?;
-                
+
                 let mut response_line = String::new();
                 let read_result = tokio::time::timeout(
                     std::time::Duration::from_secs(2),
@@ -93,8 +96,9 @@ pub async fn deliver_signal(pending: &PendingSignal, session_id: &str, port: u16
                     "Gateway closed connection without JSON-RPC response"
                 );
 
-                let response: crate::router::JsonRpcResponse = serde_json::from_str(response_line.trim())
-                    .map_err(|e| anyhow::anyhow!("Invalid JSON-RPC response: {}", e))?;
+                let response: crate::router::JsonRpcResponse =
+                    serde_json::from_str(response_line.trim())
+                        .map_err(|e| anyhow::anyhow!("Invalid JSON-RPC response: {}", e))?;
                 if let Some(error) = response.error {
                     anyhow::bail!("Signal delivery failed: {}", error.message);
                 }
@@ -109,13 +113,21 @@ pub async fn deliver_signal(pending: &PendingSignal, session_id: &str, port: u16
     Ok(())
 }
 
-fn build_delivery_request(pending: &PendingSignal, session_id: &str) -> crate::router::JsonRpcRequest {
+fn build_delivery_request(
+    pending: &PendingSignal,
+    session_id: &str,
+) -> crate::router::JsonRpcRequest {
     let request_id = &pending.request_id;
     let signal = &pending.signal;
 
     let (message, target_agent_id, approval_status) = match signal {
         Signal::ApprovalResolved {
-            request_id, agent_id, status, install_completed, message, ..
+            request_id,
+            agent_id,
+            status,
+            install_completed,
+            message,
+            ..
         } => (
             serde_json::json!({
                 "type": "approval_resolved",
@@ -124,19 +136,24 @@ fn build_delivery_request(pending: &PendingSignal, session_id: &str) -> crate::r
                 "status": status,
                 "install_completed": install_completed,
                 "message": message,
-            }).to_string(),
+            })
+            .to_string(),
             Some(agent_id.clone()),
             status.clone(),
         ),
         Signal::WorkflowJoinSatisfied {
-            workflow_id, join_task_ids, message, ..
+            workflow_id,
+            join_task_ids,
+            message,
+            ..
         } => (
             serde_json::json!({
                 "type": "workflow_join_satisfied",
                 "workflow_id": workflow_id,
                 "join_task_ids": join_task_ids,
                 "message": message,
-            }).to_string(),
+            })
+            .to_string(),
             None,
             "completed".to_string(),
         ),
@@ -288,4 +305,3 @@ mod tests {
         server.await.expect("server task should complete");
     }
 }
-

@@ -8,8 +8,8 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, LlmCo
 use autonoetic_types::background::{
     ApprovalRequest, BackgroundMode, BackgroundPolicy, BackgroundState, ScheduledAction,
 };
-use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::{
     AgentInstallApprovalPolicy, GatewayConfig, SchemaEnforcementConfig, SchemaEnforcementMode,
 };
@@ -296,8 +296,6 @@ fn extract_host(url: &str) -> anyhow::Result<String> {
     Ok(host.to_string())
 }
 
-
-
 fn block_on_http<F, T>(future: F) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>>,
@@ -513,6 +511,9 @@ fn extract_code_for_analysis(
                 // Keep parsing aligned with the sandbox runner's split_whitespace
                 // behavior so analysis sees the same token shape execution receives.
                 if let Some(code) = after_python.strip_prefix("-c").map(str::trim_start) {
+                    // Strip surrounding shell quotes so the regex can match at
+                    // the start of the line (e.g. python3 -c "import urllib...")
+                    let code = code.trim_matches('"').trim_matches('\'');
                     if !code.is_empty() {
                         return code.to_string();
                     }
@@ -533,9 +534,7 @@ fn extract_code_for_analysis(
                 // Try to read from content store
                 if let (Some(gw_dir), Some(sid)) = (gateway_dir, session_id) {
                     if let Ok(store) = crate::runtime::content_store::ContentStore::new(gw_dir) {
-                        if let Ok(content) =
-                            store.read_by_name_or_handle(sid, content_name)
-                        {
+                        if let Ok(content) = store.read_by_name_or_handle(sid, content_name) {
                             if let Ok(content_str) = String::from_utf8(content) {
                                 return content_str;
                             }
@@ -749,7 +748,9 @@ impl NativeTool for SandboxExecTool {
                 let sid = session_id.unwrap_or("");
                 let existing =
                     crate::scheduler::approval::pending_sandbox_exec_requests_for_session(
-                        cfg, gateway_store.as_deref(), sid,
+                        cfg,
+                        gateway_store.as_deref(),
+                        sid,
                     )?;
                 if !existing.is_empty() {
                     let primary = &existing[0];
@@ -761,13 +762,12 @@ impl NativeTool for SandboxExecTool {
                             ..
                         } => (command.clone(), dependencies),
                         _ => {
-                            anyhow::bail!("internal: pending sandbox approval has wrong action type")
+                            anyhow::bail!(
+                                "internal: pending sandbox approval has wrong action type"
+                            )
                         }
                     };
-                    let summary = format!(
-                        "Sandbox exec: {}",
-                        &cmd[..cmd.len().min(60)]
-                    );
+                    let summary = format!("Sandbox exec: {}", &cmd[..cmd.len().min(60)]);
                     let approval = build_approval_details(
                         primary,
                         "sandbox_exec",
@@ -837,7 +837,9 @@ impl NativeTool for SandboxExecTool {
                 let approval_workflow_id = {
                     let sid = session_id.unwrap_or("");
                     let root = crate::runtime::content_store::root_session_id(sid);
-                    crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root).ok().flatten()
+                    crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+                        .ok()
+                        .flatten()
                 };
                 let sid = session_id.unwrap_or("");
                 let root_session_id = crate::runtime::content_store::root_session_id(sid);
@@ -860,7 +862,9 @@ impl NativeTool for SandboxExecTool {
                     workflow_id: approval_workflow_id.clone(),
                     task_id: match (&approval_workflow_id, session_id) {
                         (Some(wf_id), Some(sid)) => {
-                            crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid).ok().flatten()
+                            crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
+                                .ok()
+                                .flatten()
                         }
                         _ => None,
                     },
@@ -2188,7 +2192,12 @@ impl NativeTool for ContentReadTool {
                 }
 
                 // Return standard error without hints
-                anyhow::bail!("Content '{}' not found in session '{}': {}", args.name_or_handle, sid, e);
+                anyhow::bail!(
+                    "Content '{}' not found in session '{}': {}",
+                    args.name_or_handle,
+                    sid,
+                    e
+                );
             }
         };
 
@@ -2211,6 +2220,15 @@ impl NativeTool for ContentReadTool {
         }
         meta
     }
+}
+
+/// Short scoped alias for agents (`artifact_ref`); global uniqueness enforced by SQLite primary key.
+fn mint_artifact_ref_id() -> String {
+    let b = *uuid::Uuid::new_v4().as_bytes();
+    format!(
+        "ar.{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5]
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2267,8 +2285,8 @@ impl NativeTool for ArtifactBuildTool {
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2285,16 +2303,62 @@ impl NativeTool for ArtifactBuildTool {
         let sid = _session_id.unwrap_or(&_manifest.agent.id);
         let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
 
-        let bundle = store.build(
-            &args.inputs,
-            args.entrypoints.as_deref(),
-            sid,
-        )?;
+        let bundle = store.build(&args.inputs, args.entrypoints.as_deref(), sid)?;
 
-        serde_json::to_string(&serde_json::json!({
+        let root = crate::runtime::content_store::root_session_id(sid);
+        let (scope_type, scope_id) = match config {
+            Some(cfg) => {
+                match crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                    cfg, root,
+                ) {
+                    Ok(Some(wf_id)) => (
+                        autonoetic_types::artifact::ArtifactRefScopeType::Workflow,
+                        wf_id,
+                    ),
+                    _ => (
+                        autonoetic_types::artifact::ArtifactRefScopeType::Session,
+                        sid.to_string(),
+                    ),
+                }
+            }
+            None => (
+                autonoetic_types::artifact::ArtifactRefScopeType::Session,
+                sid.to_string(),
+            ),
+        };
+
+        let mut artifact_ref: Option<String> = None;
+        let mut artifact_ref_scope: Option<serde_json::Value> = None;
+        if let Some(gs) = gateway_store {
+            // New bundle only: dedup reuse returns the same artifact_id/digest; avoid minting
+            // a fresh short ref row on every identical build.
+            if !bundle.reused {
+                let ref_id = mint_artifact_ref_id();
+                let record = autonoetic_types::artifact::ArtifactRefRecord {
+                    ref_id: ref_id.clone(),
+                    scope_type,
+                    scope_id: scope_id.clone(),
+                    artifact_id: bundle.artifact_id.clone(),
+                    artifact_digest: bundle.digest.clone(),
+                    created_by_agent_id: _manifest.agent.id.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    expires_at: None,
+                    revoked_at: None,
+                };
+                gs.create_artifact_ref(&record)?;
+                artifact_ref = Some(ref_id);
+                artifact_ref_scope = Some(serde_json::json!({
+                    "type": scope_type.as_str(),
+                    "id": scope_id,
+                }));
+            }
+        }
+
+        let mut out = serde_json::json!({
             "ok": true,
             "artifact_id": bundle.artifact_id,
             "digest": bundle.digest,
+            "artifact_digest": bundle.digest,
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
                 "handle": f.handle,
@@ -2308,8 +2372,14 @@ impl NativeTool for ArtifactBuildTool {
             } else {
                 "Created new artifact"
             }
-        }))
-        .map_err(Into::into)
+        });
+        if let (Some(r), Some(scope)) = (artifact_ref, artifact_ref_scope) {
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("artifact_ref".to_string(), serde_json::Value::String(r));
+                obj.insert("artifact_ref_scope".to_string(), scope);
+            }
+        }
+        serde_json::to_string(&out).map_err(Into::into)
     }
 
     fn extract_metadata(&self, arguments_json: &str) -> ToolMetadata {
@@ -3680,7 +3750,8 @@ impl NativeTool for AgentSpawnTool {
         // session is still pending. Async spawn (args.async) is NOT blocked — it queues
         // independently and the scheduler picks it up regardless of approval state.
         if !args.r#async {
-            let root_for_approval_check = crate::runtime::content_store::root_session_id(&resolved_session_id);
+            let root_for_approval_check =
+                crate::runtime::content_store::root_session_id(&resolved_session_id);
             let pending = crate::scheduler::approval::pending_approval_requests_for_root(
                 gw_config,
                 gateway_store.as_deref(),
@@ -3710,7 +3781,8 @@ impl NativeTool for AgentSpawnTool {
             agents_dir: agents_dir.to_path_buf(),
             ..GatewayConfig::default()
         };
-        let execution = crate::execution::GatewayExecutionService::new(execution_config, gateway_store.clone());
+        let execution =
+            crate::execution::GatewayExecutionService::new(execution_config, gateway_store.clone());
 
         let target_agent_id = args.agent_id.clone();
         let kickoff_message = match &args.metadata {
@@ -3847,6 +3919,8 @@ impl NativeTool for AgentSpawnTool {
                     false,
                     None,
                     args.metadata.as_ref(),
+                    None,
+                    None,
                 )
                 .await
         };
@@ -3992,8 +4066,9 @@ impl NativeTool for ApprovalStatusTool {
                         autonoetic_types::background::ApprovalStatus::Approved => "approved",
                         autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
                     },
-                    None => "pending"
-                }.to_string();
+                    None => "pending",
+                }
+                .to_string();
 
                 let response = serde_json::json!({
                     "ok": true,
@@ -4064,7 +4139,9 @@ fn check_task_statuses(
     let mut any_not_found = false;
 
     for task_id in task_ids {
-        let task = crate::scheduler::load_task_run(config, store, workflow_id, task_id).ok().flatten();
+        let task = crate::scheduler::load_task_run(config, store, workflow_id, task_id)
+            .ok()
+            .flatten();
         match task {
             Some(t) => {
                 let is_terminal = matches!(
@@ -4087,7 +4164,9 @@ fn check_task_statuses(
                     "result_summary": t.result_summary,
                 });
                 // Consume task checkpoint: include last step/state
-                if let Ok(Some(cp)) = crate::scheduler::load_task_checkpoint(config, store, workflow_id, &t.task_id) {
+                if let Ok(Some(cp)) =
+                    crate::scheduler::load_task_checkpoint(config, store, workflow_id, &t.task_id)
+                {
                     entry["checkpoint_step"] = serde_json::Value::String(cp.step);
                     entry["checkpoint_version"] = serde_json::json!(cp.version);
                     if cp.state != serde_json::Value::Null {
@@ -4098,9 +4177,13 @@ fn check_task_statuses(
                 if t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
                     if let (Some(gw_dir), Some(sid)) = (gateway_dir, session_id) {
                         let implicit_name = format!("impl_{}", t.task_id);
-                        if let Ok(content_store) = crate::runtime::content_store::ContentStore::new(gw_dir) {
+                        if let Ok(content_store) =
+                            crate::runtime::content_store::ContentStore::new(gw_dir)
+                        {
                             if let Ok(content) = content_store.read_by_name(sid, &implicit_name) {
-                                if let Ok(artifact_data) = serde_json::from_slice::<serde_json::Value>(&content) {
+                                if let Ok(artifact_data) =
+                                    serde_json::from_slice::<serde_json::Value>(&content)
+                                {
                                     let output = serde_json::json!({
                                         "artifact_id": artifact_data.get("artifact_id").and_then(|v| v.as_str()),
                                         "summary": artifact_data.get("summary").and_then(|v| v.as_str()),
@@ -4238,8 +4321,14 @@ impl NativeTool for WorkflowWaitTool {
 
         // Non-blocking mode: check once and return
         if timeout_secs == 0 {
-            let (tasks_status, all_done, any_failed, any_not_found) =
-                check_task_statuses(gw_config, gateway_store.as_deref(), &workflow_id, &args.task_ids, _gateway_dir, session_id);
+            let (tasks_status, all_done, any_failed, any_not_found) = check_task_statuses(
+                gw_config,
+                gateway_store.as_deref(),
+                &workflow_id,
+                &args.task_ids,
+                _gateway_dir,
+                session_id,
+            );
             return serde_json::to_string(&serde_json::json!({
                 "ok": true,
                 "workflow_id": workflow_id,
@@ -4268,11 +4357,25 @@ impl NativeTool for WorkflowWaitTool {
         let wf_id = workflow_id.clone();
         let gw_config_arc = std::sync::Arc::new(gw_config.clone());
 
-        let (tasks_status, all_done, any_failed, any_not_found, waited_secs) = if let Ok(handle) =
-            tokio::runtime::Handle::try_current()
-        {
-            tokio::task::block_in_place(|| {
-                handle.block_on(async {
+        let (tasks_status, all_done, any_failed, any_not_found, waited_secs) =
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                tokio::task::block_in_place(|| {
+                    handle.block_on(async {
+                        poll_until_join(
+                            gw_config_arc.as_ref(),
+                            gateway_store.as_deref(),
+                            &wf_id,
+                            &task_ids,
+                            timeout_secs,
+                            poll_interval_secs,
+                            _gateway_dir,
+                            session_id,
+                        )
+                        .await
+                    })
+                })
+            } else {
+                tokio::runtime::Runtime::new()?.block_on(async {
                     poll_until_join(
                         gw_config_arc.as_ref(),
                         gateway_store.as_deref(),
@@ -4285,22 +4388,7 @@ impl NativeTool for WorkflowWaitTool {
                     )
                     .await
                 })
-            })
-        } else {
-            tokio::runtime::Runtime::new()?.block_on(async {
-                poll_until_join(
-                    gw_config_arc.as_ref(),
-                    gateway_store.as_deref(),
-                    &wf_id,
-                    &task_ids,
-                    timeout_secs,
-                    poll_interval_secs,
-                    _gateway_dir,
-                    session_id,
-                )
-                .await
-            })
-        };
+            };
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -4340,8 +4428,14 @@ async fn poll_until_join(
     let mut waited_secs = 0u64;
 
     loop {
-        let (tasks_status, all_done, any_failed, any_not_found) =
-            check_task_statuses(config, store, workflow_id, task_ids, gateway_dir, session_id);
+        let (tasks_status, all_done, any_failed, any_not_found) = check_task_statuses(
+            config,
+            store,
+            workflow_id,
+            task_ids,
+            gateway_dir,
+            session_id,
+        );
         if all_done {
             return (tasks_status, true, any_failed, any_not_found, waited_secs);
         }
@@ -4619,17 +4713,28 @@ impl NativeTool for AgentInstallTool {
 
                 if let Some(request_id) = install_approval_ref {
                     let decision = if let Some(store) = &_gateway_store {
-                        store.get_approval(request_id)?
-                             .ok_or_else(|| anyhow::anyhow!("Approval request not found in store: {}", request_id))?
-                             .into_decision()?
+                        store
+                            .get_approval(request_id)?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Approval request not found in store: {}",
+                                    request_id
+                                )
+                            })?
+                            .into_decision()?
                     } else {
-                        return Err(tagged::Tagged::validation(anyhow::anyhow!("GatewayStore is required to verify approval")).into());
+                        return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                            "GatewayStore is required to verify approval"
+                        ))
+                        .into());
                     };
 
                     if decision.status != autonoetic_types::background::ApprovalStatus::Approved {
                         return Err(tagged::Tagged::validation(anyhow::anyhow!(
-                            "install_approval_ref '{}' references a request that is not approved", request_id
-                        )).into());
+                            "install_approval_ref '{}' references a request that is not approved",
+                            request_id
+                        ))
+                        .into());
                     }
 
                     match &decision.action {
@@ -4647,7 +4752,8 @@ impl NativeTool for AgentInstallTool {
                                      Please re-submit the install request.", request_id
                                 ))
                             })?;
-                            let mut stored_args: InstallAgentArgs = serde_json::from_value(payload_value)?;
+                            let mut stored_args: InstallAgentArgs =
+                                serde_json::from_value(payload_value)?;
                             tracing::info!(
                                 target: "agent.install",
                                 request_id = %request_id,
@@ -4711,11 +4817,7 @@ impl NativeTool for AgentInstallTool {
                     let summary = if capability_names.is_empty() {
                         args.agent_id.clone()
                     } else {
-                        format!(
-                            "{} with {}",
-                            args.agent_id,
-                            capability_names.join(", ")
-                        )
+                        format!("{} with {}", args.agent_id, capability_names.join(", "))
                     };
                     let risk_factors = install_risk_factors(&args, &scheduled_action, &background);
                     let execution_mode = execution_mode_label(args.execution_mode).to_string();
@@ -4731,7 +4833,9 @@ impl NativeTool for AgentInstallTool {
                     let approval_workflow_id = {
                         let sid = session_id.unwrap_or("");
                         let root = crate::runtime::content_store::root_session_id(sid);
-                        crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root).ok().flatten()
+                        crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+                            .ok()
+                            .flatten()
                     };
                     let request = ApprovalRequest {
                         request_id: request_id.clone(),
@@ -4742,17 +4846,26 @@ impl NativeTool for AgentInstallTool {
                             summary: summary.clone(),
                             requested_by_agent_id: manifest.agent.id.clone(),
                             install_fingerprint: install_fingerprint.clone(),
-                            payload: Some(serde_json::to_value(&args).unwrap_or(serde_json::Value::Null)),
+                            payload: Some(
+                                serde_json::to_value(&args).unwrap_or(serde_json::Value::Null),
+                            ),
                         },
                         created_at: Utc::now().to_rfc3339(),
                         reason: Some("agent.install requires human approval".to_string()),
                         evidence_ref: None,
-                        root_session_id: Some(crate::runtime::content_store::root_session_id(session_id.unwrap_or("")).to_string()),
+                        root_session_id: Some(
+                            crate::runtime::content_store::root_session_id(
+                                session_id.unwrap_or(""),
+                            )
+                            .to_string(),
+                        ),
                         // Bind to workflow + task if available
                         workflow_id: approval_workflow_id.as_ref().map(|w| w.clone()),
                         task_id: match (&approval_workflow_id, session_id) {
                             (Some(wf_id), Some(sid)) => {
-                                crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid).ok().flatten()
+                                crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
+                                    .ok()
+                                    .flatten()
                             }
                             _ => None,
                         },
@@ -5199,7 +5312,8 @@ impl NativeTool for AgentInstallTool {
             for file in &resolved_files {
                 validate_relative_agent_path(&file.path)?;
                 anyhow::ensure!(
-                    file.path.as_str() != "SKILL.md" && file.path.as_str() != child_manifest.runtime.runtime_lock.as_str(),
+                    file.path.as_str() != "SKILL.md"
+                        && file.path.as_str() != child_manifest.runtime.runtime_lock.as_str(),
                     "files may not overwrite generated SKILL.md or runtime.lock"
                 );
                 let target = install_tmp_dir.join(&file.path);
@@ -5295,7 +5409,6 @@ impl NativeTool for AgentInstallTool {
                 )?;
             }
         }
-
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -5657,6 +5770,125 @@ fn parse_dependency_plan(runtime: &str, packages: Vec<String>) -> anyhow::Result
     Ok(DependencyPlan { runtime, packages })
 }
 
+// ---------------------------------------------------------------------------
+// workflow.cancel_task
+// ---------------------------------------------------------------------------
+
+pub struct WorkflowCancelTaskTool;
+
+impl NativeTool for WorkflowCancelTaskTool {
+    fn name(&self) -> &'static str {
+        "workflow.cancel_task"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
+    }
+
+    fn definition(&self) -> crate::llm::ToolDefinition {
+        crate::llm::ToolDefinition {
+            name: self.name().to_string(),
+            description: "Cancel a task that is AwaitingApproval or Pending. Running tasks cannot be cancelled. Deletes any saved continuation and marks the task as Cancelled, which triggers the join condition check so the planner is notified.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["workflow_id", "task_id"],
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "The workflow ID containing the task."
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID to cancel."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why the task is being cancelled."
+                    }
+                }
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> anyhow::Result<String> {
+        let config = config
+            .ok_or_else(|| anyhow::anyhow!("Gateway config required for workflow.cancel_task"))?;
+        let args: serde_json::Value = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid arguments: {}", e))?;
+
+        let workflow_id = args["workflow_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("workflow_id is required"))?;
+        let task_id = args["task_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("task_id is required"))?;
+        let reason = args["reason"].as_str().map(str::to_string);
+
+        let store = gateway_store.as_deref();
+        let task = crate::scheduler::load_task_run(config, store, workflow_id, task_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Task '{}' not found in workflow '{}'", task_id, workflow_id)
+            })?;
+
+        let cancellable = matches!(
+            task.status,
+            autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
+                | autonoetic_types::workflow::TaskRunStatus::Pending
+                | autonoetic_types::workflow::TaskRunStatus::Runnable
+        );
+        if !cancellable {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "task_id": task_id,
+                "status": format!("{:?}", task.status),
+                "error": format!("Task is {:?} and cannot be cancelled. Only AwaitingApproval, Pending, and Runnable tasks can be cancelled.", task.status)
+            })
+            .to_string());
+        }
+
+        // Delete any saved continuation file.
+        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
+
+        // Mark as Cancelled (triggers join condition check).
+        crate::scheduler::workflow_store::update_task_run_status(
+            config,
+            store,
+            workflow_id,
+            task_id,
+            autonoetic_types::workflow::TaskRunStatus::Cancelled,
+            reason
+                .clone()
+                .or_else(|| Some("Cancelled by operator".to_string())),
+        )?;
+
+        // Remove from queue if present.
+        let _ = crate::scheduler::workflow_store::dequeue_task(config, store, workflow_id, task_id);
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "task_id": task_id,
+            "workflow_id": workflow_id,
+            "status": "Cancelled",
+            "reason": reason.unwrap_or_else(|| "Cancelled by operator".to_string())
+        })
+        .to_string())
+    }
+}
+
 pub fn default_registry() -> NativeToolRegistry {
     let mut registry = NativeToolRegistry::new();
     registry.register(Box::new(SandboxExecTool));
@@ -5684,9 +5916,14 @@ pub fn default_registry() -> NativeToolRegistry {
     // Workflow tools
     registry.register(Box::new(ApprovalStatusTool));
     registry.register(Box::new(WorkflowWaitTool));
+    registry.register(Box::new(WorkflowCancelTaskTool));
     // Promotion tools
-    registry.register(Box::new(crate::runtime::tools_promotion::PromotionRecordTool));
-    registry.register(Box::new(crate::runtime::tools_promotion::PromotionQueryTool));
+    registry.register(Box::new(
+        crate::runtime::tools_promotion::PromotionRecordTool,
+    ));
+    registry.register(Box::new(
+        crate::runtime::tools_promotion::PromotionQueryTool,
+    ));
     registry
 }
 
@@ -5813,7 +6050,8 @@ mod tests {
 
         let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
         let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
-        let promotion_store = crate::runtime::promotion_store::PromotionStore::new(&gateway_dir).unwrap();
+        let promotion_store =
+            crate::runtime::promotion_store::PromotionStore::new(&gateway_dir).unwrap();
 
         let session_id = "test-session";
         let mut input_names = Vec::new();
@@ -5980,7 +6218,10 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&result).expect("workflow.wait result should decode");
         assert_eq!(parsed.get("ok"), Some(&serde_json::json!(true)));
-        assert_eq!(parsed.get("join_satisfied"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            parsed.get("join_satisfied"),
+            Some(&serde_json::json!(false))
+        );
         assert_eq!(parsed.get("any_not_found"), Some(&serde_json::json!(true)));
         assert_eq!(parsed.get("waited_secs"), Some(&serde_json::json!(0)));
         assert_eq!(
@@ -7334,7 +7575,14 @@ dependencies:
 
         // Record approved decision via store.
         let request_id = "apr-test1234";
-        store.record_decision(request_id, "approved", "test-user", &chrono::Utc::now().to_rfc3339()).unwrap();
+        store
+            .record_decision(
+                request_id,
+                "approved",
+                "test-user",
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap();
 
         // Retry with approval_ref: should NOT request approval again.
         // It should continue and fail on dependency parsing instead.
@@ -7521,9 +7769,10 @@ dependencies:
         std::fs::create_dir_all(&parent_dir).expect("parent dir should create");
 
         // Build artifact that tries to overwrite SKILL.md (should fail)
-        let (artifact_id, gateway_dir) = build_test_artifact(temp.path(), &[
-            ("SKILL.md", "should fail because SKILL.md is generated"),
-        ]);
+        let (artifact_id, gateway_dir) = build_test_artifact(
+            temp.path(),
+            &[("SKILL.md", "should fail because SKILL.md is generated")],
+        );
 
         let args = serde_json::json!({
             "agent_id": "broken_worker",
@@ -8323,9 +8572,8 @@ Research agent instructions.
         std::fs::create_dir_all(&parent_dir).expect("parent dir should create");
 
         // Script mode should work without llm_config
-        let (artifact_id, gateway_dir) = build_test_artifact(temp.path(), &[
-            ("scripts/main.py", "print('hello')"),
-        ]);
+        let (artifact_id, gateway_dir) =
+            build_test_artifact(temp.path(), &[("scripts/main.py", "print('hello')")]);
 
         let args = serde_json::json!({
             "agent_id": "no.llm.script",
@@ -8857,7 +9105,14 @@ Research agent instructions.
         let request_id = parsed.get("request_id").and_then(|v| v.as_str()).unwrap();
 
         // Manually approve the request via store
-        store.record_decision(request_id, "approved", "test-user", &chrono::Utc::now().to_rfc3339()).unwrap();
+        store
+            .record_decision(
+                request_id,
+                "approved",
+                "test-user",
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap();
 
         // Retry with DIFFERENT payload but same approval_ref
         // The gateway should use the STORED payload, not this one
@@ -9004,7 +9259,14 @@ Research agent instructions.
         );
 
         // Manually approve via store
-        store.record_decision(request_id, "approved", "test-user", &chrono::Utc::now().to_rfc3339()).unwrap();
+        store
+            .record_decision(
+                request_id,
+                "approved",
+                "test-user",
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap();
 
         // Retry with approval_ref
         let retry_args = serde_json::json!({

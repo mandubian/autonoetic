@@ -1,5 +1,5 @@
 //! Gateway-owned background scheduler.
-//! 
+//!
 //! This module has been split by domain responsibility:
 //! - [`crate::scheduler::decision`] - Wake-decision logic
 //! - [`crate::scheduler::store`] - Persistence helpers  
@@ -8,27 +8,27 @@
 //!
 //! The main entry points remain in this file for backwards compatibility.
 
-use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-pub mod decision;
-pub mod store;
 pub mod approval;
+pub mod decision;
+pub mod gateway_store;
 pub mod runner;
 pub mod signal;
-pub mod workflow_store;
+pub mod store;
 pub mod workflow_causal;
-pub mod gateway_store;
+pub mod workflow_store;
 
-pub use decision::*;
-pub use store::*;
 pub use approval::*;
+pub use decision::*;
+pub use gateway_store::*;
 pub use runner::*;
 pub use signal::*;
-pub use workflow_store::*;
+pub use store::*;
 pub use workflow_causal::*;
-pub use gateway_store::*;
+pub use workflow_store::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxEvent {
@@ -61,7 +61,9 @@ pub async fn start_background_scheduler(
     }
 }
 
-pub async fn run_scheduler_tick(execution: Arc<crate::execution::GatewayExecutionService>) -> anyhow::Result<()> {
+pub async fn run_scheduler_tick(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
     run_scheduler_tick_at(execution, Utc::now()).await
 }
 
@@ -110,16 +112,19 @@ async fn run_scheduler_tick_at(
         };
 
         let session_id = decision::background_session_id(&loaded.manifest.agent.id);
-        let effective_interval = decision::effective_interval_secs(&config, &background, cap_min_interval);
+        let effective_interval =
+            decision::effective_interval_secs(&config, &background, cap_min_interval);
         let state_path = store::background_state_path(&config, &loaded.manifest.agent.id);
-        let mut state = store::load_background_state(&state_path, &loaded.manifest.agent.id, &session_id)?;
+        let mut state =
+            store::load_background_state(&state_path, &loaded.manifest.agent.id, &session_id)?;
         if state.next_due_at.is_none() {
             state.next_due_at =
                 Some((now + Duration::seconds(effective_interval as i64)).to_rfc3339());
             store::save_background_state(&state_path, &state)?;
         }
 
-        let reevaluation = crate::runtime::reevaluation_state::load_reevaluation_state(&loaded.dir)?;
+        let reevaluation =
+            crate::runtime::reevaluation_state::load_reevaluation_state(&loaded.dir)?;
         let reason = decision::should_wake(
             &config,
             &loaded.manifest.agent.id,
@@ -164,9 +169,103 @@ async fn run_scheduler_tick_at(
         tracing::warn!(error = %e, "Failed to process runnable workflow tasks");
     }
 
+    // Fail tasks that have been AwaitingApproval longer than the configured timeout.
+    if let Err(e) = check_approval_timeouts(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to check approval timeouts");
+    }
+
     // Process queued async workflow tasks (Phase 2)
     if let Err(e) = process_queued_workflow_tasks(execution).await {
         tracing::warn!(error = %e, "Failed to process queued workflow tasks");
+    }
+
+    Ok(())
+}
+
+/// Fail workflow tasks that have been stuck in `AwaitingApproval` longer than
+/// `config.approval_timeout_secs`. When a task times out its continuation file
+/// is deleted so stale disk state doesn't accumulate.
+async fn check_approval_timeouts(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let config = execution.config();
+    let timeout_secs = config.approval_timeout_secs;
+    if timeout_secs == 0 {
+        return Ok(()); // disabled
+    }
+
+    let store = execution.gateway_store();
+    let store = store.as_deref();
+
+    let workflows_root = workflow_store::workflows_root(&config).join("runs");
+    if !workflows_root.is_dir() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now();
+
+    for entry in std::fs::read_dir(&workflows_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let wf_id = entry.file_name().to_string_lossy().to_string();
+        let tasks = workflow_store::list_task_runs_for_workflow(&config, store, &wf_id)?;
+
+        for task in tasks {
+            if task.status != autonoetic_types::workflow::TaskRunStatus::AwaitingApproval {
+                continue;
+            }
+
+            // Check the continuation file's `suspended_at` timestamp.
+            let cont = crate::runtime::continuation::load_continuation(&config, &task.task_id)
+                .ok()
+                .flatten();
+            let suspended_at = cont.as_ref().and_then(|c| {
+                chrono::DateTime::parse_from_rfc3339(&c.suspended_at)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            });
+
+            let timed_out = match suspended_at {
+                Some(ts) => (now - ts).num_seconds() as u64 > timeout_secs,
+                None => false, // no continuation → not managed by new model
+            };
+
+            if timed_out {
+                tracing::warn!(
+                    target: "workflow",
+                    workflow_id = %wf_id,
+                    task_id = %task.task_id,
+                    timeout_secs = timeout_secs,
+                    "Approval timeout expired; failing task"
+                );
+
+                let reason = "Approval timed out".to_string();
+                let _ = workflow_store::update_task_run_status(
+                    &config,
+                    store,
+                    &wf_id,
+                    &task.task_id,
+                    autonoetic_types::workflow::TaskRunStatus::Failed,
+                    Some(reason.clone()),
+                );
+                let _ = workflow_store::checkpoint_task(
+                    &config,
+                    store,
+                    &wf_id,
+                    &task.task_id,
+                    "approval_timeout".to_string(),
+                    serde_json::json!({
+                        "reason": reason,
+                        "timeout_secs": timeout_secs,
+                    }),
+                );
+                // Delete the stale continuation file.
+                let _ = crate::runtime::continuation::delete_continuation(&config, &task.task_id);
+                let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
+            }
+        }
     }
 
     Ok(())
@@ -386,7 +485,9 @@ async fn spawn_task_execution(
     let store = exec.gateway_store();
     let store = store.as_deref();
     // Load previous task checkpoint (if any) for resume context
-    let prev_checkpoint = workflow_store::load_task_checkpoint(&cfg, store, &wf_id, &t_id).ok().flatten();
+    let prev_checkpoint = workflow_store::load_task_checkpoint(&cfg, store, &wf_id, &t_id)
+        .ok()
+        .flatten();
     let checkpoint_context = if let Some(ref prev) = prev_checkpoint {
         tracing::info!(
             target: "workflow",
@@ -422,9 +523,8 @@ async fn spawn_task_execution(
     let heartbeat_task_id = t_id.clone();
     let heartbeat_interval_secs = task_claim_heartbeat_interval_secs(cfg.as_ref());
     let heartbeat = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            heartbeat_interval_secs,
-        ));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval_secs));
         loop {
             interval.tick().await;
             let _ = workflow_store::refresh_task_claim_heartbeat(
@@ -445,6 +545,8 @@ async fn spawn_task_execution(
             false,
             None,
             metadata.as_ref(),
+            Some(&wf_id),
+            Some(&t_id),
         )
         .await;
 
@@ -453,28 +555,16 @@ async fn spawn_task_execution(
 
     match result {
         Ok(spawn_result) => {
-            let pending_approval_ids: Vec<String> = crate::scheduler::approval::load_approval_requests(&cfg, exec.gateway_store().as_deref())
-                .map(|requests| {
-                    requests
-                        .into_iter()
-                        .filter(|request| request.session_id == session_id)
-                        .map(|request| request.request_id)
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            if !pending_approval_ids.is_empty() {
-                let summary = format!(
-                    "awaiting approval {}",
-                    pending_approval_ids.join(",")
-                );
+            // Check if the turn was suspended at an approval gate (continuation already on disk).
+            if let Some(ref request_id) = spawn_result.suspended_for_approval {
+                let summary = format!("awaiting approval {}", request_id);
                 if let Err(e) = workflow_store::update_task_run_status(
                     &cfg,
                     store,
                     &wf_id,
                     &t_id,
                     autonoetic_types::workflow::TaskRunStatus::AwaitingApproval,
-                    Some(summary.clone()),
+                    Some(summary),
                 ) {
                     tracing::warn!(
                         target: "workflow",
@@ -491,22 +581,26 @@ async fn spawn_task_execution(
                     "awaiting_approval".to_string(),
                     serde_json::json!({
                         "status": "awaiting_approval",
-                        "pending_approval_ids": pending_approval_ids,
-                        "result_summary": spawn_result.assistant_reply.as_ref().map(|s| &s[..s.len().min(200)]),
+                        "approval_request_id": request_id,
                     }),
                 );
                 let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
                 tracing::info!(
                     target: "workflow",
                     task_id = %t_id,
-                    "Async task is awaiting approval; not marking completed"
+                    approval_request_id = %request_id,
+                    "Turn suspended at approval gate; continuation saved; task awaiting approval"
                 );
                 return;
             }
 
             let summary = spawn_result.assistant_reply.as_ref().map(|s| {
                 const MAX: usize = 512;
-                if s.len() <= MAX { s.clone() } else { format!("{}…", &s[..MAX]) }
+                if s.len() <= MAX {
+                    s.clone()
+                } else {
+                    format!("{}…", &s[..MAX])
+                }
             });
             if let Err(e) = workflow_store::update_task_run_status(
                 &cfg,
@@ -598,58 +692,7 @@ pub async fn process_runnable_workflow_tasks(
                 "Re-queueing approval-unblocked task for durable execution"
             );
 
-            // Check if the approval stored a resume_message in the task checkpoint.
-            // If so, use it instead of the original task message so the agent
-            // receives the exec result and continues from where it left off rather
-            // than restarting the task from scratch.
-            let checkpoint = workflow_store::load_task_checkpoint(&config, store, &wf_id, &task.task_id)
-                .ok()
-                .flatten();
-            let resume_message = checkpoint
-                .as_ref()
-                .filter(|cp| cp.step == "approval_resolved")
-                .and_then(|cp| cp.state.get("resume_message")?.as_str().map(str::to_string));
-            let effective_message = resume_message
-                .clone()
-                .unwrap_or_else(|| {
-                    task.message
-                        .clone()
-                        .unwrap_or_else(|| format!("Resume after approval: {}", task.session_id))
-                });
-
-            // If a stale queued task exists (for example after crash/recovery),
-            // reconcile its message with approval-resolved resume context.
             if workflow_store::queued_task_exists(&config, &wf_id, &task.task_id) {
-                if let Some(resume_message) = resume_message {
-                    if let Ok(queued_tasks) = workflow_store::load_queued_tasks(&config, store, &wf_id) {
-                        if let Some(existing) = queued_tasks.into_iter().find(|q| q.task_id == task.task_id)
-                        {
-                            if existing.message != resume_message {
-                                tracing::info!(
-                                    target: "workflow",
-                                    workflow_id = %wf_id,
-                                    task_id = %task.task_id,
-                                    "Refreshing stale queued task message from approval_resolved checkpoint"
-                                );
-
-                                let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
-                                let mut refreshed = existing;
-                                refreshed.message = resume_message;
-                                refreshed.enqueued_at = chrono::Utc::now().to_rfc3339();
-
-                                if let Err(e) = workflow_store::enqueue_task(&config, store, &refreshed) {
-                                    tracing::warn!(
-                                        target: "workflow",
-                                        workflow_id = %wf_id,
-                                        task_id = %task.task_id,
-                                        error = %e,
-                                        "Failed to refresh queued task message"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
                 continue;
             }
 
@@ -657,7 +700,10 @@ pub async fn process_runnable_workflow_tasks(
                 task_id: task.task_id.clone(),
                 workflow_id: wf_id.clone(),
                 agent_id: task.agent_id.clone(),
-                message: effective_message,
+                message: task
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| format!("Resume after approval: {}", task.session_id)),
                 child_session_id: task.session_id.clone(),
                 parent_session_id: task.parent_session_id.clone(),
                 source_agent_id: task.source_agent_id.clone().unwrap_or_default(),
@@ -721,11 +767,23 @@ async fn process_pending_notifications(
 
         if let Some(signal) = signal {
             let pending_signal = crate::scheduler::signal::PendingSignal {
-                request_id: n.request_id.clone().unwrap_or_else(|| n.notification_id.clone()),
+                request_id: n
+                    .request_id
+                    .clone()
+                    .unwrap_or_else(|| n.notification_id.clone()),
                 signal,
-                filename: format!("{}.json", n.request_id.as_deref().unwrap_or(&n.notification_id)),
+                filename: format!(
+                    "{}.json",
+                    n.request_id.as_deref().unwrap_or(&n.notification_id)
+                ),
             };
-            if let Err(e) = crate::scheduler::signal::deliver_signal(&pending_signal, &n.target_session_id, port).await {
+            if let Err(e) = crate::scheduler::signal::deliver_signal(
+                &pending_signal,
+                &n.target_session_id,
+                port,
+            )
+            .await
+            {
                 tracing::warn!(notification_id = %n.notification_id, error = %e, "Failed to deliver signal");
 
                 // Track attempts and eventually fail so malformed/unreachable
@@ -739,7 +797,10 @@ async fn process_pending_notifications(
                     );
                 }
             } else {
-                store.update_notification_status(&n.notification_id, autonoetic_types::notification::NotificationStatus::Delivered)?;
+                store.update_notification_status(
+                    &n.notification_id,
+                    autonoetic_types::notification::NotificationStatus::Delivered,
+                )?;
             }
         } else {
             // Payload is not interpretable as a supported notification signal:

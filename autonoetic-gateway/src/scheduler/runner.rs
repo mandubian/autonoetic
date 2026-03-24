@@ -24,7 +24,10 @@ pub fn background_kickoff_prompt(reason: &WakeReason, reevaluation: &Reevaluatio
     )
 }
 
-pub fn clear_reevaluation_after_success(agent_dir: &Path, reason: &WakeReason) -> anyhow::Result<()> {
+pub fn clear_reevaluation_after_success(
+    agent_dir: &Path,
+    reason: &WakeReason,
+) -> anyhow::Result<()> {
     persist_reevaluation_state(agent_dir, |state| {
         state.last_outcome = Some("background_success".to_string());
         state.retry_not_before = None;
@@ -144,17 +147,36 @@ pub async fn handle_due_wake(
                     // Try to bind to workflow + task
                     workflow_id: {
                         let root = crate::runtime::content_store::root_session_id(session_id);
-                        crate::scheduler::resolve_workflow_id_for_root_session(config.as_ref(), &root).ok().flatten()
+                        crate::scheduler::resolve_workflow_id_for_root_session(
+                            config.as_ref(),
+                            &root,
+                        )
+                        .ok()
+                        .flatten()
                     },
                     task_id: {
                         let root = crate::runtime::content_store::root_session_id(session_id);
-                        let wf_id = crate::scheduler::resolve_workflow_id_for_root_session(config.as_ref(), &root).ok().flatten();
+                        let wf_id = crate::scheduler::resolve_workflow_id_for_root_session(
+                            config.as_ref(),
+                            &root,
+                        )
+                        .ok()
+                        .flatten();
                         match wf_id {
-                            Some(wf) => crate::scheduler::resolve_task_id_for_session(config.as_ref(), None, &wf, session_id).ok().flatten(),
+                            Some(wf) => crate::scheduler::resolve_task_id_for_session(
+                                config.as_ref(),
+                                None,
+                                &wf,
+                                session_id,
+                            )
+                            .ok()
+                            .flatten(),
                             None => None,
                         }
                     },
-                    root_session_id: Some(crate::runtime::content_store::root_session_id(session_id).to_string()),
+                    root_session_id: Some(
+                        crate::runtime::content_store::root_session_id(session_id).to_string(),
+                    ),
                     status: None,
                     decided_at: None,
                     decided_by: None,
@@ -197,7 +219,9 @@ pub async fn handle_due_wake(
         let kickoff = background_kickoff_prompt(&reason, &reevaluation);
         Some(
             execution
-                .spawn_agent_once(agent_id, &kickoff, session_id, None, false, None, None)
+                .spawn_agent_once(
+                    agent_id, &kickoff, session_id, None, false, None, None, None, None,
+                )
                 .await
                 .map(|spawn| spawn.assistant_reply.unwrap_or_default()),
         )
