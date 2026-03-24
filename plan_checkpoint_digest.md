@@ -27,6 +27,8 @@ Current systems:
 5. Two separate SQLite databases (`gateway.db` and `memory.db`) with no reason to be apart.
 6. Memory search ignores tags — the `tags` field exists but `memory.search` only does SQL LIKE on content.
 7. No cross-session learning — each session is isolated; there's no mechanism for agents to learn from past errors, successful approaches, or execution patterns.
+8. No first-class human interaction primitive — agents can ask in plain text or rely on approval flows, but there is no structured way to ask the user a question, present choices, suspend execution, and resume deterministically with the answer.
+9. No operator-grade emergency stop — `workflow.cancel_task` only handles queued or waiting work, not already running tasks or sandbox child processes.
 
 **Design principles:**
 - Agents are meant to be increasingly autonomous, self-evolving, and learning (while staying immutable in their SKILL.md definition). Every storage system must be evaluated through this lens: does it help agents learn and improve?
@@ -45,6 +47,9 @@ Current systems:
 │   ├── [table] task_runs
 │   ├── [table] workflow_events
 │   ├── [table] approvals
+│   ├── [table] user_interactions     ← NEW: persisted user questions, choices, answers
+│   ├── [table] emergency_stops       ← NEW: durable stop requests + audit trail
+│   ├── [table] active_executions     ← NEW: running execution leases + kill metadata
 │   ├── [table] queued_tasks
 │   ├── [table] memories              ← merged from memory.db
 │   ├── [table] causal_events         ← NEW: queryable mirror of causal chain
@@ -81,6 +86,9 @@ Current systems:
 |--------|---------|
 | `causal_events` table | Queryable mirror of all causal chain events — agents can search past executions |
 | `execution_traces` table | Full code execution results (command, exit_code, stdout, stderr, duration) — not truncated |
+| `user_interactions` table | Structured user questions, options, and answers — queryable and resumable |
+| `emergency_stops` table | Durable operator stop requests and final stop outcome for audit / CLI visibility |
+| `active_executions` table | Running execution leases and kill metadata so emergency stop can target live work |
 | `artifact_refs` table | Scoped short refs (`session`/`workflow`/`global`) mapped to canonical artifact digest |
 | Checkpoint system | Universal execution snapshots at all yield points |
 | Live Digest | Structured real-time narrative with reasoning annotations |
@@ -236,6 +244,12 @@ pub enum YieldReason {
     ApprovalRequired {     // approval gate (overlaps TurnContinuation)
         approval_request_id: String,
     },
+    UserInputRequired {    // explicit question / choice for the human
+        interaction_id: String,
+    },
+    EmergencyStop {        // operator circuit breaker; do not auto-resume
+        stop_id: String,
+    },
     MaxTurnsReached,      // loop guard limit
     ManualStop,           // operator/user interrupt
     Error(String),        // recoverable error
@@ -251,6 +265,287 @@ pub enum YieldReason {
 4. On session completion: final checkpoint archived (enables post-mortem replay)
 
 **Relationship to TurnContinuation:** TurnContinuation is kept as a specialized structure for the approval resume path (it has `pending_tool_call`, `remaining_tool_calls`, `completed_tool_results` which are specific to mid-tool-batch suspension). The general checkpoint covers all other yield reasons. When an approval suspension occurs, BOTH a TurnContinuation and a checkpoint are written — the continuation drives the scheduler resume, the checkpoint enables general respawn.
+
+**Relationship to user ask:** Human clarification should use the same checkpoint/resume model as approvals, but without reusing approval-specific state. When an agent calls `user.ask`, the gateway persists a `user_interactions` row, writes a checkpoint with `YieldReason::UserInputRequired`, returns control to the chat surface, and later resumes from checkpoint once the user answers. This makes human clarification a first-class suspension point rather than an ad hoc plain-text convention.
+
+---
+
+### System 1B: Human Interaction and `user.ask`
+
+**Purpose:** Let an agent ask the human a question, optionally present structured choices, suspend execution, and resume deterministically with the answer.
+
+**Why this is separate from approvals:** Approvals are policy gates over privileged actions. Human questions are part of task execution itself: clarifications, tradeoff selection, requirement confirmation, and proposal selection. They need their own schema and resume semantics.
+
+#### `user_interactions` table
+
+```sql
+CREATE TABLE user_interactions (
+    interaction_id  TEXT PRIMARY KEY,      -- ui-* short id
+    session_id      TEXT NOT NULL,
+    root_session_id TEXT NOT NULL,
+    workflow_id     TEXT,
+    task_id         TEXT,
+    agent_id        TEXT NOT NULL,
+    turn_id         TEXT,
+    kind            TEXT NOT NULL,         -- clarification | decision | proposal | confirmation
+    question        TEXT NOT NULL,
+    context         TEXT,
+    options_json    TEXT,                  -- JSON array of {id,label,value}
+    allow_freeform  INTEGER NOT NULL,      -- 1 = free text answer allowed
+    status          TEXT NOT NULL,         -- pending | answered | cancelled | expired
+    answer_option_id TEXT,
+    answer_text     TEXT,
+    answered_by     TEXT,
+    created_at      TEXT NOT NULL,
+    answered_at     TEXT,
+    expires_at      TEXT
+);
+
+CREATE INDEX idx_user_interactions_session ON user_interactions(session_id);
+CREATE INDEX idx_user_interactions_root_session ON user_interactions(root_session_id);
+CREATE INDEX idx_user_interactions_workflow ON user_interactions(workflow_id);
+CREATE INDEX idx_user_interactions_status ON user_interactions(status);
+CREATE INDEX idx_user_interactions_agent ON user_interactions(agent_id, created_at);
+```
+
+#### Tool contract: `user.ask`
+
+```json
+{
+  "kind": "clarification",
+  "question": "Which output format do you want?",
+  "context": "I can produce the report as Markdown, HTML, or JSON. The format affects artifact shape and follow-up tooling.",
+  "options": [
+    {"id": "md", "label": "Markdown", "value": "markdown"},
+    {"id": "html", "label": "HTML", "value": "html"},
+    {"id": "json", "label": "JSON", "value": "json"}
+  ],
+  "allow_freeform": true
+}
+```
+
+Returns:
+
+```json
+{
+  "ok": true,
+  "interaction_id": "ui-9c1a2f4d",
+  "status": "awaiting_user"
+}
+```
+
+Side effects:
+- Insert row into `user_interactions`
+- Write checkpoint with `YieldReason::UserInputRequired`
+- Emit causal event / workflow event for visibility
+- Stop the current turn cleanly
+
+#### Resume contract
+
+When the user answers:
+1. Gateway updates `user_interactions.status = 'answered'`
+2. Gateway loads the latest checkpoint for the session
+3. Gateway reconstructs execution state and injects a synthetic answer record into the resumed turn context
+4. Agent continues from the exact suspended point
+
+**Injected answer shape:**
+
+```json
+{
+  "interaction_id": "ui-9c1a2f4d",
+  "kind": "clarification",
+  "question": "Which output format do you want?",
+  "answer_option_id": "md",
+  "answer_text": "markdown"
+}
+```
+
+#### CLI / chat behavior
+
+- The chat UI renders the question, context, and options
+- The user can answer with either an option selection or free text
+- `trace` commands can inspect interaction history alongside causal and workflow events
+
+#### Incoming user messages during active workflows
+
+When the user sends a new chat message while child agents are still running, the message should route to the **lead session** for that root session, which is typically the planner. The planner is the coordination point for user intent updates while specialists continue independently in the background.
+
+Expected behavior:
+1. User sends a new `event.ingest` chat message for an existing root session
+2. Gateway resolves the session's lead binding and delivers the message to the lead agent
+3. Running child tasks are **not** interrupted automatically
+4. Planner decides how to react:
+  - answer immediately without changing delegated work
+  - revise the plan and spawn new tasks
+  - cancel superseded tasks
+  - wait for current tasks and incorporate the new message later
+  - escalate to `user.ask` / `workflow.wait` / cancel tools as needed
+
+This keeps the planner as the single authority for orchestration changes while preserving background task durability. It also avoids broadcasting the same user message to every child session.
+
+**Design rule:** direct user messages are planner-managed by default; worker sessions only receive human input explicitly via `user.ask` resume or an explicit targeted routing mechanism.
+
+#### Query examples
+
+- "All pending clarifications in this workflow": `WHERE workflow_id = ? AND status = 'pending'`
+- "What decisions did the user make in session X": `WHERE session_id = ? AND kind = 'decision' AND status = 'answered'`
+- "How often did this agent need clarification": `WHERE agent_id = ? AND kind = 'clarification'`
+
+---
+
+### System 1C: Emergency Stop / Circuit Breaker
+
+**Purpose:** Let the root session be halted immediately, including all active child work, already running workflow tasks, and sandbox child processes.
+
+**Why this is separate from `workflow.cancel_task`:** `workflow.cancel_task` is a planner-facing orchestration tool for graceful cancellation. Today it only cancels `Pending`, `Runnable`, and `AwaitingApproval` tasks. Emergency stop is a gateway-owned safety control that must also target `Running` work and prevent automatic resume.
+
+**Primary control boundary:** emergency stop is a **root-session** operation first. Internally it fans out to workflow, task, and process scopes, but the user-facing and policy-facing control surface should be `root_session.emergency_stop(root_session_id, reason)`.
+
+**Authorized callers:**
+- **User / operator** via chat, CLI, or API against a root session
+- **Gateway itself** when a security monitor or policy engine detects a breach, sandbox escape signal, credential exfiltration attempt, or other hard-stop condition
+- **Future emergency-manager agent** with an explicit high-privilege capability dedicated to emergency response
+
+The last category must not reuse ordinary workflow tools. It should eventually get a dedicated policy capability such as `EmergencyStop` so the authority is explicit and tightly reviewable.
+
+**Semantics:**
+1. Authorized caller invokes `root_session.emergency_stop` (or an internal gateway equivalent) for a root session
+2. Gateway writes a durable stop request row and marks the root workflow/session as stopping
+3. Gateway cancels queued work, expires pending human interactions/approvals for the stopped scope, aborts active async task handles, and kills tracked sandbox child processes
+4. Each affected task transitions to a terminal aborted/cancelled state
+5. Root session receives a terminal checkpoint with `YieldReason::EmergencyStop`; the session does not auto-resume
+6. CLI / trace surfaces show whether the stop fully succeeded or was only partially enforced
+
+#### Public contract
+
+```json
+{
+  "root_session_id": "chat-root-123",
+  "reason": "Security breach suspected: attempted secret exfiltration",
+  "requested_by_type": "user",
+  "requested_by_id": "alice"
+}
+```
+
+Returns immediately with a durable stop id and current state:
+
+```json
+{
+  "ok": true,
+  "stop_id": "estop-9f3c2a10",
+  "root_session_id": "chat-root-123",
+  "status": "requested"
+}
+```
+
+#### Status model
+
+Extend workflow/task lifecycle state so emergency-stop is explicit instead of overloading normal cancellation:
+
+```rust
+pub enum WorkflowRunStatus {
+  Active,
+  WaitingChildren,
+  BlockedApproval,
+  Resumable,
+  EmergencyStopping,
+  EmergencyStopped,
+  Completed,
+  Failed,
+  Cancelled,
+}
+
+pub enum TaskRunStatus {
+  Pending,
+  Runnable,
+  Running,
+  AwaitingApproval,
+  Paused,
+  Aborting,
+  Aborted,
+  Succeeded,
+  Failed,
+  Cancelled,
+}
+```
+
+`Cancelled` remains the graceful planner/scheduler path. `Aborted` means work was force-stopped by the gateway after it had started or while a stop was in progress.
+
+#### Durable schema
+
+```sql
+CREATE TABLE emergency_stops (
+  stop_id          TEXT PRIMARY KEY,      -- estop-* short id
+  scope_type       TEXT NOT NULL,         -- root_session | workflow | session | task
+  scope_id         TEXT NOT NULL,
+  root_session_id  TEXT NOT NULL,
+  workflow_id      TEXT,
+  requested_by_type TEXT NOT NULL,        -- user | gateway | agent
+  requested_by_id   TEXT NOT NULL,        -- username | subsystem name | agent_id
+  reason           TEXT,
+  trigger_kind     TEXT NOT NULL,         -- manual | security_policy | automated_response
+  mode             TEXT NOT NULL,         -- immediate
+  status           TEXT NOT NULL,         -- requested | stopping | stopped | partially_stopped | failed
+  requested_at     TEXT NOT NULL,
+  completed_at     TEXT,
+  details_json     TEXT                   -- JSON summary: killed_pids, aborted_tasks, failures
+);
+
+CREATE INDEX idx_emergency_stops_root ON emergency_stops(root_session_id, requested_at);
+CREATE INDEX idx_emergency_stops_workflow ON emergency_stops(workflow_id, requested_at);
+CREATE INDEX idx_emergency_stops_status ON emergency_stops(status);
+CREATE INDEX idx_emergency_stops_requester ON emergency_stops(requested_by_type, requested_by_id, requested_at);
+
+CREATE TABLE active_executions (
+  execution_id      TEXT PRIMARY KEY,
+  root_session_id   TEXT NOT NULL,
+  workflow_id       TEXT,
+  task_id           TEXT,
+  session_id        TEXT NOT NULL,
+  agent_id          TEXT NOT NULL,
+  execution_kind    TEXT NOT NULL,        -- root_turn | workflow_task | sandbox_process | middleware
+  driver            TEXT,
+  pid               INTEGER,
+  host_id           TEXT NOT NULL,
+  status            TEXT NOT NULL,        -- running | stop_requested | stopped | lost
+  started_at        TEXT NOT NULL,
+  heartbeat_at      TEXT NOT NULL,
+  stop_requested_at TEXT,
+  stopped_at        TEXT,
+  stop_id           TEXT
+);
+
+CREATE INDEX idx_active_executions_root ON active_executions(root_session_id, status);
+CREATE INDEX idx_active_executions_workflow ON active_executions(workflow_id, status);
+CREATE INDEX idx_active_executions_task ON active_executions(task_id, status);
+CREATE INDEX idx_active_executions_session ON active_executions(session_id, status);
+```
+
+`active_executions` is not the only kill mechanism. It is the durable ownership ledger used for visibility, restart reconciliation, and best-effort stop propagation. The live gateway still needs an in-memory registry of abort handles / process handles for immediate enforcement.
+
+#### Runtime requirements
+
+- Scheduler registers every running workflow task in an `ActiveExecutionRegistry` with an abort handle before `tokio::spawn`
+- Sandbox execution registers child process ownership before blocking on `wait_with_output()`
+- Middleware / helper subprocesses register the same way as sandbox processes
+- Emergency stop first hits the in-memory registry for immediate abort/kill, then persists final stop outcome in SQLite
+- Gateway security monitors can invoke the same root-session stop path directly without going through chat UX or planner mediation
+- Future emergency-manager agents must call the same root-session stop path through a dedicated privileged tool/capability, not via generic workflow controls
+- On restart, the gateway scans `active_executions` with stale heartbeats and marks them `lost` or `stopped`; no hidden zombie work
+
+#### Interaction with checkpoints and human interaction
+
+- Pending `user_interactions` in the stopped scope move to `cancelled` with linkage to `stop_id`
+- Pending approvals in the stopped scope are marked cancelled/expired and never resume work
+- Root session writes a terminal checkpoint using `YieldReason::EmergencyStop { stop_id }`
+- A later manual restart must create a fresh workflow or explicitly restore from a non-emergency checkpoint; emergency stop is terminal by default
+
+#### Query examples
+
+- "Show all emergency stops for this root session": `WHERE root_session_id = ? ORDER BY requested_at DESC`
+- "Show all security-triggered emergency stops": `WHERE requested_by_type = 'gateway' AND trigger_kind = 'security_policy'`
+- "Which tasks were aborted by stop X": `WHERE stop_id = ? AND status IN ('stopped', 'lost')`
+- "What work is still believed to be running after a stop": `WHERE root_session_id = ? AND status IN ('running', 'stop_requested')`
 
 ---
 
@@ -530,6 +825,9 @@ gateway.db
 ├── task_runs            (existing)
 ├── workflow_events      (existing)
 ├── approvals            (existing)
+├── user_interactions    (NEW: structured user questions + answers)
+├── emergency_stops      (NEW: durable stop requests + outcomes)
+├── active_executions    (NEW: running execution leases + kill metadata)
 ├── queued_tasks         (existing)
 ├── memories             (merged from memory.db, enhanced tag queries)
 ├── causal_events        (NEW: queryable mirror of causal chain JSONL)
@@ -554,7 +852,33 @@ During Session:
        │                                            │  Checkpoint      │
        │                                            │  (opaque JSON)   │
        │                                            └─────────────────┘
+      │
+      ├── user.ask ─────────────────────────►      ┌─────────────────┐
+      │                                            │ user_interactions│
+      │                                            │ gateway.db       │
+      │                                            └─────────────────┘
+      │                                                     │
+      │                                              answer selected
+      │                                                     │
+      │                                                     ▼
+      │                                            ┌─────────────────┐
+      │                                            │ Resume from      │
+      │                                            │ checkpoint       │
+      │                                            └─────────────────┘
        │
+        ├── emergency stop ──────────────────►      ┌─────────────────┐
+        │                                            │ emergency_stops │
+        │                                            │ active_execs    │
+        │                                            └─────────────────┘
+        │                                                     │
+        │                                   abort async tasks / kill pids
+        │                                                     │
+        │                                                     ▼
+        │                                            ┌─────────────────┐
+        │                                            │ terminal        │
+        │                                            │ checkpoint      │
+        │                                            └─────────────────┘
+        │
        ├── per event ────────────────────────►      ┌─────────────────┐
        │                                            │  Causal Chain    │
        │                                            │  (JSONL, hashed) │
@@ -589,6 +913,11 @@ On Respawn:
   ┌──────────────┐
   │ Checkpoint   │────► reconstruct executor ──► execute_with_history()
   └──────────────┘
+
+On User Answer:
+  ┌──────────────────┐
+  │ user_interactions│────► update answer ──► load checkpoint ──► resume turn
+  └──────────────────┘
 
 Agent Learning (cross-session):
   ┌──────────────┐
@@ -629,7 +958,7 @@ Make causal chain data and execution results queryable. This is foundation for a
 - [x] **1.5** Implement `execution.search` native tool in `tools.rs`. Arguments: `{ tool_name, success, error_type, command_pattern, agent_id, limit }`. Queries `execution_traces` table. Returns structured results. Available to all agents (no capability gate — agents should learn from all visible executions).
 - [x] **1.6** Remove gateway causal chain (`.gateway/history/causal_chain.jsonl`). Stop calling `init_gateway_causal_logger()` and `log_gateway_causal_event()` in `execution.rs`. Gateway-level events that matter (agent spawn, approvals) are already in `gateway.db` tables or can be written to agent causal chains.
 - [x] **1.7** Update `trace session` CLI to query `causal_events` table instead of reading JSONL files. Add `--agent` filter. Show evidence_ref when available.
-- [ ] **1.8** Make evidence mode a config option (not just env var). Support `full`/`errors`/`off`. Default: `full` in dev, recommend `errors` in production.
+- [x] **1.8** Make evidence mode a config option (not just env var). Support `full`/`errors`/`off`. Default: `full` in dev, recommend `errors` in production.
 - [ ] **1.9** Unit test: dual-write produces identical event data in JSONL and causal_events table.
 - [ ] **1.10** Unit test: execution_traces captures full stdout/stderr for both successful and failed sandbox.exec calls.
 - [ ] **1.11** Integration test: agent runs sandbox.exec → fails → execution_traces has full error → agent uses `execution.search` to find the error → gets structured result.
@@ -737,13 +1066,49 @@ Generalize `TurnContinuation` into a universal `SessionCheckpoint` at all yield 
 - [ ] **2.9** Integration test: agent runs 3 turns → hibernates → checkpoint saved → new executor loads checkpoint → agent continues from turn 4 with correct history and loop guard state.
 - [ ] **2.10** Integration test: agent hits budget limit → checkpoint saved → respawn with increased budget → agent continues.
 
+### Phase 2B: Human Interaction Suspension
+Add a first-class `user.ask` tool that suspends execution and resumes from checkpoint with the human's answer.
+
+- [ ] **2B.1** Add `user_interactions` table to `GatewayStore::open()` in `gateway_store.rs`. Schema as defined above with indexes on session/root_session/workflow/status.
+- [ ] **2B.2** Extend `YieldReason` with `UserInputRequired { interaction_id }` in `checkpoint.rs`.
+- [ ] **2B.3** Implement `user.ask` native tool in `tools.rs`. Arguments: `{ kind, question, context, options, allow_freeform, expires_at? }`. Always available.
+- [ ] **2B.4** On `user.ask`, persist interaction row, emit a causal event, save checkpoint, and stop the current turn cleanly.
+- [ ] **2B.5** Add gateway APIs / CLI plumbing to answer an interaction by `interaction_id` with either `answer_option_id` or `answer_text`.
+- [ ] **2B.6** Implement `resume_from_user_interaction()` in `execution.rs`: load checkpoint, inject the recorded answer into resumed state, and continue execution.
+- [ ] **2B.7** Wire chat UI rendering so questions with options are shown as structured prompts instead of plain assistant text only.
+- [ ] **2B.8** Extend `trace` commands to display user interactions alongside workflow and causal history.
+- [ ] **2B.9** Integration test: agent calls `user.ask` → session suspends → user answers → agent resumes from checkpoint with preserved loop guard and history.
+- [ ] **2B.10** Integration test: option-based answer resumes with selected option id and canonical value.
+- [ ] **2B.11** Integration test: freeform answer resumes with raw user text and is captured in digest + causal history.
+- [ ] **2B.12** Document and enforce incoming user message routing during active workflows: default route to lead/planner session; do not auto-interrupt running child tasks.
+- [ ] **2B.13** Integration test: user sends a new message while async child tasks are running → planner receives it → child tasks continue unless planner cancels them explicitly.
+
+### Phase 2C: Emergency Stop / Circuit Breaker
+Add a true root-session emergency stop path for running workflows, sessions, and sandbox child processes.
+
+- [ ] **2C.1** Extend `WorkflowRunStatus` and `TaskRunStatus` in `autonoetic-types/src/workflow.rs` with `EmergencyStopping`, `EmergencyStopped`, `Aborting`, and `Aborted`. Preserve serde compatibility for existing states.
+- [ ] **2C.2** Add `emergency_stops` and `active_executions` tables to `GatewayStore::open()` in `gateway_store.rs`, with store APIs for create/update/list and stale-heartbeat reconciliation.
+- [ ] **2C.3** Introduce an in-memory `ActiveExecutionRegistry` in the gateway runtime to track `tokio` abort handles and sandbox/middleware process kill handles keyed by root session / workflow / task / session.
+- [ ] **2C.4** Register workflow child tasks before `tokio::spawn` in `scheduler.rs`, and unregister them on normal completion, failure, approval suspension, or abort.
+- [ ] **2C.5** Register sandbox child process ownership before `wait_with_output()` in both lifecycle and native-tool execution paths so emergency stop can kill already-running child processes.
+- [ ] **2C.6** Implement `root_session.emergency_stop` plus CLI/API/chat plumbing. Behavior: persist stop request, mark the root workflow/session `EmergencyStopping`, cancel queued tasks, abort live tasks/processes, cancel pending approvals/interactions in scope, then finalize status.
+- [ ] **2C.6a** Add an internal gateway self-protection entrypoint that invokes the same stop pipeline when security policy detects a hard-stop breach.
+- [ ] **2C.6b** Reserve a dedicated privileged capability/tool path for a future emergency-manager agent; do not expose emergency stop through ordinary workflow delegation tools.
+- [ ] **2C.7** Write a terminal checkpoint with `YieldReason::EmergencyStop { stop_id }` and prevent auto-resume from that checkpoint.
+- [ ] **2C.8** Surface emergency-stop state in `trace` / workflow inspection commands, including partial-stop failures and any `lost` active executions after restart.
+- [ ] **2C.9** Integration test: root workflow with two running async children receives emergency stop → queued work cancelled, running tasks aborted, workflow ends `EmergencyStopped`.
+- [ ] **2C.10** Integration test: sandbox child process running under `wait_with_output()` receives emergency stop → process is killed and task ends `Aborted`.
+- [ ] **2C.11** Integration test: emergency stop during pending approval or `user.ask` interaction cancels the pending gate and does not allow resume.
+- [ ] **2C.12** Restart test: gateway crashes after stop requested but before completion → stale `active_executions` reconciled on startup and stop finishes as `stopped` or `partially_stopped` with audit details.
+- [ ] **2C.13** Authorization test: user/operator, gateway security subsystem, and future privileged agent path are accepted; ordinary agents without the dedicated capability are denied.
+
 ### Phase 3: Live Digest
 Replace `timeline.md` with a richer real-time narrative.
 
 - [ ] **3.1** Create `autonoetic-gateway/src/runtime/live_digest.rs` with `LiveDigestWriter`. Methods: `start_session()`, `start_turn()`, `record_action()`, `record_result()`, `record_error()`, `record_annotation()`, `end_turn()`, `write_summary()`. Output: structured Markdown.
 - [ ] **3.2** Implement `digest.annotate` native tool in `tools.rs`. Arguments: `{ "type": "reasoning|decision|observation|lesson", "content": "..." }`. Appends to live digest. Always available.
 - [ ] **3.3** Wire `LiveDigestWriter` into `execute_with_history` turn loop. Replace `SessionTimeline` calls with `LiveDigestWriter` calls.
-- [ ] **3.4** Add tool result formatting: for `sandbox.exec`, extract exit_code, stdout preview, stderr preview. For errors, extract error_type and message. For artifacts, extract ID and file list.
+- [ ] **3.4** Add tool result formatting: for `sandbox.exec`, extract exit_code, stdout preview, stderr preview. For errors, extract error_type and message. For artifacts, extract ID and file list. For `user.ask`, record the question, options, and final answer.
 - [ ] **3.5** Add turn summary and session summary blocks.
 - [ ] **3.6** Remove `session_timeline.rs` and all `SessionTimeline` references.
 - [ ] **3.7** Update agent system prompts to document `digest.annotate` tool.
@@ -823,6 +1188,8 @@ The agent doesn't need to be told to use these — the system prompts document t
 | Post-session digest agent LLM cost | Input is live digest (1-5KB); skip trivial sessions; configurable |
 | Evidence files consume disk in production | Configurable: `full`/`errors`/`off`. Recommend `errors` for production. |
 | Checkpoint files grow large | Prune old checkpoints (keep last 3); history capped at 400 messages |
+| Agents may over-ask the user | Add `kind`, `expires_at`, and future rate-limit / policy controls; surface pending interactions so planners can batch or avoid redundant asks |
+| Emergency stop creates false confidence if live handles are not tracked | Make `active_executions` + in-memory registry mandatory for stop-on-running-work; report `partially_stopped` or `lost` explicitly instead of pretending success |
 | Memory table grows unbounded | TTL/archival policy (Phase 6); confidence scores enable aging |
 | Agents overwhelmed by too many search results | All search tools have `limit` parameter; results sorted by recency |
 | Short artifact IDs collide or are confused across sessions | Use scoped short refs (`artifact_refs`) mapped to canonical digest; enforce strict scope lookup and digest verification |
@@ -840,3 +1207,5 @@ The agent doesn't need to be told to use these — the system prompts document t
 6. **Agent learning:** An agent encountering an error can query past sessions for similar errors and their resolutions.
 7. **Fewer redundancies:** Gateway causal chain deleted. Session timeline replaced. memory.db merged. Session snapshot subsumed.
 8. **Artifact robustness + ergonomics:** Agents can use short scoped refs in prompts, while gateway always resolves to canonical digest with integrity checks.
+9. **Human interaction is first-class:** An agent can ask a structured question, suspend, resume from checkpoint with the user's answer, and query that interaction later.
+10. **Emergency stop is real:** Operator can stop a root workflow with running children, the gateway aborts live work, writes an auditable stop record, and does not silently auto-resume.
