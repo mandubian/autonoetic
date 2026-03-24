@@ -1058,16 +1058,16 @@ If we need a faster path than scoped refs:
 ### Phase 2: Checkpoint System
 Generalize `TurnContinuation` into a universal `SessionCheckpoint` at all yield points.
 
-- [ ] **2.1** Define `SessionCheckpoint`, `YieldReason`, `LlmConfigSnapshot` structs in a new `autonoetic-gateway/src/runtime/checkpoint.rs`. Include all fields needed for exact respawn.
-- [ ] **2.2** Add `save_checkpoint()` and `load_latest_checkpoint()` functions. Storage: `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json`. Include pruning logic (keep last N, default 3).
-- [ ] **2.3** Write checkpoint at hibernation yield points in `lifecycle.rs`. After `StopReason::EndTurn` / `StopReason::StopSequence` handling, call `save_checkpoint()` with `YieldReason::Hibernation`.
-- [ ] **2.4** Write checkpoint at budget exhaustion. Add `save_checkpoint()` with `YieldReason::BudgetExhausted` before returning.
-- [ ] **2.5** Write checkpoint at max turns (loop guard). Add `save_checkpoint()` with `YieldReason::MaxTurnsReached`.
-- [ ] **2.6** Add `LlmConfigSnapshot` capture at session start. Store `runtime_lock_hash` (SHA-256 of `runtime.lock` content).
-- [ ] **2.7** Implement `respawn_from_checkpoint()` in `execution.rs`: load checkpoint → reconstruct `AgentExecutor` state → call `execute_with_history` with checkpoint history. Wire into `spawn_agent_once` as alternative to fresh start.
-- [ ] **2.8** Subsume session snapshot into checkpoint: modify `SessionFork::fork()` to read from checkpoint. Remove `session_snapshot.rs` if fully replaced.
-- [ ] **2.9** Integration test: agent runs 3 turns → hibernates → checkpoint saved → new executor loads checkpoint → agent continues from turn 4 with correct history and loop guard state.
-- [ ] **2.10** Integration test: agent hits budget limit → checkpoint saved → respawn with increased budget → agent continues.
+- [x] **2.1** Define `SessionCheckpoint`, `YieldReason`, `LlmConfigSnapshot` structs in a new `autonoetic-gateway/src/runtime/checkpoint.rs`. Include all fields needed for exact respawn.
+- [x] **2.2** Add `save_checkpoint()` and `load_latest_checkpoint()` functions. Storage: `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json`. Include pruning logic (keep last N, default 3).
+- [x] **2.3** Write checkpoint at hibernation yield points in `lifecycle.rs`. After `StopReason::EndTurn` / `StopReason::StopSequence` handling, call `save_checkpoint()` with `YieldReason::Hibernation`.
+- [x] **2.4** Write checkpoint at budget exhaustion. Add `save_checkpoint()` with `YieldReason::BudgetExhausted` before returning.
+- [x] **2.5** Write checkpoint at max turns (loop guard). Add `save_checkpoint()` with `YieldReason::MaxTurnsReached`.
+- [x] **2.6** Add `LlmConfigSnapshot` capture at session start. Store `runtime_lock_hash` (SHA-256 of `runtime.lock` content).
+- [x] **2.7** Implement `respawn_from_checkpoint()` in `execution.rs`: load checkpoint → reconstruct `AgentExecutor` state → call `execute_with_history` with checkpoint history. Wire into `spawn_agent_once` as alternative to fresh start.
+- [x] **2.8** Subsume session snapshot into checkpoint: modify `SessionFork::fork()` to read from checkpoint. Keep `session_snapshot.rs` for backward compatibility; add `fork_from_checkpoint()` method.
+- [x] **2.9** Integration test: agent runs 3 turns → hibernates → checkpoint saved → new executor loads checkpoint → agent continues from turn 4 with correct history and loop guard state.
+- [x] **2.10** Integration test: agent hits budget limit → checkpoint saved → respawn with increased budget → agent continues.
 
 ### Phase 2B: Human Interaction Suspension
 Add a first-class `user.ask` tool that suspends execution and resumes from checkpoint with the human's answer.

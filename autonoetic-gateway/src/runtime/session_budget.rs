@@ -165,6 +165,13 @@ impl SessionBudgetRegistry {
         st.tool_invocations = next;
         Ok(())
     }
+
+    /// Snapshot current budget counters for a scope: (llm_rounds, llm_tokens, estimated_cost_usd).
+    pub fn snapshot_counters(&self, scope: &str) -> Option<(u64, u64, f64)> {
+        let map = self.scopes.lock().ok()?;
+        let st = map.get(scope)?;
+        Some((st.llm_rounds, st.llm_tokens, st.session_cost_usd))
+    }
 }
 
 #[cfg(test)]

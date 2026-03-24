@@ -180,6 +180,45 @@ impl SessionFork {
     pub fn initial_history(&self) -> &[Message] {
         &self.initial_history
     }
+
+    /// Creates a new session by forking from a checkpoint.
+    ///
+    /// Checkpoints contain full execution state including conversation history,
+    /// which is what SessionFork needs. This provides an alternative to
+    /// `fork()` that reads from checkpoint files instead of snapshot captures.
+    pub fn fork_from_checkpoint(
+        checkpoint: &crate::runtime::checkpoint::SessionCheckpoint,
+        new_session_id: Option<&str>,
+        branch_message: Option<&str>,
+        gateway_dir: &Path,
+    ) -> anyhow::Result<Self> {
+        let store = ContentStore::new(gateway_dir)?;
+
+        let new_session_id = new_session_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("fork-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+
+        // Build history from checkpoint
+        let mut history = checkpoint.history.clone();
+
+        // Add branch message if provided
+        if let Some(msg_text) = branch_message {
+            history.push(Message::user(msg_text));
+        }
+
+        // Copy history to new session
+        let history_json = serde_json::to_string(&history)?;
+        let history_handle = store.write(history_json.as_bytes())?;
+        store.register_name(&new_session_id, "session_history", &history_handle)?;
+
+        Ok(SessionFork {
+            new_session_id,
+            source_session_id: checkpoint.session_id.clone(),
+            fork_turn: checkpoint.turn_counter as usize,
+            history_handle,
+            initial_history: history,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -261,5 +300,58 @@ mod tests {
         assert_eq!(fork.fork_turn, 1);
         assert_eq!(fork.initial_history.len(), 3); // 2 original + 1 branch message
         assert_eq!(fork.initial_history[2].content, "Try a different approach");
+    }
+
+    #[test]
+    fn test_fork_from_checkpoint() {
+        use crate::runtime::checkpoint::{SessionCheckpoint, YieldReason};
+        use crate::runtime::guard::LoopGuardState;
+
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let history = vec![Message::user("Hello"), Message::assistant("Hi!")];
+
+        let checkpoint = SessionCheckpoint {
+            history: history.clone(),
+            turn_counter: 2,
+            loop_guard_state: LoopGuardState {
+                max_loops_without_progress: 10,
+                current_loops: 0,
+                last_failure_hash: None,
+                consecutive_failures: 0,
+            },
+            agent_id: "test-agent".to_string(),
+            session_id: "original-session".to_string(),
+            turn_id: "turn-002".to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+        };
+
+        let fork = SessionFork::fork_from_checkpoint(
+            &checkpoint,
+            Some("checkpoint-fork"),
+            Some("Continue from here"),
+            &gateway_dir,
+        )
+        .unwrap();
+
+        assert_eq!(fork.new_session_id, "checkpoint-fork");
+        assert_eq!(fork.source_session_id, "original-session");
+        assert_eq!(fork.fork_turn, 2);
+        assert_eq!(fork.initial_history.len(), 3); // 2 original + 1 branch message
+        assert_eq!(fork.initial_history[2].content, "Continue from here");
     }
 }
