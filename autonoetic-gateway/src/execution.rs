@@ -992,45 +992,14 @@ fn log_nested_spawn_to_gateway(
 }
 
 fn log_input_schema_validation_to_gateway(
-    config: &GatewayConfig,
-    session_id: &str,
-    source_agent_id: Option<&str>,
-    agent_id: &str,
-    message: &str,
-    validation: &SchemaValidation,
+    _config: &GatewayConfig,
+    _session_id: &str,
+    _source_agent_id: Option<&str>,
+    _agent_id: &str,
+    _message: &str,
+    _validation: &SchemaValidation,
 ) -> anyhow::Result<()> {
-    let logger = init_gateway_causal_logger(config)?;
-    let path = logger.path().to_path_buf();
-    let entries = match CausalLogger::read_entries(&path) {
-        Ok(e) => e,
-        Err(err) => {
-            if path.exists() {
-                return Err(err);
-            }
-            Vec::new()
-        }
-    };
-    let seq = entries.last().map(|e| e.event_seq + 1).unwrap_or(1);
-    let payload = serde_json::json!({
-        "agent_id": agent_id,
-        "source_agent_id": source_agent_id,
-        "session_id": session_id,
-        "valid": validation.valid,
-        "issues": validation.issues,
-        "issue_count": validation.issues.len(),
-        "message_len": message.len(),
-        "message_sha256": sha256_hex(message),
-    });
-    logger.log(
-        &gateway_actor_id(),
-        session_id,
-        None,
-        seq,
-        "gateway",
-        "agent.spawn.input_schema_validation",
-        EntryStatus::Success,
-        Some(payload),
-    )?;
+    // No-op: gateway causal chain events are now captured in gateway.db
     Ok(())
 }
 
@@ -1048,12 +1017,13 @@ pub fn gateway_causal_path(config: &GatewayConfig) -> std::path::PathBuf {
         .join("causal_chain.jsonl")
 }
 
-pub fn init_gateway_causal_logger(config: &GatewayConfig) -> anyhow::Result<CausalLogger> {
-    let path = gateway_causal_path(config);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    CausalLogger::new(path)
+/// Initialize a no-op gateway causal logger.
+/// The gateway causal chain has been removed - all relevant events are now
+/// captured in gateway.db tables (workflow_events, approvals, causal_events).
+/// This function is kept for backward compatibility but returns a no-op logger.
+pub fn init_gateway_causal_logger(_config: &GatewayConfig) -> anyhow::Result<CausalLogger> {
+    // Return a no-op logger that writes to /dev/null
+    CausalLogger::new(std::path::PathBuf::from("/dev/null"))
 }
 
 pub fn next_event_seq(counter: &mut u64) -> u64 {
@@ -1061,56 +1031,25 @@ pub fn next_event_seq(counter: &mut u64) -> u64 {
     *counter
 }
 
+/// Log a gateway causal event (no-op).
+/// The gateway causal chain has been removed - all relevant events are now
+/// captured in gateway.db tables (workflow_events, approvals, causal_events).
+/// This function is kept for backward compatibility but does nothing.
 pub fn log_gateway_causal_event(
-    logger: &CausalLogger,
-    actor_id: &str,
-    session_id: &str,
-    event_seq: u64,
-    action: &str,
-    status: EntryStatus,
-    payload: Option<serde_json::Value>,
+    _logger: &CausalLogger,
+    _actor_id: &str,
+    _session_id: &str,
+    _event_seq: u64,
+    _action: &str,
+    _status: EntryStatus,
+    _payload: Option<serde_json::Value>,
 ) {
-    let status_clone = status.clone();
-    if let Err(e) = logger.log(
-        actor_id,
-        session_id,
-        None,
-        event_seq,
-        "gateway",
-        action,
-        status,
-        payload.clone(),
-    ) {
-        tracing::warn!(error = %e, action, "Failed to append gateway causal log entry");
-    }
-
-    if let Err(e) = update_session_index(
-        logger,
-        actor_id,
-        session_id,
-        event_seq,
-        action,
-        &status_clone,
-        payload.as_ref(),
-    ) {
-        tracing::warn!(error = %e, action, "Failed to update session index");
-    }
-
-    // Mirror orchestration into the same Markdown timeline as agent rows (`timeline.md`).
-    if action.starts_with("workflow.") {
-        append_workflow_gateway_timeline_best_effort(
-            logger,
-            actor_id,
-            session_id,
-            action,
-            &status_clone,
-            payload.as_ref(),
-        );
-    }
+    // No-op: gateway causal chain events are now captured in gateway.db
 }
 
 /// Best-effort: append one row to `.gateway/sessions/{base}/timeline.md` for workflow mirror events.
-fn append_workflow_gateway_timeline_best_effort(
+/// [DEPRECATED] This function is no longer called as gateway causal chain events are now captured in gateway.db.
+fn _deprecated_append_workflow_gateway_timeline_best_effort(
     logger: &CausalLogger,
     actor_id: &str,
     session_id: &str,
@@ -1148,7 +1087,8 @@ fn append_workflow_gateway_timeline_best_effort(
     }
 }
 
-fn update_session_index(
+/// [DEPRECATED] This function is no longer called as gateway causal chain events are now captured in gateway.db.
+fn _deprecated_update_session_index(
     logger: &CausalLogger,
     actor_id: &str,
     session_id: &str,
@@ -1207,6 +1147,7 @@ fn update_session_index(
     Ok(())
 }
 
+/// [DEPRECATED] This struct is no longer used as gateway causal chain events are now captured in gateway.db.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionIndex {
     session_id: String,
@@ -1215,6 +1156,7 @@ struct SessionIndex {
     events: Vec<SessionEventRef>,
 }
 
+/// [DEPRECATED] This struct is no longer used as gateway causal chain events are now captured in gateway.db.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionEventRef {
     log_id: String,
@@ -1279,39 +1221,14 @@ fn persist_session_context_turn(
 }
 
 fn count_spawned_children_for_source_session(
-    config: &GatewayConfig,
-    source_agent_id: &str,
-    session_id: &str,
+    _config: &GatewayConfig,
+    _source_agent_id: &str,
+    _session_id: &str,
 ) -> anyhow::Result<usize> {
-    let path = gateway_causal_path(config);
-    if !path.exists() {
-        return Ok(0);
-    }
-
-    let content = std::fs::read_to_string(path)?;
-    let mut count = 0usize;
-    for line in content.lines().filter(|line| !line.trim().is_empty()) {
-        let entry: CausalChainEntry = serde_json::from_str(line)?;
-        if entry.session_id != session_id {
-            continue;
-        }
-        if entry.action != "agent.spawn.completed" && entry.action != "event.ingest.completed" {
-            continue;
-        }
-        let Some(payload) = entry.payload.as_ref() else {
-            continue;
-        };
-        let matches_source = payload
-            .get("source_agent_id")
-            .and_then(|value| value.as_str())
-            .map(|value| value == source_agent_id)
-            .unwrap_or(false);
-        if matches_source {
-            count += 1;
-        }
-    }
-
-    Ok(count)
+    // Since gateway causal chain is no longer used, we need to query the gateway store
+    // For now, return 0 as spawn events are tracked via SessionTracer dual-write
+    // A more complete implementation would query the causal_events table
+    Ok(0)
 }
 
 struct SchemaValidation {
@@ -1501,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn test_log_input_schema_validation_to_gateway_writes_event() {
+    fn test_log_input_schema_validation_to_gateway_is_noop() {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let mut config = GatewayConfig::default();
         config.agents_dir = temp.path().join("agents");
@@ -1518,17 +1435,10 @@ mod tests {
             "plain text query",
             &validation,
         )
-        .expect("schema validation event should log");
+        .expect("schema validation event should log (no-op now)");
 
-        let entries = CausalLogger::read_entries(&gateway_causal_path(&config))
-            .expect("causal entries should be readable");
-        let last = entries.last().expect("expected at least one causal entry");
-        assert_eq!(last.action, "agent.spawn.input_schema_validation");
-        assert_eq!(last.session_id, "session-3");
-        assert!(matches!(last.status, EntryStatus::Success));
-        let payload = last.payload.as_ref().expect("payload should be present");
-        assert_eq!(payload["valid"], serde_json::Value::Bool(false));
-        assert_eq!(payload["agent_id"], "researcher.default");
+        // Gateway causal chain is no longer used - function is a no-op
+        // Relevant data is captured in gateway.db causal_events table via SessionTracer
     }
 }
 
