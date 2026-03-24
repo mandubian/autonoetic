@@ -830,6 +830,97 @@ impl GatewayStore {
         Ok(())
     }
 
+    pub fn search_execution_traces(
+        &self,
+        tool_name: Option<&str>,
+        success: Option<bool>,
+        error_type: Option<&str>,
+        command_pattern: Option<&str>,
+        agent_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<autonoetic_types::causal_chain::ExecutionTraceRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut conditions = Vec::new();
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
+        let mut param_idx = 1;
+
+        if let Some(name) = tool_name {
+            conditions.push("tool_name = ?");
+            params.push(rusqlite::types::Value::Text(name.to_string()));
+            param_idx += 1;
+        }
+
+        if let Some(s) = success {
+            conditions.push("success = ?");
+            params.push(rusqlite::types::Value::Integer(if s { 1 } else { 0 }));
+            param_idx += 1;
+        }
+
+        if let Some(et) = error_type {
+            conditions.push("error_type = ?");
+            params.push(rusqlite::types::Value::Text(et.to_string()));
+            param_idx += 1;
+        }
+
+        if let Some(pattern) = command_pattern {
+            conditions.push("command LIKE ?");
+            params.push(rusqlite::types::Value::Text(format!("%{}%", pattern)));
+            param_idx += 1;
+        }
+
+        if let Some(aid) = agent_id {
+            conditions.push("agent_id = ?");
+            params.push(rusqlite::types::Value::Text(aid.to_string()));
+            param_idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            "1".to_string()
+        } else {
+            format!("{}", conditions.join(" AND "))
+        };
+
+        let query = format!(
+            "SELECT * FROM execution_traces WHERE {} ORDER BY timestamp DESC LIMIT ?{}",
+            where_clause, param_idx
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let mut params_with_limit = params.clone();
+        params_with_limit.push(rusqlite::types::Value::Integer(limit));
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_with_limit), |row| {
+            Ok(autonoetic_types::causal_chain::ExecutionTraceRecord {
+                trace_id: row.get(0)?,
+                event_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                session_id: row.get(3)?,
+                turn_id: row.get(4)?,
+                timestamp: row.get(5)?,
+                tool_name: row.get(6)?,
+                command: row.get(7)?,
+                exit_code: row.get(8)?,
+                stdout: row.get(9)?,
+                stderr: row.get(10)?,
+                duration_ms: row.get(11)?,
+                success: row.get(12)?,
+                error_type: row.get(13)?,
+                error_summary: row.get(14)?,
+                approval_required: row.get(15)?,
+                approval_request_id: row.get(16)?,
+                arguments: row.get(17)?,
+                result: row.get(18)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
     pub fn list_workflow_events_since(
         &self,
         workflow_id: &str,
