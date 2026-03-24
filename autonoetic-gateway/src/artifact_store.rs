@@ -51,12 +51,6 @@ impl ArtifactStore {
         })
     }
 
-    /// Generates a short artifact ID: art_XXXXXXXX (first 8 hex of UUID v4).
-    fn generate_artifact_id() -> String {
-        let uuid_hex = uuid::Uuid::new_v4().to_string().replace('-', "");
-        format!("{}{}", ARTIFACT_ID_PREFIX, &uuid_hex[..8])
-    }
-
     /// Computes a deterministic artifact ID from sorted inputs and entrypoints.
     /// Same inputs + entrypoints always produce the same artifact ID.
     fn compute_deterministic_artifact_id(
@@ -85,12 +79,19 @@ impl ArtifactStore {
 
         let hash = hasher.finalize();
         // Use first 8 hex chars for short ID (same length as UUID-based)
-        format!("{}{:08x}", ARTIFACT_ID_PREFIX, u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]))
+        format!(
+            "{}{:08x}",
+            ARTIFACT_ID_PREFIX,
+            u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+        )
     }
 
     /// Checks if an artifact with the given ID exists.
     fn artifact_exists(&self, artifact_id: &str) -> bool {
-        self.artifacts_dir.join(artifact_id).join("manifest.json").exists()
+        self.artifacts_dir
+            .join(artifact_id)
+            .join("manifest.json")
+            .exists()
     }
 
     /// Computes SHA-256 digest of the manifest JSON.
@@ -98,6 +99,21 @@ impl ArtifactStore {
         let mut hasher = Sha256::new();
         hasher.update(bundle_json.as_bytes());
         format!("sha256:{:x}", hasher.finalize())
+    }
+
+    /// Sorted (name, handle) pairs and sorted entrypoints for identity checks on dedup.
+    fn normalized_artifact_identity(
+        files: &[ArtifactFileEntry],
+        entrypoints: &[String],
+    ) -> (Vec<(String, String)>, Vec<String>) {
+        let mut pairs: Vec<(String, String)> = files
+            .iter()
+            .map(|f| (f.name.clone(), f.handle.clone()))
+            .collect();
+        pairs.sort();
+        let mut eps = entrypoints.to_vec();
+        eps.sort();
+        (pairs, eps)
     }
 
     /// Loads the artifact index from disk.
@@ -180,29 +196,8 @@ impl ArtifactStore {
             });
         }
 
-        // Phase 2: Compute deterministic artifact ID from handles + entrypoints
-        let artifact_id = Self::compute_deterministic_artifact_id(&file_handles, entrypoints);
-
-        // Phase 3: Check if artifact already exists (deduplication)
-        if self.artifact_exists(&artifact_id) {
-            let existing_bundle = self.inspect(&artifact_id)?;
-            tracing::info!(
-                target: "artifact_store",
-                artifact_id = %artifact_id,
-                "Reused existing artifact (deduplication)"
-            );
-            // Return existing artifact with reused: true
-            return Ok(ArtifactBundle {
-                reused: true,
-                ..existing_bundle
-            });
-        }
-
-        // Phase 4: Create new artifact
-        let created_at = chrono::Utc::now().to_rfc3339();
-
-        // Build entrypoints - validate they exist in the file list
-        let ep = if let Some(eps) = entrypoints {
+        // Validate entrypoints before dedup so we never "reuse" with invalid args.
+        let ep: Vec<String> = if let Some(eps) = entrypoints {
             for e in eps {
                 anyhow::ensure!(
                     files.iter().any(|f| f.name == *e),
@@ -214,6 +209,38 @@ impl ArtifactStore {
         } else {
             Vec::new()
         };
+
+        // Phase 2: Compute deterministic artifact ID from handles + entrypoints
+        let artifact_id =
+            Self::compute_deterministic_artifact_id(&file_handles, Some(ep.as_slice()));
+
+        // Phase 3: Check if artifact already exists (deduplication)
+        if self.artifact_exists(&artifact_id) {
+            let existing_bundle = self.inspect(&artifact_id)?;
+            let (want_pairs, want_eps) = Self::normalized_artifact_identity(&files, &ep);
+            let (got_pairs, got_eps) = Self::normalized_artifact_identity(
+                &existing_bundle.files,
+                &existing_bundle.entrypoints,
+            );
+            if want_pairs != got_pairs || want_eps != got_eps {
+                anyhow::bail!(
+                    "artifact id '{}' already exists but its manifest does not match the requested inputs (identity mismatch). Refusing reuse; remove or repair the on-disk artifact if it is corrupted.",
+                    artifact_id
+                );
+            }
+            tracing::info!(
+                target: "artifact_store",
+                artifact_id = %artifact_id,
+                "Reused existing artifact (deduplication)"
+            );
+            return Ok(ArtifactBundle {
+                reused: true,
+                ..existing_bundle
+            });
+        }
+
+        // Phase 4: Create new artifact
+        let created_at = chrono::Utc::now().to_rfc3339();
 
         let bundle = ArtifactBundle {
             artifact_id: artifact_id.clone(),
@@ -295,11 +322,7 @@ impl ArtifactStore {
         Ok(())
     }
 
-    fn materialize_projection_file(
-        &self,
-        handle: &str,
-        output_path: &Path,
-    ) -> anyhow::Result<()> {
+    fn materialize_projection_file(&self, handle: &str, output_path: &Path) -> anyhow::Result<()> {
         if output_path.exists() || output_path.is_symlink() {
             std::fs::remove_file(output_path)?;
         }
@@ -357,7 +380,9 @@ impl ArtifactStore {
             "This directory is a human-readable projection of the canonical artifact bundle."
                 .to_string(),
         );
-        lines.push("Edit neither these files nor this README; rebuild the artifact instead.".to_string());
+        lines.push(
+            "Edit neither these files nor this README; rebuild the artifact instead.".to_string(),
+        );
 
         lines.join("\n")
     }
@@ -484,7 +509,10 @@ mod tests {
 
         let bundle = store
             .build(
-                &["weather_fetch.py".into(), "tests/test_weather_fetch.py".into()],
+                &[
+                    "weather_fetch.py".into(),
+                    "tests/test_weather_fetch.py".into(),
+                ],
                 Some(&["weather_fetch.py".into()]),
                 "demo-session/coder.default-abc",
             )
@@ -527,7 +555,11 @@ mod tests {
             .unwrap();
 
         let bundle = store
-            .build(&["main.py".into()], Some(&["main.py".into()]), "demo-session/coder.default-abc")
+            .build(
+                &["main.py".into()],
+                Some(&["main.py".into()]),
+                "demo-session/coder.default-abc",
+            )
             .unwrap();
 
         let projected = gw
@@ -559,10 +591,13 @@ mod tests {
         let b1 = store.build(&["data.txt".into()], None, "s1").unwrap();
         let b2 = store.build(&["data.txt".into()], None, "s1").unwrap();
 
+        assert_eq!(b1.artifact_id, b2.artifact_id);
+        assert!(!b1.reused);
+        assert!(b2.reused);
+
         let ids = store.list().unwrap();
-        assert_eq!(ids.len(), 2);
+        assert_eq!(ids.len(), 1);
         assert!(ids.contains(&b1.artifact_id));
-        assert!(ids.contains(&b2.artifact_id));
     }
 
     #[test]
@@ -600,12 +635,52 @@ mod tests {
 
         let bundle = store.build(&["file.txt".into()], None, "s1").unwrap();
 
-        // Same inputs produce different artifact IDs (different UUID)
         let bundle2 = store.build(&["file.txt".into()], None, "s1").unwrap();
 
-        assert_ne!(bundle.artifact_id, bundle2.artifact_id);
-        // Same file content handles (same underlying content)
+        assert_eq!(bundle.artifact_id, bundle2.artifact_id);
+        assert!(!bundle.reused);
+        assert!(bundle2.reused);
         assert_eq!(bundle.files[0].handle, bundle2.files[0].handle);
+    }
+
+    #[test]
+    fn test_artifact_reuse_rejects_manifest_identity_mismatch() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h = content_store.write(b"payload").unwrap();
+        content_store.register_name("s1", "a.txt", &h).unwrap();
+
+        let bundle = store.build(&["a.txt".into()], None, "s1").unwrap();
+        let manifest_path = gw
+            .join("artifacts")
+            .join(&bundle.artifact_id)
+            .join("manifest.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        if let Some(files) = raw.get_mut("files").and_then(|v| v.as_array_mut()) {
+            if let Some(first) = files.first_mut() {
+                if let Some(obj) = first.as_object_mut() {
+                    obj.insert(
+                        "handle".to_string(),
+                        serde_json::json!("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+                    );
+                }
+            }
+        }
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let err = store
+            .build(&["a.txt".into()], None, "s1")
+            .expect_err("corrupt manifest must block reuse");
+        assert!(
+            err.to_string().contains("identity mismatch"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
