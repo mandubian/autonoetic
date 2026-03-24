@@ -35,6 +35,9 @@ async fn main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::Approvals { command } => {
                 cli::gateway::handle_gateway_approvals(&config_path, command)?;
             }
+            cli::common::GatewayCommands::Interactions { command } => {
+                cli::gateway::handle_gateway_interactions(&config_path, command)?;
+            }
         },
 
         Commands::Agent(args) => match &args.command {

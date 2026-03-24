@@ -776,7 +776,67 @@ impl AgentExecutor {
                         });
                     }
 
-                    // No approval required — commit assistant message + tool results to history.
+                    // Check whether the last executed tool call requires user interaction.
+                    let interaction_info = results.last().and_then(|(id, _name, result_json)| {
+                        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                        if parsed
+                            .get("interaction_required")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            let interaction_id = parsed
+                                .get("interaction_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_default();
+                            Some((id.clone(), interaction_id))
+                        } else {
+                            None
+                        }
+                    });
+
+                    if let Some((pending_call_id, interaction_id)) = interaction_info {
+                        // User interaction required — save checkpoint and suspend.
+                        let completed_results = results[..results.len() - 1].to_vec();
+                        let remaining_calls = response.tool_calls[results.len()..].to_vec();
+
+                        // Save checkpoint with UserInputRequired yield reason
+                        let cp = self.build_checkpoint(
+                            history,
+                            &turn_id,
+                            YieldReason::UserInputRequired {
+                                interaction_id: interaction_id.clone(),
+                            },
+                        );
+                        self.save_checkpoint_if_possible(&cp);
+
+                        tracing::info!(
+                            target: "user_interaction",
+                            agent_id = %self.manifest.agent.id,
+                            session_id = %session_id,
+                            interaction_id = %interaction_id,
+                            pending_call_id = %pending_call_id,
+                            "Turn suspended at user interaction boundary"
+                        );
+
+                        // Inject the assistant message and tool results into history
+                        // so the checkpoint has full context for resume
+                        history.push(assistant_msg);
+                        for (id, name, result) in &completed_results {
+                            history.push(Message::tool_result(
+                                id.clone(),
+                                name.clone(),
+                                result.clone(),
+                            ));
+                        }
+
+                        // Return Completed (not Suspended) — user interaction suspension
+                        // doesn't use the TurnContinuation path. The resume happens via
+                        // checkpoint loading + answer injection.
+                        return Ok(TurnOutcome::Completed(None));
+                    }
+
+                    // No approval or interaction required — commit assistant message + tool results to history.
                     history.push(assistant_msg);
                     for (id, name, result) in &results {
                         history.push(Message::tool_result(

@@ -88,6 +88,11 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayApprovalCommands,
     },
+    /// Inspect or answer pending user interactions.
+    Interactions {
+        #[command(subcommand)]
+        command: GatewayInteractionCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -111,6 +116,41 @@ pub enum GatewayApprovalCommands {
         /// Approval request identifier.
         request_id: String,
         /// Optional rejection note.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayInteractionCommands {
+    /// List pending user interactions.
+    List {
+        /// Filter by root session ID.
+        #[arg(long)]
+        root_session: Option<String>,
+        /// Filter by session ID.
+        #[arg(long)]
+        session: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer a pending user interaction.
+    Answer {
+        /// Interaction identifier.
+        interaction_id: String,
+        /// Answer text (for freeform answers).
+        #[arg(long)]
+        text: Option<String>,
+        /// Answer option ID (for structured choices).
+        #[arg(long)]
+        option: Option<String>,
+    },
+    /// Cancel a pending user interaction.
+    Cancel {
+        /// Interaction identifier.
+        interaction_id: String,
+        /// Optional cancellation reason.
         #[arg(long)]
         reason: Option<String>,
     },

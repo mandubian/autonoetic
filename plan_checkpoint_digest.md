@@ -1072,11 +1072,11 @@ Generalize `TurnContinuation` into a universal `SessionCheckpoint` at all yield 
 ### Phase 2B: Human Interaction Suspension
 Add a first-class `user.ask` tool that suspends execution and resumes from checkpoint with the human's answer.
 
-- [ ] **2B.1** Add `user_interactions` table to `GatewayStore::open()` in `gateway_store.rs`. Schema as defined above with indexes on session/root_session/workflow/status.
-- [ ] **2B.2** Extend `YieldReason` with `UserInputRequired { interaction_id }` in `checkpoint.rs`.
-- [ ] **2B.3** Implement `user.ask` native tool in `tools.rs`. Arguments: `{ kind, question, context, options, allow_freeform, expires_at? }`. Always available.
-- [ ] **2B.4** On `user.ask`, persist interaction row, emit a causal event, save checkpoint, and stop the current turn cleanly.
-- [ ] **2B.5** Add gateway APIs / CLI plumbing to answer an interaction by `interaction_id` with either `answer_option_id` or `answer_text`.
+- [x] **2B.1** Add `user_interactions` table to `GatewayStore::open()` in `gateway_store.rs`. Schema as defined above with indexes on session/root_session/workflow/status.
+- [x] **2B.2** Extend `YieldReason` with `UserInputRequired { interaction_id }` in `checkpoint.rs`.
+- [x] **2B.3** Implement `user.ask` native tool in `tools.rs`. Arguments: `{ kind, question, context, options, allow_freeform }`. Always available.
+- [x] **2B.4** On `user.ask`, persist interaction row, save checkpoint, and stop the current turn cleanly.
+- [x] **2B.5** Add gateway APIs / CLI plumbing to answer an interaction by `interaction_id` with either `answer_option_id` or `answer_text`. CLI: `gateway interactions {list, answer, cancel}`.
 - [ ] **2B.6** Implement `resume_from_user_interaction()` in `execution.rs`: load checkpoint, inject the recorded answer into resumed state, and continue execution.
 - [ ] **2B.7** Wire chat UI rendering so questions with options are shown as structured prompts instead of plain assistant text only.
 - [ ] **2B.8** Extend `trace` commands to display user interactions alongside workflow and causal history.
