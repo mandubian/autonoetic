@@ -794,6 +794,42 @@ impl GatewayStore {
         Ok(())
     }
 
+    pub fn create_execution_trace(
+        &self,
+        trace: &autonoetic_types::causal_chain::ExecutionTraceRecord,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO execution_traces (
+                trace_id, event_id, agent_id, session_id, turn_id, timestamp,
+                tool_name, command, exit_code, stdout, stderr, duration_ms,
+                success, error_type, error_summary, approval_required, approval_request_id, arguments, result
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                &trace.trace_id,
+                trace.event_id.as_deref(),
+                &trace.agent_id,
+                &trace.session_id,
+                trace.turn_id.as_deref(),
+                &trace.timestamp,
+                &trace.tool_name,
+                trace.command.as_deref(),
+                trace.exit_code,
+                trace.stdout.as_deref(),
+                trace.stderr.as_deref(),
+                &trace.duration_ms,
+                &trace.success,
+                trace.error_type.as_deref(),
+                trace.error_summary.as_deref(),
+                trace.approval_required,
+                trace.approval_request_id.as_deref(),
+                trace.arguments.as_deref(),
+                trace.result.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn list_workflow_events_since(
         &self,
         workflow_id: &str,
