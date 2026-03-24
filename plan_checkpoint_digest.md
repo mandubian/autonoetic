@@ -404,9 +404,11 @@ This keeps the planner as the single authority for orchestration changes while p
 **Authorized callers:**
 - **User / operator** via chat, CLI, or API against a root session
 - **Gateway itself** when a security monitor or policy engine detects a breach, sandbox escape signal, credential exfiltration attempt, or other hard-stop condition
-- **Future emergency-manager agent** with an explicit high-privilege capability dedicated to emergency response
+- **Dedicated emergency-manager agent** with an explicit high-privilege capability dedicated to emergency response
 
-The last category must not reuse ordinary workflow tools. It should eventually get a dedicated policy capability such as `EmergencyStop` so the authority is explicit and tightly reviewable.
+Among agents, this dedicated emergency-manager agent is the **only** agent allowed to request emergency stop. No planner, specialist, or ordinary autonomous agent may call it. The gateway remains the sole executor: agents can request, but only the gateway accepts, validates, records, and performs the stop.
+
+The agent path must not reuse ordinary workflow tools. It should use a dedicated policy capability such as `EmergencyStop` so the authority is explicit and tightly reviewable.
 
 **Semantics:**
 1. Authorized caller invokes `root_session.emergency_stop` (or an internal gateway equivalent) for a root session
@@ -481,7 +483,7 @@ CREATE TABLE emergency_stops (
   root_session_id  TEXT NOT NULL,
   workflow_id      TEXT,
   requested_by_type TEXT NOT NULL,        -- user | gateway | agent
-  requested_by_id   TEXT NOT NULL,        -- username | subsystem name | agent_id
+  requested_by_id   TEXT NOT NULL,        -- username | subsystem name | emergency agent id
   reason           TEXT,
   trigger_kind     TEXT NOT NULL,         -- manual | security_policy | automated_response
   mode             TEXT NOT NULL,         -- immediate
@@ -530,7 +532,8 @@ CREATE INDEX idx_active_executions_session ON active_executions(session_id, stat
 - Middleware / helper subprocesses register the same way as sandbox processes
 - Emergency stop first hits the in-memory registry for immediate abort/kill, then persists final stop outcome in SQLite
 - Gateway security monitors can invoke the same root-session stop path directly without going through chat UX or planner mediation
-- Future emergency-manager agents must call the same root-session stop path through a dedicated privileged tool/capability, not via generic workflow controls
+- The dedicated emergency-manager agent must call the same root-session stop path through a dedicated privileged tool/capability, not via generic workflow controls
+- Gateway is always the enforcement point: it validates the requester, writes the audit row, and executes the kill / abort sequence itself
 - On restart, the gateway scans `active_executions` with stale heartbeats and marks them `lost` or `stopped`; no hidden zombie work
 
 #### Interaction with checkpoints and human interaction
@@ -959,9 +962,9 @@ Make causal chain data and execution results queryable. This is foundation for a
 - [x] **1.6** Remove gateway causal chain (`.gateway/history/causal_chain.jsonl`). Stop calling `init_gateway_causal_logger()` and `log_gateway_causal_event()` in `execution.rs`. Gateway-level events that matter (agent spawn, approvals) are already in `gateway.db` tables or can be written to agent causal chains.
 - [x] **1.7** Update `trace session` CLI to query `causal_events` table instead of reading JSONL files. Add `--agent` filter. Show evidence_ref when available.
 - [x] **1.8** Make evidence mode a config option (not just env var). Support `full`/`errors`/`off`. Default: `full` in dev, recommend `errors` in production.
-- [ ] **1.9** Unit test: dual-write produces identical event data in JSONL and causal_events table.
-- [ ] **1.10** Unit test: execution_traces captures full stdout/stderr for both successful and failed sandbox.exec calls.
-- [ ] **1.11** Integration test: agent runs sandbox.exec → fails → execution_traces has full error → agent uses `execution.search` to find the error → gets structured result.
+- [x] **1.9** Unit test: dual-write produces identical event data in JSONL and causal_events table.
+- [x] **1.10** Unit test: execution_traces captures full stdout/stderr for both successful and failed sandbox.exec calls.
+- [x] **1.11** Integration test: agent runs sandbox.exec → fails → execution_traces has full error → agent uses `execution.search` to find the error → gets structured result.
 - [x] **1.12** Add `artifact_refs` table in `GatewayStore` (schema above). Scoped short ref mapping (`session`/`workflow`/`global`) to canonical artifact identity, plus store APIs (`create`/`resolve`/`revoke`/`list`) and unit coverage for migration idempotency, strict scope isolation, and expiry/revocation filtering.
 - [x] **1.13** Update `artifact.build` output to include both `artifact_id` and canonical `artifact_digest` (additive alias for existing `digest`); mint scoped short ref in `artifact_refs` when `GatewayStore` is wired (workflow scope when root session is workflow-indexed, else session scope). New ref rows are minted only on first materialization (`reused: false`).
 - [x] **1.14** Implement `artifact.resolve_ref` tool with strict scope lookup + digest revalidation. Hard-fail on missing/expired/revoked refs (no fallback).
@@ -1093,14 +1096,14 @@ Add a true root-session emergency stop path for running workflows, sessions, and
 - [ ] **2C.5** Register sandbox child process ownership before `wait_with_output()` in both lifecycle and native-tool execution paths so emergency stop can kill already-running child processes.
 - [ ] **2C.6** Implement `root_session.emergency_stop` plus CLI/API/chat plumbing. Behavior: persist stop request, mark the root workflow/session `EmergencyStopping`, cancel queued tasks, abort live tasks/processes, cancel pending approvals/interactions in scope, then finalize status.
 - [ ] **2C.6a** Add an internal gateway self-protection entrypoint that invokes the same stop pipeline when security policy detects a hard-stop breach.
-- [ ] **2C.6b** Reserve a dedicated privileged capability/tool path for a future emergency-manager agent; do not expose emergency stop through ordinary workflow delegation tools.
+- [ ] **2C.6b** Reserve a dedicated privileged capability/tool path for the emergency-manager agent as the only agent-authorized requester; do not expose emergency stop through ordinary workflow delegation tools.
 - [ ] **2C.7** Write a terminal checkpoint with `YieldReason::EmergencyStop { stop_id }` and prevent auto-resume from that checkpoint.
 - [ ] **2C.8** Surface emergency-stop state in `trace` / workflow inspection commands, including partial-stop failures and any `lost` active executions after restart.
 - [ ] **2C.9** Integration test: root workflow with two running async children receives emergency stop → queued work cancelled, running tasks aborted, workflow ends `EmergencyStopped`.
 - [ ] **2C.10** Integration test: sandbox child process running under `wait_with_output()` receives emergency stop → process is killed and task ends `Aborted`.
 - [ ] **2C.11** Integration test: emergency stop during pending approval or `user.ask` interaction cancels the pending gate and does not allow resume.
 - [ ] **2C.12** Restart test: gateway crashes after stop requested but before completion → stale `active_executions` reconciled on startup and stop finishes as `stopped` or `partially_stopped` with audit details.
-- [ ] **2C.13** Authorization test: user/operator, gateway security subsystem, and future privileged agent path are accepted; ordinary agents without the dedicated capability are denied.
+- [ ] **2C.13** Authorization test: user/operator, gateway security subsystem, and the dedicated emergency-manager agent path are accepted; all other agents are denied.
 
 ### Phase 3: Live Digest
 Replace `timeline.md` with a richer real-time narrative.
@@ -1190,6 +1193,7 @@ The agent doesn't need to be told to use these — the system prompts document t
 | Checkpoint files grow large | Prune old checkpoints (keep last 3); history capped at 400 messages |
 | Agents may over-ask the user | Add `kind`, `expires_at`, and future rate-limit / policy controls; surface pending interactions so planners can batch or avoid redundant asks |
 | Emergency stop creates false confidence if live handles are not tracked | Make `active_executions` + in-memory registry mandatory for stop-on-running-work; report `partially_stopped` or `lost` explicitly instead of pretending success |
+| Emergency stop authority becomes too broad | Make root-session stop the single public surface, record requester type/id, allow only the dedicated emergency-manager agent on the agent side, and keep execution in the gateway |
 | Memory table grows unbounded | TTL/archival policy (Phase 6); confidence scores enable aging |
 | Agents overwhelmed by too many search results | All search tools have `limit` parameter; results sorted by recency |
 | Short artifact IDs collide or are confused across sessions | Use scoped short refs (`artifact_refs`) mapped to canonical digest; enforce strict scope lookup and digest verification |
@@ -1208,4 +1212,4 @@ The agent doesn't need to be told to use these — the system prompts document t
 7. **Fewer redundancies:** Gateway causal chain deleted. Session timeline replaced. memory.db merged. Session snapshot subsumed.
 8. **Artifact robustness + ergonomics:** Agents can use short scoped refs in prompts, while gateway always resolves to canonical digest with integrity checks.
 9. **Human interaction is first-class:** An agent can ask a structured question, suspend, resume from checkpoint with the user's answer, and query that interaction later.
-10. **Emergency stop is real:** Operator can stop a root workflow with running children, the gateway aborts live work, writes an auditable stop record, and does not silently auto-resume.
+10. **Emergency stop is real:** User, gateway self-protection, or the dedicated emergency-manager agent can request a root-session stop, but the gateway is the component that accepts it, aborts live work, writes an auditable stop record, and does not silently auto-resume.
