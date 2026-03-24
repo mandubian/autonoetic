@@ -1,4 +1,5 @@
 use anyhow::Result;
+use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
 use autonoetic_types::background::ApprovalRequest;
 use autonoetic_types::notification::{NotificationRecord, NotificationStatus, NotificationType};
 use autonoetic_types::workflow::WorkflowEventRecord;
@@ -154,6 +155,18 @@ impl GatewayStore {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS artifact_refs (
+                ref_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                artifact_digest TEXT NOT NULL,
+                created_by_agent_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                revoked_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
             CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id);
             CREATE INDEX IF NOT EXISTS idx_approvals_root_session ON approvals(root_session_id);
@@ -162,6 +175,10 @@ impl GatewayStore {
             CREATE INDEX IF NOT EXISTS idx_notifications_target ON notifications(target_session_id);
             CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow ON workflow_events(workflow_id);
             CREATE INDEX IF NOT EXISTS idx_workflow_events_created ON workflow_events(created_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_refs_scope_ref
+              ON artifact_refs(scope_type, scope_id, ref_id);
+            CREATE INDEX IF NOT EXISTS idx_artifact_refs_artifact ON artifact_refs(artifact_id);
+            CREATE INDEX IF NOT EXISTS idx_artifact_refs_digest ON artifact_refs(artifact_digest);
 
             CREATE TABLE IF NOT EXISTS workflow_index (
                 root_session_id TEXT PRIMARY KEY,
@@ -494,6 +511,205 @@ impl GatewayStore {
         Ok(())
     }
 
+    // --- Artifact refs ---
+
+    pub fn create_artifact_ref(&self, record: &ArtifactRefRecord) -> Result<()> {
+        if record.ref_id.is_empty() {
+            return Err(anyhow::anyhow!("artifact ref_id must not be empty"));
+        }
+        if record.scope_id.is_empty() {
+            return Err(anyhow::anyhow!("artifact scope_id must not be empty"));
+        }
+        if record.artifact_id.is_empty() {
+            return Err(anyhow::anyhow!("artifact_id must not be empty"));
+        }
+        if record.artifact_digest.is_empty() {
+            return Err(anyhow::anyhow!("artifact_digest must not be empty"));
+        }
+        if record.created_by_agent_id.is_empty() {
+            return Err(anyhow::anyhow!("created_by_agent_id must not be empty"));
+        }
+
+        Self::parse_rfc3339_utc(&record.created_at, "created_at")?;
+        if let Some(expires_at) = record.expires_at.as_deref() {
+            Self::parse_rfc3339_utc(expires_at, "expires_at")?;
+        }
+        if let Some(revoked_at) = record.revoked_at.as_deref() {
+            Self::parse_rfc3339_utc(revoked_at, "revoked_at")?;
+        }
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO artifact_refs (
+                ref_id, scope_type, scope_id, artifact_id, artifact_digest, created_by_agent_id,
+                created_at, expires_at, revoked_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                record.ref_id,
+                record.scope_type.as_str(),
+                record.scope_id,
+                record.artifact_id,
+                record.artifact_digest,
+                record.created_by_agent_id,
+                record.created_at,
+                record.expires_at,
+                record.revoked_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn resolve_artifact_ref(
+        &self,
+        scope_type: ArtifactRefScopeType,
+        scope_id: &str,
+        ref_id: &str,
+    ) -> Result<Option<ArtifactRefRecord>> {
+        let conn = self.conn.lock().unwrap();
+        Self::resolve_artifact_ref_with_conn(&conn, scope_type, scope_id, ref_id)
+    }
+
+    pub fn list_artifact_refs_for_scope(
+        &self,
+        scope_type: ArtifactRefScopeType,
+        scope_id: &str,
+    ) -> Result<Vec<ArtifactRefRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT
+                ref_id, scope_type, scope_id, artifact_id, artifact_digest, created_by_agent_id,
+                created_at, expires_at, revoked_at
+             FROM artifact_refs
+             WHERE scope_type = ?1 AND scope_id = ?2
+             ORDER BY created_at ASC, ref_id ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![scope_type.as_str(), scope_id],
+            Self::artifact_ref_from_row,
+        )?;
+
+        let now = chrono::Utc::now();
+        let mut refs = Vec::new();
+        for row in rows {
+            let record = row?;
+            if Self::artifact_ref_is_active(&record, now)? {
+                refs.push(record);
+            }
+        }
+        Ok(refs)
+    }
+
+    pub fn revoke_artifact_ref(
+        &self,
+        scope_type: ArtifactRefScopeType,
+        scope_id: &str,
+        ref_id: &str,
+        revoked_at: Option<&str>,
+    ) -> Result<bool> {
+        let revoked_at = revoked_at
+            .map(str::to_string)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        Self::parse_rfc3339_utc(&revoked_at, "revoked_at")?;
+
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE artifact_refs
+             SET revoked_at = ?1
+             WHERE scope_type = ?2
+               AND scope_id = ?3
+               AND ref_id = ?4
+               AND revoked_at IS NULL",
+            params![revoked_at, scope_type.as_str(), scope_id, ref_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    fn resolve_artifact_ref_with_conn(
+        conn: &Connection,
+        scope_type: ArtifactRefScopeType,
+        scope_id: &str,
+        ref_id: &str,
+    ) -> Result<Option<ArtifactRefRecord>> {
+        let record = conn
+            .query_row(
+                "SELECT
+                    ref_id, scope_type, scope_id, artifact_id, artifact_digest, created_by_agent_id,
+                    created_at, expires_at, revoked_at
+                 FROM artifact_refs
+                 WHERE scope_type = ?1 AND scope_id = ?2 AND ref_id = ?3",
+                params![scope_type.as_str(), scope_id, ref_id],
+                Self::artifact_ref_from_row,
+            )
+            .optional()?;
+
+        let Some(record) = record else {
+            return Ok(None);
+        };
+
+        if Self::artifact_ref_is_active(&record, chrono::Utc::now())? {
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn artifact_ref_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRefRecord> {
+        let scope_type_raw: String = row.get(1)?;
+        let scope_type = ArtifactRefScopeType::from_str(&scope_type_raw).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid artifact ref scope_type: {scope_type_raw}"),
+                )),
+            )
+        })?;
+
+        Ok(ArtifactRefRecord {
+            ref_id: row.get(0)?,
+            scope_type,
+            scope_id: row.get(2)?,
+            artifact_id: row.get(3)?,
+            artifact_digest: row.get(4)?,
+            created_by_agent_id: row.get(5)?,
+            created_at: row.get(6)?,
+            expires_at: row.get(7)?,
+            revoked_at: row.get(8)?,
+        })
+    }
+
+    fn artifact_ref_is_active(
+        record: &ArtifactRefRecord,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        if let Some(revoked_at) = record.revoked_at.as_deref() {
+            Self::parse_rfc3339_utc(revoked_at, "revoked_at")?;
+            return Ok(false);
+        }
+        if let Some(expires_at) = record.expires_at.as_deref() {
+            let expires_at = Self::parse_rfc3339_utc(expires_at, "expires_at")?;
+            if now >= expires_at {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn parse_rfc3339_utc(
+        value: &str,
+        field_name: &'static str,
+    ) -> Result<chrono::DateTime<chrono::Utc>> {
+        let dt = chrono::DateTime::parse_from_rfc3339(value).map_err(|e| {
+            anyhow::anyhow!(
+                "invalid RFC3339 timestamp for artifact_refs.{}: {}",
+                field_name,
+                e
+            )
+        })?;
+        Ok(dt.with_timezone(&chrono::Utc))
+    }
+
     // --- Workflow events ---
 
     pub fn append_workflow_event(&self, event: &WorkflowEventRecord) -> Result<()> {
@@ -618,5 +834,168 @@ impl GatewayStore {
             )
             .optional()?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GatewayStore;
+    use anyhow::Result;
+    use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+
+    fn artifact_ref(
+        ref_id: &str,
+        scope_type: ArtifactRefScopeType,
+        scope_id: &str,
+        expires_at: Option<String>,
+    ) -> ArtifactRefRecord {
+        ArtifactRefRecord {
+            ref_id: ref_id.to_string(),
+            scope_type,
+            scope_id: scope_id.to_string(),
+            artifact_id: "art_abcd1234".to_string(),
+            artifact_digest:
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+            created_by_agent_id: "planner.default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn test_artifact_ref_migration_idempotent_and_roundtrip() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        // Ensure migration can be safely run multiple times.
+        store.migrate()?;
+        store.migrate()?;
+
+        let record = artifact_ref(
+            "ar.wf9f3.001.k7p2",
+            ArtifactRefScopeType::Workflow,
+            "wf-123",
+            None,
+        );
+        store.create_artifact_ref(&record)?;
+
+        let resolved = store.resolve_artifact_ref(
+            ArtifactRefScopeType::Workflow,
+            "wf-123",
+            "ar.wf9f3.001.k7p2",
+        )?;
+        assert_eq!(resolved, Some(record));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_artifact_ref_resolution_is_scope_strict() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let record = artifact_ref(
+            "ar.sess8f1.004.0x9c",
+            ArtifactRefScopeType::Session,
+            "sess-1",
+            None,
+        );
+        store.create_artifact_ref(&record)?;
+
+        let correct = store.resolve_artifact_ref(
+            ArtifactRefScopeType::Session,
+            "sess-1",
+            "ar.sess8f1.004.0x9c",
+        )?;
+        assert!(correct.is_some());
+
+        let wrong_scope_id = store.resolve_artifact_ref(
+            ArtifactRefScopeType::Session,
+            "sess-2",
+            "ar.sess8f1.004.0x9c",
+        )?;
+        assert!(wrong_scope_id.is_none());
+
+        let wrong_scope_type = store.resolve_artifact_ref(
+            ArtifactRefScopeType::Workflow,
+            "sess-1",
+            "ar.sess8f1.004.0x9c",
+        )?;
+        assert!(wrong_scope_type.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_artifact_ref_revocation_and_expiry_filter_resolution_and_list() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let active = artifact_ref(
+            "ar.wf9f3.010.a1a1",
+            ArtifactRefScopeType::Workflow,
+            "wf-456",
+            None,
+        );
+        store.create_artifact_ref(&active)?;
+
+        let expired = artifact_ref(
+            "ar.wf9f3.011.b2b2",
+            ArtifactRefScopeType::Workflow,
+            "wf-456",
+            Some((chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339()),
+        );
+        store.create_artifact_ref(&expired)?;
+
+        let revoked = artifact_ref(
+            "ar.wf9f3.012.c3c3",
+            ArtifactRefScopeType::Workflow,
+            "wf-456",
+            Some((chrono::Utc::now() + chrono::Duration::seconds(600)).to_rfc3339()),
+        );
+        store.create_artifact_ref(&revoked)?;
+        let first_revoke = store.revoke_artifact_ref(
+            ArtifactRefScopeType::Workflow,
+            "wf-456",
+            "ar.wf9f3.012.c3c3",
+            None,
+        )?;
+        assert!(first_revoke);
+        let second_revoke = store.revoke_artifact_ref(
+            ArtifactRefScopeType::Workflow,
+            "wf-456",
+            "ar.wf9f3.012.c3c3",
+            None,
+        )?;
+        assert!(!second_revoke);
+
+        let active_resolved = store.resolve_artifact_ref(
+            ArtifactRefScopeType::Workflow,
+            "wf-456",
+            "ar.wf9f3.010.a1a1",
+        )?;
+        assert!(active_resolved.is_some());
+
+        let expired_resolved = store.resolve_artifact_ref(
+            ArtifactRefScopeType::Workflow,
+            "wf-456",
+            "ar.wf9f3.011.b2b2",
+        )?;
+        assert!(expired_resolved.is_none());
+
+        let revoked_resolved = store.resolve_artifact_ref(
+            ArtifactRefScopeType::Workflow,
+            "wf-456",
+            "ar.wf9f3.012.c3c3",
+        )?;
+        assert!(revoked_resolved.is_none());
+
+        let refs = store.list_artifact_refs_for_scope(ArtifactRefScopeType::Workflow, "wf-456")?;
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].ref_id, "ar.wf9f3.010.a1a1");
+
+        Ok(())
     }
 }
