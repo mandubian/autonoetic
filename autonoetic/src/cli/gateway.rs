@@ -238,3 +238,108 @@ pub fn handle_gateway_approvals(
     }
     Ok(())
 }
+
+pub fn handle_gateway_interactions(
+    config_path: &Path,
+    command: &super::common::GatewayInteractionCommands,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    match command {
+        super::common::GatewayInteractionCommands::List {
+            root_session,
+            session,
+            json,
+        } => {
+            let interactions = if let Some(rsid) = root_session {
+                gateway_store.get_pending_interactions_for_root_session(rsid)?
+            } else if let Some(sid) = session {
+                gateway_store.get_pending_interactions_for_session(sid)?
+            } else {
+                // List all pending - use empty string to get all (or we'd need a new method)
+                // For now, just show a help message
+                println!("Please specify --root-session or --session to list interactions.");
+                return Ok(());
+            };
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&interactions)?);
+                return Ok(());
+            }
+
+            if interactions.is_empty() {
+                println!("No pending user interactions.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<14} {:<14} {:<15} {:<24} QUESTION",
+                "INTERACTION ID", "AGENT", "KIND", "CREATED AT"
+            );
+            for i in interactions {
+                let truncated_q = if i.question.len() > 60 {
+                    format!("{}...", &i.question[..57])
+                } else {
+                    i.question.clone()
+                };
+                println!(
+                    "{:<14} {:<14} {:<15} {:<24} {}",
+                    i.interaction_id,
+                    i.agent_id,
+                    i.kind.as_str(),
+                    i.created_at,
+                    truncated_q,
+                );
+            }
+        }
+        super::common::GatewayInteractionCommands::Answer {
+            interaction_id,
+            text,
+            option,
+        } => {
+            use autonoetic_types::background::UserInteractionAnswer;
+
+            if text.is_none() && option.is_none() {
+                anyhow::bail!("Must provide either --text or --option to answer an interaction");
+            }
+
+            let answer = UserInteractionAnswer {
+                interaction_id: interaction_id.clone(),
+                answer_option_id: option.clone(),
+                answer_text: text.clone(),
+                answered_by: "cli".to_string(),
+            };
+
+            gateway_store.answer_user_interaction(&answer)?;
+
+            println!("Answered interaction {}", interaction_id);
+            if let Some(opt) = option {
+                println!("  Selected option: {}", opt);
+            }
+            if let Some(txt) = text {
+                println!("  Answer text: {}", txt);
+            }
+            println!();
+            println!("The interaction has been answered. The agent's session should resume");
+            println!("automatically on the next scheduler cycle or gateway restart.");
+        }
+        super::common::GatewayInteractionCommands::Cancel {
+            interaction_id,
+            reason,
+        } => {
+            let reason = reason
+                .clone()
+                .unwrap_or_else(|| "Cancelled by operator".to_string());
+
+            gateway_store.cancel_user_interaction(interaction_id, &reason)?;
+
+            println!("Cancelled interaction {}", interaction_id);
+            println!("  Reason: {}", reason);
+        }
+    }
+
+    Ok(())
+}

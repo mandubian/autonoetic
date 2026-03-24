@@ -308,3 +308,123 @@ pub struct ApprovalDecision {
 fn default_true() -> bool {
     true
 }
+
+// ---------------------------------------------------------------------------
+// User Interaction
+// ---------------------------------------------------------------------------
+
+/// Why the agent asked the user something.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UserInteractionKind {
+    /// "What did you mean by X?"
+    Clarification,
+    /// "I can do A or B — which do you prefer?"
+    Decision,
+    /// "Here's my proposal — approve or suggest changes?"
+    Proposal,
+    /// "Do you want to proceed with this?"
+    Confirmation,
+}
+
+impl std::fmt::Display for UserInteractionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Clarification => write!(f, "clarification"),
+            Self::Decision => write!(f, "decision"),
+            Self::Proposal => write!(f, "proposal"),
+            Self::Confirmation => write!(f, "confirmation"),
+        }
+    }
+}
+
+impl UserInteractionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Clarification => "clarification",
+            Self::Decision => "decision",
+            Self::Proposal => "proposal",
+            Self::Confirmation => "confirmation",
+        }
+    }
+}
+
+/// Status of a user interaction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UserInteractionStatus {
+    Pending,
+    Answered,
+    Cancelled,
+    Expired,
+}
+
+/// A single option the agent presents to the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserInteractionOption {
+    pub id: String,
+    pub label: String,
+    pub value: String,
+}
+
+/// An interaction created by `user.ask`.
+///
+/// Stored in `user_interactions` table. When a user interaction is created,
+/// the agent's turn is suspended and a checkpoint is saved.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserInteraction {
+    pub interaction_id: String,
+    pub session_id: String,
+    pub root_session_id: String,
+    pub agent_id: String,
+    pub turn_id: String,
+    pub kind: UserInteractionKind,
+    pub question: String,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub options: Vec<UserInteractionOption>,
+    #[serde(default = "default_true")]
+    pub allow_freeform: bool,
+    pub status: UserInteractionStatus,
+    #[serde(default)]
+    pub answer_option_id: Option<String>,
+    #[serde(default)]
+    pub answer_text: Option<String>,
+    #[serde(default)]
+    pub answered_by: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub answered_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub checkpoint_turn_id: Option<String>,
+}
+
+/// The answer provided by the user (via CLI, chat, or API).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInteractionAnswer {
+    pub interaction_id: String,
+    #[serde(default)]
+    pub answer_option_id: Option<String>,
+    #[serde(default)]
+    pub answer_text: Option<String>,
+    pub answered_by: String,
+}
+
+/// Payload injected into the resumed conversation when a user answers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInteractionResumePayload {
+    pub interaction_id: String,
+    pub kind: UserInteractionKind,
+    pub question: String,
+    #[serde(default)]
+    pub answer_option_id: Option<String>,
+    #[serde(default)]
+    pub answer_text: Option<String>,
+}
