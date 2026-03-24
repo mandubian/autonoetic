@@ -11,6 +11,16 @@ pub enum EntryStatus {
     Error,
 }
 
+impl std::fmt::Display for EntryStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success => write!(f, "SUCCESS"),
+            Self::Denied => write!(f, "DENIED"),
+            Self::Error => write!(f, "ERROR"),
+        }
+    }
+}
+
 /// A single entry in the append-only `.jsonl` Causal Chain log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CausalChainEntry {
@@ -34,4 +44,24 @@ pub struct CausalChainEntry {
     pub prev_hash: String,
     #[serde(default)]
     pub entry_hash: String,
+}
+
+/// Causal event record for storage in gateway.db causal_events table.
+/// Matches the schema for queryable event storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CausalEventRecord {
+    pub event_id: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub turn_id: Option<String>,
+    pub event_seq: u64,
+    pub timestamp: String,
+    pub category: String,
+    pub action: String,
+    pub status: String,
+    pub target: Option<String>,
+    pub payload: Option<String>,
+    pub payload_ref: Option<String>,
+    pub evidence_ref: Option<String>,
+    pub reason: Option<String>,
 }

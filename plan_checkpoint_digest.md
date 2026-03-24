@@ -620,11 +620,11 @@ Agent Learning (cross-session):
 ## Implementation Plan
 
 ### Phase 1: Queryable Event Store
-Make causal chain data and execution results queryable. This is the foundation for agent learning.
+Make causal chain data and execution results queryable. This is foundation for agent learning.
 
-- [ ] **1.1** Add `causal_events` table to `GatewayStore::open()` in `gateway_store.rs`. Schema as defined above with indexes on (agent_id, session_id), (category, action), (status), (target), (timestamp).
-- [ ] **1.2** Add `execution_traces` table to `GatewayStore::open()`. Schema as defined above with indexes on (agent_id, session_id), (tool_name), (success), (error_type), (command).
-- [ ] **1.3** Dual-write in `SessionTracer`: every `log_event()` call writes to BOTH the JSONL causal chain AND inserts into `causal_events` table. Pass `GatewayStore` reference to `SessionTracer`.
+- [x] **1.1** Add `causal_events` table to `GatewayStore::open()` in `gateway_store.rs`. Schema as defined above with indexes on (agent_id, session_id), (category, action), (status), (target), (timestamp).
+- [x] **1.2** Add `execution_traces` table to `GatewayStore::open()`. Schema as defined above with indexes on (agent_id, session_id), (tool_name), (success), (error_type), (command).
+- [x] **1.3** Dual-write in `SessionTracer`: every `log_event()` call writes to BOTH the JSONL causal chain AND inserts into `causal_events` table. Pass `GatewayStore` reference to `SessionTracer`.
 - [ ] **1.4** Write execution traces in `tool_call_processor.rs`: after every tool execution (not just errors), insert into `execution_traces`. For `sandbox.exec`, parse result JSON to extract `exit_code`, `stdout`, `stderr`. For other tools, store full result. Classify `error_type` from `ToolError` categories (compilation, runtime, permission, timeout, validation, resource).
 - [ ] **1.5** Implement `execution.search` native tool in `tools.rs`. Arguments: `{ tool_name, success, error_type, command_pattern, agent_id, limit }`. Queries `execution_traces` table. Returns structured results. Available to all agents (no capability gate — agents should learn from all visible executions).
 - [ ] **1.6** Remove gateway causal chain (`.gateway/history/causal_chain.jsonl`). Stop calling `init_gateway_causal_logger()` and `log_gateway_causal_event()` in `execution.rs`. Gateway-level events that matter (agent spawn, approvals) are already in `gateway.db` tables or can be written to agent causal chains.
@@ -635,12 +635,12 @@ Make causal chain data and execution results queryable. This is the foundation f
 - [ ] **1.11** Integration test: agent runs sandbox.exec → fails → execution_traces has full error → agent uses `execution.search` to find the error → gets structured result.
 - [x] **1.12** Add `artifact_refs` table in `GatewayStore` (schema above). Scoped short ref mapping (`session`/`workflow`/`global`) to canonical artifact identity, plus store APIs (`create`/`resolve`/`revoke`/`list`) and unit coverage for migration idempotency, strict scope isolation, and expiry/revocation filtering.
 - [x] **1.13** Update `artifact.build` output to include both `artifact_id` and canonical `artifact_digest` (additive alias for existing `digest`); mint scoped short ref in `artifact_refs` when `GatewayStore` is wired (workflow scope when root session is workflow-indexed, else session scope). New ref rows are minted only on first materialization (`reused: false`).
-- [ ] **1.14** Implement `artifact.resolve_ref` tool with strict scope lookup + digest revalidation. Hard-fail on missing/expired/revoked refs (no fallback).
+- [x] **1.14** Implement `artifact.resolve_ref` tool with strict scope lookup + digest revalidation. Hard-fail on missing/expired/revoked refs (no fallback).
 - [x] **1.15** Add collision safety in artifact reuse path: if an existing `artifact_id` is found but on-disk manifest identity (sorted name/handle pairs + entrypoints) does not match the requested build, fail loudly (no silent reuse).
-- [ ] **1.16** Integration test: child task returns short `artifact_ref`; parent resolves and inspects artifact successfully without file-handle inlining.
+- [x] **1.16** Integration test: child task returns short `artifact_ref`; parent resolves and inspects artifact successfully without file-handle inlining.
 - [ ] **1.17** (Optional) Add `artifact_shares` table + signed share envelope workflow for cross-gateway artifact transfer.
 
-#### Phase 1A: Concrete PR Slices (Artifact Refs)
+#### Phase 1A: Concrete PR Slices (Artifact Refs) — ✅ Completed
 
 This breaks `1.12`–`1.17` into independently shippable PRs with explicit file touch points.
 
@@ -679,17 +679,20 @@ This breaks `1.12`–`1.17` into independently shippable PRs with explicit file 
   - Unit test: synthetic ID collision path fails hard on digest mismatch
   - Integration test: `artifact.build` returns both digest + short ref
 
-**PR-C (resolution tool + agent contract):**
+**PR-C (resolution tool + agent contract): ✅ Completed**
 - Files:
   - `autonoetic-gateway/src/runtime/tools.rs` (new `artifact.resolve_ref`)
-  - `docs/workflow-orchestration.md` / docs references where artifact passing is described
+  - `autonoetic-gateway/tests/artifact_build_ref_integration.rs` (integration tests)
 - Tool contract:
   - Input: `{ ref_id, scope_type, scope_id }`
-  - Output: `{ ok, artifact_id, artifact_digest, files, entrypoints, created_at, builder_session_id }`
+  - Output: `{ ok, artifact_id, artifact_digest, files, entrypoints, created_at, builder_session_id, ref_created_at, ref_created_by }`
   - Hard fail on: missing ref, wrong scope, expired, revoked, digest mismatch
 - Tests:
-  - Integration test: child emits `artifact_ref`, parent resolves + inspects without raw handles
-  - Integration test: wrong scope fails deterministically
+  - Integration test: child emits `artifact_ref`, parent resolves + inspects without raw handles ✅
+  - Integration test: wrong scope fails deterministically ✅
+  - Integration test: missing ref fails ✅
+  - Integration test: expired ref fails ✅
+  - Integration test: revoked ref fails ✅
 
 **PR-D (optional network share envelope):**
 - Files:

@@ -140,6 +140,8 @@ pub struct SessionTracer {
     /// Progressive Markdown timeline written to `.gateway/sessions/{session}/timeline.md`.
     /// `None` when no gateway directory is available (standalone agent runs).
     timeline_writer: Option<SessionTimelineWriter>,
+    /// Optional GatewayStore for dual-write to causal_events table.
+    gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
 }
 
 impl SessionTracer {
@@ -155,6 +157,7 @@ impl SessionTracer {
             event_seq: 0,
             evidence_store,
             timeline_writer: None,
+            gateway_store: None,
         })
     }
 
@@ -198,6 +201,14 @@ impl SessionTracer {
         self.turn_id = Some(turn_id.into());
     }
 
+    pub fn with_gateway_store(
+        mut self,
+        store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> Self {
+        self.gateway_store = store;
+        self
+    }
+
     fn next_event_seq(&mut self) -> u64 {
         self.event_seq += 1;
         self.event_seq
@@ -211,6 +222,8 @@ impl SessionTracer {
         payload: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
         let event_seq = self.next_event_seq();
+        let event_id = uuid::Uuid::new_v4().to_string();
+
         log_causal_event(
             &self.causal_logger,
             &self.agent_id,
@@ -223,7 +236,56 @@ impl SessionTracer {
             event_seq,
         )?;
 
-        // Best-effort: append to the human/agent-readable Markdown timeline.
+        let payload_str = payload.as_ref().and_then(|v| serde_json::to_string(v).ok());
+
+        if let Some(store) = &self.gateway_store {
+            let payload_ref = payload
+                .as_ref()
+                .and_then(|v| v.get("payload_ref"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let evidence_ref = payload
+                .as_ref()
+                .and_then(|v| v.get("evidence_ref"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let reason = payload
+                .as_ref()
+                .and_then(|v| v.get("reason"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let target = payload
+                .as_ref()
+                .and_then(|v| v.get("target"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            if let Err(e) =
+                store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+                    event_id: event_id.clone(),
+                    agent_id: self.agent_id.clone(),
+                    session_id: self.session_id.clone(),
+                    turn_id: self.turn_id.clone(),
+                    event_seq,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    category: category.to_string(),
+                    action: action.to_string(),
+                    status: status.to_string(),
+                    target,
+                    payload: payload_str.clone(),
+                    payload_ref,
+                    evidence_ref,
+                    reason,
+                })
+            {
+                tracing::warn!(
+                    target: "session_tracer",
+                    error = %e,
+                    "Failed to write causal event to DB — continuing with JSONL only"
+                );
+            }
+        }
+
         if let Some(writer) = &mut self.timeline_writer {
             let ts = chrono::Utc::now().to_rfc3339();
             if let Err(e) = writer.append(
