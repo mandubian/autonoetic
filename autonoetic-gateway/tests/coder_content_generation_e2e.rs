@@ -115,16 +115,22 @@ async fn test_coder_content_write_via_tool_calls() {
 
     // Verify LLM was called and received our prompt
     let request_bodies = stub.captured_bodies();
-    assert!(request_bodies.len() >= 1, "Should have made at least 1 LLM call");
+    assert!(
+        request_bodies.len() >= 1,
+        "Should have made at least 1 LLM call"
+    );
 
     // Verify causal chain has content.write entry
-    let agent_history_file = agents_dir.join(agent_id).join("history").join("causal_chain.jsonl");
+    let agent_history_file = agents_dir
+        .join(agent_id)
+        .join("history")
+        .join("causal_chain.jsonl");
     let agent_history = std::fs::read_to_string(&agent_history_file).unwrap();
-    
+
     let mut content_write_count = 0;
     let mut session_start_count = 0;
     let mut session_end_count = 0;
-    
+
     for line in agent_history.lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
             if value["session_id"].as_str() == Some(session_id) {
@@ -133,19 +139,27 @@ async fn test_coder_content_write_via_tool_calls() {
                 {
                     content_write_count += 1;
                 }
-                if value["category"].as_str() == Some("session") && value["action"].as_str() == Some("start") {
+                if value["category"].as_str() == Some("session")
+                    && value["action"].as_str() == Some("start")
+                {
                     session_start_count += 1;
                 }
-                if value["category"].as_str() == Some("session") && value["action"].as_str() == Some("end") {
+                if value["category"].as_str() == Some("session")
+                    && value["action"].as_str() == Some("end")
+                {
                     session_end_count += 1;
                 }
             }
         }
     }
-    
+
     // Verify tool was executed
-    assert_eq!(content_write_count, 1, "Expected exactly 1 content.write in agent history for session {}", session_id);
-    
+    assert_eq!(
+        content_write_count, 1,
+        "Expected exactly 1 content.write in agent history for session {}",
+        session_id
+    );
+
     // Verify session completed successfully
     assert_eq!(session_start_count, 1, "Expected 1 session start");
     assert_eq!(session_end_count, 1, "Expected 1 session end");
@@ -153,7 +167,11 @@ async fn test_coder_content_write_via_tool_calls() {
     // Verify the response indicates the tool was used
     let result = resp.result.unwrap();
     let reply = result["assistant_reply"].as_str().unwrap_or("");
-    assert!(reply.contains("stored"), "Response should indicate content was stored, got: {}", reply);
+    assert!(
+        reply.contains("stored"),
+        "Response should indicate content was stored, got: {}",
+        reply
+    );
 
     server_task.abort();
 }
@@ -270,9 +288,12 @@ async fn test_coder_multiple_tool_calls_single_turn() {
     assert!(resp.error.is_none(), "Request failed: {:?}", resp.error);
 
     // Verify multiple content.write calls were made
-    let agent_history_file = agents_dir.join(agent_id).join("history").join("causal_chain.jsonl");
+    let agent_history_file = agents_dir
+        .join(agent_id)
+        .join("history")
+        .join("causal_chain.jsonl");
     let agent_history = std::fs::read_to_string(&agent_history_file).unwrap();
-    
+
     let mut content_write_count = 0;
     for line in agent_history.lines() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
@@ -284,8 +305,11 @@ async fn test_coder_multiple_tool_calls_single_turn() {
             }
         }
     }
-    
-    assert_eq!(content_write_count, 2, "Expected 2 content.write calls (script + SKILL.md)");
+
+    assert_eq!(
+        content_write_count, 2,
+        "Expected 2 content.write calls (script + SKILL.md)"
+    );
 
     server_task.abort();
 }

@@ -191,7 +191,9 @@ async fn test_loopback_content_audit_and_negatives() {
     let result3 = resp3.result.unwrap();
     let result_str = result3.to_string();
     assert!(
-        result_str.contains("missing") || result_str.contains("not found") || result_str.contains("File"),
+        result_str.contains("missing")
+            || result_str.contains("not found")
+            || result_str.contains("File"),
         "Expected agent to report missing file, got: {}",
         result_str
     );

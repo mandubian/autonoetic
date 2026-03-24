@@ -19,7 +19,7 @@ fn make_openrouter_driver(model: &str) -> anyhow::Result<std::sync::Arc<dyn LlmD
         Some(0.7),
         Some(512),
         None,
-        None, // reads OPENROUTER_API_KEY from env
+        None,  // reads OPENROUTER_API_KEY from env
         false, // chat_only
     )?;
 

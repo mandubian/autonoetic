@@ -13,8 +13,8 @@ mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::approved_exec_cache::{
-    ApprovedExecCache, ApprovedExecEntry, compute_fingerprint, has_concrete_targets,
-    normalize_targets,
+    compute_fingerprint, has_concrete_targets, normalize_targets, ApprovedExecCache,
+    ApprovedExecEntry,
 };
 use autonoetic_gateway::runtime::remote_access::DetectedPattern;
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -48,7 +48,9 @@ fn test_agent_manifest() -> AgentManifest {
             name: "test.agent".to_string(),
             description: "Test agent".to_string(),
         },
-        capabilities: vec![Capability::CodeExecution { patterns: vec!["*".to_string()] }],
+        capabilities: vec![Capability::CodeExecution {
+            patterns: vec!["*".to_string()],
+        }],
         llm_config: None,
         limits: None,
         background: None,
@@ -63,7 +65,11 @@ fn test_agent_manifest() -> AgentManifest {
 }
 
 /// Creates a test script file with the given content and returns the script path.
-fn create_test_script(agent_dir: &std::path::Path, filename: &str, content: &str) -> std::path::PathBuf {
+fn create_test_script(
+    agent_dir: &std::path::Path,
+    filename: &str,
+    content: &str,
+) -> std::path::PathBuf {
     let scripts_dir = agent_dir.join("scripts");
     std::fs::create_dir_all(&scripts_dir).expect("scripts dir should create");
     let script_path = scripts_dir.join(filename);
@@ -147,7 +153,9 @@ fn test_cache_update_last_used() {
     };
 
     cache.record(entry).expect("record should succeed");
-    cache.update_last_used("sha256:update").expect("update should succeed");
+    cache
+        .update_last_used("sha256:update")
+        .expect("update should succeed");
 
     let found = cache.find("sha256:update").expect("should find entry");
     // Verify last_used_at was updated (it should be close to now)
@@ -165,7 +173,10 @@ fn test_cache_not_found() {
 
 #[test]
 fn test_has_concrete_targets_url_only() {
-    let patterns = vec![create_pattern("url_literal", "https://api.example.com/data")];
+    let patterns = vec![create_pattern(
+        "url_literal",
+        "https://api.example.com/data",
+    )];
     assert!(has_concrete_targets(&patterns));
 }
 
@@ -337,7 +348,10 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
 
     // Pre-populate the cache with a known fingerprint for concrete URL-only code
     let code_content = r#"print("https://api.example.com/data")"#;
-    let patterns = vec![create_pattern("url_literal", "https://api.example.com/data")];
+    let patterns = vec![create_pattern(
+        "url_literal",
+        "https://api.example.com/data",
+    )];
     let targets = normalize_targets(&patterns);
     let fingerprint = compute_fingerprint("test.agent", &targets, code_content);
 
@@ -376,7 +390,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
         Some("test-session"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // The call should succeed (not return approval_required)
@@ -387,7 +401,10 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
             let resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap();
             // Cache hit should skip approval - no approval_required in response
             assert!(
-                !resp_val.get("approval_required").and_then(|v| v.as_bool()).unwrap_or(false),
+                !resp_val
+                    .get("approval_required")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 "Cache hit should skip approval, but got: {}",
                 resp
             );
@@ -444,7 +461,7 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
         Some("test-session"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // Should require approval since cache is empty
@@ -452,7 +469,10 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
         Ok(resp) => {
             let resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap();
             assert!(
-                resp_val.get("approval_required").and_then(|v| v.as_bool()).unwrap_or(false),
+                resp_val
+                    .get("approval_required")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 "Cache miss should require approval for concrete URL code, but got: {}",
                 resp
             );
@@ -541,7 +561,7 @@ requests.get("https://api.cache-test.dev")"#;
         Some("test-session"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // Should require approval even though cache has entry

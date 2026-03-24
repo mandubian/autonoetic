@@ -122,7 +122,10 @@ async fn test_promotion_reject_no_records() {
     let content_handle = handle;
 
     // Verify content exists
-    assert!(content_store.exists(&content_handle), "content should exist in store");
+    assert!(
+        content_store.exists(&content_handle),
+        "content should exist in store"
+    );
 
     // Try to install WITHOUT recording promotion → should REJECT
     let registry = default_registry();
@@ -162,7 +165,7 @@ async fn test_promotion_reject_no_records() {
         Some("session-reject-test"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     assert!(
@@ -238,7 +241,7 @@ async fn test_promotion_reject_evaluator_failed() {
         Some("session-reject-eval-fail"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // When evaluator_pass=false, the new validation code checks:
@@ -273,9 +276,7 @@ async fn test_promotion_reject_auditor_failed() {
         autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
     let session_id = "test-session";
     let handle = store.write(b"good script").unwrap();
-    store
-        .register_name(session_id, "main.py", &handle)
-        .unwrap();
+    store.register_name(session_id, "main.py", &handle).unwrap();
     let bundle = artifact_store
         .build(&["main.py".to_string()], None, session_id)
         .unwrap();
@@ -317,7 +318,7 @@ async fn test_promotion_reject_auditor_failed() {
         Some("session-reject-audit-fail"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // Both evaluator and auditor are claimed as passed=true, but no records exist
@@ -404,7 +405,7 @@ async fn test_promotion_reject_invalid_handle() {
         Some("session-reject-invalid"),
         None,
         Some(&config),
-            None,
+        None,
     );
 
     // Even with a valid-format handle, if no promotion records exist → REJECT

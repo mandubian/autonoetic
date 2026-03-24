@@ -52,13 +52,26 @@ async fn test_script_agent_execution_returns_stdout() -> anyhow::Result<()> {
     let session_id = "session-script-test";
 
     let result = execution
-        .spawn_agent_once(agent_id, "hello world", session_id, None, false, None, None)
+        .spawn_agent_once(
+            agent_id,
+            "hello world",
+            session_id,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
         .await;
 
     match result {
         Ok(spawn_result) => {
             let reply = spawn_result.assistant_reply.expect("should have reply");
-            assert!(reply.contains("Echo: hello world"), "reply should contain echo output");
+            assert!(
+                reply.contains("Echo: hello world"),
+                "reply should contain echo output"
+            );
             tracing::info!(reply = %reply, "Script agent executed successfully");
         }
         Err(e) => {
@@ -83,7 +96,17 @@ async fn test_script_agent_logs_causal_events() -> anyhow::Result<()> {
     let session_id = "session-script-causal";
 
     let _ = execution
-        .spawn_agent_once(agent_id, "test input", session_id, None, false, None, None)
+        .spawn_agent_once(
+            agent_id,
+            "test input",
+            session_id,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
         .await;
 
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -164,7 +187,9 @@ async fn test_script_agent_with_sandbox_failure_returns_error() -> anyhow::Resul
     let session_id = "session-script-fail";
 
     let result = execution
-        .spawn_agent_once(agent_id, "test", session_id, None, false, None, None)
+        .spawn_agent_once(
+            agent_id, "test", session_id, None, false, None, None, None, None,
+        )
         .await;
 
     match result {
@@ -184,7 +209,10 @@ async fn test_script_agent_with_sandbox_failure_returns_error() -> anyhow::Resul
     Ok(())
 }
 
-fn install_policy_restricted_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
+fn install_policy_restricted_agent(
+    agent_dir: &std::path::Path,
+    agent_id: &str,
+) -> anyhow::Result<()> {
     std::fs::create_dir_all(agent_dir.join("scripts"))?;
 
     std::fs::write(
@@ -233,7 +261,9 @@ async fn test_script_agent_without_capabilities_cannot_access_tools() -> anyhow:
     let session_id = "session-script-policy";
 
     let result = execution
-        .spawn_agent_once(agent_id, "test", session_id, None, false, None, None)
+        .spawn_agent_once(
+            agent_id, "test", session_id, None, false, None, None, None, None,
+        )
         .await;
 
     match result {
@@ -267,7 +297,17 @@ async fn test_script_agent_execution_time_under_100ms() -> anyhow::Result<()> {
     let start = Instant::now();
 
     let result = execution
-        .spawn_agent_once(agent_id, "test input", session_id, None, false, None, None)
+        .spawn_agent_once(
+            agent_id,
+            "test input",
+            session_id,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
         .await;
 
     let elapsed = start.elapsed();

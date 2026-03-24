@@ -6,7 +6,10 @@ use support::{read_causal_entries, EnvGuard, OpenAiStub, TestWorkspace};
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
 
-fn install_schema_validation_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
+fn install_schema_validation_agent(
+    agent_dir: &std::path::Path,
+    agent_id: &str,
+) -> anyhow::Result<()> {
     std::fs::create_dir_all(agent_dir)?;
     std::fs::write(
         agent_dir.join("skip_hook.py"),
@@ -88,11 +91,16 @@ async fn test_spawn_logs_schema_validation_for_mismatched_and_valid_inputs() -> 
             false,
             None,
             None,
+            None,
+            None,
         )
         .await?;
 
     assert_eq!(result.session_id, mismatched_session_id);
-    assert_eq!(result.assistant_reply.as_deref(), Some("deterministic reply"));
+    assert_eq!(
+        result.assistant_reply.as_deref(),
+        Some("deterministic reply")
+    );
 
     let result = execution
         .spawn_agent_once(
@@ -103,11 +111,16 @@ async fn test_spawn_logs_schema_validation_for_mismatched_and_valid_inputs() -> 
             false,
             None,
             None,
+            None,
+            None,
         )
         .await?;
 
     assert_eq!(result.session_id, valid_session_id);
-    assert_eq!(result.assistant_reply.as_deref(), Some("deterministic reply"));
+    assert_eq!(
+        result.assistant_reply.as_deref(),
+        Some("deterministic reply")
+    );
 
     let entries = read_causal_entries(
         &workspace
@@ -139,14 +152,18 @@ async fn test_spawn_logs_schema_validation_for_mismatched_and_valid_inputs() -> 
     let valid_entry = entries
         .iter()
         .find(|entry| {
-            entry.session_id == valid_session_id && entry.action == "agent.spawn.input_schema_validation"
+            entry.session_id == valid_session_id
+                && entry.action == "agent.spawn.input_schema_validation"
         })
         .expect("expected valid input schema validation causal entry");
     let valid_payload = valid_entry
         .payload
         .as_ref()
         .expect("valid payload should be present");
-    assert_eq!(valid_payload.get("valid"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        valid_payload.get("valid"),
+        Some(&serde_json::Value::Bool(true))
+    );
     assert_eq!(
         valid_payload.get("agent_id"),
         Some(&serde_json::json!(target_agent_id))
