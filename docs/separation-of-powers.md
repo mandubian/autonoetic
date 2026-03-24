@@ -40,6 +40,21 @@ Agent (low-privilege):           Gateway (high-privilege):
 
 ---
 
+## Approval Execution Boundary
+
+Approval-gated tool calls are a concrete example of separation-of-powers:
+
+1. **Agent proposes** a privileged action (for example `sandbox.exec` with remote access, or `agent.install`).
+2. **Gateway enforces** the approval gate and records a pending request.
+3. **Operator decides** approve/reject.
+4. **Gateway executes** the approved action for workflow-bound continuations and returns the real tool result to the resumed turn.
+
+The agent never receives direct authority from approval itself. Approval authorizes the **gateway's execution path**, not a privilege escalation inside the agent runtime.
+
+For non-workflow sessions, the gateway may deliver a durable approval notification and the agent can retry with a validated reference. In both paths, the gateway remains the authority.
+
+---
+
 ## Delegation
 
 **Agent proposes** which agent to spawn, when, and with what instructions.

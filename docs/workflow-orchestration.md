@@ -75,6 +75,23 @@ resolved_at       RFC3339 timestamp (when resolved)
 resume_target     Task(s) to unblock on resolution
 ```
 
+### TurnContinuation
+
+Approval-gated tool calls use a durable turn checkpoint so the child task can resume without synthetic "retry" instructions:
+
+```
+task_id            Continuation file key
+approval_request_id Bound apr-* request in GatewayStore
+history            Full conversation history at suspension point
+assistant_message  Tool-call assistant message that triggered approval
+pending_tool_call  The approval-gated tool call payload
+remaining_tool_calls Tool calls after the gated one in the same batch
+suspended_at       RFC3339 timestamp used for timeout enforcement
+loop_guard_state   Guard counters restored on resume
+```
+
+Storage: `.gateway/continuations/<task_id>.json`
+
 ## Execution Semantics
 
 ### Async Spawn
@@ -120,9 +137,9 @@ When a task enters `AwaitingApproval`, its `message` and `metadata` are preserve
 Planners interact with the orchestration layer through:
 
 - **`agent.spawn(..., async: true)`** — Enqueue a child task and return immediately
-- **`workflow.wait({ task_ids, policy })`** — Check task statuses and join condition
-- **`workflow.get_status({ workflow_id })`** — Get workflow state
-- **`workflow.get_results({ task_ids })`** — Get completed task outputs
+- **`workflow.wait({ task_ids, workflow_id?, timeout_secs? })`** — Inspect task statuses and join condition
+- **`workflow.cancel_task({ workflow_id, task_id, reason? })`** — Cancel `AwaitingApproval`/`Pending`/`Runnable` tasks and trigger join re-evaluation
+- **`approval.status({ request_id })`** — Inspect approval state when needed
 
 ### Planner Lifecycle
 
@@ -132,10 +149,10 @@ The planner is not "done" when it delegates:
 2. Gateway checkpoints planner state
 3. Planner enters `WaitingChildren`
 4. Child tasks execute independently
-5. On approval: blocked tasks pause, others continue
-6. On approval resolution: blocked tasks resume
-7. When join condition is satisfied: planner becomes `Resumable`
-8. Gateway resumes planner with child outputs
+5. On approval: child turn is suspended to `TurnContinuation`, task becomes `AwaitingApproval`, and resources are released
+6. On approval resolution: task becomes `Runnable`; on next execution the gateway loads continuation, executes approved action, and resumes turn history
+7. When join condition is satisfied: workflow becomes `Resumable`
+8. Planner observes task state via `workflow.wait` and continues
 
 ## Join Policies
 
@@ -212,7 +229,7 @@ The workflow system emits structured events for all state transitions. These eve
 
 | Event Type | Description | Payload |
 |-----------|-------------|---------|
-| `task.awaiting_approval` | Task is waiting for approval approval | `{ status: "AwaitingApproval", approval: "sandbox_exec\|agent_install" }` |
+| `task.awaiting_approval` | Task is waiting for operator decision | `{ status: "AwaitingApproval", approval: "sandbox_exec\|agent_install" }` |
 | `task.approved` | Approval was granted, task is now runnable | `{ status: "Runnable", approval: "approval_approved" }` |
 | `task.rejected` | Approval was rejected, task has failed | `{ status: "Failed", approval: "approval_rejected" }` |
 
@@ -240,14 +257,15 @@ Approval tracking is now unified through workflow events only:
 3. **User approves via CLI** → `autonoetic gateway approve apr-xxx`
 4. **Task status updated** → Status changed to `Runnable` → `task.approved` event emitted
 5. **Chat CLI polls events** → Shows "✅ Approval approved: task-xxx"
-6. **Agent wakes up** → Receives `approval_resolved` signal → Retries tool with `approval_ref`
-7. **Task executes** → Returns to `Running` → Eventually completes
+6. **Scheduler re-queues task** → Next execution loads `TurnContinuation`
+7. **Gateway executes approved action** → Real tool result is injected into resumed history
+8. **Task executes** → Returns to `Running` → Eventually completes
 
 This unified approach means:
-- **No SQLite approval polling** in chat CLI
-- **Single source of truth**: workflow events
-- **Consistent visibility**: All state transitions visible through events
-- **Approvals persist** in SQLite for the approval command, but chat uses events for display
+- **No synthetic resume messages** for workflow-bound tasks
+- **Single source of truth** for task state transitions: workflow events
+- **Durable continuation/resume** across gateway restarts
+- **Approvals still persist** in SQLite; events are the operator-facing projection
 
 ## Causal Chain Relationship
 
