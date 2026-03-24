@@ -65,3 +65,28 @@ pub struct CausalEventRecord {
     pub evidence_ref: Option<String>,
     pub reason: Option<String>,
 }
+
+/// Execution trace record for storage in gateway.db execution_traces table.
+/// Stores structured tool execution results for agent learning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionTraceRecord {
+    pub trace_id: String,
+    pub event_id: Option<String>,
+    pub agent_id: String,
+    pub session_id: String,
+    pub turn_id: Option<String>,
+    pub timestamp: String,
+    pub tool_name: String,
+    pub command: Option<String>,
+    pub exit_code: Option<i32>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub duration_ms: i64,
+    pub success: i32,
+    pub error_type: Option<String>,
+    pub error_summary: Option<String>,
+    pub approval_required: Option<i32>,
+    pub approval_request_id: Option<String>,
+    pub arguments: Option<String>,
+    pub result: Option<String>,
+}
