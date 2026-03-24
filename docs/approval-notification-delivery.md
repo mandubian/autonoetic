@@ -1,87 +1,59 @@
-# Approval Notification Delivery
+# Approval Resolution Delivery
 
-This document describes the current approval-resolution delivery model in Autonoetic.
+This document describes how approval outcomes are delivered after an operator runs
+`autonoetic gateway approve` or `autonoetic gateway reject`.
 
 ## Summary
 
-Approval is a first-class control surface. When an operator approves or rejects a request:
+Approval resolution is now **path-dependent**:
 
-1. the decision is written durably under the scheduler approvals store,
-2. a structured approval-resolution notification is persisted for the target session(s),
-3. delivery is handled by long-running gateway-owned components and channel consumers,
-4. the notification remains pending until explicitly consumed.
+1. Decision is always persisted in SQLite (`approvals` table).
+2. Workflow-bound requests resume via **turn continuation**, not session notification.
+3. Non-workflow requests still use durable notification delivery.
 
-This model replaces short-lived CLI-owned wake logic with durable gateway-owned delivery.
+This keeps workflow orchestration deterministic while preserving direct-chat compatibility.
 
-## Design Goals
+## Two Delivery Paths
 
-- Keep approval handling simple and auditable.
-- Use one payload shape for all delivery paths.
-- Avoid process-lifetime races from short-lived CLI commands.
-- Ensure chat/session continuation can happen automatically.
-- Keep pending notifications durable until acknowledged.
+### 1) Workflow-Bound Tasks (continuation model)
 
-## Structured Payload Contract
+If an approval request has both `workflow_id` and `task_id`:
 
-Approval resolution uses a structured message body:
+- Decision is recorded in `approvals`.
+- Workflow task is unblocked (`Runnable` on approve, `Failed` on reject).
+- Scheduler picks runnable tasks and re-executes them.
+- Execution loads `TurnContinuation`, executes approved action in the gateway, injects real tool result, and continues the turn.
+- No `approval_resolved` signal is required for this path.
 
-```json
-{
-  "type": "approval_resolved",
-  "request_id": "apr-1234abcd",
-  "agent_id": "weather.fetcher",
-  "status": "approved",
-  "install_completed": true,
-  "message": "Agent approved and installed."
-}
-```
+### 2) Non-Workflow Sessions (notification model)
 
-The same schema is used for approval notifications regardless of delivery path.
+If the request is not workflow-bound:
+
+- Decision is recorded in `approvals`.
+- A durable approval signal is written to `notifications`.
+- Gateway-owned consumers/channel clients deliver and acknowledge the signal.
+- This path preserves existing direct-chat continuation behavior.
 
 ## Storage Model
 
-Autonoetic now uses an embedded SQLite database (`GatewayStore`) for durable approval and notification storage, replacing the legacy file-based system.
+All approval state is stored in `.gateway/gateway.db`:
 
-- **Database:** `.gateway/gateway.db`
-- **Approvals:** Stored in the `approvals` table with columns for `request_id`, `agent_id`, `session_id`, `status` (`pending`, `approved`, `rejected`), etc.
-- **Notifications:** Stored in the `notifications` table (replacing `.gateway/signal/` files), tracking delivery attempts and consumption status.
-- **Workflow Events:** Stored in the `workflow_events` table for resilient event logging.
-
-Delivery bookkeeping (like attempt counts and `consumed_at` timestamps) is natively tracked as columns within the SQLite schema.
-
-## Delivery Ownership
-
-- `gateway approvals approve|reject` records approval decisions.
-- Notification polling and delivery are started by the gateway daemon (`gateway start`), not by the short-lived approval CLI process.
-- Chat/TUI acts as a channel consumer and can resume on its own connection.
-
-## Chat Channel Behavior
-
-For terminal chat:
-
-1. chat observes the causal chain for `approval_resolved` workflow events or background continuation,
-2. chat renders the assistant continuation automatically based on the updated causal events.
-
-Signal files are no longer polled or consumed by the CLI; this is now entirely managed by the Gateway's internal SQLite notification system.
-
-## Background Scheduler Behavior
-
-Background wake on approval is gated by `background.wake_predicates.approval_resolved`.
-
-If disabled, approved requests do not trigger `WakeReason::ApprovalResolved`.
+- `approvals`: request metadata + decision status (`pending`/`approved`/`rejected`)
+- `notifications`: durable queued notifications for non-workflow delivery
+- `workflow_events`: workflow-visible state transitions (`task.awaiting_approval`, `task.approved`, `task.rejected`, etc.)
 
 ## Operator Expectations
 
-- Approving a request should queue a durable notification for the waiting session.
-- If chat for that session is already open, continuation should appear without manual `continue`/`done` prompts.
-- If no consumer is connected yet, the notification stays pending until a consumer acknowledges it.
+- Approve/reject is always durable and auditable.
+- Workflow tasks resume from continuation without requiring manual retry prompts.
+- Non-workflow chat sessions still receive durable approval notifications.
 
-## Current Caveats
+## Notes
 
-- Some target routing for parent/child sessions still relies on existing session conventions.
-- Signal persistence and delivery markers are durable, but consumer-side acknowledgement remains the primary completion signal.
+- Workflow chat visibility should be read from workflow events, not notification payloads.
+- Approval records remain queryable regardless of which delivery path is used.
 
 ## Related Docs
 
-- `docs/quickstart-planner-specialist-chat.md`
-- `docs/agent_routing_and_roles.md`
+- `docs/workflow-orchestration.md`
+- `docs/separation-of-powers.md`
