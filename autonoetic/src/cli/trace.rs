@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::common::AgentTrace;
 use autonoetic_gateway::llm::Message;
-use autonoetic_types::causal_chain::{CausalChainEntry, EntryStatus};
+use autonoetic_types::causal_chain::{CausalChainEntry, CausalEventRecord, EntryStatus};
 use autonoetic_types::workflow::{
     TaskRun, TaskRunStatus, WorkflowEventRecord, WorkflowRun, WorkflowRunStatus,
 };
@@ -142,6 +142,22 @@ pub fn handle_trace_session(
         !session_id.trim().is_empty(),
         "session_id must not be empty"
     );
+
+    // Try to load from gateway database first (preferred method)
+    let db_result = load_traces_from_db(
+        config_path,
+        Some(session_id),
+        requested_agent,
+        1000, // Default limit
+    );
+
+    if let Ok(db_events) = db_result {
+        if !db_events.is_empty() {
+            return handle_trace_session_from_db(session_id, &db_events, json_output);
+        }
+    }
+
+    // Fall back to JSONL files
     let traces = load_agent_traces(config_path, requested_agent)?;
     let mut matches: Vec<(String, Vec<CausalChainEntry>)> = Vec::new();
     for trace in traces {
@@ -352,6 +368,115 @@ pub fn load_agent_traces(
         });
     }
     Ok(traces)
+}
+
+/// Load traces from the gateway database (causal_events table).
+/// This is the preferred method as it provides queryable access to events.
+pub fn load_traces_from_db(
+    config_path: &Path,
+    session_id: Option<&str>,
+    agent_id: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<CausalEventRecord>> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = config.agents_dir.join(".gateway");
+    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
+    
+    store.search_causal_events(session_id, agent_id, limit)
+}
+
+/// Handle trace session output from database events
+fn handle_trace_session_from_db(
+    session_id: &str,
+    events: &[CausalEventRecord],
+    json_output: bool,
+) -> anyhow::Result<()> {
+    if json_output {
+        let body = serde_json::json!({
+            "session_id": session_id,
+            "source": "gateway.db",
+            "events": events,
+        });
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    println!("Session: {}{}{}", color::BRIGHT_YELLOW, session_id, color::RESET);
+    println!("Source: {}{}{}", color::DIM, "gateway.db (causal_events)", color::RESET);
+    println!();
+    println!(
+        "{}{}{:<8} {:<24} {:<15} {:<18} {:<15} {:<20} {}{}",
+        color::DIM, color::BOLD,
+        "SEQ", "TIMESTAMP", "CATEGORY", "ACTION", "STATUS", "TARGET", "REASON",
+        color::RESET
+    );
+    println!("{}", color::separator(130));
+    
+    for event in events {
+        let target_str = event.target.as_deref().unwrap_or("-");
+        let reason_str = event.reason.as_deref().unwrap_or("-");
+        let target_display = if target_str.len() > 19 { format!("{}…", &target_str[..18]) } else { target_str.to_string() };
+        let reason_display = if reason_str.len() > 35 { format!("{}…", &reason_str[..34]) } else { reason_str.to_string() };
+
+        let reason_colored = match event.status.as_str() {
+            "ERROR" => format!("{}{}{}{}", color::BRIGHT_RED, color::BOLD, reason_display, color::RESET),
+            "DENIED" => format!("{}{}{}{}", color::YELLOW, color::BOLD, reason_display, color::RESET),
+            _ => color::dim(&reason_display),
+        };
+
+        println!(
+            "{} {:<24} {} {} {} {} {}",
+            color::seq(event.event_seq),
+            event.timestamp,
+            color::category(&event.category),
+            color::action(&event.action),
+            color::status_label(&event.status),
+            color::dim(&target_display),
+            reason_colored,
+        );
+
+        // Show tool-specific info for tool_invoke events
+        if event.category == "tool_invoke" {
+            if let Some(ref payload) = event.payload {
+                if let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(payload) {
+                    if let Some(tool_name) = payload_json.get("tool_name").and_then(|v| v.as_str()) {
+                        let args_preview = payload_json.get("arguments")
+                            .and_then(|v| v.as_str())
+                            .map(|a| {
+                                if a.len() > 80 { format!("{}…", &a[..79]) } else { a.to_string() }
+                            })
+                            .unwrap_or_default();
+                        let result_preview = payload_json.get("result_preview")
+                            .and_then(|v| v.as_str())
+                            .map(|r| {
+                                if r.len() > 80 { format!("{}…", &r[..79]) } else { r.to_string() }
+                            })
+                            .unwrap_or_default();
+
+                        if event.action == "requested" && !args_preview.is_empty() {
+                            println!("      {}├─ {}({}){}", color::DIM, color::tool_name(tool_name), color::dim(&args_preview), color::RESET);
+                        } else if event.action == "completed" && !result_preview.is_empty() {
+                            println!("      {}├─ {} → {}{}", color::DIM, color::tool_name(tool_name), color::dim(&result_preview), color::RESET);
+                        } else {
+                            println!("      {}├─ {}{}", color::DIM, color::tool_name(tool_name), color::RESET);
+                        }
+                    }
+                }
+            }
+        } else {
+            if let Some(ref payload) = event.payload {
+                if let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let payload_str = serde_json::to_string(&payload_json).unwrap_or_default();
+                    if payload_str.len() > 2 && payload_str != "null" {
+                        let truncated = if payload_str.len() > 120 { format!("{}…", &payload_str[..119]) } else { payload_str };
+                        println!("      {}├─ payload: {}{}{}", color::DIM, color::BRIGHT_BLUE, truncated, color::RESET);
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(())
 }
 
 fn load_trace_from_path(path: &Path, agent_id: &str) -> anyhow::Result<AgentTrace> {

@@ -794,6 +794,72 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Query causal events with filters.
+    pub fn search_causal_events(
+        &self,
+        session_id: Option<&str>,
+        agent_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<autonoetic_types::causal_chain::CausalEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut conditions = Vec::new();
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
+        let mut param_idx = 1;
+
+        if let Some(sid) = session_id {
+            conditions.push("session_id = ?");
+            params.push(rusqlite::types::Value::Text(sid.to_string()));
+            param_idx += 1;
+        }
+
+        if let Some(aid) = agent_id {
+            conditions.push("agent_id = ?");
+            params.push(rusqlite::types::Value::Text(aid.to_string()));
+            param_idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            "1".to_string()
+        } else {
+            conditions.join(" AND ")
+        };
+
+        let query = format!(
+            "SELECT * FROM causal_events WHERE {} ORDER BY timestamp DESC LIMIT ?{}",
+            where_clause, param_idx
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let mut params_with_limit = params.clone();
+        params_with_limit.push(rusqlite::types::Value::Integer(limit));
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_with_limit), |row| {
+            Ok(autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: row.get(0)?,
+                agent_id: row.get(1)?,
+                session_id: row.get(2)?,
+                turn_id: row.get(3)?,
+                event_seq: row.get::<_, i64>(4)? as u64,
+                timestamp: row.get(5)?,
+                category: row.get(6)?,
+                action: row.get(7)?,
+                status: row.get(8)?,
+                target: row.get(9)?,
+                payload: row.get(10)?,
+                payload_ref: row.get(11)?,
+                evidence_ref: row.get(12)?,
+                reason: row.get(13)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
     pub fn create_execution_trace(
         &self,
         trace: &autonoetic_types::causal_chain::ExecutionTraceRecord,
