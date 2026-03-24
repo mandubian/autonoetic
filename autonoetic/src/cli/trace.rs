@@ -1242,8 +1242,6 @@ struct WorkflowGraphView {
     workflow_status: String,
     lead_agent_id: String,
     active_task_ids: Vec<String>,
-    blocked_task_ids: Vec<String>,
-    pending_approval_ids: Vec<String>,
     tasks: Vec<WorkflowGraphTaskView>,
     recent_events: Vec<WorkflowGraphEventView>,
 }
@@ -1288,8 +1286,6 @@ fn build_workflow_graph_view(
         workflow_status: workflow_status_snake(run.status).to_string(),
         lead_agent_id: run.lead_agent_id.clone(),
         active_task_ids: run.active_task_ids.clone(),
-        blocked_task_ids: run.blocked_task_ids.clone(),
-        pending_approval_ids: run.pending_approval_ids.clone(),
         tasks: task_views,
         recent_events: event_views,
     })
@@ -1337,14 +1333,6 @@ fn print_workflow_graph_text(view: &WorkflowGraphView) {
         }
     }
 
-    if !view.pending_approval_ids.is_empty() {
-        println!(
-            "{}pending_approvals:{} {}",
-            color::YELLOW,
-            color::RESET,
-            view.pending_approval_ids.join(", ")
-        );
-    }
     if !view.active_task_ids.is_empty() {
         println!(
             "{}active_task_ids:{} {}",
@@ -1353,15 +1341,6 @@ fn print_workflow_graph_text(view: &WorkflowGraphView) {
             view.active_task_ids.join(", ")
         );
     }
-    if !view.blocked_task_ids.is_empty() {
-        println!(
-            "{}blocked_task_ids:{} {}",
-            color::DIM,
-            color::RESET,
-            view.blocked_task_ids.join(", ")
-        );
-    }
-
     if !view.recent_events.is_empty() {
         println!();
         println!("{}recent workflow events:{}", color::BOLD, color::RESET);

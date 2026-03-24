@@ -748,20 +748,25 @@ pub async fn run_agent_with_runtime_with_driver(
         Message::system(runtime.instructions.clone()),
         Message::user(runtime.initial_user_message.clone()),
     ];
+    use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
     match runtime.execute_with_history(&mut history).await {
-        Ok(Some(reply)) => {
+        Ok(TurnOutcome::Completed(Some(reply))) => {
             println!("{}", reply);
             if let Some(u) = format_llm_usage_for_cli(&runtime.take_llm_usage_last_run()) {
                 eprintln!("{}", u);
             }
             runtime.close_session("headless_complete")?;
         }
-        Ok(None) => {
+        Ok(TurnOutcome::Completed(None)) => {
             println!("[No assistant text returned]");
             if let Some(u) = format_llm_usage_for_cli(&runtime.take_llm_usage_last_run()) {
                 eprintln!("{}", u);
             }
             runtime.close_session("headless_complete_empty")?;
+        }
+        Ok(TurnOutcome::Suspended { approval_request_id, .. }) => {
+            println!("[Turn suspended pending approval: {}]", approval_request_id);
+            runtime.close_session("headless_suspended")?;
         }
         Err(e) => {
             let _ = runtime.close_session("headless_error");
@@ -775,6 +780,7 @@ pub async fn run_interactive_session(
     runtime: &mut autonoetic_gateway::runtime::lifecycle::AgentExecutor,
     kickoff_message: Option<&str>,
 ) -> anyhow::Result<()> {
+    use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
     let mut stdout = tokio::io::stdout();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut history = vec![Message::system(runtime.instructions.clone())];
@@ -787,7 +793,7 @@ pub async fn run_interactive_session(
     if let Some(message) = kickoff_message {
         history.push(Message::user(message.to_string()));
         match runtime.execute_with_history(&mut history).await {
-            Ok(Some(reply)) => {
+            Ok(TurnOutcome::Completed(Some(reply))) => {
                 stdout.write_all(reply.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
@@ -795,10 +801,14 @@ pub async fn run_interactive_session(
                     eprintln!("{}", u);
                 }
             }
-            Ok(None) => {
+            Ok(TurnOutcome::Completed(None)) => {
                 if let Some(u) = format_llm_usage_for_cli(&runtime.take_llm_usage_last_run()) {
                     eprintln!("{}", u);
                 }
+            }
+            Ok(TurnOutcome::Suspended { approval_request_id, .. }) => {
+                stdout.write_all(format!("[Turn suspended pending approval: {}]\n", approval_request_id).as_bytes()).await?;
+                stdout.flush().await?;
             }
             Err(e) => {
                 let _ = runtime.close_session("interactive_error");
@@ -824,7 +834,7 @@ pub async fn run_interactive_session(
 
         history.push(Message::user(trimmed.to_string()));
         match runtime.execute_with_history(&mut history).await {
-            Ok(Some(reply)) => {
+            Ok(TurnOutcome::Completed(Some(reply))) => {
                 stdout.write_all(reply.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
@@ -832,10 +842,14 @@ pub async fn run_interactive_session(
                     eprintln!("{}", u);
                 }
             }
-            Ok(None) => {
+            Ok(TurnOutcome::Completed(None)) => {
                 if let Some(u) = format_llm_usage_for_cli(&runtime.take_llm_usage_last_run()) {
                     eprintln!("{}", u);
                 }
+            }
+            Ok(TurnOutcome::Suspended { approval_request_id, .. }) => {
+                stdout.write_all(format!("[Turn suspended pending approval: {}]\n", approval_request_id).as_bytes()).await?;
+                stdout.flush().await?;
             }
             Err(e) => {
                 let _ = runtime.close_session("interactive_error");
