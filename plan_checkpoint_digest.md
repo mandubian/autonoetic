@@ -1149,6 +1149,14 @@ LLM-powered summarization and memory extraction.
 - [ ] **6.6** Update `CLAUDE.md` with checkpoint, event store, and digest architecture.
 - [ ] **6.7** Write `docs/agent-learning.md`: how agents use `execution.search`, `memory.search_by_tags`, and `digest.query` to learn from past sessions.
 
+#### Phase 6 Optional: Checkpoint Reproducibility Enhancements (Mid-term)
+
+These are optional improvements to make checkpoint respawn more strictly reproducible. Not required for core functionality.
+
+- [ ] **6.O1** Populate `tool_invocations_consumed` in checkpoint — track tool call counts per session for accurate budget restoration on respawn.
+- [ ] **6.O2** Populate `content_store_refs` in checkpoint — capture active (name, handle) pairs so respawn can restore content store references.
+- [ ] **6.O3** Compute `tool_registry_version` hash — detect tool registry changes between checkpoint save and respawn; warn or fail if mismatch.
+
 ---
 
 ## Agent Learning: How It All Comes Together
