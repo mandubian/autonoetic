@@ -690,6 +690,30 @@ impl SessionTracer {
             gateway_store: None,
         }
     }
+
+    /// Creates a test tracer with gateway store for dual-write testing.
+    pub fn test_tracer_with_store(
+        agent_dir: &std::path::Path,
+        store: std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
+    ) -> Self {
+        Self {
+            causal_logger: CausalLogger::test_logger(
+                &agent_dir.join("history").join("causal_chain.jsonl"),
+            ),
+            agent_id: "test-agent".to_string(),
+            session_id: "test-session".to_string(),
+            turn_id: Some("test-turn".to_string()),
+            event_seq: 0,
+            evidence_store: EvidenceStore {
+                mode: EvidenceMode::Off,
+                agent_dir: agent_dir.to_path_buf(),
+                session_id: "test-session".to_string(),
+                base_dir: None,
+            },
+            timeline_writer: None,
+            gateway_store: Some(store),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -763,5 +787,98 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("AUTONOETIC_EVIDENCE_MODE", value) },
             None => unsafe { std::env::remove_var("AUTONOETIC_EVIDENCE_MODE") },
         }
+    }
+
+    #[test]
+    fn test_dual_write_produces_identical_event_data() {
+        let temp = tempdir().unwrap();
+        let agents_dir = temp.path().join("agents");
+        let agent_dir = agents_dir.join("test-agent");
+        let gateway_dir = agents_dir.join(".gateway");
+        fs::create_dir_all(agent_dir.join("history")).unwrap();
+        fs::create_dir_all(&gateway_dir).unwrap();
+
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let mut tracer = SessionTracer::test_tracer_with_store(&agent_dir, store.clone());
+        tracer.set_turn_id("turn-000001");
+
+        // Log an event - should write to both JSONL and DB
+        let payload = serde_json::json!({
+            "tool_name": "sandbox.exec",
+            "arguments": "echo hello"
+        });
+        tracer
+            .log_event(
+                "tool_invoke",
+                "completed",
+                EntryStatus::Success,
+                Some(payload.clone()),
+            )
+            .unwrap();
+
+        // Read JSONL
+        let jsonl_path = agent_dir.join("history").join("causal_chain.jsonl");
+        let jsonl_content = fs::read_to_string(&jsonl_path).unwrap();
+        let jsonl_lines: Vec<&str> = jsonl_content.lines().collect();
+        assert_eq!(jsonl_lines.len(), 1, "Should have one JSONL entry");
+
+        let jsonl_entry: serde_json::Value = serde_json::from_str(jsonl_lines[0]).unwrap();
+
+        // Verify JSONL has expected fields
+        assert_eq!(jsonl_entry["session_id"].as_str().unwrap(), "test-session");
+        assert_eq!(jsonl_entry["turn_id"].as_str().unwrap(), "turn-000001");
+        assert_eq!(jsonl_entry["category"].as_str().unwrap(), "tool_invoke");
+        assert_eq!(jsonl_entry["action"].as_str().unwrap(), "completed");
+        assert_eq!(jsonl_entry["status"].as_str().unwrap(), "SUCCESS");
+
+        // Read DB
+        let db_events = store
+            .search_causal_events(Some("test-session"), None, 100)
+            .unwrap();
+        assert_eq!(db_events.len(), 1, "Should have one DB entry");
+
+        let db_entry = &db_events[0];
+        assert_eq!(db_entry.session_id, "test-session");
+        assert_eq!(db_entry.turn_id.as_deref(), Some("turn-000001"));
+        assert_eq!(db_entry.category, "tool_invoke");
+        assert_eq!(db_entry.action, "completed");
+        assert_eq!(db_entry.status, "SUCCESS");
+    }
+
+    #[test]
+    fn test_dual_write_error_status_preserved() {
+        let temp = tempdir().unwrap();
+        let agents_dir = temp.path().join("agents");
+        let agent_dir = agents_dir.join("test-agent");
+        let gateway_dir = agents_dir.join(".gateway");
+        fs::create_dir_all(agent_dir.join("history")).unwrap();
+        fs::create_dir_all(&gateway_dir).unwrap();
+
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let mut tracer = SessionTracer::test_tracer_with_store(&agent_dir, store.clone());
+        tracer.set_turn_id("turn-000002");
+
+        // Log an error event
+        let payload = serde_json::json!({
+            "tool_name": "sandbox.exec",
+            "reason": "compilation failed"
+        });
+        tracer
+            .log_event("tool_invoke", "failure", EntryStatus::Error, Some(payload))
+            .unwrap();
+
+        // Read DB
+        let db_events = store
+            .search_causal_events(Some("test-session"), None, 100)
+            .unwrap();
+        assert_eq!(db_events.len(), 1);
+        assert_eq!(db_events[0].status, "ERROR");
+        assert_eq!(db_events[0].action, "failure");
     }
 }
