@@ -27,11 +27,11 @@ pub mod python_ast;
 pub use composite::CompositeAnalyzer;
 pub use llm::LlmAnalyzer;
 pub use pattern::PatternAnalyzer;
-pub use python_ast::PythonAstAnalyzer;
 pub use provider::{
     AnalysisProvider, AnalysisProviderType, CapabilityAnalysis, FileToAnalyze, SecurityAnalysis,
     SecurityThreatType,
 };
+pub use python_ast::PythonAstAnalyzer;
 
 use autonoetic_types::capability::Capability;
 

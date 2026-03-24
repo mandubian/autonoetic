@@ -641,13 +641,17 @@ mod tests {
             )
             .unwrap();
 
-        let causal_log = fs::read_to_string(agent_dir.join("history").join("causal_chain.jsonl")).unwrap();
+        let causal_log =
+            fs::read_to_string(agent_dir.join("history").join("causal_chain.jsonl")).unwrap();
         assert!(
             causal_log.contains("evidence_ref"),
             "failed tool results should preserve a full evidence pointer"
         );
 
-        let evidence_dir = agent_dir.join("history").join("evidence").join("demo-session");
+        let evidence_dir = agent_dir
+            .join("history")
+            .join("evidence")
+            .join("demo-session");
         let evidence_files: Vec<_> = fs::read_dir(evidence_dir).unwrap().collect();
         assert_eq!(evidence_files.len(), 1);
     }

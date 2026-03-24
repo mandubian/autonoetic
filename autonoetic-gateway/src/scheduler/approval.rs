@@ -102,10 +102,6 @@ pub fn approve_request(
         );
     }
 
-    // Store the approval result in the task checkpoint so the agent knows
-    // to retry with approval_ref when the workflow re-queues.
-    store_approval_result_in_checkpoint(config, gateway_store, &decision);
-
     // Unblock the task in the workflow (if bound to one)
     unblock_task_on_approval(config, gateway_store, &decision);
 
@@ -338,139 +334,6 @@ fn should_resume_waiting_session(decision: &ApprovalDecision) -> bool {
     !(decision.workflow_id.is_some() && decision.task_id.is_some())
 }
 
-/// Build a human-readable resume message for an approval decision.
-///
-/// This message is stored in the task checkpoint and used by the workflow scheduler
-/// when re-queueing an approval-unblocked task, so the agent knows approval was granted
-/// and must retry the tool call with the approval_ref.
-fn build_approval_resume_message(decision: &ApprovalDecision) -> String {
-    let status_str = match decision.status {
-        ApprovalStatus::Approved => "approved",
-        ApprovalStatus::Rejected => "rejected",
-    };
-
-    let payload = match &decision.action {
-        ScheduledAction::SandboxExec { command, .. } => {
-            if decision.status == ApprovalStatus::Approved {
-                serde_json::json!({
-                    "type": "approval_resolved",
-                    "request_id": decision.request_id,
-                    "approval_id": decision.request_id,
-                    "agent_id": decision.agent_id,
-                    "status": "approved",
-                    "action_kind": "sandbox_exec",
-                    "command": command,
-                    "message": format!(
-                        "Approval {} granted. Re-run sandbox.exec with the SAME command PLUS approval_ref='{}'.",
-                        decision.request_id, decision.request_id
-                    ),
-                })
-            } else {
-                serde_json::json!({
-                    "type": "approval_resolved",
-                    "request_id": decision.request_id,
-                    "approval_id": decision.request_id,
-                    "agent_id": decision.agent_id,
-                    "status": "rejected",
-                    "action_kind": "sandbox_exec",
-                    "command": command,
-                    "message": format!("Sandbox execution for '{}' was rejected.", command),
-                })
-            }
-        }
-        ScheduledAction::AgentInstall { agent_id, .. } => {
-            if decision.status == ApprovalStatus::Approved {
-                serde_json::json!({
-                    "type": "approval_resolved",
-                    "request_id": decision.request_id,
-                    "approval_id": decision.request_id,
-                    "agent_id": decision.agent_id,
-                    "status": "approved",
-                    "action_kind": "agent_install",
-                    "message": format!(
-                        "Approval {} granted. Re-run agent.install for '{}' with install_approval_ref='{}'.",
-                        decision.request_id, agent_id, decision.request_id
-                    ),
-                })
-            } else {
-                serde_json::json!({
-                    "type": "approval_resolved",
-                    "request_id": decision.request_id,
-                    "approval_id": decision.request_id,
-                    "agent_id": decision.agent_id,
-                    "status": "rejected",
-                    "action_kind": "agent_install",
-                    "message": format!("Agent install for '{}' was rejected.", agent_id),
-                })
-            }
-        }
-        _ => serde_json::json!({
-            "type": "approval_resolved",
-            "request_id": decision.request_id,
-            "approval_id": decision.request_id,
-            "agent_id": decision.agent_id,
-            "status": status_str,
-            "action_kind": decision.action.kind(),
-        }),
-    };
-
-    serde_json::to_string(&payload).unwrap_or_else(|_| {
-        format!(
-            "{{\"type\":\"approval_resolved\",\"request_id\":\"{}\",\"status\":\"{}\"}}",
-            decision.request_id, status_str
-        )
-    })
-}
-
-/// Store the approval result in the task checkpoint for workflow re-queue.
-///
-/// When `process_runnable_workflow_tasks` picks up the unblocked task, it will
-/// check this checkpoint and use the stored `resume_message` to tell the agent
-/// it must retry with an approval_ref.
-fn store_approval_result_in_checkpoint(
-    config: &GatewayConfig,
-    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    decision: &ApprovalDecision,
-) {
-    let (Some(wf_id), Some(t_id)) = (&decision.workflow_id, &decision.task_id) else {
-        return;
-    };
-    let resume_message = build_approval_resume_message(decision);
-    let status_str = match decision.status {
-        ApprovalStatus::Approved => "approved",
-        ApprovalStatus::Rejected => "rejected",
-    };
-    if let Err(e) = super::workflow_store::checkpoint_task(
-        config,
-        gateway_store,
-        wf_id,
-        t_id,
-        "approval_resolved".to_string(),
-        serde_json::json!({
-            "request_id": decision.request_id,
-            "approval_id": decision.request_id,
-            "status": status_str,
-            "resume_message": resume_message,
-        }),
-    ) {
-        tracing::warn!(
-            target: "approval",
-            workflow_id = %wf_id,
-            task_id = %t_id,
-            error = %e,
-            "Failed to store approval result in task checkpoint"
-        );
-    } else {
-        tracing::info!(
-            target: "approval",
-            workflow_id = %wf_id,
-            task_id = %t_id,
-            request_id = %decision.request_id,
-            "Stored approval result in task checkpoint for workflow re-queue"
-        );
-    }
-}
-
 /// On approval resolution, update the blocked task's status and emit workflow events.
 fn unblock_task_on_approval(
     config: &GatewayConfig,
@@ -480,23 +343,45 @@ fn unblock_task_on_approval(
     let (Some(wf_id), Some(t_id)) = (&decision.workflow_id, &decision.task_id) else {
         return;
     };
-    let new_status = match decision.status {
-        ApprovalStatus::Approved => autonoetic_types::workflow::TaskRunStatus::Runnable,
-        ApprovalStatus::Rejected => autonoetic_types::workflow::TaskRunStatus::Failed,
+    let (new_status, approval_event_type) = match decision.status {
+        ApprovalStatus::Approved => (
+            autonoetic_types::workflow::TaskRunStatus::Runnable,
+            "task.approved",
+        ),
+        ApprovalStatus::Rejected => (
+            autonoetic_types::workflow::TaskRunStatus::Failed,
+            "task.rejected",
+        ),
     };
+
+    // Emit the approval decision event before updating status so chat CLI sees it.
+    let _ = super::workflow_store::append_workflow_event(
+        config,
+        gateway_store,
+        &autonoetic_types::workflow::WorkflowEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            workflow_id: wf_id.to_string(),
+            task_id: Some(t_id.to_string()),
+            event_type: approval_event_type.to_string(),
+            agent_id: Some(decision.agent_id.clone()),
+            payload: serde_json::json!({
+                "request_id": decision.request_id,
+                "status": match decision.status {
+                    ApprovalStatus::Approved => "approved",
+                    ApprovalStatus::Rejected => "rejected",
+                },
+            }),
+            occurred_at: decision.decided_at.clone(),
+        },
+    );
+
     if let Err(e) = super::workflow_store::update_task_run_status(
         config,
         gateway_store,
         wf_id,
         t_id,
         new_status,
-        Some(format!(
-            "approval_{}",
-            match decision.status {
-                ApprovalStatus::Approved => "approved",
-                ApprovalStatus::Rejected => "rejected",
-            }
-        )),
+        None,
     ) {
         tracing::warn!(
             target: "approval",
@@ -505,14 +390,44 @@ fn unblock_task_on_approval(
             error = %e,
             "Failed to unblock task on approval resolution"
         );
-    } else {
-        tracing::info!(
-            target: "approval",
-            workflow_id = %wf_id,
-            task_id = %t_id,
-            status = ?decision.status,
-            "Task unblocked after approval resolution"
-        );
+        return;
+    }
+
+    tracing::info!(
+        target: "approval",
+        workflow_id = %wf_id,
+        task_id = %t_id,
+        status = ?decision.status,
+        "Task unblocked after approval resolution"
+    );
+
+    // Clear BlockedApproval if no tasks remain in AwaitingApproval.
+    if let Ok(tasks) =
+        super::workflow_store::list_task_runs_for_workflow(config, gateway_store, wf_id)
+    {
+        let any_awaiting = tasks
+            .iter()
+            .any(|t| t.status == autonoetic_types::workflow::TaskRunStatus::AwaitingApproval);
+        if !any_awaiting {
+            if let Ok(Some(mut wf)) =
+                super::workflow_store::load_workflow_run(config, gateway_store, wf_id)
+            {
+                if wf.status == autonoetic_types::workflow::WorkflowRunStatus::BlockedApproval {
+                    wf.status = autonoetic_types::workflow::WorkflowRunStatus::WaitingChildren;
+                    wf.updated_at = chrono::Utc::now().to_rfc3339();
+                    if let Err(e) =
+                        super::workflow_store::save_workflow_run(config, gateway_store, &wf)
+                    {
+                        tracing::warn!(
+                            target: "approval",
+                            workflow_id = %wf_id,
+                            error = %e,
+                            "Failed to clear BlockedApproval status"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -624,9 +539,7 @@ fn decide_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_approval_resume_message, should_notify_parent_session, should_resume_waiting_session,
-    };
+    use super::{should_notify_parent_session, should_resume_waiting_session};
     use crate::scheduler::workflow_store::{ensure_workflow_for_root_session, save_task_run};
     use autonoetic_types::background::{
         ApprovalDecision, ApprovalRequest, ApprovalStatus, ScheduledAction,
@@ -1035,55 +948,5 @@ mod tests {
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(!pending.is_empty(), "should have created a notification");
-    }
-
-    #[test]
-    fn build_approval_resume_message_returns_valid_json_without_execution_data() {
-        let decision = ApprovalDecision {
-            request_id: "apr-jsonsafe1".to_string(),
-            agent_id: "coder.default".to_string(),
-            session_id: "demo-session/coder.default-1234".to_string(),
-            action: ScheduledAction::SandboxExec {
-                command: "python3 /tmp/weather.py".to_string(),
-                dependencies: None,
-                requires_approval: true,
-                evidence_ref: None,
-            },
-            status: ApprovalStatus::Approved,
-            decided_at: chrono::Utc::now().to_rfc3339(),
-            decided_by: "operator".to_string(),
-            reason: None,
-            workflow_id: None,
-            task_id: None,
-            root_session_id: None,
-        };
-
-        let msg = build_approval_resume_message(&decision);
-        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
-
-        assert_eq!(
-            parsed.get("type").and_then(|v| v.as_str()),
-            Some("approval_resolved")
-        );
-        assert_eq!(
-            parsed.get("request_id").and_then(|v| v.as_str()),
-            Some("apr-jsonsafe1")
-        );
-        assert_eq!(
-            parsed.get("status").and_then(|v| v.as_str()),
-            Some("approved")
-        );
-        assert!(
-            parsed.get("execution").is_none(),
-            "new model should not include execution data"
-        );
-        assert!(
-            parsed
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .contains("approval_ref"),
-            "message should instruct agent to retry with approval_ref"
-        );
     }
 }

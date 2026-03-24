@@ -492,7 +492,8 @@ impl ContentStore {
             if after_prefix.len() == SHORT_ALIAS_LEN
                 && after_prefix.chars().all(|c| c.is_ascii_hexdigit())
             {
-                return self.resolve_alias_with_root(session_id, after_prefix)
+                return self
+                    .resolve_alias_with_root(session_id, after_prefix)
                     .and_then(|handle| self.read(&handle));
             }
             // Otherwise, treat as full handle
@@ -503,7 +504,8 @@ impl ContentStore {
         if name_or_handle.len() == SHORT_ALIAS_LEN
             && name_or_handle.chars().all(|c| c.is_ascii_hexdigit())
         {
-            return self.resolve_alias_with_root(session_id, name_or_handle)
+            return self
+                .resolve_alias_with_root(session_id, name_or_handle)
                 .and_then(|handle| self.read(&handle));
         }
 

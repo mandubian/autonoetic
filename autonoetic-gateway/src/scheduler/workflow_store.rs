@@ -202,8 +202,6 @@ pub fn ensure_workflow_for_root_session(
                     created_at: now_rfc3339(),
                     updated_at: now_rfc3339(),
                     active_task_ids: vec![],
-                    blocked_task_ids: vec![],
-                    pending_approval_ids: vec![],
                     queued_task_ids: vec![],
                     join_policy: Default::default(),
                     join_task_ids: vec![],
@@ -230,8 +228,6 @@ pub fn ensure_workflow_for_root_session(
         created_at: ts.clone(),
         updated_at: ts,
         active_task_ids: vec![],
-        blocked_task_ids: vec![],
-        pending_approval_ids: vec![],
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![],
@@ -364,13 +360,6 @@ pub fn refresh_workflow_graph_markdown(
         run.lead_agent_id.as_str()
     };
     writeln!(body, "| lead (planner) | `{}` |", lead)?;
-    if !run.pending_approval_ids.is_empty() {
-        writeln!(
-            body,
-            "| pending_approvals | `{}` |",
-            run.pending_approval_ids.join(", ")
-        )?;
-    }
     writeln!(body)?;
     writeln!(body, "## Tasks")?;
     writeln!(body)?;
@@ -548,30 +537,15 @@ pub fn update_task_run_status(
         }
     }
 
-    // Determine event type, with special handling for approval events
-    let event_type = match (&result_summary, &status) {
-        // Check for approval-related result_summary first
-        (Some(summary), _) if summary.contains("approval_approved") => "task.approved",
-        (Some(summary), _) if summary.contains("approval_rejected") => "task.rejected",
-        // Standard status-based events
-        (_, TaskRunStatus::Succeeded) => "task.completed",
-        (_, TaskRunStatus::Failed) => "task.failed",
-        (_, TaskRunStatus::AwaitingApproval) => "task.awaiting_approval",
-        (_, TaskRunStatus::Running) => "task.started",
-        (_, TaskRunStatus::Cancelled) => "task.failed",
+    let event_type = match &status {
+        TaskRunStatus::Succeeded => "task.completed",
+        TaskRunStatus::Failed | TaskRunStatus::Cancelled => "task.failed",
+        TaskRunStatus::AwaitingApproval => "task.awaiting_approval",
+        TaskRunStatus::Running => "task.started",
         _ => "task.updated",
     };
 
-    // Build payload with approval info if available
-    let mut payload = serde_json::json!({ "status": status });
-    if let Some(summary) = &result_summary {
-        if summary.contains("approval_") {
-            payload = serde_json::json!({
-                "status": status,
-                "approval": summary
-            });
-        }
-    }
+    let payload = serde_json::json!({ "status": status });
 
     append_workflow_event(
         config,
@@ -2550,8 +2524,8 @@ mod tests {
         let cfg = test_config(&agents);
         let gateway_dir = agents.join(".gateway");
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-        let wf =
-            ensure_workflow_for_root_session(&cfg, Some(&store), "implicit-store-root", None).unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "implicit-store-root", None)
+            .unwrap();
 
         // Without explicit store arg, loader opens GatewayStore from config.
         let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();

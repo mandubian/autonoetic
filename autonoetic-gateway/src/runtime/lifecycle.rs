@@ -7,10 +7,10 @@ use crate::policy::PolicyEngine;
 use crate::runtime::artifact::extract_artifacts_from_text;
 use crate::runtime::disclosure::DisclosureState;
 use crate::runtime::guard::LoopGuard;
-use crate::runtime::openrouter_catalog::OpenRouterCatalog;
-use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::mcp::McpToolRuntime;
+use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::persist_reevaluation_state;
+use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_tracer::{EvidenceMode, SessionTracer};
 use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tool_call_processor::ToolCallProcessor;
@@ -32,6 +32,31 @@ const LLM_OTHER_EMPTY_RETRY_DEFAULT: usize = 1;
 struct SchemaValidation {
     valid: bool,
     messages: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// TurnOutcome
+// ---------------------------------------------------------------------------
+
+/// Result of a single `execute_with_history` call.
+#[derive(Debug)]
+pub enum TurnOutcome {
+    /// The turn completed normally.  Contains the final assistant reply text
+    /// (filtered by disclosure policy), or `None` when the turn ended without
+    /// producing any text.
+    Completed(Option<String>),
+
+    /// The turn was suspended at an approval boundary.  The `TurnContinuation`
+    /// has already been saved to disk by `execute_with_history`; the caller
+    /// (typically `spawn_task_execution`) should set the task to
+    /// `AwaitingApproval` and release the tokio task / claim — no resources
+    /// need to be held while waiting for the operator.
+    Suspended {
+        approval_request_id: String,
+        /// The full continuation, returned so the caller can attach
+        /// `workflow_id` / `task_id` and persist it with `save_continuation`.
+        continuation: Box<crate::runtime::continuation::TurnContinuation>,
+    },
 }
 
 pub(crate) fn compose_system_instructions(agent_instructions: &str) -> String {
@@ -83,6 +108,9 @@ pub struct AgentExecutor {
     /// Optional OpenRouter models catalog (context + pricing) for UX and session price budgets.
     pub openrouter_catalog: Option<Arc<OpenRouterCatalog>>,
     pub gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    /// Workflow / task context used to populate `TurnContinuation` on suspension.
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
 }
 
 impl AgentExecutor {
@@ -112,6 +140,8 @@ impl AgentExecutor {
             llm_usage_last_run: Vec::new(),
             openrouter_catalog: None,
             gateway_store,
+            workflow_id: None,
+            task_id: None,
         }
     }
 
@@ -152,6 +182,16 @@ impl AgentExecutor {
 
     pub fn with_middleware(mut self, middleware: Middleware) -> Self {
         self.middleware = middleware;
+        self
+    }
+
+    pub fn with_workflow_context(
+        mut self,
+        workflow_id: Option<String>,
+        task_id: Option<String>,
+    ) -> Self {
+        self.workflow_id = workflow_id;
+        self.task_id = task_id;
         self
     }
 
@@ -199,8 +239,14 @@ impl AgentExecutor {
             Message::user(self.initial_user_message.clone()),
         ];
         match self.execute_with_history(&mut history).await {
-            Ok(_) => {
+            Ok(TurnOutcome::Completed(_)) => {
                 let _ = self.close_session("execute_loop_complete");
+                Ok(())
+            }
+            Ok(TurnOutcome::Suspended { .. }) => {
+                // Suspension is expected in scheduler context; continuation already saved.
+                // In standalone execute_loop context, just end the session.
+                let _ = self.close_session("execute_loop_suspended");
                 Ok(())
             }
             Err(e) => {
@@ -214,7 +260,7 @@ impl AgentExecutor {
     pub async fn execute_with_history(
         &mut self,
         history: &mut Vec<Message>,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<TurnOutcome> {
         tracing::info!("Agent {} waking up...", self.manifest.agent.id);
         self.guard = LoopGuard::new(5);
         self.llm_usage_last_run.clear();
@@ -249,10 +295,6 @@ impl AgentExecutor {
 
         tracer.log_wake(history.len(), evidence_mode);
 
-        // Detect resumption: if history has more than just system+user messages,
-        // this is a resumption from hibernation
-        let is_resumption = history.len() > 2;
-
         let mut mcp_runtime = McpToolRuntime::from_env().await?;
         let mut secret_store: Option<SecretStoreRuntime> =
             SecretStoreRuntime::from_instructions(&self.instructions)?;
@@ -284,8 +326,6 @@ impl AgentExecutor {
         let policy = PolicyEngine::new(self.manifest.clone());
         let max_empty_other_retries = max_other_empty_retries();
         let mut empty_other_retries_used = 0usize;
-        // When a tool returns approval_required, force the next LLM call to end turn (no tools).
-        let mut approval_required_force_end_turn = false;
 
         loop {
             self.guard.check_loop()?;
@@ -307,13 +347,7 @@ impl AgentExecutor {
                 history.push(Message::system(system_instructions));
             }
 
-            // MCP tool exposure ... (skipped for brevity, but I must match exactly)
-
-            // When approval_required was returned by a tool, force end turn: no further tool calls.
-            let tools: Vec<ToolDefinition> = if approval_required_force_end_turn {
-                approval_required_force_end_turn = false;
-                vec![]
-            } else {
+            let tools: Vec<ToolDefinition> = {
                 let mut t: Vec<ToolDefinition> = mcp_runtime
                     .tool_definitions()?
                     .into_iter()
@@ -521,9 +555,10 @@ impl AgentExecutor {
 
             match response.stop_reason {
                 StopReason::ToolUse => {
+                    // Keep the assistant message aside — we only push it to history
+                    // if no suspension occurs (continuation reconstruction re-injects it).
                     let mut assistant_msg = Message::assistant(response.text.clone());
                     assistant_msg.tool_calls = response.tool_calls.clone();
-                    history.push(assistant_msg);
 
                     if let Some(budget) = self.session_budget.as_ref() {
                         budget.reserve_tool_invocations(
@@ -541,8 +576,7 @@ impl AgentExecutor {
                         self.config.as_deref(),
                         self.gateway_store.clone(),
                     )
-                    .with_session_context(self.session_id.clone(), Some(turn_id.clone()))
-                    .with_resumption(is_resumption);
+                    .with_session_context(self.session_id.clone(), Some(turn_id.clone()));
 
                     let (had_any_success, results) = processor
                         .process_tool_calls(
@@ -553,44 +587,101 @@ impl AgentExecutor {
                         )
                         .await?;
 
-                    let mut seen_approval_required: Option<String> = None;
-                    for (id, name, result) in results {
-                        history.push(Message::tool_result(id.clone(), name, result.clone()));
+                    // Check whether the last executed tool call requires approval.
+                    // `process_tool_calls` already stops after the first approval-required result,
+                    // so if any approval is pending it is always the last entry in `results`.
+                    let approval_info = results.last().and_then(|(id, _name, result_json)| {
+                        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                        if parsed
+                            .get("approval_required")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            let request_id = parsed
+                                .get("request_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_default();
+                            Some((id.clone(), request_id, result_json.clone()))
+                        } else {
+                            None
+                        }
+                    });
 
-                        // Check if result is an error to register in guard
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result) {
+                    if let Some((pending_call_id, request_id, approval_response)) = approval_info {
+                        // Build a TurnContinuation and save it, then suspend.
+                        let completed_results = results[..results.len() - 1].to_vec();
+                        // Tool calls that did NOT run because they came after the approval gate.
+                        let remaining_calls = response.tool_calls[results.len()..].to_vec();
+
+                        let pending_tc = response
+                            .tool_calls
+                            .iter()
+                            .find(|tc| tc.id == pending_call_id)
+                            .expect("pending call id must match a tool call in the response");
+
+                        let continuation = crate::runtime::continuation::TurnContinuation {
+                            history: history.clone(), // snapshot BEFORE assistant_msg
+                            assistant_message: assistant_msg,
+                            completed_tool_results: completed_results,
+                            pending_tool_call:
+                                crate::runtime::continuation::PendingApprovalToolCall {
+                                    call_id: pending_call_id,
+                                    tool_name: pending_tc.name.clone(),
+                                    arguments: pending_tc.arguments.clone(),
+                                    approval_response,
+                                },
+                            remaining_tool_calls: remaining_calls,
+                            approval_request_id: request_id.clone(),
+                            workflow_id: self.workflow_id.clone(),
+                            task_id: self.task_id.clone(),
+                            session_id: session_id.clone(),
+                            turn_id: turn_id.clone(),
+                            suspended_at: chrono::Utc::now().to_rfc3339(),
+                            loop_guard_state: self.guard.snapshot(),
+                        };
+
+                        // Persist continuation to disk when we have a task_id and config.
+                        if let (Some(task_id), Some(config)) =
+                            (self.task_id.as_deref(), self.config.as_deref())
+                        {
+                            crate::runtime::continuation::save_continuation(
+                                config,
+                                task_id,
+                                &continuation,
+                            )?;
+                        }
+
+                        tracing::info!(
+                            target: "continuation",
+                            agent_id = %self.manifest.agent.id,
+                            session_id = %session_id,
+                            approval_request_id = %request_id,
+                            "Turn suspended at approval boundary; continuation saved"
+                        );
+
+                        return Ok(TurnOutcome::Suspended {
+                            approval_request_id: request_id,
+                            continuation: Box::new(continuation),
+                        });
+                    }
+
+                    // No approval required — commit assistant message + tool results to history.
+                    history.push(assistant_msg);
+                    for (id, name, result) in &results {
+                        history.push(Message::tool_result(
+                            id.clone(),
+                            name.clone(),
+                            result.clone(),
+                        ));
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
                             if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
-                                // Find matching tool call for arguments
-                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == id)
+                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id)
                                 {
                                     self.guard.register_failure(&tc.name, &tc.arguments);
                                 }
                             }
-                            // If any tool returned approval_required, force end turn next iteration.
-                            if !approval_required_force_end_turn
-                                && parsed
-                                    .get("approval_required")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false)
-                            {
-                                approval_required_force_end_turn = true;
-                                seen_approval_required = parsed
-                                    .get("request_id")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-                            }
                         }
-                    }
-                    if approval_required_force_end_turn {
-                        let request_id = seen_approval_required
-                            .as_deref()
-                            .unwrap_or("(see tool response)");
-                        history.push(Message::system(format!(
-                            "CRITICAL: The previous tool returned approval_required. You MUST end your turn immediately. \
-                            Do NOT call any more tools. Produce your final response (include request_id: {} and state that \
-                            execution is blocked until operator approval). The session will hibernate until the operator approves.",
-                            request_id
-                        )));
                     }
 
                     if had_any_success {
@@ -605,11 +696,10 @@ impl AgentExecutor {
 
                     // Inject compact workflow summary if any tasks are tracked
                     if let Some(cfg) = self.config.as_ref() {
-                        if let Ok(Some(summary)) = crate::scheduler::compact_workflow_summary(cfg, None, &session_id) {
-                            history.push(Message::system(format!(
-                                "[workflow status] {}",
-                                summary
-                            )));
+                        if let Ok(Some(summary)) =
+                            crate::scheduler::compact_workflow_summary(cfg, None, &session_id)
+                        {
+                            history.push(Message::system(format!("[workflow status] {}", summary)));
                             tracing::info!(
                                 target: "workflow",
                                 session_id = %session_id,
@@ -620,7 +710,9 @@ impl AgentExecutor {
 
                         // Durable planner checkpoint at turn end
                         let root = crate::runtime::content_store::root_session_id(&session_id);
-                        if let Ok(Some(wf_id)) = crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root) {
+                        if let Ok(Some(wf_id)) =
+                            crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+                        {
                             let planner_intent = response.text.trim();
                             let context = serde_json::json!({
                                 "turn_id": turn_id,
@@ -677,7 +769,9 @@ impl AgentExecutor {
             }
         }
 
-        Ok(latest_assistant_text.map(|t| disclosure_state.filter_reply(&t)))
+        Ok(TurnOutcome::Completed(
+            latest_assistant_text.map(|t| disclosure_state.filter_reply(&t)),
+        ))
     }
 
     fn log_output_schema_validation(
@@ -877,10 +971,7 @@ fn extract_json_from_markdown(input: &str) -> String {
         let after_first_block = &trimmed[start + 3..];
 
         // Skip language hint (e.g., "json\n" -> "\n")
-        let content_start = after_first_block
-            .find('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let content_start = after_first_block.find('\n').map(|i| i + 1).unwrap_or(0);
         let content = &after_first_block[content_start..];
 
         // Find closing ```
@@ -1126,10 +1217,14 @@ mod tests {
             None,
         );
         let mut history = vec![Message::system("System prompt"), Message::user("Hello")];
-        let reply = runtime
+        let outcome = runtime
             .execute_with_history(&mut history)
             .await
             .expect("execution should succeed");
+        let reply = match outcome {
+            TurnOutcome::Completed(r) => r,
+            other => panic!("expected Completed, got {:?}", other),
+        };
         assert_eq!(reply.as_deref(), Some("assistant reply"));
     }
 
@@ -1149,10 +1244,14 @@ mod tests {
             None,
         );
         let mut history = vec![Message::system("System prompt"), Message::user("Hello")];
-        let reply = runtime
+        let outcome = runtime
             .execute_with_history(&mut history)
             .await
             .expect("execution should succeed after retry");
+        let reply = match outcome {
+            TurnOutcome::Completed(r) => r,
+            other => panic!("expected Completed, got {:?}", other),
+        };
         assert_eq!(reply.as_deref(), Some("recovered reply"));
         assert_eq!(*calls.lock().expect("mutex should lock"), 2);
     }
@@ -1276,61 +1375,37 @@ mod tests {
         }
     }
 
-    struct ApprovalThenEndTurnDriver {
+    struct ApprovalToolUseDriver {
         calls: Arc<AtomicUsize>,
-        second_call_had_no_tools: Arc<Mutex<bool>>,
     }
 
     #[async_trait::async_trait]
-    impl LlmDriver for ApprovalThenEndTurnDriver {
+    impl LlmDriver for ApprovalToolUseDriver {
         async fn complete(
             &self,
-            request: &CompletionRequest,
+            _request: &CompletionRequest,
         ) -> anyhow::Result<CompletionResponse> {
-            let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
-            if call_index == 0 {
-                Ok(CompletionResponse {
-                    text: "trying tool".to_string(),
-                    tool_calls: vec![ToolCall {
-                        id: "tc1".to_string(),
-                        name: "test.approval".to_string(),
-                        arguments: "{}".to_string(),
-                    }],
-                    stop_reason: StopReason::ToolUse,
-                    usage: TokenUsage::default(),
-                })
-            } else {
-                let no_tools = request.tools.is_empty()
-                    && request.messages.iter().any(|m| {
-                        m.role == crate::llm::Role::System
-                            && m.content.contains("approval_required")
-                            && m.content.contains("Do NOT call any more tools")
-                    });
-                *self
-                    .second_call_had_no_tools
-                    .lock()
-                    .expect("mutex should lock") = no_tools;
-
-                Ok(CompletionResponse {
-                    text: "Approval required. Request ID: apr-lifecycle1234. Waiting for operator approval."
-                        .to_string(),
-                    tool_calls: vec![],
-                    stop_reason: StopReason::EndTurn,
-                    usage: TokenUsage::default(),
-                })
-            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CompletionResponse {
+                text: "trying tool".to_string(),
+                tool_calls: vec![ToolCall {
+                    id: "tc1".to_string(),
+                    name: "test.approval".to_string(),
+                    arguments: "{}".to_string(),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            })
         }
     }
 
     #[tokio::test]
-    async fn test_approval_required_blocks_more_tools_but_allows_final_llm_message() {
+    async fn test_approval_required_suspends_turn_immediately() {
         let manifest = manifest_with_capabilities(vec![]);
         let temp = tempdir().expect("tempdir should create");
         let calls = Arc::new(AtomicUsize::new(0));
-        let second_call_had_no_tools = Arc::new(Mutex::new(false));
-        let driver = ApprovalThenEndTurnDriver {
+        let driver = ApprovalToolUseDriver {
             calls: Arc::clone(&calls),
-            second_call_had_no_tools: Arc::clone(&second_call_had_no_tools),
         };
         let mut registry = NativeToolRegistry::new();
         registry.register(Box::new(ApprovalRequiredLifecycleTool));
@@ -1345,29 +1420,35 @@ mod tests {
         );
         let mut history = vec![Message::system("System prompt"), Message::user("Hello")];
 
-        let reply = runtime
+        let outcome = runtime
             .execute_with_history(&mut history)
             .await
             .expect("execution should succeed");
 
+        // With the continuation model, the turn suspends immediately at the approval gate.
+        // No second LLM call is made.
         assert_eq!(
-            reply.as_deref(),
-            Some("Approval required. Request ID: apr-lifecycle1234. Waiting for operator approval.")
+            calls.load(Ordering::SeqCst),
+            1,
+            "only one LLM call should occur"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert!(
-            *second_call_had_no_tools
-                .lock()
-                .expect("mutex should lock"),
-            "second LLM call should have no tools and should include approval guidance"
-        );
+        match outcome {
+            TurnOutcome::Suspended {
+                approval_request_id,
+                ..
+            } => {
+                assert_eq!(approval_request_id, "apr-lifecycle1234");
+            }
+            other => panic!("expected Suspended, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_native_disclosure_path_extraction() {
         let registry = crate::runtime::tools::default_registry();
         // content.read uses name_or_handle, not path
-        let meta = registry.extract_metadata("content.read", "{\"name_or_handle\": \"secrets.txt\"}");
+        let meta =
+            registry.extract_metadata("content.read", "{\"name_or_handle\": \"secrets.txt\"}");
         assert_eq!(meta.path.as_deref(), Some("secrets.txt"));
     }
 
@@ -1453,7 +1534,11 @@ Hope this helps!"#;
 ```
 Hope this helps!"#;
         let result = validate_against_schema(output, &schema);
-        assert!(result.valid, "Should accept markdown-wrapped JSON: {:?}", result.messages);
+        assert!(
+            result.valid,
+            "Should accept markdown-wrapped JSON: {:?}",
+            result.messages
+        );
     }
 
     #[tokio::test]
@@ -1532,13 +1617,14 @@ Hope this helps!"#;
             None,
         );
         let mut history = vec![Message::user("what is the answer?")];
-        let reply = runtime
+        let outcome = runtime
             .execute_with_history(&mut history)
             .await
             .expect("exec success");
-
-        assert!(reply.is_some());
-        let r = reply.unwrap();
+        let r = match outcome {
+            TurnOutcome::Completed(Some(r)) => r,
+            other => panic!("expected Completed reply, got {:?}", other),
+        };
         assert!(r.contains("42"), "Expected answer in reply");
     }
 

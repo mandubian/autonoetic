@@ -91,8 +91,7 @@ impl OpenRouterCatalog {
         let need_fetch = {
             let g = self.inner.read().await;
             g.by_id.is_empty()
-                || g
-                    .fetched_at
+                || g.fetched_at
                     .map(|t| t.elapsed() > CACHE_TTL)
                     .unwrap_or(true)
         };
@@ -132,9 +131,7 @@ impl OpenRouterCatalog {
                 .and_then(|p| p.completion.as_ref())
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(0.0);
-            let context_length = row
-                .context_length
-                .and_then(|n| u32::try_from(n).ok());
+            let context_length = row.context_length.and_then(|n| u32::try_from(n).ok());
             by_id.insert(
                 row.id.clone(),
                 ModelEntry {
@@ -187,7 +184,6 @@ impl OpenRouterCatalog {
             + output_tokens as f64 * entry.completion_usd_per_token;
         Some(cost)
     }
-
 }
 
 #[cfg(test)]
@@ -201,7 +197,10 @@ mod tests {
             "completion": "0.0000005"
         }))
         .unwrap();
-        assert_eq!(p.prompt.as_deref().unwrap().parse::<f64>().unwrap(), 0.00000025);
+        assert_eq!(
+            p.prompt.as_deref().unwrap().parse::<f64>().unwrap(),
+            0.00000025
+        );
         assert_eq!(
             p.completion.as_deref().unwrap().parse::<f64>().unwrap(),
             0.0000005
