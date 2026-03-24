@@ -83,6 +83,7 @@ struct App {
     signal_resume_inflight: HashSet<String>,
     seen_workflow_event_ids: HashSet<String>,
     workflow_events_bootstrapped: bool,
+    current_workflow_id: Option<String>,
     workflow_status_line: String,
     // Persistent clipboard — must stay alive so arboard's background ownership
     // thread keeps running and clipboard managers have time to capture the content.
@@ -108,6 +109,7 @@ impl App {
             signal_resume_inflight: HashSet::new(),
             seen_workflow_event_ids: HashSet::new(),
             workflow_events_bootstrapped: false,
+            current_workflow_id: None,
             workflow_status_line: "workflow: n/a".to_string(),
             // Safe clipboard initialization - arboard can panic on headless/SSH systems
             clipboard: std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None),
@@ -249,6 +251,7 @@ fn format_workflow_event_card(event: &autonoetic_types::workflow::WorkflowEventR
     let text = match event.event_type.as_str() {
         "workflow.started" => Some(format!("📋 [{}] Workflow started", ts_short)),
         "task.spawned" => Some(format!("🚀 [{}] Task spawned: {}", ts_short, task)),
+        "task.queued" => Some(format!("📥 [{}] Task queued: {}", ts_short, task)),
         "task.awaiting_approval" => {
             // Show what kind of approval is needed
             let kind = if approval.contains("sandbox") {
@@ -265,11 +268,21 @@ fn format_workflow_event_card(event: &autonoetic_types::workflow::WorkflowEventR
         "task.started" => Some(format!("▶ [{}] Task started: {}", ts_short, task)),
         "task.completed" => Some(format!("✅ [{}] Task completed: {}", ts_short, task)),
         "task.failed" => Some(format!("❌ [{}] Task failed: {}", ts_short, task)),
+        "task.cancelled" => Some(format!("🚫 [{}] Task cancelled: {}", ts_short, task)),
+        "task.paused" => Some(format!("⏸ [{}] Task paused: {}", ts_short, task)),
         "workflow.join.satisfied" => Some(format!("✅ [{}] Workflow join satisfied", ts_short)),
+        "workflow.checkpoint.saved" => Some(format!("💾 [{}] Workflow checkpoint saved", ts_short)),
+        "task.checkpoint.saved" => Some(format!("💾 [{}] Task checkpoint saved: {}", ts_short, task)),
         "task.updated" if status == "runnable" => {
             Some(format!("🔁 [{}] Task resumed: {}", ts_short, task))
         }
-        _ => None,
+        "task.updated" => {
+            Some(format!("🔄 [{}] Task updated: {} ({})", ts_short, task, status))
+        }
+        other => {
+            // Catch-all: show unknown event types instead of silently dropping them
+            Some(format!("⚡ [{}] {} (task: {})", ts_short, other, task))
+        }
     };
 
     text
@@ -1210,8 +1223,11 @@ async fn check_signals(
     refresh_workflow_status_line(app, config, &root_session_id);
     if app.workflow_status_line != previous_workflow_status {
         processed_any = true;
-        // Show notification when workflow becomes active
-        if app.workflow_status_line.starts_with("wf:") && previous_workflow_status.starts_with("workflow: n/a") {
+        // Show notification when workflow becomes active or changes
+        let prev_is_na = previous_workflow_status.starts_with("workflow: n/a")
+            || previous_workflow_status.starts_with("workflow: error");
+        let curr_is_active = app.workflow_status_line.starts_with("wf:");
+        if curr_is_active && (prev_is_na || app.current_workflow_id.is_none()) {
             app.add_message(MessageRole::System, format!("🔗 Workflow connected: {}", app.workflow_status_line));
             processed_any = true;
         }
@@ -1223,82 +1239,104 @@ async fn check_signals(
     ) {
         Ok(Some(workflow_id)) => {
             tracing::debug!(target: "chat", workflow_id = %workflow_id, "Resolved workflow ID");
-            if let Ok(events) = autonoetic_gateway::scheduler::load_workflow_events(config, store, &workflow_id) {
-                tracing::info!(target: "chat", event_count = events.len(), workflow_id = %workflow_id, "Loaded workflow events");
-                // Detect new workflow: reset bootstrap flag if workflow_id changed
-                let current_workflow_count = events.len();
-                let previous_seen_count = app.seen_workflow_event_ids.len();
 
-                // If we have more events than seen, or workflow ID might have changed, reset bootstrap
-                let should_bootstrap = !app.workflow_events_bootstrapped
-                    || current_workflow_count < previous_seen_count
-                    || current_workflow_count > previous_seen_count + 50; // Large jump = new workflow
+            // Detect workflow ID change → force re-bootstrap
+            let workflow_changed = app.current_workflow_id.as_ref() != Some(&workflow_id);
+            if workflow_changed {
+                tracing::info!(
+                    target: "chat",
+                    old = ?app.current_workflow_id,
+                    new = %workflow_id,
+                    "Workflow ID changed, resetting event tracking"
+                );
+                app.workflow_events_bootstrapped = false;
+                app.seen_workflow_event_ids.clear();
+                app.current_workflow_id = Some(workflow_id.clone());
+            }
 
-                if should_bootstrap {
-                    let recap_count = events.len().min(20);
-                    if recap_count > 0 {
-                        app.add_message(MessageRole::System, "── workflow recap ──".to_string());
-                        let start_idx = events.len().saturating_sub(recap_count);
-                        for event in &events[start_idx..] {
-                            if let Some(card) = format_workflow_event_card(event) {
-                                app.add_message(MessageRole::Signal, card);
+            match autonoetic_gateway::scheduler::load_workflow_events(config, store, &workflow_id) {
+                Ok(events) => {
+                    tracing::info!(target: "chat", event_count = events.len(), workflow_id = %workflow_id, "Loaded workflow events");
+                    let current_workflow_count = events.len();
+                    let previous_seen_count = app.seen_workflow_event_ids.len();
+
+                    let should_bootstrap = !app.workflow_events_bootstrapped
+                        || current_workflow_count < previous_seen_count
+                        || current_workflow_count > previous_seen_count + 50; // Large jump = new workflow
+
+                    if should_bootstrap {
+                        let recap_count = events.len().min(20);
+                        if recap_count > 0 {
+                            app.add_message(MessageRole::System, "── workflow recap ──".to_string());
+                            let start_idx = events.len().saturating_sub(recap_count);
+                            for event in &events[start_idx..] {
+                                if let Some(card) = format_workflow_event_card(event) {
+                                    app.add_message(MessageRole::Signal, card);
+                                }
                             }
+                            app.add_message(MessageRole::System, "── live updates ──".to_string());
                         }
-                        app.add_message(MessageRole::System, "── live updates ──".to_string());
-                    }
-                    // Mark ALL fetched events as seen, not just the recap window,
-                    // so events outside the recap don't re-appear as "new" on next poll.
-                    app.seen_workflow_event_ids.clear();
-                    for event in &events {
-                        app.seen_workflow_event_ids.insert(event.event_id.clone());
-                    }
-                    app.workflow_events_bootstrapped = true;
+                        // Mark ALL fetched events as seen, not just the recap window,
+                        // so events outside the recap don't re-appear as "new" on next poll.
+                        app.seen_workflow_event_ids.clear();
+                        for event in &events {
+                            app.seen_workflow_event_ids.insert(event.event_id.clone());
+                        }
+                        app.workflow_events_bootstrapped = true;
 
-                    tracing::debug!(
-                        target: "chat",
-                        workflow_id = %workflow_id,
-                        total_events = events.len(),
-                        recap_shown = recap_count,
-                        "workflow events bootstrapped"
-                    );
-                } else {
-                    let mut new_event_count = 0usize;
-                    for event in events {
-                        if app.seen_workflow_event_ids.insert(event.event_id.clone()) {
-                            // NEW event - process it (insert returns true if newly added)
-                            tracing::debug!(
-                                target: "chat",
-                                event_id = %event.event_id,
-                                event_type = %event.event_type,
-                                "New workflow event detected"
-                            );
-                            if let Some(card) = format_workflow_event_card(&event) {
-                                tracing::debug!(
-                                    target: "chat",
-                                    card = %card,
-                                    "Formatted workflow event card"
-                                );
-                                app.add_message(MessageRole::Signal, card);
-                                processed_any = true;
-                            } else {
-                                tracing::warn!(
-                                    target: "chat",
-                                    event_type = %event.event_type,
-                                    "Failed to format workflow event card"
-                                );
-                            }
-                            new_event_count += 1;
-                        }
-                        // Existing event - skip (already processed in bootstrap)
-                    }
-                    if new_event_count > 0 {
                         tracing::debug!(
                             target: "chat",
-                            new_event_count,
-                            total_seen = app.seen_workflow_event_ids.len(),
-                            "check_signals: processed new workflow events"
+                            workflow_id = %workflow_id,
+                            total_events = events.len(),
+                            recap_shown = recap_count,
+                            "workflow events bootstrapped"
                         );
+                    } else {
+                        let mut new_event_count = 0usize;
+                        for event in events {
+                            if app.seen_workflow_event_ids.insert(event.event_id.clone()) {
+                                // NEW event - process it (insert returns true if newly added)
+                                tracing::debug!(
+                                    target: "chat",
+                                    event_id = %event.event_id,
+                                    event_type = %event.event_type,
+                                    "New workflow event detected"
+                                );
+                                if let Some(card) = format_workflow_event_card(&event) {
+                                    tracing::debug!(
+                                        target: "chat",
+                                        card = %card,
+                                        "Formatted workflow event card"
+                                    );
+                                    app.add_message(MessageRole::Signal, card);
+                                    processed_any = true;
+                                } else {
+                                    tracing::warn!(
+                                        target: "chat",
+                                        event_type = %event.event_type,
+                                        "Failed to format workflow event card"
+                                    );
+                                }
+                                new_event_count += 1;
+                            }
+                        }
+                        if new_event_count > 0 {
+                            tracing::debug!(
+                                target: "chat",
+                                new_event_count,
+                                total_seen = app.seen_workflow_event_ids.len(),
+                                "check_signals: processed new workflow events"
+                            );
+                        }
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "chat",
+                        workflow_id = %workflow_id,
+                        error = %e,
+                        "Failed to load workflow events"
+                    );
                 }
             }
         }
