@@ -190,6 +190,30 @@ pub struct GatewayConfig {
     /// Default: 600 (10 minutes).
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
+
+    /// Evidence mode configuration.
+    /// Controls how much tool/LLM execution data is saved to evidence files for debugging.
+    /// "full": all tool results and LLM completions (default for development)
+    /// "errors": only failures, approval gates, non-zero exit codes (production recommended)
+    /// "off": no evidence files (causal_events DB still captures everything)
+    #[serde(default)]
+    pub evidence_mode: String,
+}
+
+/// Configuration for evidence storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    /// Evidence mode: "full", "errors", or "off"
+    #[serde(default = "default_evidence_mode")]
+    pub mode: String,
+}
+
+impl Default for EvidenceConfig {
+    fn default() -> Self {
+        Self {
+            mode: "full".to_string(),
+        }
+    }
 }
 
 /// Configuration for pluggable code analysis.
@@ -331,6 +355,10 @@ fn default_approval_timeout_secs() -> u64 {
     600
 }
 
+fn default_evidence_mode() -> String {
+    "full".to_string()
+}
+
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
@@ -352,6 +380,7 @@ impl Default for GatewayConfig {
             code_analysis: CodeAnalysisConfig::default(),
             session_budget: SessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
+            evidence_mode: default_evidence_mode(),
         }
     }
 }

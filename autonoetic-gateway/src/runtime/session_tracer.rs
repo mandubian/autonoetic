@@ -19,6 +19,7 @@ const TOOL_RESULT_PREVIEW_MAX_CHARS: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceMode {
     Off,
+    Errors,
     Full,
 }
 
@@ -26,9 +27,10 @@ impl EvidenceMode {
     pub fn parse(value: &str) -> anyhow::Result<Self> {
         match value.to_ascii_lowercase().as_str() {
             "" | "full" => Ok(Self::Full),
+            "errors" => Ok(Self::Errors),
             "off" => Ok(Self::Off),
             other => anyhow::bail!(
-                "Invalid {}='{}'. Expected one of: off, full",
+                "Invalid {}='{}'. Expected one of: full, errors, off",
                 EVIDENCE_MODE_ENV,
                 other
             ),
@@ -38,6 +40,7 @@ impl EvidenceMode {
     fn as_str(&self) -> &'static str {
         match self {
             EvidenceMode::Off => "off",
+            EvidenceMode::Errors => "errors",
             EvidenceMode::Full => "full",
         }
     }
@@ -51,9 +54,32 @@ pub struct EvidenceStore {
 }
 
 impl EvidenceStore {
+    /// Create evidence store from environment variable.
     pub fn from_env(agent_dir: &Path, session_id: &str) -> anyhow::Result<Self> {
         let raw = std::env::var(EVIDENCE_MODE_ENV).unwrap_or_else(|_| "full".to_string());
         let mode = EvidenceMode::parse(&raw)?;
+        let base_dir = if mode == EvidenceMode::Full {
+            let dir = agent_dir.join("history").join("evidence").join(session_id);
+            std::fs::create_dir_all(&dir)?;
+            Some(dir)
+        } else {
+            None
+        };
+        Ok(Self {
+            mode,
+            agent_dir: agent_dir.to_path_buf(),
+            session_id: session_id.to_string(),
+            base_dir,
+        })
+    }
+
+    /// Create evidence store from config.
+    pub fn from_config(
+        agent_dir: &Path,
+        session_id: &str,
+        evidence_mode: &str,
+    ) -> anyhow::Result<Self> {
+        let mode = EvidenceMode::parse(evidence_mode)?;
         let base_dir = if mode == EvidenceMode::Full {
             let dir = agent_dir.join("history").join("evidence").join(session_id);
             std::fs::create_dir_all(&dir)?;
