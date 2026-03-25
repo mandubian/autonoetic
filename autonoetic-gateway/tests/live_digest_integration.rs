@@ -152,9 +152,9 @@ capabilities: []
         digest.contains("**Observation:**") && digest.contains("User prefers short answers"),
         "annotation missing: {digest}"
     );
-    assert!(digest.contains("## Turn "), "expected turn headings");
+    assert!(digest.contains("— Turn "), "expected turn headings");
     assert!(
-        digest.contains("## Session summary"),
+        digest.contains("— Session summary"),
         "expected session summary: {digest}"
     );
     assert!(
