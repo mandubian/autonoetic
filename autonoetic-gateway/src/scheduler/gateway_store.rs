@@ -1,10 +1,10 @@
 use anyhow::Result;
 use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
-use autonoetic_types::memory::MemoryObject;
 use autonoetic_types::background::{
     ApprovalRequest, UserInteraction, UserInteractionAnswer, UserInteractionKind,
     UserInteractionOption, UserInteractionStatus,
 };
+use autonoetic_types::memory::MemoryObject;
 use autonoetic_types::notification::{NotificationRecord, NotificationStatus, NotificationType};
 use autonoetic_types::workflow::WorkflowEventRecord;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -521,6 +521,56 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Prune execution_traces older than `days`. 0 = no pruning.
+    pub fn prune_execution_traces(&self, days: u32) -> Result<u64> {
+        if days == 0 {
+            return Ok(0);
+        }
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM execution_traces WHERE timestamp < ?1",
+            params![cutoff],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Prune causal_events older than `days`. 0 = no pruning.
+    pub fn prune_causal_events(&self, days: u32) -> Result<u64> {
+        if days == 0 {
+            return Ok(0);
+        }
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM causal_events WHERE timestamp < ?1",
+            params![cutoff],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Apply retention policy from config. Call once on gateway startup.
+    pub fn apply_retention_policy(
+        &self,
+        retention: &autonoetic_types::config::RetentionConfig,
+    ) -> Result<()> {
+        if let Err(e) = self.prune_execution_traces(retention.execution_traces_days) {
+            tracing::warn!(
+                target: "gateway_store",
+                error = %e,
+                "Failed to prune execution_traces"
+            );
+        }
+        if let Err(e) = self.prune_causal_events(retention.causal_events_days) {
+            tracing::warn!(
+                target: "gateway_store",
+                error = %e,
+                "Failed to prune causal_events"
+            );
+        }
+        Ok(())
+    }
+
     // --- Tier 2 memories (gateway.db) ---
 
     pub fn memory_upsert(&self, memory: &MemoryObject) -> Result<()> {
@@ -681,10 +731,7 @@ impl GatewayStore {
             ));
             next_param += 1;
         }
-        sql.push_str(&format!(
-            "ORDER BY m.updated_at DESC LIMIT ?{}",
-            next_param
-        ));
+        sql.push_str(&format!("ORDER BY m.updated_at DESC LIMIT ?{}", next_param));
 
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&sql)?;

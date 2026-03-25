@@ -1151,10 +1151,10 @@ LLM-powered summarization and memory extraction.
 
 ### Phase 6: Cleanup & Documentation
 
-- [ ] **6.1** Remove `session_snapshot.rs` if fully replaced by checkpoint.
-- [ ] **6.2** Audit all `evidence_ref` reads — ensure they work with both filesystem paths (legacy) and content store handles (new).
-- [ ] **6.3** Add `execution_traces` pruning policy (keep last N days, configurable).
-- [ ] **6.4** Add `causal_events` pruning policy (keep last N days or archive to cold storage).
+- [x] **6.1** Remove `session_snapshot.rs` if fully replaced by checkpoint. Fork path migrated to `checkpoint::SessionFork`. Old `SessionSnapshot` struct and `SessionSnapshotTool` removed.
+- [x] **6.2** Audit all `evidence_ref` reads — ensure they work with both filesystem paths (legacy) and content store handles (new). **Result:** No issue — evidence_ref is a filesystem path string stored as metadata, never read back programmatically. Evidence files are for human debugging only.
+- [x] **6.3** Add `execution_traces` pruning policy (keep last N days, configurable). Added `retention.execution_traces_days` config field (default: 30) and `prune_execution_traces` on `GatewayStore`, called via `apply_retention_policy` on gateway startup.
+- [x] **6.4** Add `causal_events` pruning policy (keep last N days or archive to cold storage). Added `retention.causal_events_days` config field (default: 90) and `prune_causal_events` on `GatewayStore`, called via `apply_retention_policy` on gateway startup.
 - [ ] **6.5** Update `docs/ARCHITECTURE.md` with new storage model.
 - [ ] **6.6** Update `CLAUDE.md` with checkpoint, event store, and digest architecture.
 - [ ] **6.7** Write `docs/agent-learning.md`: how agents use `execution.search`, `memory.search_by_tags`, and `digest.query` to learn from past sessions.

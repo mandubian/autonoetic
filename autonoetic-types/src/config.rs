@@ -238,6 +238,10 @@ pub struct GatewayConfig {
     /// Optional post-session digest (narrative + extracted memories). Off by default — enable in config.
     #[serde(default)]
     pub digest_agent: DigestAgentConfig,
+
+    /// Data retention settings (days). 0 = retain forever.
+    #[serde(default)]
+    pub retention: RetentionConfig,
 }
 
 /// Configuration for evidence storage.
@@ -254,6 +258,33 @@ impl Default for EvidenceConfig {
             mode: "full".to_string(),
         }
     }
+}
+
+/// Configuration for data retention / pruning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Days to retain execution_traces. 0 = forever. Default: 30.
+    #[serde(default = "default_retention_execution_traces_days")]
+    pub execution_traces_days: u32,
+    /// Days to retain causal_events. 0 = forever. Default: 90.
+    #[serde(default = "default_retention_causal_events_days")]
+    pub causal_events_days: u32,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            execution_traces_days: 30,
+            causal_events_days: 90,
+        }
+    }
+}
+
+fn default_retention_execution_traces_days() -> u32 {
+    30
+}
+fn default_retention_causal_events_days() -> u32 {
+    90
 }
 
 /// Configuration for pluggable code analysis.
@@ -422,6 +453,7 @@ impl Default for GatewayConfig {
             approval_timeout_secs: default_approval_timeout_secs(),
             evidence_mode: default_evidence_mode(),
             digest_agent: DigestAgentConfig::default(),
+            retention: RetentionConfig::default(),
         }
     }
 }

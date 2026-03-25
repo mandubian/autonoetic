@@ -3949,164 +3949,6 @@ fn normalize_install_background(
 }
 
 // ---------------------------------------------------------------------------
-// Session Snapshot Tool
-// ---------------------------------------------------------------------------
-
-/// Captures a snapshot of the current session's conversation history and stores
-/// it in the content-addressable storage. Returns a content handle for later
-/// retrieval or forking.
-pub struct SessionSnapshotTool;
-
-impl NativeTool for SessionSnapshotTool {
-    fn name(&self) -> &'static str {
-        "session.snapshot"
-    }
-
-    fn is_available(&self, manifest: &AgentManifest) -> bool {
-        // Available to any agent with WriteAccess capability
-        manifest
-            .capabilities
-            .iter()
-            .any(|cap| matches!(cap, Capability::WriteAccess { .. }))
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name().to_string(),
-            description: "Capture a snapshot of the current session's conversation history. Returns a content handle that can be used to restore or fork this session later. The snapshot is persisted automatically.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Optional name for this snapshot (e.g., 'checkpoint-1')"
-                    },
-                    "persist": {
-                        "type": "boolean",
-                        "description": "Whether to persist the snapshot permanently (default: true)",
-                        "default": true
-                    }
-                },
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    fn execute(
-        &self,
-        manifest: &AgentManifest,
-        _policy: &PolicyEngine,
-        agent_dir: &Path,
-        gateway_dir: Option<&Path>,
-        arguments_json: &str,
-        session_id: Option<&str>,
-        _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
-    ) -> anyhow::Result<String> {
-        #[derive(Deserialize, Default)]
-        struct Args {
-            #[serde(default)]
-            name: Option<String>,
-            #[serde(default = "default_true")]
-            persist: bool,
-        }
-        fn default_true() -> bool {
-            true
-        }
-
-        let args: Args = serde_json::from_str(arguments_json)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
-
-        let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("session.snapshot requires gateway directory");
-        };
-
-        let sid = session_id.unwrap_or(&manifest.agent.id);
-
-        // Load current history from session history file
-        let history_path = agent_dir.join("history").join("causal_chain.jsonl");
-        let history = if history_path.exists() {
-            // Load from causal chain or session history
-            load_history_from_session(agent_dir, sid)?
-        } else {
-            vec![]
-        };
-
-        // Count turns (approximate from messages)
-        let turn_count = history.len() / 2; // Rough estimate: user+assistant pairs
-
-        // Create snapshot
-        let snapshot = crate::runtime::session_snapshot::SessionSnapshot::capture(
-            sid, &history, turn_count,
-            None, // session_context - TODO: load from session_context.rs
-            None, // sdk_checkpoint
-            gw_dir,
-        )?;
-
-        // Session visibility is already handled by register_name in capture()
-        // No separate persist step needed
-
-        // Register with custom name if provided
-        if let Some(name) = &args.name {
-            let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
-            if let Some(handle) = snapshot.handle() {
-                let handle_string = handle.to_string();
-                store.register_name(sid, &format!("snapshot:{}", name), &handle_string)?;
-            }
-        }
-
-        serde_json::to_string(&serde_json::json!({
-            "ok": true,
-            "handle": snapshot.handle(),
-            "source_session_id": snapshot.source_session_id,
-            "turn_count": snapshot.turn_count,
-            "created_at": snapshot.created_at,
-            "persisted": args.persist,
-        }))
-        .map_err(Into::into)
-    }
-}
-
-/// Loads conversation history from a session directory.
-fn load_history_from_session(
-    agent_dir: &Path,
-    session_id: &str,
-) -> anyhow::Result<Vec<crate::llm::Message>> {
-    // Try to load from session history file
-    let history_file = agent_dir
-        .join("history")
-        .join(format!("{}.jsonl", session_id));
-    if !history_file.exists() {
-        return Ok(vec![]);
-    }
-
-    let content = std::fs::read_to_string(history_file)?;
-    let mut messages = Vec::new();
-
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-            // Try to extract message from causal chain entry
-            if let Some(action) = entry.get("action").and_then(|a| a.as_str()) {
-                if action.contains("assistant") {
-                    if let Some(payload) = entry.get("payload") {
-                        if let Some(content) = payload.get("content").and_then(|c| c.as_str()) {
-                            messages.push(crate::llm::Message::assistant(content));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(messages)
-}
-
-// ---------------------------------------------------------------------------
 // Session Escalate Tool
 // ---------------------------------------------------------------------------
 
@@ -6993,7 +6835,6 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(DigestQueryTool));
     registry.register(Box::new(KnowledgeShareTool));
     // Session tools
-    registry.register(Box::new(SessionSnapshotTool));
     registry.register(Box::new(SessionEscalateTool));
     // Agent tools
     registry.register(Box::new(AgentSpawnTool));
@@ -7240,9 +7081,9 @@ mod tests {
         // artifact.build, artifact.inspect, artifact.resolve_ref (3) +
         // execution.search (1) +
         // knowledge.store, knowledge.recall, knowledge.search, knowledge.search_by_tags, digest.query (5) +
-        // session.snapshot (1) + knowledge.share (1) +
-        // promotion.query (1) + always-available (6) = 20
-        assert_eq!(defs_all.len(), 20);
+        // knowledge.share (1) +
+        // promotion.query (1) + always-available (6) = 19
+        assert_eq!(defs_all.len(), 19);
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
