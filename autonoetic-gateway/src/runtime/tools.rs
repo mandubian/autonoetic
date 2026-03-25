@@ -6379,6 +6379,48 @@ impl NativeTool for UserAskTool {
                 session_id = %sid,
                 "User interaction created; agent will suspend"
             );
+            if let Some(ctx) = _run_context {
+                if let Some(w) = &ctx.live_digest {
+                    let opts_summary = if interaction.options.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            interaction
+                                .options
+                                .iter()
+                                .map(|o| format!("{}: {}", o.id, o.label))
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                        )
+                    };
+                    if let Ok(mut g) = w.lock() {
+                        let _ = g.record_user_ask_pending(&interaction.question, opts_summary.as_deref());
+                    }
+                }
+            }
+            if let Some(ctx) = _run_context {
+                let _ = store.create_live_digest_event(
+                    &crate::scheduler::gateway_store::LiveDigestEventRecord {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        root_session_id: ctx.root_session_id.clone(),
+                        source_session_id: ctx.session_id.clone(),
+                        turn_id: turn_id.map(|s| s.to_string()),
+                        source_agent_id: Some(_manifest.agent.id.clone()),
+                        source_node_id: std::env::var("AUTONOETIC_NODE_ID")
+                            .unwrap_or_else(|_| "gateway".to_string()),
+                        event_type: "user.ask.pending".to_string(),
+                        payload: Some(
+                            serde_json::json!({
+                                "interaction_id": interaction_id.clone(),
+                                "question": crate::log_redaction::redact_text_for_logs(&interaction.question),
+                                "options_count": interaction.options.len(),
+                            })
+                            .to_string(),
+                        ),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+            }
         } else {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -6395,6 +6437,103 @@ impl NativeTool for UserAskTool {
             "status": "awaiting_user"
         }))
         .map_err(Into::into)
+    }
+}
+
+/// Append a structured note to the session live digest (`digest.md`). Does not modify chat history.
+pub struct DigestAnnotateTool;
+
+impl NativeTool for DigestAnnotateTool {
+    fn name(&self) -> &'static str {
+        "digest.annotate"
+    }
+
+    fn is_available(&self, _manifest: &AgentManifest) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Add a reasoning, decision, observation, or lesson line to the live session digest (markdown file). Use for audit trail and handoff context without bloating the model transcript.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["reasoning", "decision", "observation", "lesson"],
+                        "description": "Category of annotation"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Text to record in the digest"
+                    }
+                },
+                "required": ["type", "content"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(rename = "type")]
+            annotation_type: String,
+            content: String,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+        let allowed = ["reasoning", "decision", "observation", "lesson"];
+        if !allowed.contains(&args.annotation_type.as_str()) {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error_type": "validation",
+                "message": format!("type must be one of: {}", allowed.join(", "))
+            }))?);
+        }
+        if let Some(ctx) = run_context {
+            if let Some(w) = &ctx.live_digest {
+                if let Ok(mut g) = w.lock() {
+                    g.record_annotation(&args.annotation_type, &args.content)?;
+                }
+            }
+            if let Some(store) = _gateway_store.as_ref() {
+                let _ = store.create_live_digest_event(
+                    &crate::scheduler::gateway_store::LiveDigestEventRecord {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        root_session_id: ctx.root_session_id.clone(),
+                        source_session_id: ctx.session_id.clone(),
+                        turn_id: _turn_id.map(|s| s.to_string()),
+                        source_agent_id: Some(ctx.agent_id.clone()),
+                        source_node_id: std::env::var("AUTONOETIC_NODE_ID")
+                            .unwrap_or_else(|_| "gateway".to_string()),
+                        event_type: "digest.annotate".to_string(),
+                        payload: Some(
+                            serde_json::json!({
+                                "type": args.annotation_type,
+                                "content": crate::log_redaction::redact_text_for_logs(&args.content),
+                            })
+                            .to_string(),
+                        ),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+            }
+        }
+        Ok(serde_json::to_string(&serde_json::json!({ "ok": true }))?)
     }
 }
 
@@ -6541,6 +6680,7 @@ pub fn default_registry() -> NativeToolRegistry {
     // Human interaction tools
     registry.register(Box::new(UserAskTool));
     registry.register(Box::new(UserInteractionStatusTool));
+    registry.register(Box::new(DigestAnnotateTool));
     // Promotion tools
     registry.register(Box::new(
         crate::runtime::tools_promotion::PromotionRecordTool,
@@ -6752,15 +6892,15 @@ mod tests {
     fn test_native_tool_registry_availability() {
         let registry = default_registry();
         let manifest_none = test_manifest(vec![]);
-        // SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool, UserAskTool, and UserInteractionStatusTool are always available
-        assert_eq!(registry.available_definitions(&manifest_none).len(), 5);
+        // SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool, UserAskTool, UserInteractionStatusTool, DigestAnnotateTool are always available
+        assert_eq!(registry.available_definitions(&manifest_none).len(), 6);
 
         let manifest_shell = test_manifest(vec![Capability::CodeExecution {
             patterns: vec!["*".into()],
         }]);
         let defs = registry.available_definitions(&manifest_shell);
-        // sandbox.exec (1) + SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool, UserAskTool, UserInteractionStatusTool (5) = 6
-        assert_eq!(defs.len(), 6);
+        // sandbox.exec (1) + SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool, UserAskTool, UserInteractionStatusTool, DigestAnnotateTool (6) = 7
+        assert_eq!(defs.len(), 7);
         assert!(defs.iter().any(|d| d.name == "sandbox.exec"));
 
         let manifest_all = test_manifest(vec![
@@ -6774,13 +6914,13 @@ mod tests {
         // execution.search (1) +
         // knowledge.store, knowledge.recall, knowledge.search (3) +
         // session.snapshot (1) + knowledge.share (1) +
-        // promotion.query (1) + always-available (5) = 17
-        assert_eq!(defs_all.len(), 17);
+        // promotion.query (1) + always-available (6) = 18
+        assert_eq!(defs_all.len(), 18);
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
-        // agent.spawn, agent.exists, agent.discover, workflow.wait, workflow.cancel_task (5) + always-available (5) = 10
-        assert_eq!(defs_spawn.len(), 10);
+        // agent.spawn, agent.exists, agent.discover, workflow.wait, workflow.cancel_task (5) + always-available (6) = 11
+        assert_eq!(defs_spawn.len(), 11);
         assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
         assert!(
             !defs_spawn.iter().any(|d| d.name == "agent.install"),
@@ -6803,8 +6943,8 @@ mod tests {
             hosts: vec!["*".to_string()],
         }]);
         let defs_net = registry.available_definitions(&manifest_net);
-        // web.search, web.fetch (2) + always-available (5) = 7
-        assert_eq!(defs_net.len(), 7);
+        // web.search, web.fetch (2) + always-available (6) = 8
+        assert_eq!(defs_net.len(), 8);
         assert!(defs_net.iter().any(|d| d.name == "web.search"));
         assert!(defs_net.iter().any(|d| d.name == "web.fetch"));
     }

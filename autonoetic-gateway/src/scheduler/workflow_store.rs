@@ -7,7 +7,7 @@
 //! - Workflow events are stored in SQLite table `workflow_events` (`gateway.db`).
 
 use crate::execution::gateway_root_dir;
-use crate::runtime::session_timeline::base_session_id;
+use crate::runtime::live_digest::base_session_id;
 use crate::scheduler::gateway_store::GatewayStore;
 use crate::scheduler::store::{read_json_file, write_json_file};
 use autonoetic_types::causal_chain::EntryStatus;
@@ -323,7 +323,7 @@ fn task_run_status_snake(s: TaskRunStatus) -> &'static str {
 
 /// Rewrite `.gateway/sessions/{root}/workflow_graph.md` from current workflow + task + event state.
 ///
-/// Called after each workflow event append so operators can open it beside `timeline.md`.
+/// Called after each workflow event append so operators can open it beside `digest.md`.
 pub fn refresh_workflow_graph_markdown(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,

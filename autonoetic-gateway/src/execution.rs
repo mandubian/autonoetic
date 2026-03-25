@@ -9,7 +9,7 @@ use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
-use crate::runtime::session_timeline::{base_session_id, SessionTimelineWriter};
+use crate::runtime::live_digest::base_session_id;
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
 use autonoetic_types::background::{ScheduledAction, UserInteraction, UserInteractionStatus};
 use autonoetic_types::causal_chain::EntryStatus;
@@ -721,7 +721,7 @@ impl GatewayExecutionService {
                 // Execute script directly in sandbox
                 let script_kill_scope = Some((
                     self.active_executions.clone(),
-                    crate::runtime::session_timeline::base_session_id(session_id).to_string(),
+                    crate::runtime::live_digest::base_session_id(session_id).to_string(),
                 ));
                 let script_result = execute_script_in_sandbox(
                     &loaded.dir,
@@ -1725,46 +1725,6 @@ pub fn log_gateway_causal_event(
     // No-op: gateway causal chain events are now captured in gateway.db
 }
 
-/// Best-effort: append one row to `.gateway/sessions/{base}/timeline.md` for workflow mirror events.
-/// [DEPRECATED] This function is no longer called as gateway causal chain events are now captured in gateway.db.
-fn _deprecated_append_workflow_gateway_timeline_best_effort(
-    logger: &CausalLogger,
-    actor_id: &str,
-    session_id: &str,
-    action: &str,
-    status: &EntryStatus,
-    payload: Option<&serde_json::Value>,
-) {
-    let Some(gateway_dir) = logger.path().parent().and_then(|p| p.parent()) else {
-        tracing::warn!(path = ?logger.path(), "workflow timeline: cannot resolve gateway dir");
-        return;
-    };
-    let base = base_session_id(session_id).to_string();
-    let mut writer = match SessionTimelineWriter::open(gateway_dir, &base) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(
-                target: "session_timeline",
-                error = %e,
-                base = %base,
-                "workflow timeline: open failed"
-            );
-            return;
-        }
-    };
-    let ts = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = writer.append(
-        actor_id, session_id, &ts, "gateway", action, status, payload,
-    ) {
-        tracing::warn!(
-            target: "session_timeline",
-            error = %e,
-            action = %action,
-            "workflow timeline: append failed"
-        );
-    }
-}
-
 /// [DEPRECATED] This function is no longer called as gateway causal chain events are now captured in gateway.db.
 fn _deprecated_update_session_index(
     logger: &CausalLogger,
@@ -2006,6 +1966,23 @@ async fn resume_answered_user_interaction_from_loaded_checkpoint(
 
     let mut history = checkpoint.history.clone();
     inject_answered_user_interaction_into_history(&mut history, &checkpoint, interaction)?;
+    if let Some(gw) = runtime.gateway_dir.as_ref() {
+        let base = base_session_id(session_id).to_string();
+        let answer_summary = match (
+            interaction.answer_text.as_deref(),
+            interaction.answer_option_id.as_deref(),
+        ) {
+            (Some(t), _) if !t.trim().is_empty() => t.trim().to_string(),
+            (_, Some(oid)) if !oid.is_empty() => format!("selected option `{oid}`"),
+            _ => "(answered)".to_string(),
+        };
+        crate::runtime::live_digest::append_user_ask_answer_best_effort(
+            gw,
+            &base,
+            &interaction.interaction_id,
+            &answer_summary,
+        );
+    }
     if !message.trim().is_empty() {
         history.push(Message::user(message.to_string()));
     }

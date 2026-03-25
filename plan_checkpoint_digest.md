@@ -1118,14 +1118,14 @@ Add a true root-session emergency stop path for running workflows, sessions, and
 ### Phase 3: Live Digest
 Replace `timeline.md` with a richer real-time narrative.
 
-- [ ] **3.1** Create `autonoetic-gateway/src/runtime/live_digest.rs` with `LiveDigestWriter`. Methods: `start_session()`, `start_turn()`, `record_action()`, `record_result()`, `record_error()`, `record_annotation()`, `end_turn()`, `write_summary()`. Output: structured Markdown.
-- [ ] **3.2** Implement `digest.annotate` native tool in `tools.rs`. Arguments: `{ "type": "reasoning|decision|observation|lesson", "content": "..." }`. Appends to live digest. Always available.
-- [ ] **3.3** Wire `LiveDigestWriter` into `execute_with_history` turn loop. Replace `SessionTimeline` calls with `LiveDigestWriter` calls.
-- [ ] **3.4** Add tool result formatting: for `sandbox.exec`, extract exit_code, stdout preview, stderr preview. For errors, extract error_type and message. For artifacts, extract ID and file list. For `user.ask`, record the question, options, and final answer.
-- [ ] **3.5** Add turn summary and session summary blocks.
-- [ ] **3.6** Remove `session_timeline.rs` and all `SessionTimeline` references.
-- [ ] **3.7** Update agent system prompts to document `digest.annotate` tool.
-- [ ] **3.8** Integration test: agent runs session → digest.md has structured entries with actions, results, errors, and annotations.
+- [x] **3.1** Create `autonoetic-gateway/src/runtime/live_digest.rs` with `LiveDigestWriter`. Methods: `start_session()`, `start_turn()`, `record_action()`, `record_result()`, `record_error()`, `record_annotation()`, `end_turn()`, `write_summary()`. Output: structured Markdown.
+- [x] **3.2** Implement `digest.annotate` native tool in `tools.rs`. Arguments: `{ "type": "reasoning|decision|observation|lesson", "content": "..." }`. Appends to live digest. Always available.
+- [x] **3.3** Wire `LiveDigestWriter` into `execute_with_history` turn loop. Replace `SessionTimeline` calls with `LiveDigestWriter` calls.
+- [x] **3.4** Add tool result formatting: for `sandbox.exec`, extract exit_code, stdout preview, stderr preview. For errors, extract error_type and message. For artifacts, extract ID and file list. For `user.ask`, record the question, options, and final answer.
+- [x] **3.5** Add turn summary and session summary blocks.
+- [x] **3.6** Remove `session_timeline.rs` and all `SessionTimeline` references.
+- [x] **3.7** Update agent system prompts to document `digest.annotate` tool.
+- [x] **3.8** Integration test: agent runs session → digest.md has structured entries with actions, results, errors, and annotations.
 
 ### Phase 4: Unified Gateway DB + Enhanced Memory
 Merge `memory.db`, add tag-based queries.
@@ -1231,3 +1231,18 @@ The agent doesn't need to be told to use these — the system prompts document t
 8. **Artifact robustness + ergonomics:** Agents can use short scoped refs in prompts, while gateway always resolves to canonical digest with integrity checks.
 9. **Human interaction is first-class:** An agent can ask a structured question, suspend, resume from checkpoint with the user's answer, and query that interaction later.
 10. **Emergency stop is real:** User, gateway self-protection, or the dedicated emergency-manager agent can request a root-session stop, but the gateway is the component that accepts it, aborts live work, writes an auditable stop record, and does not silently auto-resume.
+
+---
+
+## Backlog: Remote Agent Spawn (Gateway-Orchestrated)
+
+Current state: `spawn_agent_once` starts local sandbox processes on the same host as the gateway. "Remote agent" support today is HTTP content access for externally launched agents, not gateway-orchestrated remote process placement.
+
+- [ ] **R.1** Define execution model: owner gateway + remote worker daemon contract (push vs pull scheduling, failure domains, and idempotency keys).
+- [ ] **R.2** Add worker registration + heartbeat table/API in `GatewayStore` (`remote_workers`) with capabilities, labels, load, and liveness.
+- [ ] **R.3** Add scheduler placement policy: choose local vs remote worker by capability/labels and session affinity; record placement decision in workflow/session events.
+- [ ] **R.4** Add secure spawn transport (mutual auth + signed spawn request + replay protection) and explicit worker authorization boundaries.
+- [ ] **R.5** Implement remote spawn lifecycle protocol (start, stdout/stderr streaming, completion, cancellation, forced kill) with durable state transitions.
+- [ ] **R.6** Wire approvals, user interactions, checkpoints, and emergency stop across remote boundaries so behavior matches local spawn semantics.
+- [ ] **R.7** Extend live digest/event projection to merge remote worker events under root-session ownership deterministically.
+- [ ] **R.8** Add integration tests: remote worker unavailable, network partition, duplicate delivery, worker restart, and cross-node emergency stop.

@@ -54,6 +54,19 @@ pub struct ActiveExecutionRecord {
     pub stop_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LiveDigestEventRecord {
+    pub event_id: String,
+    pub root_session_id: String,
+    pub source_session_id: String,
+    pub turn_id: Option<String>,
+    pub source_agent_id: Option<String>,
+    pub source_node_id: String,
+    pub event_type: String,
+    pub payload: Option<String>,
+    pub created_at: String,
+}
+
 /// Stable host/process identity for `active_executions.host_id` (override with `AUTONOETIC_HOST_ID`).
 pub fn default_gateway_host_id() -> String {
     match std::env::var("AUTONOETIC_HOST_ID") {
@@ -363,10 +376,25 @@ impl GatewayStore {
                 stop_id TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS live_digest_events (
+                event_id TEXT PRIMARY KEY,
+                root_session_id TEXT NOT NULL,
+                source_session_id TEXT NOT NULL,
+                turn_id TEXT,
+                source_agent_id TEXT,
+                source_node_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_active_executions_root ON active_executions(root_session_id, status);
             CREATE INDEX IF NOT EXISTS idx_active_executions_workflow ON active_executions(workflow_id, status);
             CREATE INDEX IF NOT EXISTS idx_active_executions_task ON active_executions(task_id, status);
             CREATE INDEX IF NOT EXISTS idx_active_executions_session ON active_executions(session_id, status);
+            CREATE INDEX IF NOT EXISTS idx_live_digest_root_created ON live_digest_events(root_session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_live_digest_event_type ON live_digest_events(event_type, created_at);
+            CREATE INDEX IF NOT EXISTS idx_live_digest_source_session ON live_digest_events(source_session_id, created_at);
             ",
         )?;
         Ok(())
@@ -1619,6 +1647,28 @@ impl GatewayStore {
                 trace.approval_request_id.as_deref(),
                 trace.arguments.as_deref(),
                 trace.result.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_live_digest_event(&self, event: &LiveDigestEventRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO live_digest_events (
+                event_id, root_session_id, source_session_id, turn_id, source_agent_id,
+                source_node_id, event_type, payload, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                &event.event_id,
+                &event.root_session_id,
+                &event.source_session_id,
+                event.turn_id.as_deref(),
+                event.source_agent_id.as_deref(),
+                &event.source_node_id,
+                &event.event_type,
+                event.payload.as_deref(),
+                &event.created_at,
             ],
         )?;
         Ok(())
