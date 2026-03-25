@@ -5,7 +5,10 @@
 use crate::causal_chain::CausalLogger;
 use crate::log_redaction::redact_text_for_logs;
 use crate::runtime::artifact::Artifact;
-use crate::runtime::session_timeline::{base_session_id, SessionTimelineWriter};
+use crate::runtime::live_digest::{
+    base_session_id, format_tool_action_line, format_tool_digest_result, LiveDigestWriter,
+};
+use std::sync::{Arc, Mutex};
 use autonoetic_types::causal_chain::EntryStatus;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -163,9 +166,8 @@ pub struct SessionTracer {
     turn_id: Option<String>,
     event_seq: u64,
     evidence_store: EvidenceStore,
-    /// Progressive Markdown timeline written to `.gateway/sessions/{session}/timeline.md`.
-    /// `None` when no gateway directory is available (standalone agent runs).
-    timeline_writer: Option<SessionTimelineWriter>,
+    /// Progressive digest written to `.gateway/sessions/{base}/digest.md`.
+    live_digest: Option<Arc<Mutex<LiveDigestWriter>>>,
     /// Optional GatewayStore for dual-write to causal_events table.
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
 }
@@ -200,32 +202,82 @@ impl SessionTracer {
             turn_id: None,
             event_seq: 0,
             evidence_store,
-            timeline_writer: None,
+            live_digest: None,
             gateway_store: None,
         })
     }
 
-    /// Attach a progressive Markdown timeline.
-    ///
-    /// Opens (or resumes) `.gateway/sessions/{base_session_id}/timeline.md`.
-    /// Errors opening the timeline are non-fatal: a warning is logged and
-    /// execution continues without timeline output.
-    pub fn with_timeline(mut self, gateway_dir: &Path) -> Self {
-        let base = base_session_id(&self.session_id).to_string();
-        match SessionTimelineWriter::open(gateway_dir, &base) {
-            Ok(writer) => {
-                self.timeline_writer = Some(writer);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "session_timeline",
-                    session_id = %self.session_id,
-                    error = %e,
-                    "Failed to open session timeline — timeline output disabled for this session"
-                );
-            }
-        }
+    /// Attach a shared live digest writer (opened by [`AgentExecutor`](crate::runtime::lifecycle::AgentExecutor)).
+    pub fn with_live_digest(mut self, writer: Arc<Mutex<LiveDigestWriter>>) -> Self {
+        self.live_digest = Some(writer);
         self
+    }
+
+    pub fn start_digest_turn(&mut self) -> anyhow::Result<()> {
+        if let Some(w) = &self.live_digest {
+            w.lock().unwrap().start_turn()?;
+        }
+        self.append_live_digest_event("turn.start", None);
+        Ok(())
+    }
+
+    pub fn record_digest_llm_round(
+        &mut self,
+        model: &str,
+        stop_reason: &str,
+        tool_calls: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> anyhow::Result<()> {
+        if let Some(w) = &self.live_digest {
+            let model_short = model.split('/').last().unwrap_or(model);
+            w.lock().unwrap().record_llm_round(
+                model_short,
+                stop_reason,
+                tool_calls,
+                input_tokens,
+                output_tokens,
+            )?;
+        }
+        self.append_live_digest_event(
+            "llm.round",
+            Some(serde_json::json!({
+                "model": model,
+                "stop_reason": stop_reason,
+                "tool_calls": tool_calls,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens
+            })),
+        );
+        Ok(())
+    }
+
+    pub fn record_digest_llm_retry_note(
+        &mut self,
+        attempt: usize,
+        max_retries: usize,
+    ) -> anyhow::Result<()> {
+        if let Some(w) = &self.live_digest {
+            w.lock()
+                .unwrap()
+                .record_llm_retry_note(attempt, max_retries)?;
+        }
+        self.append_live_digest_event(
+            "llm.retry",
+            Some(serde_json::json!({
+                "attempt": attempt,
+                "max_retries": max_retries
+            })),
+        );
+        Ok(())
+    }
+
+    pub fn end_digest_turn(&mut self) -> anyhow::Result<()> {
+        if let Some(w) = &self.live_digest {
+            w.lock().unwrap().end_turn()?;
+        }
+        self.append_live_digest_event("turn.end", None);
+        Ok(())
     }
 
     pub fn with_turn_id(mut self, turn_id: impl Into<String>) -> Self {
@@ -251,6 +303,32 @@ impl SessionTracer {
     ) -> Self {
         self.gateway_store = store;
         self
+    }
+
+    fn append_live_digest_event(&self, event_type: &str, payload: Option<serde_json::Value>) {
+        let Some(store) = &self.gateway_store else {
+            return;
+        };
+        let row = crate::scheduler::gateway_store::LiveDigestEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            root_session_id: base_session_id(&self.session_id).to_string(),
+            source_session_id: self.session_id.clone(),
+            turn_id: self.turn_id.clone(),
+            source_agent_id: Some(self.agent_id.clone()),
+            source_node_id: std::env::var("AUTONOETIC_NODE_ID")
+                .unwrap_or_else(|_| "gateway".to_string()),
+            event_type: event_type.to_string(),
+            payload: payload.and_then(|v| serde_json::to_string(&v).ok()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = store.create_live_digest_event(&row) {
+            tracing::debug!(
+                target: "live_digest",
+                error = %e,
+                event_type = %event_type,
+                "Failed to persist live digest event"
+            );
+        }
     }
 
     fn next_event_seq(&mut self) -> u64 {
@@ -330,27 +408,6 @@ impl SessionTracer {
             }
         }
 
-        if let Some(writer) = &mut self.timeline_writer {
-            let ts = chrono::Utc::now().to_rfc3339();
-            if let Err(e) = writer.append(
-                &self.agent_id,
-                &self.session_id,
-                &ts,
-                category,
-                action,
-                &status,
-                payload.as_ref(),
-            ) {
-                tracing::warn!(
-                    target: "session_timeline",
-                    category = %category,
-                    action = %action,
-                    error = %e,
-                    "Failed to append timeline row — continuing without timeline update"
-                );
-            }
-        }
-
         Ok(())
     }
 
@@ -380,8 +437,33 @@ impl SessionTracer {
             "session",
             "start",
             EntryStatus::Success,
-            Some(session_payload),
+            Some(session_payload.clone()),
         )?;
+
+        if let Some(w) = &self.live_digest {
+            let preview = session_payload
+                .get("trigger_preview")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if let Err(e) = w
+                .lock()
+                .unwrap()
+                .start_session(&self.agent_id, preview)
+            {
+                tracing::warn!(
+                    target: "live_digest",
+                    error = %e,
+                    "Failed to write digest session preamble"
+                );
+            }
+        }
+        self.append_live_digest_event(
+            "session.start",
+            Some(serde_json::json!({
+                "trigger_type": trigger_type,
+                "trigger_preview": session_payload.get("trigger_preview").cloned()
+            })),
+        );
         Ok(())
     }
 
@@ -458,6 +540,21 @@ impl SessionTracer {
 
     pub fn log_tool_requested(&mut self, tool_name: &str, arguments: &str) -> anyhow::Result<()> {
         let redacted_args = redact_text_for_logs(arguments);
+        if tool_name != "digest.annotate" {
+            if let Some(w) = &self.live_digest {
+                let line = format_tool_action_line(tool_name, &redacted_args);
+                if let Err(e) = w.lock().unwrap().record_action(&line) {
+                    tracing::warn!(target: "live_digest", error = %e, "digest record_action failed");
+                }
+            }
+        }
+        self.append_live_digest_event(
+            "tool.requested",
+            Some(serde_json::json!({
+                "tool_name": tool_name,
+                "arguments": redacted_args.clone(),
+            })),
+        );
         let mut requested_payload = serde_json::json!({
             "tool_name": tool_name,
             "arguments": redacted_args,
@@ -522,6 +619,32 @@ impl SessionTracer {
             EntryStatus::Success,
             Some(completed_payload),
         )?;
+
+        if tool_name != "digest.annotate" {
+            if let Some(w) = &self.live_digest {
+                let mut guard = w.lock().unwrap();
+                let formatted = format_tool_digest_result(tool_name, result);
+                let ok = serde_json::from_str::<serde_json::Value>(result)
+                    .ok()
+                    .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
+                    != Some(false);
+                let r = if ok {
+                    guard.record_result(&formatted)
+                } else {
+                    guard.record_error(&formatted)
+                };
+                if let Err(e) = r {
+                    tracing::warn!(target: "live_digest", error = %e, "digest record result/error failed");
+                }
+            }
+        }
+        self.append_live_digest_event(
+            "tool.completed",
+            Some(serde_json::json!({
+                "tool_name": tool_name,
+                "result": crate::log_redaction::redact_text_for_logs(result)
+            })),
+        );
         Ok(())
     }
 
@@ -704,7 +827,7 @@ impl SessionTracer {
                 session_id: "test-session".to_string(),
                 base_dir: None,
             },
-            timeline_writer: None,
+            live_digest: None,
             gateway_store: None,
         }
     }
@@ -728,7 +851,7 @@ impl SessionTracer {
                 session_id: "test-session".to_string(),
                 base_dir: None,
             },
-            timeline_writer: None,
+            live_digest: None,
             gateway_store: Some(store),
         }
     }

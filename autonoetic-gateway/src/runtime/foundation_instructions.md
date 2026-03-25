@@ -115,3 +115,8 @@ Core runtime model:
   - The clarified instruction in the new message
   - A reference to previous work: "Previous work saved as handle:sha256:..."
   - Original task context so the child does not restart from scratch
+
+15. Live session digest (operator and handoff context).
+- The gateway writes `.gateway/sessions/<root_session_id>/digest.md` during execution: turns, tool results, errors, and workflow pointers.
+- Use `digest.annotate` to append short **reasoning**, **decision**, **observation**, or **lesson** lines to that digest without adding noise to the chat transcript.
+- Annotations are cheap (no extra LLM call) and help planners, humans, and post-session tooling understand *why* actions were taken.

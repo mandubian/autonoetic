@@ -119,6 +119,8 @@ pub struct AgentExecutor {
     pub runtime_lock_hash: Option<String>,
     /// Emergency-stop hooks (sandbox PIDs, etc.); same registry as [`crate::execution::GatewayExecutionService`].
     pub active_executions: Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
+    /// Shared live digest (`digest.md`) when `gateway_dir` is set.
+    pub live_digest: Option<Arc<std::sync::Mutex<crate::runtime::live_digest::LiveDigestWriter>>>,
 }
 
 impl AgentExecutor {
@@ -152,6 +154,7 @@ impl AgentExecutor {
             task_id: None,
             runtime_lock_hash: None,
             active_executions: None,
+            live_digest: None,
         }
     }
 
@@ -235,13 +238,13 @@ impl AgentExecutor {
         persist_reevaluation_state(&self.agent_dir, |state| {
             state.last_outcome = Some(reason.to_string());
         })?;
-        let mut tracer = {
-            let mut t = SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?;
-            if let Some(gateway_dir) = &self.gateway_dir {
-                t = t.with_timeline(gateway_dir);
+        if let Some(d) = self.live_digest.take() {
+            if let Ok(mut g) = d.lock() {
+                let _ = g.write_session_summary(reason);
             }
-            t
-        };
+        }
+        let mut tracer =
+            SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?;
         tracer.log_session_end(reason);
         self.session_started = false;
         self.session_id = None;
@@ -344,6 +347,25 @@ impl AgentExecutor {
         let session_id = self.ensure_session_id();
         let turn_id = self.next_turn_id();
 
+        if let Some(gw) = self.gateway_dir.as_ref() {
+            if self.live_digest.is_none() {
+                let base = crate::runtime::live_digest::base_session_id(&session_id).to_string();
+                match crate::runtime::live_digest::LiveDigestWriter::open(gw, &base) {
+                    Ok(w) => {
+                        self.live_digest = Some(Arc::new(std::sync::Mutex::new(w)));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "live_digest",
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to open live digest"
+                        );
+                    }
+                }
+            }
+        }
+
         let evidence_mode_raw = self
             .config
             .as_ref()
@@ -365,8 +387,8 @@ impl AgentExecutor {
                 SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?
             }
             .with_turn_id(&turn_id);
-            if let Some(gateway_dir) = &self.gateway_dir {
-                t = t.with_timeline(gateway_dir);
+            if let Some(ld) = self.live_digest.clone() {
+                t = t.with_live_digest(ld);
             }
             t
         };
@@ -423,6 +445,7 @@ impl AgentExecutor {
         let policy = PolicyEngine::new(self.manifest.clone());
         let max_empty_other_retries = max_other_empty_retries();
         let mut empty_other_retries_used = 0usize;
+        let mut digest_turn_active = false;
 
         loop {
             // Loop guard check — save checkpoint before propagating max-turns error
@@ -445,6 +468,11 @@ impl AgentExecutor {
                     self.save_checkpoint_if_possible(&cp);
                     return Err(e);
                 }
+            }
+
+            if !digest_turn_active {
+                tracer.start_digest_turn()?;
+                digest_turn_active = true;
             }
 
             // Update system message
@@ -624,6 +652,14 @@ impl AgentExecutor {
                 input_context_pct,
             )?;
 
+            let _ = tracer.record_digest_llm_round(
+                &model,
+                &format!("{:?}", response.stop_reason),
+                response.tool_calls.len(),
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            );
+
             if !skip_llm {
                 self.llm_usage_last_run.push(LlmExchangeUsage {
                     model: model.clone(),
@@ -663,6 +699,10 @@ impl AgentExecutor {
                         "max_retries": max_empty_other_retries,
                     })),
                 );
+                let _ = tracer.record_digest_llm_retry_note(
+                    empty_other_retries_used,
+                    max_empty_other_retries,
+                );
                 continue;
             }
 
@@ -697,22 +737,23 @@ impl AgentExecutor {
                         }
                     }
 
-                    let tool_run_ctx =
-                        match (self.active_executions.as_ref(), self.session_id.as_ref()) {
-                            (Some(reg), Some(sid)) => {
-                                Some(crate::runtime::active_execution_registry::NativeToolRunContext {
-                                    registry: reg.clone(),
-                                    root_session_id:
-                                        crate::runtime::session_timeline::base_session_id(sid)
-                                            .to_string(),
-                                    workflow_id: self.workflow_id.clone(),
-                                    task_id: self.task_id.clone(),
-                                    session_id: sid.clone(),
-                                    agent_id: self.manifest.agent.id.clone(),
-                                })
-                            }
-                            _ => None,
-                        };
+                    let tool_run_ctx = self.session_id.as_ref().map(|sid| {
+                        crate::runtime::active_execution_registry::NativeToolRunContext {
+                            registry: self
+                                .active_executions
+                                .clone()
+                                .unwrap_or_else(
+                                    crate::runtime::active_execution_registry::ActiveExecutionRegistry::new,
+                                ),
+                            root_session_id: crate::runtime::live_digest::base_session_id(sid)
+                                .to_string(),
+                            workflow_id: self.workflow_id.clone(),
+                            task_id: self.task_id.clone(),
+                            session_id: sid.clone(),
+                            agent_id: self.manifest.agent.id.clone(),
+                            live_digest: self.live_digest.clone(),
+                        }
+                    });
                     let mut processor = ToolCallProcessor::new(
                         &mut mcp_runtime,
                         &self.registry,
@@ -818,6 +859,7 @@ impl AgentExecutor {
                         );
                         self.save_checkpoint_if_possible(&cp);
 
+                        let _ = tracer.end_digest_turn();
                         return Ok(TurnOutcome::Suspended {
                             approval_request_id: request_id,
                             continuation: Box::new(continuation),
@@ -897,6 +939,7 @@ impl AgentExecutor {
                         // Return Completed (not Suspended) — user interaction suspension
                         // doesn't use the TurnContinuation path. The resume happens via
                         // checkpoint loading + answer injection.
+                        let _ = tracer.end_digest_turn();
                         return Ok(TurnOutcome::Completed(None));
                     }
 
@@ -921,6 +964,9 @@ impl AgentExecutor {
                     if had_any_success {
                         self.guard.register_progress();
                     }
+
+                    let _ = tracer.end_digest_turn();
+                    digest_turn_active = false;
                 }
                 StopReason::EndTurn | StopReason::StopSequence => {
                     if !response.text.trim().is_empty() {
@@ -986,6 +1032,7 @@ impl AgentExecutor {
                             history,
                             gateway_dir,
                             &mut tracer,
+                            &disclosure_state,
                         ) {
                             tracing::warn!("Failed to persist history: {}", e);
                         }
@@ -1000,6 +1047,7 @@ impl AgentExecutor {
                         let _ = prune_checkpoints(config, &session_id, 3);
                     }
 
+                    let _ = tracer.end_digest_turn();
                     break;
                 }
                 StopReason::MaxTokens | StopReason::Other(_) => {
@@ -1007,6 +1055,7 @@ impl AgentExecutor {
                         history.push(Message::assistant(response.text.clone()));
                     }
                     tracer.log_stopped(&format!("{:?}", response.stop_reason));
+                    let _ = tracer.end_digest_turn();
                     break;
                 }
             }
@@ -1955,6 +2004,7 @@ fn persist_history_to_content_store(
     history: &[Message],
     gateway_dir: &Path,
     tracer: &mut SessionTracer,
+    disclosure_state: &DisclosureState,
 ) -> anyhow::Result<()> {
     use crate::runtime::content_store::ContentStore;
     const MAX_PERSISTED_MESSAGES: usize = 400;
@@ -2000,6 +2050,18 @@ fn persist_history_to_content_store(
     }
 
     // Serialize history
+    for msg in &mut merged_history {
+        // Persist a redacted view of message content.
+        msg.content = crate::log_redaction::redact_text_for_logs(
+            &disclosure_state.filter_reply(&msg.content),
+        );
+        for tc in &mut msg.tool_calls {
+            tc.arguments = crate::log_redaction::redact_text_for_logs(
+                &disclosure_state.filter_reply(&tc.arguments),
+            );
+        }
+    }
+
     let history_json = serde_json::to_string(&merged_history)?;
     let history_handle = store.write(history_json.as_bytes())?;
 
@@ -2018,4 +2080,49 @@ fn persist_history_to_content_store(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod history_persistence_tests {
+    use super::*;
+    use crate::llm::ToolCall;
+    use crate::runtime::content_store::ContentStore;
+    use crate::runtime::disclosure::DisclosureState;
+    use tempfile::tempdir;
+
+    #[test]
+    fn persisted_history_redacts_secret_like_text_and_tool_args() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir)?;
+
+        let mut assistant = Message::assistant("Will use Authorization: Bearer very-secret-value");
+        assistant.tool_calls = vec![ToolCall {
+            id: "tc-1".to_string(),
+            name: "web.fetch".to_string(),
+            arguments: r#"{"headers":{"authorization":"Bearer very-secret-value"}}"#.to_string(),
+        }];
+
+        let history = vec![Message::system("sys"), assistant];
+        let mut tracer = SessionTracer::test_tracer();
+        let disclosure = DisclosureState::default();
+
+        persist_history_to_content_store(
+            temp.path(),
+            "sess-redact",
+            &history,
+            &gateway_dir,
+            &mut tracer,
+            &disclosure,
+        )?;
+
+        let store = ContentStore::new(&gateway_dir)?;
+        let bytes = store.read_by_name("sess-redact", "session_history")?;
+        let persisted: Vec<Message> = serde_json::from_slice(&bytes)?;
+
+        let raw = serde_json::to_string(&persisted)?;
+        assert!(raw.contains("***REDACTED***"));
+        assert!(!raw.contains("very-secret-value"));
+        Ok(())
+    }
 }

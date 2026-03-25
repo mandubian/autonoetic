@@ -14,6 +14,7 @@ pub struct NativeToolRunContext {
     pub task_id: Option<String>,
     pub session_id: String,
     pub agent_id: String,
+    pub live_digest: Option<Arc<Mutex<crate::runtime::live_digest::LiveDigestWriter>>>,
 }
 
 #[derive(Clone)]
