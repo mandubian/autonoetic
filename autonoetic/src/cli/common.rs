@@ -346,6 +346,14 @@ pub enum TraceCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Print the post-session narrative for a root session (`post_session_narrative.md`)
+    Digest {
+        /// Session identifier (root or nested; root segment selects storage)
+        session_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
     /// Show durable workflow orchestration events (gateway workflow store)
     Workflow {
         /// Workflow id (`wf-…`) or root session id when `--root` is set

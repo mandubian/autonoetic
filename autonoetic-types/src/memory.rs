@@ -22,6 +22,8 @@ pub enum MemorySourceType {
     IngestedEvent,
     ScheduledAction,
     Manual,
+    /// Extracted by the post-session digest LLM from a completed session.
+    SessionDigest,
 }
 
 /// Lineage entry tracks the ancestry of a memory record.

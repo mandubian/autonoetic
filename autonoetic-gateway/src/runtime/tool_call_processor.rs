@@ -1035,7 +1035,15 @@ mod tests {
             .unwrap();
 
         let traces = store
-            .search_execution_traces(None, None, None, None, Some("test-agent"), 10)
+            .search_execution_traces(
+                None,
+                None,
+                None,
+                None,
+                Some("test-agent"),
+                Some("trace-session"),
+                10,
+            )
             .unwrap();
         assert_eq!(traces.len(), 2);
         for trace in &traces {

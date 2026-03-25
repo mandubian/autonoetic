@@ -297,3 +297,56 @@ fn test_tier2_memory_list_scopes() {
     assert!(scopes.contains(&"scope_a".to_string()));
     assert!(scopes.contains(&"scope_b".to_string()));
 }
+
+/// Tag search respects visibility: shared memory with tags is visible to readers.
+#[test]
+fn test_tier2_memory_search_by_tags_cross_agent_shared() {
+    use autonoetic_types::memory::MemoryObject;
+    use std::sync::Arc;
+
+    let ws = create_test_gateway();
+    let gateway_dir = ws.path().join(".gateway");
+    let store = Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let writer = autonoetic_gateway::runtime::memory::Tier2Memory::with_store(
+        Arc::clone(&store),
+        "writer-agent",
+    );
+
+    let mut memory = MemoryObject::new(
+        "tagged_fact".into(),
+        "lessons".into(),
+        "writer-agent".into(),
+        "writer-agent".into(),
+        "session:x:turn:1".into(),
+        "Never block the runtime thread.".into(),
+    );
+    memory.tags = vec![
+        "type:error_lesson".to_string(),
+        "domain:async".to_string(),
+    ];
+    writer.save_memory(&memory).unwrap();
+
+    writer
+        .share_with("tagged_fact", vec!["reader-agent".to_string()])
+        .unwrap();
+
+    let reader = autonoetic_gateway::runtime::memory::Tier2Memory::with_store(store, "reader-agent");
+    let found = reader
+        .search_by_tags(
+            "lessons",
+            &["type:error_lesson".to_string(), "domain:async".to_string()],
+            None,
+            10,
+        )
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].memory_id, "tagged_fact");
+
+    let not_found = reader
+        .search_by_tags("lessons", &["type:error_lesson".to_string(), "missing".to_string()], None, 10)
+        .unwrap();
+    assert!(not_found.is_empty());
+}

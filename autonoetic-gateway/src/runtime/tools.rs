@@ -2701,6 +2701,10 @@ impl NativeTool for ExecutionSearchTool {
                         "type": "string",
                         "description": "Filter by agent ID. Optional."
                     },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Restrict to this session id and nested sessions (exact match or id/<suffix>). Optional."
+                    },
                     "limit": {
                         "type": "integer",
                         "description": "Maximum results to return (default: 10)."
@@ -2737,6 +2741,8 @@ impl NativeTool for ExecutionSearchTool {
             #[serde(default)]
             agent_id: Option<String>,
             #[serde(default)]
+            session_id: Option<String>,
+            #[serde(default)]
             limit: Option<i64>,
         }
 
@@ -2755,6 +2761,7 @@ impl NativeTool for ExecutionSearchTool {
             args.error_type.as_deref(),
             args.command_pattern.as_deref(),
             args.agent_id.as_deref(),
+            args.session_id.as_deref(),
             limit,
         )?;
 
@@ -2789,6 +2796,18 @@ impl NativeTool for ExecutionSearchTool {
         }))
         .map_err(Into::into)
     }
+}
+
+fn tier2_memory_for_native_tool(
+    gateway_dir: &Path,
+    gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    agent_id: &str,
+) -> anyhow::Result<crate::runtime::memory::Tier2Memory> {
+    crate::runtime::memory::Tier2Memory::open_for_agent(
+        gateway_dir,
+        gateway_store.cloned(),
+        agent_id,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2842,7 +2861,7 @@ impl NativeTool for KnowledgeStoreTool {
         session_id: Option<&str>,
         turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
@@ -2883,20 +2902,19 @@ impl NativeTool for KnowledgeStoreTool {
             None => format!("session:{}", sid),
         };
 
-        let mem = crate::runtime::memory::Tier2Memory::new(gw_dir, &manifest.agent.id)?;
-        let memory = mem.remember(
-            &args.id,
-            &args.scope,
-            &manifest.agent.id,
-            &source_ref,
-            &args.content,
-        )?;
+        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
 
-        // Apply tags if provided
-        if !args.tags.is_empty() {
-            // Note: tags are set during remember via MemoryObject::new
-            // For now, we just return success
-        }
+        let mut memory = autonoetic_types::memory::MemoryObject::new(
+            args.id.clone(),
+            args.scope.clone(),
+            manifest.agent.id.clone(),
+            manifest.agent.id.clone(),
+            source_ref,
+            args.content.clone(),
+        );
+        memory.confidence = Some(args.confidence);
+        memory.tags = args.tags.clone();
+        let memory = mem.save_memory(&memory)?;
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -2954,7 +2972,7 @@ impl NativeTool for KnowledgeRecallTool {
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
@@ -2970,7 +2988,7 @@ impl NativeTool for KnowledgeRecallTool {
             anyhow::bail!("Knowledge requires gateway directory to be configured");
         };
 
-        let mem = crate::runtime::memory::Tier2Memory::new(gw_dir, &manifest.agent.id)?;
+        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
         let memory = mem.recall(&args.id)?;
 
         serde_json::to_string(&serde_json::json!({
@@ -3032,7 +3050,7 @@ impl NativeTool for KnowledgeSearchTool {
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
@@ -3049,7 +3067,7 @@ impl NativeTool for KnowledgeSearchTool {
             anyhow::bail!("Knowledge requires gateway directory to be configured");
         };
 
-        let mem = crate::runtime::memory::Tier2Memory::new(gw_dir, &manifest.agent.id)?;
+        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
         let results = mem.search(&args.scope, args.query.as_deref())?;
 
         let items: Vec<serde_json::Value> = results
@@ -3070,6 +3088,313 @@ impl NativeTool for KnowledgeSearchTool {
             "scope": args.scope,
             "results": items,
             "count": items.len(),
+        }))
+        .map_err(Into::into)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge search by tags (Tier 2 JSON tag array)
+// ---------------------------------------------------------------------------
+
+/// Searches the knowledge base by scope, requiring every listed tag on the stored JSON `tags` array.
+pub struct KnowledgeSearchByTagsTool;
+
+impl NativeTool for KnowledgeSearchByTagsTool {
+    fn name(&self) -> &'static str {
+        "knowledge.search_by_tags"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Search the knowledge base by scope and tags. Each result's `tags` JSON array must contain every tag you pass (AND semantics). Optional `text` filters `content` with a SQL LIKE substring match.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string", "description": "Scope/namespace (e.g. 'lessons', 'general')" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "All of these tag strings must appear in the record's tags list" },
+                    "text": { "type": "string", "description": "Optional substring filter on content" },
+                    "limit": { "type": "integer", "description": "Max results (1–100)", "default": 10 }
+                },
+                "required": ["scope", "tags"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            scope: String,
+            tags: Vec<String>,
+            text: Option<String>,
+            #[serde(default = "default_limit")]
+            limit: u32,
+        }
+        fn default_limit() -> u32 {
+            10
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        anyhow::ensure!(!args.scope.trim().is_empty(), "scope must not be empty");
+        anyhow::ensure!(
+            !args.tags.is_empty(),
+            "tags must be a non-empty array"
+        );
+        anyhow::ensure!(
+            (1..=100).contains(&args.limit),
+            "limit must be between 1 and 100 inclusive"
+        );
+        let limit = args.limit as usize;
+
+        let Some(gw_dir) = gateway_dir else {
+            anyhow::bail!("Knowledge requires gateway directory to be configured");
+        };
+
+        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
+        let results = mem.search_by_tags(
+            &args.scope,
+            &args.tags,
+            args.text.as_deref(),
+            limit,
+        )?;
+
+        let items: Vec<serde_json::Value> = results
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.memory_id,
+                    "content": m.content,
+                    "scope": m.scope,
+                    "tags": m.tags,
+                    "writer": m.writer_agent_id,
+                    "created_at": m.created_at,
+                    "confidence": m.confidence,
+                })
+            })
+            .collect();
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "scope": args.scope,
+            "tags": args.tags,
+            "results": items,
+            "count": items.len(),
+        }))
+        .map_err(Into::into)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Digest query (Tier-2 memories + post-session narrative)
+// ---------------------------------------------------------------------------
+
+/// Truncate to at most `max_chars` Unicode scalar values without splitting codepoints.
+fn truncate_narrative_to_char_boundary(s: &str, max_chars: usize) -> String {
+    let max_chars = max_chars.max(1);
+    let mut count = 0usize;
+    let mut end_byte = 0usize;
+    for (i, c) in s.char_indices() {
+        if count >= max_chars {
+            break;
+        }
+        count += 1;
+        end_byte = i + c.len_utf8();
+    }
+    if end_byte >= s.len() {
+        s.to_string()
+    } else {
+        format!("{}… (truncated)", &s[..end_byte])
+    }
+}
+
+/// Combines tag-based memory search with the stored post-session narrative for a root session.
+pub struct DigestQueryTool;
+
+impl NativeTool for DigestQueryTool {
+    fn name(&self) -> &'static str {
+        "digest.query"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Search digest-scoped Tier-2 memories by scope and tags, and optionally load the post-session narrative: either as `post_session_narrative.md` for the session root, or by explicit content handle/alias via `narrative_handle` (uses the same resolution rules as `content.read`).".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string", "description": "Memory scope/namespace (e.g. 'digest.lesson')" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "AND-matched tags on the memory record" },
+                    "text": { "type": "string", "description": "Optional substring filter on memory content" },
+                    "session_id": { "type": "string", "description": "Session id for resolving narrative by name or handle (see `narrative_handle`). If omitted, the active tool session id is used when available." },
+                    "narrative_handle": { "type": "string", "description": "Optional content handle (sha256:…), short alias, or name for the post-session narrative blob. Requires `session_id` or an active tool session for visibility checks." },
+                    "narrative_max_chars": { "type": "integer", "description": "Max Unicode scalars of narrative to return (default 16000)", "default": 16000 },
+                    "limit": { "type": "integer", "description": "Max memory results (1–100, default 10)", "default": 10 }
+                },
+                "required": ["scope", "tags"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            scope: String,
+            tags: Vec<String>,
+            text: Option<String>,
+            #[serde(default)]
+            session_id: Option<String>,
+            #[serde(default)]
+            narrative_handle: Option<String>,
+            #[serde(default = "default_narrative_cap")]
+            narrative_max_chars: usize,
+            #[serde(default = "default_limit")]
+            limit: u32,
+        }
+        fn default_limit() -> u32 {
+            10
+        }
+        fn default_narrative_cap() -> usize {
+            16_000
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        anyhow::ensure!(!args.scope.trim().is_empty(), "scope must not be empty");
+        anyhow::ensure!(!args.tags.is_empty(), "tags must be non-empty");
+        anyhow::ensure!((1..=100).contains(&args.limit), "limit must be 1–100");
+
+        let Some(gw_dir) = gateway_dir else {
+            anyhow::bail!("digest.query requires gateway directory");
+        };
+
+        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
+        let results = mem.search_by_tags(
+            &args.scope,
+            &args.tags,
+            args.text.as_deref(),
+            args.limit as usize,
+        )?;
+
+        let items: Vec<serde_json::Value> = results
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.memory_id,
+                    "content": m.content,
+                    "scope": m.scope,
+                    "tags": m.tags,
+                    "writer": m.writer_agent_id,
+                    "created_at": m.created_at,
+                    "confidence": m.confidence,
+                })
+            })
+            .collect();
+
+        let sid_for_narrative = args
+            .session_id
+            .as_deref()
+            .or(session_id)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let narrative = if let Some(ref raw) = args.narrative_handle {
+            let nh = raw.trim();
+            anyhow::ensure!(
+                !nh.is_empty(),
+                "narrative_handle must be non-empty when provided"
+            );
+            let sid = sid_for_narrative.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "digest.query narrative_handle requires session_id (argument) or an active tool session context"
+                )
+            })?;
+            let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
+            let bytes = store.read_by_name_or_handle(sid, nh)?;
+            let text = String::from_utf8(bytes)
+                .map_err(|e| anyhow::anyhow!("narrative content is not valid UTF-8: {e}"))?;
+            let truncated =
+                truncate_narrative_to_char_boundary(&text, args.narrative_max_chars.max(1));
+            Some(serde_json::json!({
+                "session_id": sid,
+                "handle_or_name": nh,
+                "text": truncated,
+            }))
+        } else if let Some(sid_raw) = sid_for_narrative {
+            let base = crate::runtime::live_digest::base_session_id(sid_raw).to_string();
+            let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
+            match store.read_by_name(
+                &base,
+                crate::runtime::post_session_digest::POST_SESSION_NARRATIVE_CONTENT_NAME,
+            ) {
+                Ok(bytes) => {
+                    let text = String::from_utf8(bytes).map_err(|e| {
+                        anyhow::anyhow!("post_session_narrative.md is not valid UTF-8: {e}")
+                    })?;
+                    let truncated =
+                        truncate_narrative_to_char_boundary(&text, args.narrative_max_chars.max(1));
+                    Some(serde_json::json!({
+                        "root_session_id": base,
+                        "name": crate::runtime::post_session_digest::POST_SESSION_NARRATIVE_CONTENT_NAME,
+                        "text": truncated,
+                    }))
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "scope": args.scope,
+            "tags": args.tags,
+            "memories": items,
+            "memory_count": items.len(),
+            "narrative": narrative,
         }))
         .map_err(Into::into)
     }
@@ -3121,7 +3446,7 @@ impl NativeTool for KnowledgeShareTool {
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
@@ -3151,7 +3476,7 @@ impl NativeTool for KnowledgeShareTool {
             anyhow::bail!("Knowledge requires gateway directory to be configured");
         };
 
-        let mem = crate::runtime::memory::Tier2Memory::new(gw_dir, &manifest.agent.id)?;
+        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
         let memory = mem.share_with(&args.id, args.with_agents.clone())?;
 
         serde_json::to_string(&serde_json::json!({
@@ -6664,6 +6989,8 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(KnowledgeStoreTool));
     registry.register(Box::new(KnowledgeRecallTool));
     registry.register(Box::new(KnowledgeSearchTool));
+    registry.register(Box::new(KnowledgeSearchByTagsTool));
+    registry.register(Box::new(DigestQueryTool));
     registry.register(Box::new(KnowledgeShareTool));
     // Session tools
     registry.register(Box::new(SessionSnapshotTool));
@@ -6912,10 +7239,10 @@ mod tests {
         // sandbox.exec (1) + content.write, content.read (2) +
         // artifact.build, artifact.inspect, artifact.resolve_ref (3) +
         // execution.search (1) +
-        // knowledge.store, knowledge.recall, knowledge.search (3) +
+        // knowledge.store, knowledge.recall, knowledge.search, knowledge.search_by_tags, digest.query (5) +
         // session.snapshot (1) + knowledge.share (1) +
-        // promotion.query (1) + always-available (6) = 18
-        assert_eq!(defs_all.len(), 18);
+        // promotion.query (1) + always-available (6) = 20
+        assert_eq!(defs_all.len(), 20);
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);

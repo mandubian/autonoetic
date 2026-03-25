@@ -1,9 +1,10 @@
 //! Agent Memory Tier 1 and Tier 2 with provenance tracking.
 
 use autonoetic_types::memory::MemoryObject;
-use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use crate::scheduler::gateway_store::GatewayStore;
 
 /// Tier 1 Memory: Working state directory (`state/`).
 /// Flat files for the agent's immediate situational awareness.
@@ -40,66 +41,37 @@ impl Tier1Memory {
 ///
 /// This is the gateway-owned source of truth for durable facts and cross-agent recall.
 /// All memory records include full provenance (writer, source, timestamps, content hash).
+/// Rows live in `gateway.db` (`memories` table).
 pub struct Tier2Memory {
-    conn: Arc<Connection>,
+    store: Arc<GatewayStore>,
     /// The agent ID that is currently using this memory instance.
     current_agent_id: String,
 }
 
 impl Tier2Memory {
-    /// Creates a new Tier2Memory instance connected to the gateway-managed database.
-    ///
-    /// # Arguments
-    /// * `gateway_dir` - Path to the gateway directory (contains memory.db)
-    /// * `agent_id` - The ID of the agent using this memory instance
+    pub fn with_store(store: Arc<GatewayStore>, agent_id: impl Into<String>) -> Self {
+        Self {
+            store,
+            current_agent_id: agent_id.into(),
+        }
+    }
+
+    /// Opens the gateway store for `gateway_dir` and constructs Tier 2 memory for `agent_id`.
     pub fn new(gateway_dir: &Path, agent_id: &str) -> anyhow::Result<Self> {
-        let db_path = gateway_dir.join("memory.db");
-        let conn = Connection::open(&db_path)?;
+        let store = Arc::new(GatewayStore::open(gateway_dir)?);
+        Ok(Self::with_store(store, agent_id.to_string()))
+    }
 
-        // Create the provenance-aware memories table
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS memories (
-                memory_id TEXT PRIMARY KEY,
-                scope TEXT NOT NULL,
-                owner_agent_id TEXT NOT NULL,
-                writer_agent_id TEXT NOT NULL,
-                source_type TEXT NOT NULL DEFAULT 'agent_write',
-                source_ref TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                content TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                confidence REAL,
-                tags TEXT,
-                lineage TEXT,
-                visibility TEXT NOT NULL DEFAULT 'private',
-                allowed_agents TEXT
-            )",
-            [],
-        )?;
-
-        // Create index for scope-based queries
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope)",
-            [],
-        )?;
-
-        // Create index for owner-based queries
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_memories_owner ON memories(owner_agent_id)",
-            [],
-        )?;
-
-        // Create index for visibility-based queries
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_memories_visibility ON memories(visibility)",
-            [],
-        )?;
-
-        Ok(Self {
-            conn: Arc::new(conn),
-            current_agent_id: agent_id.to_string(),
-        })
+    /// Uses an existing store when the runtime already holds `Arc<GatewayStore>`; otherwise opens `gateway_dir`.
+    pub fn open_for_agent(
+        gateway_dir: &Path,
+        gateway_store: Option<Arc<GatewayStore>>,
+        agent_id: &str,
+    ) -> anyhow::Result<Self> {
+        match gateway_store {
+            Some(gs) => Ok(Self::with_store(gs, agent_id.to_string())),
+            None => Self::new(gateway_dir, agent_id),
+        }
     }
 
     /// Stores a new memory record or updates an existing one.
@@ -132,35 +104,7 @@ impl Tier2Memory {
 
     /// Saves a MemoryObject to the database.
     pub fn save_memory(&self, memory: &MemoryObject) -> anyhow::Result<MemoryObject> {
-        let tags_json = serde_json::to_string(&memory.tags)?;
-        let lineage_json = serde_json::to_string(&memory.lineage)?;
-        let allowed_agents_json = serde_json::to_string(&memory.allowed_agents)?;
-
-        self.conn.execute(
-            "INSERT OR REPLACE INTO memories (
-                memory_id, scope, owner_agent_id, writer_agent_id, source_type, source_ref,
-                created_at, updated_at, content, content_hash, confidence, tags, lineage,
-                visibility, allowed_agents
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
-                memory.memory_id,
-                memory.scope,
-                memory.owner_agent_id,
-                memory.writer_agent_id,
-                serde_json::to_string(&memory.source_type)?,
-                memory.source_ref,
-                memory.created_at,
-                memory.updated_at,
-                memory.content,
-                memory.content_hash,
-                memory.confidence,
-                tags_json,
-                lineage_json,
-                serde_json::to_string(&memory.visibility)?,
-                allowed_agents_json,
-            ],
-        )?;
-
+        self.store.memory_upsert(memory)?;
         Ok(memory.clone())
     }
 
@@ -168,67 +112,9 @@ impl Tier2Memory {
     ///
     /// Enforces visibility/ACL checks based on the current agent.
     pub fn recall(&self, memory_id: &str) -> anyhow::Result<MemoryObject> {
-        let memory: MemoryObject = self
-            .conn
-            .prepare("SELECT * FROM memories WHERE memory_id = ?1")?
-            .query_row(
-                params![memory_id],
-                |row| -> rusqlite::Result<MemoryObject> {
-                    let source_type_str: String = row.get(4)?;
-                    let tags_str: String = row.get(11)?;
-                    let lineage_str: String = row.get(12)?;
-                    let visibility_str: String = row.get(13)?;
-                    let allowed_agents_str: String = row.get(14)?;
-
-                    Ok(MemoryObject {
-                        memory_id: row.get(0)?,
-                        scope: row.get(1)?,
-                        owner_agent_id: row.get(2)?,
-                        writer_agent_id: row.get(3)?,
-                        source_type: serde_json::from_str(&source_type_str).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                e.to_string().into(),
-                            )
-                        })?,
-                        source_ref: row.get(5)?,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                        content: row.get(8)?,
-                        content_hash: row.get(9)?,
-                        confidence: row.get(10)?,
-                        tags: serde_json::from_str(&tags_str).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                e.to_string().into(),
-                            )
-                        })?,
-                        lineage: serde_json::from_str(&lineage_str).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                e.to_string().into(),
-                            )
-                        })?,
-                        visibility: serde_json::from_str(&visibility_str).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                e.to_string().into(),
-                            )
-                        })?,
-                        allowed_agents: serde_json::from_str(&allowed_agents_str).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                e.to_string().into(),
-                            )
-                        })?,
-                    })
-                },
-            )?;
+        let Some(memory) = self.store.memory_get_unrestricted(memory_id)? else {
+            anyhow::bail!("Memory '{}' not found", memory_id);
+        };
 
         // Enforce visibility check
         if !memory.is_readable_by(&self.current_agent_id) {
@@ -246,27 +132,10 @@ impl Tier2Memory {
     ///
     /// Returns memories that match the scope and are visible to the current agent.
     pub fn search(&self, scope: &str, query: Option<&str>) -> anyhow::Result<Vec<MemoryObject>> {
-        let mut sql = String::from("SELECT * FROM memories WHERE scope = ?1");
-
-        if let Some(_q) = query {
-            sql.push_str(" AND content LIKE ?2");
-        }
-
-        sql.push_str(" ORDER BY updated_at DESC");
-
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        let mut rows = if let Some(q) = query {
-            let search_term = format!("%{}%", q);
-            stmt.query(params![scope, search_term])?
-        } else {
-            stmt.query(params![scope])?
-        };
+        let ids = self.store.memory_list_ids_for_scope(scope, query)?;
 
         let mut results = Vec::new();
-        while let Some(row) = rows.next()? {
-            let memory_id: String = row.get(0)?;
-
+        for memory_id in ids {
             // Only include memories visible to current agent
             // Propagate errors for debugging DB/serde issues
             match self.recall(&memory_id) {
@@ -278,9 +147,44 @@ impl Tier2Memory {
                         memory_id,
                         e
                     );
-                    // Continue with other memories
                 }
             }
+        }
+
+        Ok(results)
+    }
+
+    /// Returns memories in `scope` whose JSON `tags` array contains every string in `tags`,
+    /// optionally filtered by substring match on `text`, visible to the current agent.
+    ///
+    /// `tags` must be non-empty.
+    pub fn search_by_tags(
+        &self,
+        scope: &str,
+        tags: &[String],
+        text: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryObject>> {
+        anyhow::ensure!(!tags.is_empty(), "tags must not be empty");
+        anyhow::ensure!(
+            (1..=100).contains(&limit),
+            "limit must be between 1 and 100 inclusive"
+        );
+
+        let ids = self
+            .store
+            .memory_list_ids_matching_tags(scope, &self.current_agent_id, tags, text, limit as i64)?;
+
+        let mut results = Vec::new();
+        for memory_id in ids {
+            if results.len() >= limit {
+                break;
+            }
+            let memory = match self.recall(&memory_id) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            results.push(memory);
         }
 
         Ok(results)
@@ -327,33 +231,18 @@ impl Tier2Memory {
     /// Lists all scopes available to the current agent.
     /// Only returns scopes where the agent has at least one visible memory.
     pub fn list_scopes(&self) -> anyhow::Result<Vec<String>> {
-        // A memory is visible if:
-        // 1. visibility = '"global"', OR
-        // 2. visibility = '"private"' AND (owner_agent_id = current_agent_id OR writer_agent_id = current_agent_id), OR
-        // 3. visibility = '"shared"' AND (owner_agent_id = current_agent_id OR writer_agent_id = current_agent_id OR current_agent_id is in allowed_agents)
-        // Note: visibility is stored as JSON string (e.g., '"private"')
-        let mut stmt = self.conn.prepare(LIST_SCOPES_SQL)?;
-        let mut rows = stmt.query(params![&self.current_agent_id])?;
-
-        let mut scopes = Vec::new();
-        while let Some(row) = rows.next()? {
-            let scope: String = row.get(0)?;
-            scopes.push(scope);
-        }
-
-        Ok(scopes)
+        self.store
+            .memory_list_scopes_for_agent(&self.current_agent_id)
     }
 
     /// Lists all memories owned by the current agent.
     pub fn list_memories(&self) -> anyhow::Result<Vec<MemoryObject>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT memory_id FROM memories WHERE owner_agent_id = ?1 ORDER BY created_at DESC",
-        )?;
-        let mut rows = stmt.query(params![&self.current_agent_id])?;
+        let ids = self
+            .store
+            .memory_list_ids_owned_by(&self.current_agent_id)?;
 
         let mut memories = Vec::new();
-        while let Some(row) = rows.next()? {
-            let memory_id: String = row.get(0)?;
+        for memory_id in ids {
             match self.recall(&memory_id) {
                 Ok(memory) => memories.push(memory),
                 Err(e) => {
@@ -365,19 +254,6 @@ impl Tier2Memory {
         Ok(memories)
     }
 }
-
-const LIST_SCOPES_SQL: &str = r#"
-    SELECT DISTINCT scope FROM memories
-    WHERE json_extract(visibility, '$') = 'global'
-       OR (json_extract(visibility, '$') = 'private'
-           AND (owner_agent_id = ?1 OR writer_agent_id = ?1))
-       OR (json_extract(visibility, '$') = 'shared'
-           AND (owner_agent_id = ?1 OR writer_agent_id = ?1
-                OR (allowed_agents IS NOT NULL
-                    AND json_valid(allowed_agents)
-                    AND ?1 IN (SELECT value FROM json_each(allowed_agents)))))
-    ORDER BY scope
-"#;
 
 #[cfg(test)]
 mod tests {
@@ -550,6 +426,146 @@ mod tests {
         let results = mem.search("weather", Some("Paris")).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].memory_id, "fact_1");
+    }
+
+    #[test]
+    fn test_tier2_memory_search_by_tags_requires_nonempty_tags() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+        let mem = Tier2Memory::with_store(store, "agent-1");
+        assert!(mem
+            .search_by_tags("general", &[], None, 10)
+            .unwrap_err()
+            .to_string()
+            .contains("tags must not be empty"));
+    }
+
+    #[test]
+    fn test_tier2_memory_search_by_tags_limit_bounds() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+        let mem = Tier2Memory::with_store(store, "agent-1");
+        let err0 = mem
+            .search_by_tags("general", &["t".to_string()], None, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err0.contains("limit must be between 1 and 100 inclusive"),
+            "{}",
+            err0
+        );
+        let err101 = mem
+            .search_by_tags("general", &["t".to_string()], None, 101)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err101.contains("limit must be between 1 and 100 inclusive"),
+            "{}",
+            err101
+        );
+    }
+
+    #[test]
+    fn test_tier2_memory_search_by_tags_filters() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+        let mem = Tier2Memory::with_store(Arc::clone(&store), "agent-1");
+
+        let mut m1 = MemoryObject::new(
+            "m1".into(),
+            "lessons".into(),
+            "agent-1".into(),
+            "agent-1".into(),
+            "ref:1".into(),
+            "async needs Send".into(),
+        );
+        m1.tags = vec!["type:error_lesson".to_string(), "domain:http".to_string()];
+        mem.save_memory(&m1).unwrap();
+
+        let mut m2 = MemoryObject::new(
+            "m2".into(),
+            "lessons".into(),
+            "agent-1".into(),
+            "agent-1".into(),
+            "ref:2".into(),
+            "other".into(),
+        );
+        m2.tags = vec!["type:fact".to_string()];
+        mem.save_memory(&m2).unwrap();
+
+        let found = mem
+            .search_by_tags(
+                "lessons",
+                &["type:error_lesson".to_string()],
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].memory_id, "m1");
+
+        let found2 = mem
+            .search_by_tags(
+                "lessons",
+                &["type:error_lesson".to_string(), "domain:http".to_string()],
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(found2.len(), 1);
+
+        let found_text = mem
+            .search_by_tags(
+                "lessons",
+                &["type:error_lesson".to_string()],
+                Some("Send"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(found_text.len(), 1);
+    }
+
+    #[test]
+    fn test_tier2_memory_search_by_tags_limit_applies_after_visibility() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+        let writer = Tier2Memory::with_store(Arc::clone(&store), "writer-agent");
+        let reader = Tier2Memory::with_store(store, "reader-agent");
+
+        // Write a shared match first (older row).
+        let mut shared = MemoryObject::new(
+            "shared-hit".into(),
+            "lessons".into(),
+            "writer-agent".into(),
+            "writer-agent".into(),
+            "ref:shared".into(),
+            "Readable memory".into(),
+        );
+        shared.tags = vec!["topic:rust".to_string()];
+        writer.save_memory(&shared).unwrap();
+        writer
+            .share_with("shared-hit", vec!["reader-agent".to_string()])
+            .unwrap();
+
+        // Then write many newer private matches that reader cannot access.
+        for i in 0..150 {
+            let mut private = MemoryObject::new(
+                format!("private-{}", i),
+                "lessons".into(),
+                "writer-agent".into(),
+                "writer-agent".into(),
+                format!("ref:{}", i),
+                format!("Private {}", i),
+            );
+            private.tags = vec!["topic:rust".to_string()];
+            writer.save_memory(&private).unwrap();
+        }
+
+        let found = reader
+            .search_by_tags("lessons", &["topic:rust".to_string()], None, 1)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].memory_id, "shared-hit");
     }
 
     #[test]

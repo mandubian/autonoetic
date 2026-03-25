@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod memory;
 pub mod openrouter_catalog;
 pub mod parser;
+pub mod post_session_digest;
 pub mod promotion_store;
 pub mod reevaluation_state;
 pub mod remote_access;
