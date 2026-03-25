@@ -14,32 +14,44 @@ pub fn base_session_id(session_id: &str) -> &str {
     session_id.split('/').next().unwrap_or(session_id)
 }
 
-const SESSION_STARTED_MARKER: &str = "<!-- autonoetic-session-started -->";
+/// Compute nesting depth from session_id (number of slashes).
+pub fn session_depth(session_id: &str) -> usize {
+    session_id.matches('/').count()
+}
 
 /// Writes `{gateway_dir}/sessions/{base_session_id}/digest.md`.
+///
+/// Multiple agents writing to the same digest file is expected — each agent opens its
+/// own writer with its `agent_id` and `session_id`. Turn headers and summaries are
+/// labelled with the agent. Header level follows nesting depth (## root, ### depth-1 …).
 pub struct LiveDigestWriter {
     path: PathBuf,
+    /// Agent that owns this writer instance.
+    agent_id: String,
+    /// Nesting depth (0 = root, 1 = child …).
+    depth: usize,
     digest_turn_seq: u32,
     tools_in_open_turn: u32,
     session_tool_total: u32,
     session_error_total: u32,
-    /// True if this is a resumed session (from checkpoint/hibernation)
+    /// True if this is a resumed session (from checkpoint/hibernation).
     is_resumed: bool,
 }
 
 impl LiveDigestWriter {
-    pub fn open(gateway_dir: &Path, base_session_id: &str) -> anyhow::Result<Self> {
-        let dir = gateway_dir.join("sessions").join(base_session_id);
+    pub fn open(gateway_dir: &Path, session_id: &str, agent_id: &str) -> anyhow::Result<Self> {
+        let base = base_session_id(session_id);
+        let depth = session_depth(session_id);
+        let dir = gateway_dir.join("sessions").join(base);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("digest.md");
 
         let (digest_turn_seq, is_resumed) = if path.exists() {
             let existing_turns = count_turn_headers(&path)?;
-            // If file exists with turns, this is a resume from hibernation
             (existing_turns, existing_turns > 0)
         } else {
             let mut f = std::fs::File::create(&path)?;
-            writeln!(f, "# Live session digest: `{}`", base_session_id)?;
+            writeln!(f, "# Live session digest: `{}`", base)?;
             writeln!(f)?;
             writeln!(
                 f,
@@ -51,6 +63,8 @@ impl LiveDigestWriter {
 
         Ok(Self {
             path,
+            agent_id: agent_id.to_string(),
+            depth,
             digest_turn_seq,
             tools_in_open_turn: 0,
             session_tool_total: 0,
@@ -63,6 +77,16 @@ impl LiveDigestWriter {
         &self.path
     }
 
+    /// Return the markdown header prefix for this agent's depth.
+    fn header(&self) -> String {
+        match self.depth {
+            0 => "##".to_string(),
+            1 => "###".to_string(),
+            2 => "####".to_string(),
+            d => "#".repeat(d + 2),
+        }
+    }
+
     /// Mark this session as resumed from hibernation/checkpoint.
     /// Call before start_turn() when resuming.
     pub fn mark_resumed(&mut self) {
@@ -71,14 +95,15 @@ impl LiveDigestWriter {
 
     /// Session preamble: agent, start time, task preview. Idempotent per file.
     pub fn start_session(&mut self, agent_id: &str, task_preview: &str) -> anyhow::Result<()> {
+        let marker = format!("<!-- autonoetic-session-started:{} -->", agent_id);
         let existing = std::fs::read_to_string(&self.path)?;
-        if existing.contains(SESSION_STARTED_MARKER) {
+        if existing.contains(&marker) {
             return Ok(());
         }
         let mut f = OpenOptions::new().append(true).open(&self.path)?;
         let ts = chrono::Utc::now().to_rfc3339();
         writeln!(f)?;
-        writeln!(f, "{SESSION_STARTED_MARKER}")?;
+        writeln!(f, "{marker}")?;
         writeln!(f, "**Agent:** `{}` | **Started:** {ts}", cell(agent_id))?;
         writeln!(f, "**Task:** {}", cell(&truncate_chars(task_preview, 500)))?;
         writeln!(f)?;
@@ -92,17 +117,19 @@ impl LiveDigestWriter {
         self.tools_in_open_turn = 0;
         let n = self.digest_turn_seq;
         let ts = chrono::Utc::now().to_rfc3339();
+        let hdr = self.header();
+        let agent = &self.agent_id;
         let mut f = OpenOptions::new().append(true).open(&self.path)?;
 
-        // Add resume marker if this session was resumed from hibernation
+        // Resume marker
         if self.is_resumed {
             writeln!(f, "---")?;
-            writeln!(f, "*↻ Session resumed from hibernation*")?;
+            writeln!(f, "*↻ `{agent}` resumed from hibernation*")?;
             writeln!(f)?;
-            self.is_resumed = false; // Only show once
+            self.is_resumed = false;
         }
 
-        writeln!(f, "## Turn {n} — {ts}")?;
+        writeln!(f, "{hdr} `{agent}` — Turn {n} — {ts}")?;
         writeln!(f)?;
         Ok(())
     }
@@ -219,9 +246,11 @@ impl LiveDigestWriter {
     }
 
     pub fn write_session_summary(&mut self, outcome_reason: &str) -> anyhow::Result<()> {
+        let hdr = self.header();
+        let agent = &self.agent_id;
         let mut f = OpenOptions::new().append(true).open(&self.path)?;
         let ts = chrono::Utc::now().to_rfc3339();
-        writeln!(f, "## Session summary — {ts}")?;
+        writeln!(f, "{hdr} `{agent}` — Session summary — {ts}")?;
         writeln!(f)?;
         writeln!(
             f,
@@ -268,7 +297,7 @@ pub fn append_user_ask_answer_best_effort(
 
 fn count_turn_headers(path: &Path) -> anyhow::Result<u32> {
     let s = std::fs::read_to_string(path)?;
-    let n = s.lines().filter(|l| l.starts_with("## Turn ")).count();
+    let n = s.lines().filter(|l| l.contains(" — Turn ")).count();
     Ok(n as u32)
 }
 
@@ -450,7 +479,7 @@ mod tests {
     fn digest_creates_file_and_turns() {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
-        let mut w = LiveDigestWriter::open(&gw, "s1").unwrap();
+        let mut w = LiveDigestWriter::open(&gw, "s1", "agent.a").unwrap();
         w.start_session("agent.a", "hello task").unwrap();
         w.start_turn().unwrap();
         w.record_action("Called `echo`").unwrap();
@@ -459,7 +488,7 @@ mod tests {
         w.end_turn().unwrap();
         let body = std::fs::read_to_string(w.path()).unwrap();
         assert!(body.contains("# Live session digest"));
-        assert!(body.contains("## Turn 1"));
+        assert!(body.contains("## `agent.a` — Turn 1"));
         assert!(body.contains("**Lesson:** note"));
     }
 
@@ -468,15 +497,15 @@ mod tests {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
         {
-            let mut w = LiveDigestWriter::open(&gw, "s2").unwrap();
+            let mut w = LiveDigestWriter::open(&gw, "s2", "agent.a").unwrap();
             w.start_turn().unwrap();
             w.end_turn().unwrap();
         }
-        let mut w2 = LiveDigestWriter::open(&gw, "s2").unwrap();
+        let mut w2 = LiveDigestWriter::open(&gw, "s2", "agent.a").unwrap();
         w2.start_turn().unwrap();
         let body = std::fs::read_to_string(w2.path()).unwrap();
-        assert!(body.contains("## Turn 1"));
-        assert!(body.contains("## Turn 2"));
+        assert!(body.contains("## `agent.a` — Turn 1"));
+        assert!(body.contains("## `agent.a` — Turn 2"));
     }
 
     #[test]
@@ -492,7 +521,7 @@ mod tests {
     fn digest_redacts_secret_like_annotation() {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
-        let mut w = LiveDigestWriter::open(&gw, "s3").unwrap();
+        let mut w = LiveDigestWriter::open(&gw, "s3", "agent.a").unwrap();
         w.record_annotation("observation", "Authorization: Bearer top-secret-value")
             .unwrap();
         let body = std::fs::read_to_string(w.path()).unwrap();
