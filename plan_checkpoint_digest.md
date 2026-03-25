@@ -1108,12 +1108,12 @@ Add a true root-session emergency stop path for running workflows, sessions, and
 - [x] **2C.7** Write a terminal checkpoint with `YieldReason::EmergencyStop { stop_id }` and prevent auto-resume from that checkpoint.
 - [x] **2C.8** Surface emergency-stop state in `trace` / workflow inspection commands, including partial-stop failures and any `lost` active executions after restart.
 - [x] **2C.9** Integration test: root workflow with two running async children receives emergency stop → queued work cancelled, running tasks aborted, workflow ends `EmergencyStopped`.
-- [ ] **2C.10** Integration test: sandbox child process running under `wait_with_output()` receives emergency stop → process is killed and task ends `Aborted`.
-- [ ] **2C.11** Integration test: emergency stop during pending approval or `user.ask` interaction cancels the pending gate and does not allow resume.
-- [ ] **2C.12** Restart test: gateway crashes after stop requested but before completion → stale `active_executions` reconciled on startup and stop finishes as `stopped` or `partially_stopped` with audit details.
-- [ ] **2C.13** Authorization test: user/operator, gateway security subsystem, and the dedicated emergency-manager agent path are accepted; all other agents are denied.
+- [x] **2C.10** Integration test: sandbox child process running under `wait_with_output()` receives emergency stop → process is killed and task ends `Aborted`.
+- [x] **2C.11** Integration test: emergency stop during pending approval or `user.ask` interaction cancels the pending gate and does not allow resume.
+- [x] **2C.12** Restart test: gateway crashes after stop requested but before completion → stale `active_executions` reconciled on startup and stop finishes as `stopped` or `partially_stopped` with audit details.
+- [x] **2C.13** Authorization test: user/operator, gateway security subsystem, and the dedicated emergency-manager agent path are accepted; all other agents are denied.
 
-**Current 2C remainder:** explicit sandbox-child kill integration coverage (`2C.10`), restart reconciliation test (`2C.12`), and full authorization matrix test (`2C.13`).
+**Current 2C remainder:** none — all integration tests complete.
 
 ### Phase 3: Live Digest
 Replace `timeline.md` with a richer real-time narrative.
