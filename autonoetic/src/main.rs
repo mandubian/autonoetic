@@ -168,6 +168,9 @@ async fn main() -> anyhow::Result<()> {
                     *json,
                 )?;
             }
+            cli::common::TraceCommands::Digest { session_id, json } => {
+                cli::trace::handle_trace_digest(&config_path, session_id, *json)?;
+            }
             cli::common::TraceCommands::Workflow {
                 workflow_or_root,
                 root,

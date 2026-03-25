@@ -1055,3 +1055,46 @@ fn test_terminal_chat_implicit_routing_to_planner_and_specialist_spawn() {
         .join("\n");
     assert!(request_dump.contains("delegate to specialist"));
 }
+
+#[test]
+fn trace_digest_prints_post_session_narrative() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("agents dir");
+    let config_path = temp.path().join("config.yaml");
+    write_config(&config_path, &agents_dir, 4011, 4211, 4);
+
+    let gateway_dir = agents_dir.join(".gateway");
+    let cs =
+        autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir).expect("store");
+    let root = "cli-trace-digest-root";
+    let narrative = b"## E2E narrative\nvisible from trace digest CLI.\n";
+    let handle = cs.write(narrative).expect("write narrative");
+    cs.register_name(
+        root,
+        autonoetic_gateway::runtime::post_session_digest::POST_SESSION_NARRATIVE_CONTENT_NAME,
+        &handle,
+    )
+    .expect("register narrative name");
+
+    let out = run_autonoetic(
+        &[
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+            "trace",
+            "digest",
+            root,
+        ],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("E2E narrative"),
+        "expected narrative in stdout, got:\n{stdout}"
+    );
+}

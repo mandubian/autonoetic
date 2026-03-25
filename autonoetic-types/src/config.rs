@@ -112,6 +112,42 @@ pub struct SessionBudgetConfig {
     pub extensions: Vec<String>,
 }
 
+/// Post-session digest: LLM summarization and Tier-2 memory extraction after agent sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestAgentConfig {
+    /// When true, run the digest step after eligible sessions complete (spawn / checkpoint resume).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Skip digest when `turn_counter` is strictly below this value at session end.
+    #[serde(default = "default_digest_min_turns")]
+    pub min_turns: u32,
+    /// Use `llm_presets[<name>]` for provider/model/temperature when set.
+    #[serde(default)]
+    pub llm_preset: Option<String>,
+    /// Inline provider when `llm_preset` is not used (e.g. `openai`, `anthropic`).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Inline model when `llm_preset` is not used.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_digest_min_turns() -> u32 {
+    2
+}
+
+impl Default for DigestAgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_turns: default_digest_min_turns(),
+            llm_preset: None,
+            provider: None,
+            model: None,
+        }
+    }
+}
+
 /// Top-level Gateway daemon configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
@@ -198,6 +234,10 @@ pub struct GatewayConfig {
     /// "off": no evidence files (causal_events DB still captures everything)
     #[serde(default)]
     pub evidence_mode: String,
+
+    /// Optional post-session digest (narrative + extracted memories). Off by default — enable in config.
+    #[serde(default)]
+    pub digest_agent: DigestAgentConfig,
 }
 
 /// Configuration for evidence storage.
@@ -381,6 +421,7 @@ impl Default for GatewayConfig {
             session_budget: SessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
             evidence_mode: default_evidence_mode(),
+            digest_agent: DigestAgentConfig::default(),
         }
     }
 }

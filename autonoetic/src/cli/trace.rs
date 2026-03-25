@@ -435,6 +435,51 @@ pub fn handle_trace_event(
     Ok(())
 }
 
+/// Print `post_session_narrative.md` from the content store for a session's root id.
+pub fn handle_trace_digest(
+    config_path: &Path,
+    session_id: &str,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!session_id.trim().is_empty(), "session_id must not be empty");
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = config.agents_dir.join(".gateway");
+    let base = autonoetic_gateway::runtime::live_digest::base_session_id(session_id.trim());
+    let cs = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
+    let name = autonoetic_gateway::runtime::post_session_digest::POST_SESSION_NARRATIVE_CONTENT_NAME;
+    let bytes = cs
+        .read_by_name(base, name)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "No post-session narrative for root session '{}'. Is digest_agent enabled and did a session complete with enough turns?",
+                base
+            )
+        })?;
+    let text = String::from_utf8(bytes)
+        .map_err(|e| anyhow::anyhow!("post_session_narrative.md is not valid UTF-8: {e}"))?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "root_session_id": base,
+                "name": name,
+                "text": text,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "{}Post-session narrative{} {}{}{}",
+        color::BOLD,
+        color::RESET,
+        color::DIM,
+        base,
+        color::RESET
+    );
+    println!("{}", text);
+    Ok(())
+}
+
 pub fn load_agent_traces(
     config_path: &Path,
     requested_agent: Option<&str>,

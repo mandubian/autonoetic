@@ -1230,7 +1230,19 @@ impl GatewayExecutionService {
             } else {
                 "jsonrpc_spawn_complete_empty"
             };
+            let digest_turn_count = runtime.turn_counter;
             runtime.close_session(close_reason)?;
+            crate::runtime::post_session_digest::maybe_run_post_session_digest(
+                self.config.as_ref(),
+                &self.config.agents_dir.join(".gateway"),
+                self.gateway_store.as_ref(),
+                &self.http_client,
+                &resolved_session_id,
+                agent_id,
+                digest_turn_count,
+                suspended_for_approval.is_some(),
+            )
+            .await;
             let llm_usage = runtime.take_llm_usage_last_run();
 
             // Extract artifacts from content store
@@ -1468,7 +1480,19 @@ impl GatewayExecutionService {
         } else {
             "checkpoint_respawn_complete_empty"
         };
+        let digest_turn_count = runtime.turn_counter;
         runtime.close_session(close_reason)?;
+        crate::runtime::post_session_digest::maybe_run_post_session_digest(
+            self.config.as_ref(),
+            &self.config.agents_dir.join(".gateway"),
+            self.gateway_store.as_ref(),
+            &self.http_client,
+            &resolved_session_id,
+            agent_id,
+            digest_turn_count,
+            suspended_for_approval.is_some(),
+        )
+        .await;
         let llm_usage = runtime.take_llm_usage_last_run();
 
         let artifacts = extract_artifacts_from_content_store(

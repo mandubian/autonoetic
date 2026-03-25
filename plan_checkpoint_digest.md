@@ -1128,26 +1128,26 @@ Replace `timeline.md` with a richer real-time narrative.
 - [x] **3.8** Integration test: agent runs session → digest.md has structured entries with actions, results, errors, and annotations.
 
 ### Phase 4: Unified Gateway DB + Enhanced Memory
-Merge `memory.db`, add tag-based queries.
+Tier 2 memory lives in `gateway.db` only (greenfield—no import from a separate `memory.db`).
 
-- [ ] **4.1** Add `memories` table to `GatewayStore::open()`. Same schema as current `memory.db`.
-- [ ] **4.2** Update `memory.rs` to use `GatewayStore` reference instead of own SQLite connection.
-- [ ] **4.3** Write migration: copy `memory.db` rows to `gateway.db`, rename old file.
-- [ ] **4.4** Implement `memory.search_by_tags` tool. Arguments: `{ scope, tags, text, limit }`. Queries with JSON tag matching. Available to all agents with memory capability.
-- [ ] **4.5** Add tag index: `CREATE INDEX idx_memories_tags ON memories(tags)` for JSON extraction queries.
-- [ ] **4.6** Remove `memory.db` creation logic.
-- [ ] **4.7** Unit test: memory search by tags returns correct results.
-- [ ] **4.8** Integration test: agent stores tagged memory → second agent with visibility can search by tag → finds it.
+- [x] **4.1** Add `memories` table to `GatewayStore::open()`.
+- [x] **4.2** Update `memory.rs` to use `GatewayStore` reference instead of own SQLite connection.
+- [x] **4.3** ~~Legacy `memory.db` migration~~ **Skipped** (new project; stray `memory.db` files are not read).
+- [x] **4.4** Implement `memory.search_by_tags` tool. Arguments: `{ scope, tags, text, limit }`. Queries with JSON tag matching. Available to all agents with memory capability. *(Shipped as `knowledge.search_by_tags` alongside other `knowledge.*` tools.)*
+- [x] **4.5** Add tag index: `CREATE INDEX idx_memories_tags ON memories(tags)` for JSON extraction queries.
+- [x] **4.6** Remove `memory.db` creation logic.
+- [x] **4.7** Unit test: memory search by tags returns correct results.
+- [x] **4.8** Integration test: agent stores tagged memory → second agent with visibility can search by tag → finds it.
 
 ### Phase 5: Post-Session Digest Agent
 LLM-powered summarization and memory extraction.
 
-- [ ] **5.1** Create built-in digest agent: `agents/digest/SKILL.md`. Input: live digest + execution error summary (from `execution_traces`). Output: structured JSON with `narrative` and `memories` array (each memory has `type`, `content`, `tags`, `confidence`).
-- [ ] **5.2** Implement `trigger_digest_agent()` in scheduler: called at session end. Reads live digest. Queries `execution_traces` for errors in this session. Spawns digest agent. Stores narrative in content store. Writes memories to `gateway.db`.
-- [ ] **5.3** Add session-end trigger. Guard: skip if session < 2 turns or config disabled.
-- [ ] **5.4** Implement `digest.query` tool: queries memories by tags + searches session narratives by content handle. Combines structured memory recall with narrative context.
-- [ ] **5.5** Add `trace digest <session_id>` CLI command.
-- [ ] **5.6** Integration test: session completes → digest agent produces narrative and memories → memories queryable → narrative viewable via CLI.
+- [x] **5.1** Create built-in digest agent: `agents/digest/SKILL.md`. Input: live digest + execution trace summary (successes and failures from `execution_traces`). Output: structured JSON with `narrative` and `memories` array (each memory has `type`, `content`, `tags`, `confidence`).
+- [x] **5.2** Implement post-session digest: at session end (spawn / checkpoint resume). Reads live digest. Queries `execution_traces` for the session branch. Single-shot digest LLM. Stores narrative in content store. Writes memories to `gateway.db`.
+- [x] **5.3** Add session-end trigger. Guard: skip if session < 2 turns or config disabled.
+- [x] **5.4** Implement `digest.query` tool: queries memories by tags + loads session narrative (`post_session_narrative.md` and/or `narrative_handle` using the same resolution as `content.read`). Combines structured memory recall with narrative context.
+- [x] **5.5** Add `trace digest <session_id>` CLI command.
+- [x] **5.6** Integration tests: digest pipeline (mock LLM) + `digest.query` with narrative handle + CLI `trace digest` reads narrative from the content store.
 
 ### Phase 6: Cleanup & Documentation
 
@@ -1246,3 +1246,15 @@ Current state: `spawn_agent_once` starts local sandbox processes on the same hos
 - [ ] **R.6** Wire approvals, user interactions, checkpoints, and emergency stop across remote boundaries so behavior matches local spawn semantics.
 - [ ] **R.7** Extend live digest/event projection to merge remote worker events under root-session ownership deterministically.
 - [ ] **R.8** Add integration tests: remote worker unavailable, network partition, duplicate delivery, worker restart, and cross-node emergency stop.
+
+---
+
+## Backlog: Post-Session Digest Full E2E
+
+Today, digest coverage uses direct calls to `run_post_session_digest_with_driver`, CLI fixtures that seed the content store, and isolated `digest.query` tool tests. A **full** E2E goes through the same paths production uses: ingress spawn completes, the gateway runs post-session digest with the configured LLM, then operators or tests read the result via `trace digest` (and optionally agents via `digest.query` over JSON-RPC).
+
+- [ ] **D.E2E.1** Integration test starting from `GatewayExecutionService::spawn_agent_once` (or HTTP JSON-RPC equivalent) with `digest_agent.enabled`, valid `llm_preset` or provider/model, `min_turns` satisfied, and session ending in a completed (non-suspended) state.
+- [ ] **D.E2E.2** Deterministic LLM responses for **both** the main agent loop and the digest step—e.g. HTTP mock for `AUTONOETIC_LLM_BASE_URL`, or a narrow test-only hook to inject `Arc<dyn LlmDriver>` for digest only without weakening production code paths.
+- [ ] **D.E2E.3** Assertions: `post_session_narrative.md` registered under the root session; at least one extracted memory in `gateway.db` with expected scope/tags; `execution_traces` rows visible from the digest prompt path when tools ran.
+- [ ] **D.E2E.4** CLI assertion: `autonoetic trace digest <session_id> --config <temp>` exits 0 and stdout contains a marker string from the digest LLM output (same workspace layout as **D.E2E.1**).
+- [ ] **D.E2E.5** (Optional) Same run: JSON-RPC `digest.query` (or tool batch) returns the narrative fragment and memory ids for parity with agent-visible behavior.
