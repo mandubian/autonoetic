@@ -23,6 +23,8 @@ pub struct LiveDigestWriter {
     tools_in_open_turn: u32,
     session_tool_total: u32,
     session_error_total: u32,
+    /// True if this is a resumed session (from checkpoint/hibernation)
+    is_resumed: bool,
 }
 
 impl LiveDigestWriter {
@@ -31,8 +33,10 @@ impl LiveDigestWriter {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("digest.md");
 
-        let digest_turn_seq = if path.exists() {
-            count_turn_headers(&path)?
+        let (digest_turn_seq, is_resumed) = if path.exists() {
+            let existing_turns = count_turn_headers(&path)?;
+            // If file exists with turns, this is a resume from hibernation
+            (existing_turns, existing_turns > 0)
         } else {
             let mut f = std::fs::File::create(&path)?;
             writeln!(f, "# Live session digest: `{}`", base_session_id)?;
@@ -42,7 +46,7 @@ impl LiveDigestWriter {
                 "Structured narrative (actions, tool results, errors, annotations). Workflow structure: see `workflow_graph.md` in this folder."
             )?;
             writeln!(f)?;
-            0
+            (0, false)
         };
 
         Ok(Self {
@@ -51,11 +55,18 @@ impl LiveDigestWriter {
             tools_in_open_turn: 0,
             session_tool_total: 0,
             session_error_total: 0,
+            is_resumed,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Mark this session as resumed from hibernation/checkpoint.
+    /// Call before start_turn() when resuming.
+    pub fn mark_resumed(&mut self) {
+        self.is_resumed = true;
     }
 
     /// Session preamble: agent, start time, task preview. Idempotent per file.
@@ -69,11 +80,7 @@ impl LiveDigestWriter {
         writeln!(f)?;
         writeln!(f, "{SESSION_STARTED_MARKER}")?;
         writeln!(f, "**Agent:** `{}` | **Started:** {ts}", cell(agent_id))?;
-        writeln!(
-            f,
-            "**Task:** {}",
-            cell(&truncate_chars(task_preview, 500))
-        )?;
+        writeln!(f, "**Task:** {}", cell(&truncate_chars(task_preview, 500)))?;
         writeln!(f)?;
         writeln!(f, "---")?;
         writeln!(f)?;
@@ -86,6 +93,15 @@ impl LiveDigestWriter {
         let n = self.digest_turn_seq;
         let ts = chrono::Utc::now().to_rfc3339();
         let mut f = OpenOptions::new().append(true).open(&self.path)?;
+
+        // Add resume marker if this session was resumed from hibernation
+        if self.is_resumed {
+            writeln!(f, "---")?;
+            writeln!(f, "*↻ Session resumed from hibernation*")?;
+            writeln!(f)?;
+            self.is_resumed = false; // Only show once
+        }
+
         writeln!(f, "## Turn {n} — {ts}")?;
         writeln!(f)?;
         Ok(())
@@ -292,7 +308,8 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
             let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
             let mut s = format!(
                 "`sandbox.exec` exit={} ok={}",
-                exit.map(|e| e.to_string()).unwrap_or_else(|| "?".to_string()),
+                exit.map(|e| e.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
                 ok
             );
             if !stdout.is_empty() {
@@ -335,7 +352,10 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
                     if !labels.is_empty() {
                         s.push_str(&format!(
                             " | options: {}",
-                            cell(&truncate_chars(&redact_text_for_logs(&labels.join("; ")), 300))
+                            cell(&truncate_chars(
+                                &redact_text_for_logs(&labels.join("; ")),
+                                300
+                            ))
                         ));
                     }
                 }
@@ -374,7 +394,11 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
                     files
                 )
             } else {
-                format!("`{}` id=`{}`", cell(tool_name), cell(&truncate_chars(id, 40)))
+                format!(
+                    "`{}` id=`{}`",
+                    cell(tool_name),
+                    cell(&truncate_chars(id, 40))
+                )
             }
         }
         _ => {
