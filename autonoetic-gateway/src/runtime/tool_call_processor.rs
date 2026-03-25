@@ -28,6 +28,7 @@ pub struct ToolCallProcessor<'a> {
     /// When set, passed to native tools (e.g. agent.install for approval policy).
     config: Option<&'a GatewayConfig>,
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    run_context: Option<crate::runtime::active_execution_registry::NativeToolRunContext>,
 }
 
 impl<'a> ToolCallProcessor<'a> {
@@ -50,6 +51,7 @@ impl<'a> ToolCallProcessor<'a> {
         secret_store: Option<&'a mut SecretStoreRuntime>,
         config: Option<&'a GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        run_context: Option<crate::runtime::active_execution_registry::NativeToolRunContext>,
     ) -> Self {
         Self {
             mcp_runtime,
@@ -61,6 +63,7 @@ impl<'a> ToolCallProcessor<'a> {
             turn_id: None,
             config,
             gateway_store,
+            run_context,
         }
     }
 
@@ -244,6 +247,7 @@ impl<'a> ToolCallProcessor<'a> {
                 self.turn_id.as_deref(),
                 self.config,
                 self.gateway_store.clone(),
+                self.run_context.as_ref(),
             )?
         } else {
             return Err(anyhow::Error::from(
@@ -492,6 +496,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let tool_calls = vec![ToolCall {
@@ -553,6 +558,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         // Unknown tool is now recoverable so the agent can self-repair by
@@ -593,6 +599,7 @@ mod tests {
             &registry,
             &manifest,
             &mut disclosure_state,
+            None,
             None,
             None,
             None,
@@ -679,6 +686,7 @@ mod tests {
             _turn_id: Option<&str>,
             _config: Option<&autonoetic_types::config::GatewayConfig>,
             _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
         ) -> anyhow::Result<String> {
             Ok(serde_json::json!({
                 "ok": false,
@@ -724,6 +732,7 @@ mod tests {
             _turn_id: Option<&str>,
             _config: Option<&autonoetic_types::config::GatewayConfig>,
             _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
         ) -> anyhow::Result<String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!({ "ok": true }).to_string())
@@ -766,6 +775,7 @@ mod tests {
             _turn_id: Option<&str>,
             _config: Option<&autonoetic_types::config::GatewayConfig>,
             _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
         ) -> anyhow::Result<String> {
             let parsed: serde_json::Value = serde_json::from_str(arguments_json)?;
             let command = parsed
@@ -818,6 +828,7 @@ mod tests {
             _turn_id: Option<&str>,
             _config: Option<&autonoetic_types::config::GatewayConfig>,
             _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
         ) -> anyhow::Result<String> {
             Err(anyhow::Error::from(tagged::Tagged::execution(
                 anyhow::anyhow!("command crashed"),
@@ -843,6 +854,7 @@ mod tests {
             &registry,
             &manifest,
             &mut disclosure_state,
+            None,
             None,
             None,
             None,
@@ -897,6 +909,7 @@ mod tests {
             &registry,
             &manifest,
             &mut disclosure_state,
+            None,
             None,
             None,
             None,
@@ -991,6 +1004,7 @@ mod tests {
             None,
             None,
             Some(store.clone()),
+            None,
         )
         .with_session_context(
             Some("trace-session".to_string()),

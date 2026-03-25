@@ -1,13 +1,11 @@
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use super::common::{CliAgentExecutor, mcp_registry_path, load_mcp_servers, save_mcp_servers};
-use autonoetic_mcp::{
-    AgentMcpServer, ExposedAgent, McpClient, McpServer, McpTransportConfig,
-};
+use super::common::{load_mcp_servers, mcp_registry_path, save_mcp_servers, CliAgentExecutor};
 use autonoetic_mcp::protocol::{
     JsonRpcRequest as McpJsonRpcRequest, JsonRpcResponse as McpJsonRpcResponse,
 };
+use autonoetic_mcp::{AgentMcpServer, ExposedAgent, McpClient, McpServer, McpTransportConfig};
 
 pub async fn handle_mcp_add(
     config_path: &Path,
@@ -21,9 +19,7 @@ pub async fn handle_mcp_add(
         (Some(_), None) => McpTransportConfig::Stdio,
         (None, Some(url)) => McpTransportConfig::Sse { url },
         (Some(_), Some(_)) => {
-            anyhow::bail!(
-                "Specify exactly one MCP transport: either --command or --sse-url"
-            )
+            anyhow::bail!("Specify exactly one MCP transport: either --command or --sse-url")
         }
         (None, None) => {
             anyhow::bail!("Missing MCP transport: provide --command or --sse-url")

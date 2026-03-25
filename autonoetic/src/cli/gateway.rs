@@ -174,8 +174,10 @@ pub fn handle_gateway_approvals(
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
     match command {
         super::common::GatewayApprovalCommands::List { json } => {
-            let approvals =
-                autonoetic_gateway::scheduler::load_approval_requests(&config, Some(&gateway_store))?;
+            let approvals = autonoetic_gateway::scheduler::load_approval_requests(
+                &config,
+                Some(&gateway_store),
+            )?;
             if *json {
                 println!("{}", serde_json::to_string_pretty(&approvals)?);
                 return Ok(());
@@ -305,6 +307,9 @@ pub fn handle_gateway_interactions(
             if text.is_none() && option.is_none() {
                 anyhow::bail!("Must provide either --text or --option to answer an interaction");
             }
+            if text.is_some() && option.is_some() {
+                anyhow::bail!("Provide exactly one of --text or --option");
+            }
 
             let answer = UserInteractionAnswer {
                 interaction_id: interaction_id.clone(),
@@ -323,8 +328,13 @@ pub fn handle_gateway_interactions(
                 println!("  Answer text: {}", txt);
             }
             println!();
-            println!("The interaction has been answered. The agent's session should resume");
-            println!("automatically on the next scheduler cycle or gateway restart.");
+            println!(
+                "The interaction has been answered. Resume the agent session with a spawn for"
+            );
+            println!(
+                "that session (e.g. chat/JSON-RPC `agent.spawn`), or call \
+                 `GatewayExecutionService::resume_from_user_interaction` with this id."
+            );
         }
         super::common::GatewayInteractionCommands::Cancel {
             interaction_id,

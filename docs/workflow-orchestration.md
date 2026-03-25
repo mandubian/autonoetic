@@ -21,6 +21,10 @@ join_task_ids     Task IDs the planner is waiting on
 join_policy       AllOf | AnyOf | FirstSuccess | Manual
 ```
 
+### User chat routing (`event.ingest` with `event_type: "chat"`)
+
+While a workflow is active, delegated work uses **child** [`TaskRun::session_id`](#taskrun) values (for example `root-session/coder-abc`). If a client mistakenly sends user chat with that child `session_id`, the gateway **rewrites** the request to the workflow **`root_session_id`** and the workflow **`lead_agent_id`** (when set) before resolving `target_agent_id`. That keeps user messages on the planner’s session, does **not** cancel or pause running child tasks, and avoids binding the root session to a specialist via a stray `target_agent_id`. Other `event_type` values are not rewritten. Logging: `event.ingest chat rerouted from child workflow session to root planner session`.
+
 ### TaskRun
 
 Each delegated child execution becomes a durable task record. Survives gateway restarts and approval boundaries.

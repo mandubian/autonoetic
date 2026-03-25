@@ -3,6 +3,7 @@
 use crate::agent::AgentRepository;
 use crate::causal_chain::CausalLogger;
 use crate::llm::{build_driver, Message};
+use crate::runtime::active_execution_registry::ActiveExecutionRegistry;
 use crate::runtime::lifecycle::{compose_system_instructions, AgentExecutor};
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
@@ -10,8 +11,8 @@ use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
 use crate::runtime::session_timeline::{base_session_id, SessionTimelineWriter};
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
-use autonoetic_types::background::ScheduledAction;
-use autonoetic_types::causal_chain::{CausalChainEntry, EntryStatus};
+use autonoetic_types::background::{ScheduledAction, UserInteraction, UserInteractionStatus};
+use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -331,6 +332,7 @@ pub struct GatewayExecutionService {
     /// Shared per-session budget counters for all spawns using this gateway process.
     session_budget: Arc<SessionBudgetRegistry>,
     gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    active_executions: Arc<ActiveExecutionRegistry>,
 }
 
 impl GatewayExecutionService {
@@ -347,6 +349,7 @@ impl GatewayExecutionService {
             http_client: reqwest::Client::new(),
             session_budget,
             gateway_store,
+            active_executions: ActiveExecutionRegistry::new(),
         }
     }
 
@@ -356,6 +359,214 @@ impl GatewayExecutionService {
 
     pub fn gateway_store(&self) -> Option<Arc<crate::scheduler::gateway_store::GatewayStore>> {
         self.gateway_store.clone()
+    }
+
+    pub fn active_executions(&self) -> Arc<ActiveExecutionRegistry> {
+        self.active_executions.clone()
+    }
+
+    /// Operator / gateway / privileged-agent root-session circuit breaker (see Phase 2C).
+    pub async fn emergency_stop_root_session(
+        &self,
+        root_session_id: &str,
+        reason: &str,
+        requested_by_type: &str,
+        requested_by_id: &str,
+        trigger_kind: &str,
+        source_agent_id: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        use crate::runtime::checkpoint::{load_latest_checkpoint, save_checkpoint, SessionCheckpoint, YieldReason};
+        use crate::runtime::guard::LoopGuardState;
+        use crate::scheduler::gateway_store::EmergencyStopRecord;
+
+        let store = self
+            .gateway_store()
+            .ok_or_else(|| anyhow::anyhow!("gateway store required for emergency stop"))?;
+        let root_session_id = root_session_id.trim();
+        anyhow::ensure!(!root_session_id.is_empty(), "root_session_id must not be empty");
+        anyhow::ensure!(!reason.trim().is_empty(), "reason must not be empty");
+
+        if let Some(aid) = source_agent_id {
+            let repo = AgentRepository::from_config(self.config.as_ref());
+            let loaded = repo.get_sync(aid)?;
+            let policy = crate::policy::PolicyEngine::new(loaded.manifest);
+            anyhow::ensure!(
+                policy.can_request_emergency_stop(),
+                "Permission Denied: agent '{}' cannot request emergency stop",
+                aid
+            );
+        }
+
+        let stop_id = format!("estop-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let requested_at = chrono::Utc::now().to_rfc3339();
+
+        let workflow_id = crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+            self.config.as_ref(),
+            root_session_id,
+        )?;
+
+        store.insert_emergency_stop(&EmergencyStopRecord {
+            stop_id: stop_id.clone(),
+            scope_type: "root_session".to_string(),
+            scope_id: root_session_id.to_string(),
+            root_session_id: root_session_id.to_string(),
+            workflow_id: workflow_id.clone(),
+            requested_by_type: requested_by_type.to_string(),
+            requested_by_id: requested_by_id.to_string(),
+            reason: Some(reason.to_string()),
+            trigger_kind: trigger_kind.to_string(),
+            mode: "immediate".to_string(),
+            status: "stopping".to_string(),
+            requested_at: requested_at.clone(),
+            completed_at: None,
+            details_json: None,
+        })?;
+
+        let mut details = serde_json::json!({
+            "aborted_handles": 0u32,
+            "workflow_tasks_aborted": 0u32,
+            "queued_removed": 0u32,
+        });
+
+        let killed_sandbox = self
+            .active_executions
+            .kill_sandbox_children_for_root(root_session_id);
+        details["killed_sandbox_pids"] = serde_json::json!(&killed_sandbox);
+
+        let mut aborted_handles = 0u32;
+        if let Some(ref wf) = workflow_id {
+            let tasks = crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                self.config.as_ref(),
+                Some(store.as_ref()),
+                wf,
+            )?;
+            let tids: Vec<String> = tasks.iter().map(|t| t.task_id.clone()).collect();
+            aborted_handles = self.active_executions.abort_workflow_tasks(wf, &tids) as u32;
+
+            let summary = crate::scheduler::workflow_store::apply_emergency_stop_to_workflow(
+                self.config.as_ref(),
+                Some(store.as_ref()),
+                wf,
+                &stop_id,
+            )?;
+            details["workflow_tasks_aborted"] = serde_json::json!(summary.tasks_aborted);
+            details["queued_removed"] = serde_json::json!(summary.queued_removed);
+        }
+        details["aborted_handles"] = serde_json::json!(aborted_handles);
+
+        for approval in store.get_pending_approvals_for_root(root_session_id)? {
+            store.record_decision(
+                &approval.request_id,
+                "cancelled",
+                &format!("emergency_stop:{stop_id}"),
+                &chrono::Utc::now().to_rfc3339(),
+            )?;
+        }
+
+        let cancel_note = format!("emergency_stop:{stop_id} — {reason}");
+        for inter in store.get_pending_interactions_for_root_session(root_session_id)? {
+            store.cancel_user_interaction(&inter.interaction_id, &cancel_note)?;
+        }
+
+        let wf_lead = workflow_id
+            .as_deref()
+            .and_then(|wid| {
+                crate::scheduler::workflow_store::load_workflow_run(
+                    self.config.as_ref(),
+                    Some(store.as_ref()),
+                    wid,
+                )
+                .ok()
+                .flatten()
+            })
+            .map(|r| r.lead_agent_id);
+
+        let mut cp = if let Some(existing) =
+            load_latest_checkpoint(self.config.as_ref(), root_session_id)?
+        {
+            existing
+        } else {
+            let lead = wf_lead
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cannot write emergency checkpoint for '{}': no session checkpoint and no workflow lead agent",
+                        root_session_id
+                    )
+                })?;
+            SessionCheckpoint {
+                history: vec![],
+                turn_counter: 0,
+                loop_guard_state: LoopGuardState {
+                    max_loops_without_progress: 32,
+                    current_loops: 0,
+                    last_failure_hash: None,
+                    consecutive_failures: 0,
+                },
+                agent_id: lead.to_string(),
+                session_id: root_session_id.to_string(),
+                turn_id: format!("emergency-{stop_id}"),
+                workflow_id: workflow_id.clone(),
+                task_id: None,
+                runtime_lock_hash: None,
+                llm_config_snapshot: None,
+                tool_registry_version: None,
+                yield_reason: YieldReason::EmergencyStop {
+                    stop_id: stop_id.clone(),
+                },
+                content_store_refs: vec![],
+                created_at: chrono::Utc::now().to_rfc3339(),
+                pending_tool_state: None,
+                llm_rounds_consumed: 0,
+                tool_invocations_consumed: 0,
+                tokens_consumed: 0,
+                estimated_cost_usd: 0.0,
+            }
+        };
+        cp.yield_reason = YieldReason::EmergencyStop {
+            stop_id: stop_id.clone(),
+        };
+        cp.turn_id = format!("emergency-{stop_id}");
+        cp.created_at = chrono::Utc::now().to_rfc3339();
+        if cp.workflow_id.is_none() {
+            cp.workflow_id = workflow_id.clone();
+        }
+        save_checkpoint(self.config.as_ref(), &cp)?;
+
+        let status_final = "stopped";
+        store.update_emergency_stop_status(
+            &stop_id,
+            status_final,
+            Some(&chrono::Utc::now().to_rfc3339()),
+            Some(&details.to_string()),
+        )?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "stop_id": stop_id,
+            "root_session_id": root_session_id,
+            "status": status_final,
+            "details": details,
+        }))
+    }
+
+    /// Same pipeline as [`Self::emergency_stop_root_session`], for gateway self-protection paths.
+    pub async fn emergency_stop_from_security_policy(
+        &self,
+        root_session_id: &str,
+        reason: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.emergency_stop_root_session(
+            root_session_id,
+            reason,
+            "gateway",
+            "security_policy",
+            "security_policy",
+            None,
+        )
+        .await
     }
 
     pub async fn spawn_agent_once(
@@ -508,12 +719,17 @@ impl GatewayExecutionService {
                 );
 
                 // Execute script directly in sandbox
+                let script_kill_scope = Some((
+                    self.active_executions.clone(),
+                    crate::runtime::session_timeline::base_session_id(session_id).to_string(),
+                ));
                 let script_result = execute_script_in_sandbox(
                     &loaded.dir,
                     &script_path,
                     message,
                     &loaded.manifest.runtime.sandbox,
                     self.config.as_ref(),
+                    script_kill_scope,
                 )
                 .await;
 
@@ -610,7 +826,8 @@ impl GatewayExecutionService {
             .with_workflow_context(
                 workflow_id.map(String::from),
                 task_id.map(String::from),
-            );
+            )
+            .with_active_executions(Some(self.active_executions.clone()));
 
             use crate::runtime::lifecycle::TurnOutcome;
 
@@ -695,6 +912,7 @@ impl GatewayExecutionService {
                             None,
                             Some(&self.config),
                             self.gateway_store.clone(),
+                            None,
                         ).with_session_context(
                             Some(cont.session_id.clone()),
                             Some(cont.turn_id.clone()),
@@ -761,7 +979,51 @@ impl GatewayExecutionService {
                                 session_id
                             );
                         }
-                        if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
+                        if let crate::runtime::checkpoint::YieldReason::UserInputRequired {
+                            interaction_id: ref iid,
+                        } = &checkpoint.yield_reason
+                        {
+                            let store = self.gateway_store.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "GatewayStore is required to resume user.ask checkpoints"
+                                )
+                            })?;
+                            let interaction = store
+                                .get_user_interaction(iid)?
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "User interaction '{}' from checkpoint not found in store",
+                                        iid
+                                    )
+                                })?;
+                            match &interaction.status {
+                                UserInteractionStatus::Pending => {
+                                    anyhow::bail!(
+                                        "Session '{}' is waiting for user interaction '{}'; answer it before spawning",
+                                        session_id,
+                                        iid
+                                    );
+                                }
+                                UserInteractionStatus::Cancelled | UserInteractionStatus::Expired => {
+                                    anyhow::bail!(
+                                        "User interaction '{}' is {:?}; cannot resume from checkpoint",
+                                        iid,
+                                        interaction.status
+                                    );
+                                }
+                                UserInteractionStatus::Answered => {
+                                    resume_answered_user_interaction_from_loaded_checkpoint(
+                                        &mut runtime,
+                                        session_id,
+                                        message,
+                                        checkpoint,
+                                        &interaction,
+                                    )
+                                    .await?
+                                }
+                            }
+                        } else if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason)
+                        {
                             tracing::info!(
                                 target: "checkpoint",
                                 agent_id = %runtime.manifest.agent.id,
@@ -828,7 +1090,50 @@ impl GatewayExecutionService {
                             session_id
                         );
                     }
-                    if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
+                    if let crate::runtime::checkpoint::YieldReason::UserInputRequired {
+                        interaction_id: ref iid,
+                    } = &checkpoint.yield_reason
+                    {
+                        let store = self.gateway_store.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "GatewayStore is required to resume user.ask checkpoints"
+                            )
+                        })?;
+                        let interaction = store
+                            .get_user_interaction(iid)?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "User interaction '{}' from checkpoint not found in store",
+                                    iid
+                                )
+                            })?;
+                        match &interaction.status {
+                            UserInteractionStatus::Pending => {
+                                anyhow::bail!(
+                                    "Session '{}' is waiting for user interaction '{}'; answer it before spawning",
+                                    session_id,
+                                    iid
+                                );
+                            }
+                            UserInteractionStatus::Cancelled | UserInteractionStatus::Expired => {
+                                anyhow::bail!(
+                                    "User interaction '{}' is {:?}; cannot resume from checkpoint",
+                                    iid,
+                                    interaction.status
+                                );
+                            }
+                            UserInteractionStatus::Answered => {
+                                resume_answered_user_interaction_from_loaded_checkpoint(
+                                    &mut runtime,
+                                    session_id,
+                                    message,
+                                    checkpoint,
+                                    &interaction,
+                                )
+                                .await?
+                            }
+                        }
+                    } else if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
                         tracing::info!(
                             target: "checkpoint",
                             agent_id = %runtime.manifest.agent.id,
@@ -973,6 +1278,75 @@ impl GatewayExecutionService {
         Ok(result)
     }
 
+    /// Resume execution after a `user.ask` interaction was answered in the gateway store.
+    ///
+    /// Validates the latest session checkpoint is a `UserInputRequired` yield for this
+    /// `interaction_id`, then runs the normal spawn path which injects the stored answer as the
+    /// pending `user.ask` tool result and continues the agent loop.
+    pub async fn resume_from_user_interaction(
+        &self,
+        interaction_id: &str,
+        follow_up_user_message: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
+
+        let store = self.gateway_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("GatewayStore is required to resume user interactions")
+        })?;
+
+        let interaction = store
+            .get_user_interaction(interaction_id)?
+            .ok_or_else(|| anyhow::anyhow!("Unknown user interaction '{}'", interaction_id))?;
+
+        if interaction.status != UserInteractionStatus::Answered {
+            anyhow::bail!(
+                "Interaction '{}' is {:?}; answer it before calling resume_from_user_interaction",
+                interaction_id,
+                interaction.status
+            );
+        }
+
+        let checkpoint = load_latest_checkpoint(self.config.as_ref(), &interaction.session_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("No checkpoint for session '{}'", interaction.session_id)
+            })?;
+
+        match &checkpoint.yield_reason {
+            YieldReason::UserInputRequired {
+                interaction_id: cid,
+            } => {
+                anyhow::ensure!(
+                    cid == &interaction.interaction_id,
+                    "Checkpoint is for interaction '{}', not '{}'",
+                    cid,
+                    interaction.interaction_id
+                );
+            }
+            other => {
+                anyhow::bail!(
+                    "Latest checkpoint for session '{}' is not UserInputRequired (got {:?})",
+                    interaction.session_id,
+                    other
+                );
+            }
+        }
+
+        self.spawn_agent_once(
+            &interaction.agent_id,
+            follow_up_user_message.unwrap_or(
+                "[operator] User answered the pending question via gateway interactions.",
+            ),
+            &interaction.session_id,
+            None,
+            false,
+            None,
+            None,
+            interaction.workflow_id.as_deref(),
+            interaction.task_id.as_deref(),
+        )
+        .await
+    }
+
     /// Respawn an agent from a previously saved checkpoint.
     ///
     /// Loads the checkpoint for the given session, reconstructs the executor state,
@@ -1044,7 +1418,8 @@ impl GatewayExecutionService {
         .with_openrouter_catalog(Some(openrouter_catalog))
         .with_middleware(middleware)
         .with_session_id(session_id.to_string())
-        .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from));
+        .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from))
+        .with_active_executions(Some(self.active_executions.clone()));
 
         // Restore executor state from checkpoint
         runtime.guard =
@@ -1451,6 +1826,7 @@ fn _deprecated_update_session_index(
 }
 
 /// [DEPRECATED] This struct is no longer used as gateway causal chain events are now captured in gateway.db.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionIndex {
     session_id: String,
@@ -1460,6 +1836,7 @@ struct SessionIndex {
 }
 
 /// [DEPRECATED] This struct is no longer used as gateway causal chain events are now captured in gateway.db.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionEventRef {
     log_id: String,
@@ -1489,6 +1866,159 @@ fn should_auto_resume_checkpoint_yield_reason(
             | YieldReason::ManualStop
             | YieldReason::Error(_)
     )
+}
+
+fn build_user_ask_answer_tool_result_json(interaction: &UserInteraction) -> anyhow::Result<String> {
+    if interaction.status != UserInteractionStatus::Answered {
+        anyhow::bail!(
+            "user interaction {} is not answered ({:?})",
+            interaction.interaction_id,
+            interaction.status
+        );
+    }
+    let selected_value = match &interaction.answer_option_id {
+        Some(oid) => interaction
+            .options
+            .iter()
+            .find(|o| &o.id == oid)
+            .map(|o| o.value.clone()),
+        None => None,
+    };
+    Ok(serde_json::json!({
+        "ok": true,
+        "interaction_id": interaction.interaction_id,
+        "status": "answered",
+        "question": interaction.question,
+        "kind": interaction.kind.as_str(),
+        "answer_text": interaction.answer_text,
+        "answer_option_id": interaction.answer_option_id,
+        "selected_value": selected_value,
+    })
+    .to_string())
+}
+
+fn resolve_pending_user_ask_call(
+    checkpoint: &crate::runtime::checkpoint::SessionCheckpoint,
+) -> anyhow::Result<(String, String)> {
+    if let Some(ref pts) = checkpoint.pending_tool_state {
+        return Ok((
+            pts.pending_tool_call.call_id.clone(),
+            pts.pending_tool_call.tool_name.clone(),
+        ));
+    }
+    pending_user_ask_call_from_history(&checkpoint.history)
+}
+
+fn pending_user_ask_call_from_history(history: &[Message]) -> anyhow::Result<(String, String)> {
+    use crate::llm::Role;
+    let i = history
+        .iter()
+        .rposition(|m| matches!(m.role, Role::Assistant) && !m.tool_calls.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("checkpoint history has no assistant message with tool calls")
+        })?;
+    let assistant = &history[i];
+    let mut j = i + 1;
+    let mut tc_idx = 0usize;
+    while tc_idx < assistant.tool_calls.len() && j < history.len() {
+        let m = &history[j];
+        if matches!(m.role, Role::Tool)
+            && m.tool_call_id.as_deref() == Some(assistant.tool_calls[tc_idx].id.as_str())
+        {
+            tc_idx += 1;
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    if tc_idx >= assistant.tool_calls.len() {
+        anyhow::bail!("checkpoint history has no pending tool call (batch missing result)");
+    }
+    let tc = &assistant.tool_calls[tc_idx];
+    if tc.name != "user.ask" {
+        anyhow::bail!(
+            "expected pending tool user.ask for UserInputRequired checkpoint, found {}",
+            tc.name
+        );
+    }
+    Ok((tc.id.clone(), tc.name.clone()))
+}
+
+fn inject_answered_user_interaction_into_history(
+    history: &mut Vec<Message>,
+    checkpoint: &crate::runtime::checkpoint::SessionCheckpoint,
+    interaction: &UserInteraction,
+) -> anyhow::Result<()> {
+    let (call_id, tool_name) = resolve_pending_user_ask_call(checkpoint)?;
+    let json = build_user_ask_answer_tool_result_json(interaction)?;
+    history.push(Message::tool_result(call_id, tool_name, json));
+    Ok(())
+}
+
+async fn resume_answered_user_interaction_from_loaded_checkpoint(
+    runtime: &mut AgentExecutor,
+    session_id: &str,
+    message: &str,
+    checkpoint: crate::runtime::checkpoint::SessionCheckpoint,
+    interaction: &UserInteraction,
+) -> anyhow::Result<(
+    crate::runtime::lifecycle::TurnOutcome,
+    String,
+    Option<String>,
+)> {
+    anyhow::ensure!(
+        interaction.session_id == session_id,
+        "interaction session_id '{}' does not match spawn session_id '{}'",
+        interaction.session_id,
+        session_id
+    );
+    anyhow::ensure!(
+        interaction.agent_id == runtime.manifest.agent.id,
+        "interaction agent_id '{}' does not match spawned agent '{}'",
+        interaction.agent_id,
+        runtime.manifest.agent.id
+    );
+
+    let yield_iid = match &checkpoint.yield_reason {
+        crate::runtime::checkpoint::YieldReason::UserInputRequired { interaction_id } => {
+            interaction_id.clone()
+        }
+        _ => anyhow::bail!("checkpoint yield reason is not UserInputRequired"),
+    };
+    anyhow::ensure!(
+        yield_iid == interaction.interaction_id,
+        "checkpoint interaction_id '{}' does not match row '{}'",
+        yield_iid,
+        interaction.interaction_id
+    );
+
+    tracing::info!(
+        target: "user_interaction",
+        session_id = %session_id,
+        interaction_id = %interaction.interaction_id,
+        "Resuming session from user.ask checkpoint with stored answer"
+    );
+
+    runtime.guard = crate::runtime::guard::LoopGuard::restore(checkpoint.loop_guard_state.clone());
+    runtime.session_started = true;
+    runtime.turn_counter = checkpoint.turn_counter;
+    runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+
+    let mut history = checkpoint.history.clone();
+    inject_answered_user_interaction_into_history(&mut history, &checkpoint, interaction)?;
+    if !message.trim().is_empty() {
+        history.push(Message::user(message.to_string()));
+    }
+
+    let initial_msg = checkpoint
+        .history
+        .iter()
+        .find(|m| matches!(m.role, crate::llm::Role::User))
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
+    let outcome = runtime.execute_with_history(&mut history).await?;
+    Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
 }
 
 fn build_initial_history(
@@ -1766,6 +2296,10 @@ async fn execute_script_in_sandbox(
     input_payload: &str,
     sandbox_type: &str,
     _config: &GatewayConfig,
+    sandbox_kill: Option<(
+        std::sync::Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>,
+        String,
+    )>,
 ) -> anyhow::Result<String> {
     use std::process::Stdio;
     use tokio::process::Command;
@@ -1809,6 +2343,12 @@ async fn execute_script_in_sandbox(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn script: {}", e))?;
+
+    let _script_sandbox_guard = sandbox_kill.as_ref().and_then(|(reg, root)| {
+        child
+            .id()
+            .and_then(|pid| (pid > 0).then(|| reg.register_sandbox_child_pid(root, pid)))
+    });
 
     // Write input to stdin and close it
     if let Some(mut stdin) = child.stdin.take() {
@@ -1901,4 +2441,119 @@ fn microvm_command(_script_path: &PathBuf) -> anyhow::Result<(String, Vec<String
         "firecracker".to_string(),
         vec!["--config-file".to_string(), config],
     ))
+}
+
+#[cfg(test)]
+#[test]
+fn pending_user_ask_call_from_history_finds_first_missing_result() {
+    use crate::llm::ToolCall;
+    let mut a = Message::assistant("");
+    a.tool_calls = vec![
+        ToolCall {
+            id: "c1".into(),
+            name: "noop".into(),
+            arguments: "{}".into(),
+        },
+        ToolCall {
+            id: "c2".into(),
+            name: "user.ask".into(),
+            arguments: "{}".into(),
+        },
+    ];
+    let history = vec![
+        Message::user("hi"),
+        a,
+        Message::tool_result("c1", "noop", r#"{"ok":true}"#),
+    ];
+    let (id, name) = pending_user_ask_call_from_history(&history).unwrap();
+    assert_eq!(id, "c2");
+    assert_eq!(name, "user.ask");
+}
+
+#[cfg(test)]
+#[test]
+fn resolve_pending_prefers_checkpoint_pending_tool_state() {
+    use crate::runtime::checkpoint::{
+        PendingToolCall, PendingToolState, SessionCheckpoint, YieldReason,
+    };
+    use crate::runtime::guard::LoopGuardState;
+    let pts = PendingToolState {
+        completed_tool_results: vec![],
+        pending_tool_call: PendingToolCall {
+            call_id: "tid-99".into(),
+            tool_name: "user.ask".into(),
+            arguments: "{}".into(),
+            approval_response: None,
+        },
+        remaining_tool_calls: vec![],
+    };
+    let cp = SessionCheckpoint {
+        history: vec![],
+        turn_counter: 0,
+        loop_guard_state: LoopGuardState {
+            max_loops_without_progress: 1,
+            current_loops: 0,
+            last_failure_hash: None,
+            consecutive_failures: 0,
+        },
+        agent_id: "a".into(),
+        session_id: "s".into(),
+        turn_id: "turn-1".into(),
+        workflow_id: None,
+        task_id: None,
+        runtime_lock_hash: None,
+        llm_config_snapshot: None,
+        tool_registry_version: None,
+        yield_reason: YieldReason::UserInputRequired {
+            interaction_id: "ui-x".into(),
+        },
+        content_store_refs: vec![],
+        created_at: "".into(),
+        pending_tool_state: Some(pts),
+        llm_rounds_consumed: 0,
+        tool_invocations_consumed: 0,
+        tokens_consumed: 0,
+        estimated_cost_usd: 0.0,
+    };
+    let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
+    assert_eq!(id, "tid-99");
+    assert_eq!(name, "user.ask");
+}
+
+#[cfg(test)]
+#[test]
+fn build_user_ask_answer_includes_selected_value() {
+    use autonoetic_types::background::{
+        UserInteraction, UserInteractionKind, UserInteractionStatus,
+    };
+    let interaction = UserInteraction {
+        interaction_id: "ui-abc".into(),
+        session_id: "s1".into(),
+        root_session_id: "s1".into(),
+        agent_id: "ag1".into(),
+        turn_id: "t1".into(),
+        kind: UserInteractionKind::Decision,
+        question: "Pick one".into(),
+        context: None,
+        options: vec![autonoetic_types::background::UserInteractionOption {
+            id: "opt-a".into(),
+            label: "A".into(),
+            value: "alpha".into(),
+        }],
+        allow_freeform: false,
+        status: UserInteractionStatus::Answered,
+        answer_option_id: Some("opt-a".into()),
+        answer_text: None,
+        answered_by: Some("cli".into()),
+        created_at: "".into(),
+        answered_at: None,
+        expires_at: None,
+        workflow_id: None,
+        task_id: None,
+        checkpoint_turn_id: None,
+    };
+    let json = build_user_ask_answer_tool_result_json(&interaction).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["selected_value"], "alpha");
+    assert_eq!(v["answer_option_id"], "opt-a");
 }

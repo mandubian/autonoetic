@@ -166,6 +166,7 @@ async fn test_promotion_reject_no_records() {
         None,
         Some(&config),
         None,
+        None,
     );
 
     assert!(
@@ -241,6 +242,7 @@ async fn test_promotion_reject_evaluator_failed() {
         Some("session-reject-eval-fail"),
         None,
         Some(&config),
+        None,
         None,
     );
 
@@ -318,6 +320,7 @@ async fn test_promotion_reject_auditor_failed() {
         Some("session-reject-audit-fail"),
         None,
         Some(&config),
+        None,
         None,
     );
 
@@ -405,6 +408,7 @@ async fn test_promotion_reject_invalid_handle() {
         Some("session-reject-invalid"),
         None,
         Some(&config),
+        None,
         None,
     );
 

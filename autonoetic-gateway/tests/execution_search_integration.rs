@@ -135,6 +135,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
 
     let parsed: serde_json::Value = serde_json::from_str(&result)?;
@@ -185,6 +186,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
 
     let parsed_all: serde_json::Value = serde_json::from_str(&result_all)?;
@@ -272,6 +274,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
 
     let parsed: serde_json::Value = serde_json::from_str(&result)?;

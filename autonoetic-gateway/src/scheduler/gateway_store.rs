@@ -16,6 +16,52 @@ struct WorkflowIndexFile {
     root_session_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct EmergencyStopRecord {
+    pub stop_id: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub root_session_id: String,
+    pub workflow_id: Option<String>,
+    pub requested_by_type: String,
+    pub requested_by_id: String,
+    pub reason: Option<String>,
+    pub trigger_kind: String,
+    pub mode: String,
+    pub status: String,
+    pub requested_at: String,
+    pub completed_at: Option<String>,
+    pub details_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveExecutionRecord {
+    pub execution_id: String,
+    pub root_session_id: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub session_id: String,
+    pub agent_id: String,
+    pub execution_kind: String,
+    pub driver: Option<String>,
+    pub pid: Option<i64>,
+    pub host_id: String,
+    pub status: String,
+    pub started_at: String,
+    pub heartbeat_at: String,
+    pub stop_requested_at: Option<String>,
+    pub stopped_at: Option<String>,
+    pub stop_id: Option<String>,
+}
+
+/// Stable host/process identity for `active_executions.host_id` (override with `AUTONOETIC_HOST_ID`).
+pub fn default_gateway_host_id() -> String {
+    match std::env::var("AUTONOETIC_HOST_ID") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => format!("pid:{}", std::process::id()),
+    }
+}
+
 pub struct GatewayStore {
     conn: std::sync::Mutex<Connection>,
 }
@@ -39,6 +85,13 @@ impl GatewayStore {
             conn: std::sync::Mutex::new(conn),
         };
         store.migrate()?;
+        if let Err(e) = store.reconcile_stale_active_executions() {
+            tracing::warn!(
+                target: "gateway_store",
+                error = %e,
+                "Failed to reconcile stale active_executions"
+            );
+        }
         store.backfill_workflow_index(gateway_dir)?;
         Ok(store)
     }
@@ -268,9 +321,254 @@ impl GatewayStore {
                 workflow_id TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS emergency_stops (
+                stop_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                root_session_id TEXT NOT NULL,
+                workflow_id TEXT,
+                requested_by_type TEXT NOT NULL,
+                requested_by_id TEXT NOT NULL,
+                reason TEXT,
+                trigger_kind TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                completed_at TEXT,
+                details_json TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_emergency_stops_root ON emergency_stops(root_session_id, requested_at);
+            CREATE INDEX IF NOT EXISTS idx_emergency_stops_workflow ON emergency_stops(workflow_id, requested_at);
+            CREATE INDEX IF NOT EXISTS idx_emergency_stops_status ON emergency_stops(status);
+            CREATE INDEX IF NOT EXISTS idx_emergency_stops_requester ON emergency_stops(requested_by_type, requested_by_id, requested_at);
+
+            CREATE TABLE IF NOT EXISTS active_executions (
+                execution_id TEXT PRIMARY KEY,
+                root_session_id TEXT NOT NULL,
+                workflow_id TEXT,
+                task_id TEXT,
+                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                execution_kind TEXT NOT NULL,
+                driver TEXT,
+                pid INTEGER,
+                host_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                stop_requested_at TEXT,
+                stopped_at TEXT,
+                stop_id TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_active_executions_root ON active_executions(root_session_id, status);
+            CREATE INDEX IF NOT EXISTS idx_active_executions_workflow ON active_executions(workflow_id, status);
+            CREATE INDEX IF NOT EXISTS idx_active_executions_task ON active_executions(task_id, status);
+            CREATE INDEX IF NOT EXISTS idx_active_executions_session ON active_executions(session_id, status);
             ",
         )?;
         Ok(())
+    }
+
+    fn reconcile_stale_active_executions(&self) -> Result<()> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE active_executions SET status = 'lost', stopped_at = ?1 WHERE status IN ('running', 'stop_requested') AND heartbeat_at < ?2",
+            params![now, cutoff],
+        )?;
+        Ok(())
+    }
+
+    // --- Emergency stop & active executions ---
+
+    pub fn insert_emergency_stop(&self, row: &EmergencyStopRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO emergency_stops (
+                stop_id, scope_type, scope_id, root_session_id, workflow_id,
+                requested_by_type, requested_by_id, reason, trigger_kind, mode,
+                status, requested_at, completed_at, details_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                &row.stop_id,
+                &row.scope_type,
+                &row.scope_id,
+                &row.root_session_id,
+                row.workflow_id.as_deref(),
+                &row.requested_by_type,
+                &row.requested_by_id,
+                row.reason.as_deref(),
+                &row.trigger_kind,
+                &row.mode,
+                &row.status,
+                &row.requested_at,
+                row.completed_at.as_deref(),
+                row.details_json.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_emergency_stop_status(
+        &self,
+        stop_id: &str,
+        status: &str,
+        completed_at: Option<&str>,
+        details_json: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE emergency_stops SET status = ?1, completed_at = ?2, details_json = ?3 WHERE stop_id = ?4",
+            params![status, completed_at, details_json, stop_id],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "emergency stop '{}' not found or not updated",
+            stop_id
+        );
+        Ok(())
+    }
+
+    pub fn list_emergency_stops_for_root_session(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<EmergencyStopRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT stop_id, scope_type, scope_id, root_session_id, workflow_id, requested_by_type,
+                    requested_by_id, reason, trigger_kind, mode, status, requested_at, completed_at, details_json
+             FROM emergency_stops WHERE root_session_id = ?1 ORDER BY requested_at DESC",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            Ok(EmergencyStopRecord {
+                stop_id: row.get(0)?,
+                scope_type: row.get(1)?,
+                scope_id: row.get(2)?,
+                root_session_id: row.get(3)?,
+                workflow_id: row.get(4)?,
+                requested_by_type: row.get(5)?,
+                requested_by_id: row.get(6)?,
+                reason: row.get(7)?,
+                trigger_kind: row.get(8)?,
+                mode: row.get(9)?,
+                status: row.get(10)?,
+                requested_at: row.get(11)?,
+                completed_at: row.get(12)?,
+                details_json: row.get(13)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn upsert_active_execution(&self, row: &ActiveExecutionRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO active_executions (
+                execution_id, root_session_id, workflow_id, task_id, session_id, agent_id,
+                execution_kind, driver, pid, host_id, status, started_at, heartbeat_at,
+                stop_requested_at, stopped_at, stop_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                &row.execution_id,
+                &row.root_session_id,
+                row.workflow_id.as_deref(),
+                row.task_id.as_deref(),
+                &row.session_id,
+                &row.agent_id,
+                &row.execution_kind,
+                row.driver.as_deref(),
+                row.pid,
+                &row.host_id,
+                &row.status,
+                &row.started_at,
+                &row.heartbeat_at,
+                row.stop_requested_at.as_deref(),
+                row.stopped_at.as_deref(),
+                row.stop_id.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn touch_active_execution_heartbeat(&self, execution_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = conn.execute(
+            "UPDATE active_executions SET heartbeat_at = ?1 WHERE execution_id = ?2",
+            params![now, execution_id],
+        )?;
+        anyhow::ensure!(
+            n == 1,
+            "active execution '{}' not found for heartbeat",
+            execution_id
+        );
+        Ok(())
+    }
+
+    pub fn complete_active_execution(
+        &self,
+        execution_id: &str,
+        status: &str,
+        stop_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = conn.execute(
+            "UPDATE active_executions SET status = ?1, stopped_at = ?2, stop_id = ?3 WHERE execution_id = ?4",
+            params![status, now, stop_id, execution_id],
+        )?;
+        anyhow::ensure!(
+            n == 1,
+            "active execution '{}' not found for completion",
+            execution_id
+        );
+        Ok(())
+    }
+
+    pub fn list_active_executions_for_root_sqlite(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<ActiveExecutionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT execution_id, root_session_id, workflow_id, task_id, session_id, agent_id,
+                    execution_kind, driver, pid, host_id, status, started_at, heartbeat_at,
+                    stop_requested_at, stopped_at, stop_id
+             FROM active_executions WHERE root_session_id = ?1 ORDER BY started_at DESC",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            Ok(ActiveExecutionRecord {
+                execution_id: row.get(0)?,
+                root_session_id: row.get(1)?,
+                workflow_id: row.get(2)?,
+                task_id: row.get(3)?,
+                session_id: row.get(4)?,
+                agent_id: row.get(5)?,
+                execution_kind: row.get(6)?,
+                driver: row.get(7)?,
+                pid: row.get(8)?,
+                host_id: row.get(9)?,
+                status: row.get(10)?,
+                started_at: row.get(11)?,
+                heartbeat_at: row.get(12)?,
+                stop_requested_at: row.get(13)?,
+                stopped_at: row.get(14)?,
+                stop_id: row.get(15)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     // --- Approvals ---
@@ -706,30 +1004,107 @@ impl GatewayStore {
     /// Answer a user interaction (user provides an answer).
     pub fn answer_user_interaction(&self, answer: &UserInteractionAnswer) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        anyhow::ensure!(
+            !answer.interaction_id.trim().is_empty(),
+            "interaction_id must not be empty"
+        );
+        let interaction = Self::get_user_interaction_with_conn(&conn, &answer.interaction_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("User interaction '{}' not found", answer.interaction_id)
+            })?;
+        anyhow::ensure!(
+            interaction.status == UserInteractionStatus::Pending,
+            "User interaction '{}' is {:?}; only pending interactions can be answered",
+            answer.interaction_id,
+            interaction.status
+        );
+
+        let answer_option_id = answer
+            .answer_option_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        let answer_text = answer
+            .answer_text
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .cloned();
+        anyhow::ensure!(
+            answer_option_id.is_some() || answer_text.is_some(),
+            "Must provide either answer_option_id or non-empty answer_text"
+        );
+        anyhow::ensure!(
+            !(answer_option_id.is_some() && answer_text.is_some()),
+            "Provide exactly one of answer_option_id or answer_text"
+        );
+
+        if let Some(ref oid) = answer_option_id {
+            let valid = interaction.options.iter().any(|opt| opt.id == *oid);
+            anyhow::ensure!(
+                valid,
+                "Invalid answer_option_id '{}' for interaction '{}'",
+                oid,
+                answer.interaction_id
+            );
+        }
+        if answer_text.is_some() {
+            anyhow::ensure!(
+                interaction.allow_freeform,
+                "Interaction '{}' does not allow freeform answers",
+                answer.interaction_id
+            );
+        }
+
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE user_interactions SET
                 status = 'answered', answer_option_id = ?1, answer_text = ?2,
                 answered_by = ?3, answered_at = ?4
              WHERE interaction_id = ?5 AND status = 'pending'",
             params![
-                answer.answer_option_id,
-                answer.answer_text,
+                answer_option_id,
+                answer_text,
                 answer.answered_by,
                 now,
                 answer.interaction_id,
             ],
         )?;
+        anyhow::ensure!(
+            changed == 1,
+            "User interaction '{}' was not updated (status changed concurrently)",
+            answer.interaction_id
+        );
         Ok(())
     }
 
     /// Cancel a user interaction (e.g., when workflow is cancelled or timed out).
     pub fn cancel_user_interaction(&self, interaction_id: &str, reason: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        anyhow::ensure!(
+            !interaction_id.trim().is_empty(),
+            "interaction_id must not be empty"
+        );
+        anyhow::ensure!(!reason.trim().is_empty(), "reason must not be empty");
+
+        let interaction = Self::get_user_interaction_with_conn(&conn, interaction_id)?
+            .ok_or_else(|| anyhow::anyhow!("User interaction '{}' not found", interaction_id))?;
+        anyhow::ensure!(
+            interaction.status == UserInteractionStatus::Pending,
+            "User interaction '{}' is {:?}; only pending interactions can be cancelled",
+            interaction_id,
+            interaction.status
+        );
+
+        let changed = conn.execute(
             "UPDATE user_interactions SET status = 'cancelled', answer_text = ?1 WHERE interaction_id = ?2 AND status = 'pending'",
             params![reason, interaction_id],
         )?;
+        anyhow::ensure!(
+            changed == 1,
+            "User interaction '{}' was not cancelled (status changed concurrently)",
+            interaction_id
+        );
         Ok(())
     }
 
@@ -794,6 +1169,61 @@ impl GatewayStore {
             "SELECT interaction_id FROM user_interactions WHERE root_session_id = ?1 AND status = 'pending'",
         )?;
         let rows = stmt.query_map(params![root_session_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            if let Ok(id) = row {
+                if let Ok(Some(interaction)) = Self::get_user_interaction_with_conn(&conn, &id) {
+                    results.push(interaction);
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// All `user_interactions` rows for this session line or the same root session (`session_id`
+    /// appears either as `session_id` or `root_session_id`).
+    pub fn list_user_interactions_for_session_trace(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<UserInteraction>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT interaction_id FROM user_interactions \
+             WHERE session_id = ?1 OR root_session_id = ?1 \
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            if let Ok(id) = row {
+                if let Ok(Some(interaction)) = Self::get_user_interaction_with_conn(&conn, &id) {
+                    results.push(interaction);
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// `user_interactions` rows bound to a workflow (may be empty).
+    pub fn list_user_interactions_for_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Vec<UserInteraction>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT interaction_id FROM user_interactions \
+             WHERE workflow_id = ?1 \
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![workflow_id], |row| {
             let id: String = row.get(0)?;
             Ok(id)
         })?;
@@ -1363,6 +1793,9 @@ mod tests {
     use super::GatewayStore;
     use anyhow::Result;
     use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+    use autonoetic_types::background::{
+        UserInteraction, UserInteractionAnswer, UserInteractionKind, UserInteractionOption,
+    };
 
     fn artifact_ref(
         ref_id: &str,
@@ -1382,6 +1815,35 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             expires_at,
             revoked_at: None,
+        }
+    }
+
+    fn pending_interaction(
+        interaction_id: &str,
+        allow_freeform: bool,
+        options: Vec<UserInteractionOption>,
+    ) -> UserInteraction {
+        UserInteraction {
+            interaction_id: interaction_id.to_string(),
+            session_id: "sess-1".to_string(),
+            root_session_id: "sess-1".to_string(),
+            workflow_id: None,
+            task_id: None,
+            agent_id: "planner.default".to_string(),
+            turn_id: "turn-1".to_string(),
+            kind: UserInteractionKind::Decision,
+            question: "Choose one".to_string(),
+            context: None,
+            options,
+            allow_freeform,
+            status: autonoetic_types::background::UserInteractionStatus::Pending,
+            answer_option_id: None,
+            answer_text: None,
+            answered_by: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            answered_at: None,
+            expires_at: None,
+            checkpoint_turn_id: Some("turn-1".to_string()),
         }
     }
 
@@ -1604,6 +2066,83 @@ mod tests {
         assert_eq!(fail_traces[0].stderr.as_ref().unwrap().len(), 10000);
         assert_eq!(fail_traces[0].exit_code, Some(1));
         assert_eq!(fail_traces[0].error_type.as_deref(), Some("compilation"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn answer_user_interaction_validates_inputs_and_status() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let interaction = pending_interaction(
+            "ui-answer-1",
+            false,
+            vec![UserInteractionOption {
+                id: "opt-a".to_string(),
+                label: "Option A".to_string(),
+                value: "A".to_string(),
+            }],
+        );
+        store.create_user_interaction(&interaction)?;
+
+        let invalid_option = store.answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: "ui-answer-1".to_string(),
+            answer_option_id: Some("missing".to_string()),
+            answer_text: None,
+            answered_by: "test".to_string(),
+        });
+        assert!(invalid_option.is_err());
+
+        let disallowed_freeform = store.answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: "ui-answer-1".to_string(),
+            answer_option_id: None,
+            answer_text: Some("freeform".to_string()),
+            answered_by: "test".to_string(),
+        });
+        assert!(disallowed_freeform.is_err());
+
+        store.answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: "ui-answer-1".to_string(),
+            answer_option_id: Some("opt-a".to_string()),
+            answer_text: None,
+            answered_by: "test".to_string(),
+        })?;
+
+        let second_answer = store.answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: "ui-answer-1".to_string(),
+            answer_option_id: Some("opt-a".to_string()),
+            answer_text: None,
+            answered_by: "test".to_string(),
+        });
+        assert!(second_answer.is_err());
+
+        let unknown = store.answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: "ui-missing".to_string(),
+            answer_option_id: Some("opt-a".to_string()),
+            answer_text: None,
+            answered_by: "test".to_string(),
+        });
+        assert!(unknown.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn cancel_user_interaction_requires_pending_interaction() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let interaction = pending_interaction("ui-cancel-1", true, vec![]);
+        store.create_user_interaction(&interaction)?;
+
+        store.cancel_user_interaction("ui-cancel-1", "cancelled by test")?;
+
+        let second_cancel = store.cancel_user_interaction("ui-cancel-1", "again");
+        assert!(second_cancel.is_err());
+
+        let unknown = store.cancel_user_interaction("ui-missing", "x");
+        assert!(unknown.is_err());
 
         Ok(())
     }

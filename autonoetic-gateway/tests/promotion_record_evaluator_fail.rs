@@ -176,6 +176,7 @@ async fn test_promotion_evaluator_fail_rejected() {
             None,
             Some(&config),
             None,
+            None,
         )
         .expect("evaluator promotion.record with pass=false should succeed");
 
@@ -233,6 +234,7 @@ async fn test_promotion_evaluator_fail_rejected() {
         Some("session-reject-failed-eval"),
         None,
         Some(&config),
+        None,
         None,
     );
 
@@ -296,6 +298,7 @@ async fn test_promotion_auditor_fail_rejected() {
             None,
             Some(&config),
             None,
+            None,
         )
         .expect("evaluator should record pass");
 
@@ -356,6 +359,7 @@ async fn test_promotion_auditor_fail_rejected() {
             None,
             Some(&config),
             None,
+            None,
         )
         .expect("auditor should record failure");
 
@@ -406,6 +410,7 @@ async fn test_promotion_auditor_fail_rejected() {
         Some("session-reject-audit-fail"),
         None,
         Some(&config),
+        None,
         None,
     );
 

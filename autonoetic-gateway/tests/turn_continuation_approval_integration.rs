@@ -558,6 +558,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         Some("turn-wait-before"),
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let wait_before: serde_json::Value = serde_json::from_str(&wait_before_raw)?;
     assert_eq!(
@@ -638,6 +639,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         Some("turn-wait-after"),
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let wait_after: serde_json::Value = serde_json::from_str(&wait_after_raw)?;
     assert_eq!(
@@ -1177,6 +1179,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         Some("turn-wait-mid"),
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let wait_mid: serde_json::Value = serde_json::from_str(&wait_mid_raw)?;
     assert_eq!(
@@ -1220,6 +1223,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         Some("turn-wait-end"),
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let wait_end: serde_json::Value = serde_json::from_str(&wait_end_raw)?;
     assert_eq!(
@@ -1373,6 +1377,7 @@ async fn test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join() -
         Some("turn-cancel-1"),
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let cancel_json: serde_json::Value = serde_json::from_str(&cancel_raw)?;
     assert_eq!(

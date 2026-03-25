@@ -1,5 +1,6 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
+use crate::runtime::active_execution_registry::{NativeToolRunContext, SandboxPidGuard};
 use crate::runtime::reevaluation_state::{execute_scheduled_action, persist_reevaluation_state};
 use crate::sandbox::{
     DependencyPlan, DependencyRuntime, SandboxDriverKind, SandboxMount, SandboxRunner,
@@ -400,6 +401,7 @@ pub trait NativeTool: Send + Sync {
         turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String>;
 
     /// Optionally extracts metadata from the tool's JSON arguments for disclosure policy tracking and audit.
@@ -449,6 +451,7 @@ impl NativeToolRegistry {
         turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let tool = self
             .tools
@@ -470,6 +473,7 @@ impl NativeToolRegistry {
             turn_id,
             config,
             gateway_store,
+            run_context,
         )
     }
 
@@ -579,6 +583,30 @@ fn extract_code_for_analysis(
     command.to_string()
 }
 
+#[cfg(unix)]
+fn sandbox_exec_pid_guard(
+    runner: &SandboxRunner,
+    run_context: Option<&NativeToolRunContext>,
+) -> Option<SandboxPidGuard> {
+    let ctx = run_context?;
+    let pid = runner.process.id();
+    if pid == 0 {
+        return None;
+    }
+    Some(
+        ctx.registry
+            .register_sandbox_child_pid(&ctx.root_session_id, pid),
+    )
+}
+
+#[cfg(not(unix))]
+fn sandbox_exec_pid_guard(
+    _runner: &SandboxRunner,
+    _run_context: Option<&NativeToolRunContext>,
+) -> Option<SandboxPidGuard> {
+    None
+}
+
 impl NativeTool for SandboxExecTool {
     fn name(&self) -> &'static str {
         "sandbox.exec"
@@ -637,6 +665,7 @@ impl NativeTool for SandboxExecTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: SandboxExecArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -1020,6 +1049,7 @@ impl NativeTool for SandboxExecTool {
             )?
         };
 
+        let _sandbox_pid_guard = sandbox_exec_pid_guard(&runner, run_context);
         let output = runner.process.wait_with_output()?;
         let ok = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1685,6 +1715,7 @@ impl NativeTool for WebSearchTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: WebSearchArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -1891,6 +1922,7 @@ impl NativeTool for WebFetchTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: WebFetchArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -2028,6 +2060,7 @@ impl NativeTool for ContentWriteTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2146,6 +2179,7 @@ impl NativeTool for ContentReadTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2288,6 +2322,7 @@ impl NativeTool for ArtifactBuildTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2445,6 +2480,7 @@ impl NativeTool for ArtifactInspectTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2537,6 +2573,7 @@ impl NativeTool for ArtifactResolveRefTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2548,29 +2585,36 @@ impl NativeTool for ArtifactResolveRefTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         anyhow::ensure!(!args.ref_id.trim().is_empty(), "ref_id must not be empty");
-        anyhow::ensure!(!args.scope_id.trim().is_empty(), "scope_id must not be empty");
+        anyhow::ensure!(
+            !args.scope_id.trim().is_empty(),
+            "scope_id must not be empty"
+        );
 
-        let scope_type = autonoetic_types::artifact::ArtifactRefScopeType::from_str(&args.scope_type)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Invalid scope_type '{}'. Must be 'session', 'workflow', or 'global'.",
-                    args.scope_type
-                )
-            })?;
+        let scope_type =
+            autonoetic_types::artifact::ArtifactRefScopeType::from_str(&args.scope_type)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Invalid scope_type '{}'. Must be 'session', 'workflow', or 'global'.",
+                        args.scope_type
+                    )
+                })?;
 
         let Some(store) = gateway_store else {
             anyhow::bail!("artifact.resolve_ref requires GatewayStore to be configured");
         };
 
-        let Some(ref_record) = store.resolve_artifact_ref(scope_type, &args.scope_id, &args.ref_id)? else {
-            return Err(anyhow::Error::from(autonoetic_types::tool_error::tagged::Tagged::validation(
-                anyhow::anyhow!(
+        let Some(ref_record) =
+            store.resolve_artifact_ref(scope_type, &args.scope_id, &args.ref_id)?
+        else {
+            return Err(anyhow::Error::from(
+                autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(
                     "Artifact ref '{}' not found in {} scope '{}', or it is expired/revoked.",
                     args.ref_id,
                     scope_type.as_str(),
                     args.scope_id
-                )
-            )).into());
+                )),
+            )
+            .into());
         };
 
         let Some(gw_dir) = gateway_dir else {
@@ -2678,6 +2722,7 @@ impl NativeTool for ExecutionSearchTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2715,24 +2760,26 @@ impl NativeTool for ExecutionSearchTool {
 
         let items: Vec<serde_json::Value> = traces
             .into_iter()
-            .map(|t| serde_json::json!({
-                "trace_id": t.trace_id,
-                "agent_id": t.agent_id,
-                "session_id": t.session_id,
-                "turn_id": t.turn_id,
-                "timestamp": t.timestamp,
-                "tool_name": t.tool_name,
-                "command": t.command,
-                "exit_code": t.exit_code,
-                "stdout": t.stdout,
-                "stderr": t.stderr,
-                "duration_ms": t.duration_ms,
-                "success": t.success == 1,
-                "error_type": t.error_type,
-                "error_summary": t.error_summary,
-                "approval_required": t.approval_required == Some(1),
-                "approval_request_id": t.approval_request_id,
-            }))
+            .map(|t| {
+                serde_json::json!({
+                    "trace_id": t.trace_id,
+                    "agent_id": t.agent_id,
+                    "session_id": t.session_id,
+                    "turn_id": t.turn_id,
+                    "timestamp": t.timestamp,
+                    "tool_name": t.tool_name,
+                    "command": t.command,
+                    "exit_code": t.exit_code,
+                    "stdout": t.stdout,
+                    "stderr": t.stderr,
+                    "duration_ms": t.duration_ms,
+                    "success": t.success == 1,
+                    "error_type": t.error_type,
+                    "error_summary": t.error_summary,
+                    "approval_required": t.approval_required == Some(1),
+                    "approval_request_id": t.approval_request_id,
+                })
+            })
             .collect();
 
         serde_json::to_string(&serde_json::json!({
@@ -2796,6 +2843,7 @@ impl NativeTool for KnowledgeStoreTool {
         turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2907,6 +2955,7 @@ impl NativeTool for KnowledgeRecallTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -2984,6 +3033,7 @@ impl NativeTool for KnowledgeSearchTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -3072,6 +3122,7 @@ impl NativeTool for KnowledgeShareTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -3627,6 +3678,7 @@ impl NativeTool for SessionSnapshotTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize, Default)]
         struct Args {
@@ -3796,6 +3848,7 @@ impl NativeTool for SessionEscalateTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -3937,6 +3990,7 @@ impl NativeTool for AgentSpawnTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: SpawnAgentArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -4310,6 +4364,7 @@ impl NativeTool for ApprovalStatusTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -4417,6 +4472,7 @@ fn check_task_statuses(
                     autonoetic_types::workflow::TaskRunStatus::Succeeded
                         | autonoetic_types::workflow::TaskRunStatus::Failed
                         | autonoetic_types::workflow::TaskRunStatus::Cancelled
+                        | autonoetic_types::workflow::TaskRunStatus::Aborted
                 );
                 if !is_terminal {
                     all_done = false;
@@ -4547,6 +4603,7 @@ impl NativeTool for WorkflowWaitTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -4942,6 +4999,7 @@ impl NativeTool for AgentInstallTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let mut args: InstallAgentArgs = serde_json::from_str(arguments_json).map_err(|e| {
             let context = capability_error_context(&e);
@@ -5317,6 +5375,7 @@ impl NativeTool for AgentInstallTool {
                         autonoetic_types::capability::Capability::BackgroundReevaluation {
                             ..
                         } => "BackgroundReevaluation",
+                        autonoetic_types::capability::Capability::EmergencyStop => "EmergencyStop",
                     };
                     cap_type == inferred_type.as_str()
                 })
@@ -5735,6 +5794,7 @@ impl NativeTool for AgentExistsTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: AgentExistsArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -5862,6 +5922,7 @@ impl NativeTool for AgentDiscoverTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: AgentDiscoverArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -5981,6 +6042,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::AgentMessage { .. } => "AgentMessage".to_string(),
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation".to_string(),
         Capability::CodeExecution { .. } => "CodeExecution".to_string(),
+        Capability::EmergencyStop => "EmergencyStop".to_string(),
     }
 }
 
@@ -6092,6 +6154,7 @@ impl NativeTool for WorkflowCancelTaskTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let config = config
             .ok_or_else(|| anyhow::anyhow!("Gateway config required for workflow.cancel_task"))?;
@@ -6233,6 +6296,7 @@ impl NativeTool for UserAskTool {
         turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         use autonoetic_types::background::{
             UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
@@ -6319,7 +6383,8 @@ impl NativeTool for UserAskTool {
             return Ok(serde_json::json!({
                 "ok": false,
                 "error": "Gateway store not available; user.ask requires persistent store"
-            }).to_string());
+            })
+            .to_string());
         }
 
         // Return a marker that the lifecycle will detect to trigger suspension
@@ -6328,7 +6393,8 @@ impl NativeTool for UserAskTool {
             "interaction_required": true,
             "interaction_id": interaction_id,
             "status": "awaiting_user"
-        })).map_err(Into::into)
+        }))
+        .map_err(Into::into)
     }
 }
 
@@ -6374,6 +6440,7 @@ impl NativeTool for UserInteractionStatusTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -6418,26 +6485,25 @@ impl NativeTool for UserInteractionStatusTool {
                     response["answer_text"] = serde_json::Value::String(answer_text.clone());
                 }
                 if let Some(answer_option_id) = &interaction.answer_option_id {
-                    response["answer_option_id"] = serde_json::Value::String(answer_option_id.clone());
+                    response["answer_option_id"] =
+                        serde_json::Value::String(answer_option_id.clone());
                 }
 
                 serde_json::to_string(&response).map_err(Into::into)
             }
-            Ok(None) => {
-                serde_json::to_string(&serde_json::json!({
-                    "ok": true,
-                    "interaction_id": args.interaction_id,
-                    "status": "not_found",
-                    "message": "User interaction not found"
-                })).map_err(Into::into)
-            }
-            Err(e) => {
-                serde_json::to_string(&serde_json::json!({
-                    "ok": false,
-                    "interaction_id": args.interaction_id,
-                    "error": e.to_string()
-                })).map_err(Into::into)
-            }
+            Ok(None) => serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "interaction_id": args.interaction_id,
+                "status": "not_found",
+                "message": "User interaction not found"
+            }))
+            .map_err(Into::into),
+            Err(e) => serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "interaction_id": args.interaction_id,
+                "error": e.to_string()
+            }))
+            .map_err(Into::into),
         }
     }
 }
@@ -6773,6 +6839,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("workflow.wait should succeed");
 
@@ -6828,6 +6895,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("web.fetch should succeed");
 
@@ -6868,6 +6936,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect_err("web.fetch should be denied");
         assert!(err.to_string().contains("NetworkAccess"));
@@ -6895,6 +6964,7 @@ mod tests {
                 temp.path(),
                 None,
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -6952,6 +7022,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("web.search should succeed");
 
@@ -6994,6 +7065,7 @@ mod tests {
                 temp.path(),
                 None,
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -7054,6 +7126,7 @@ mod tests {
                 temp.path(),
                 None,
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -7124,6 +7197,7 @@ mod tests {
                 temp.path(),
                 None,
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -7204,6 +7278,7 @@ mod tests {
                 temp.path(),
                 None,
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -7298,6 +7373,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("first web.search call should succeed");
         let second = registry
@@ -7308,6 +7384,7 @@ mod tests {
                 temp.path(),
                 None,
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -7359,6 +7436,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect_err("empty message should be rejected");
         assert!(err.to_string().contains("message must not be empty"));
@@ -7392,6 +7470,7 @@ mod tests {
                 None,
                 &serde_json::to_string(&args).expect("json should encode"),
                 Some("session-1"),
+                None,
                 None,
                 None,
                 None,
@@ -7430,6 +7509,7 @@ mod tests {
                 &parent_dir,
                 Some(&gateway_dir),
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -7493,6 +7573,7 @@ mod tests {
                 None,
                 None,
                 Some(&config),
+                None,
                 None,
             )
             .expect("install should return structured approval request");
@@ -7566,6 +7647,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("install should pass with promotion gate");
         assert!(result.contains("\"ok\":true"));
@@ -7631,6 +7713,7 @@ mod tests {
                 &parent_dir,
                 Some(&gateway_dir),
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -7704,6 +7787,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("agent install should accept dotted IDs");
 
@@ -7768,6 +7852,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("agent install should accept shorthand");
 
@@ -7822,6 +7907,7 @@ mod tests {
                 &parent_dir,
                 Some(&gateway_dir),
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -7892,6 +7978,7 @@ mod tests {
                 &parent_dir,
                 Some(&gateway_dir),
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -8046,6 +8133,7 @@ dependencies:
                 None,
                 None,
                 None,
+                None,
             )
             .expect_err("policy should deny command");
         assert!(err
@@ -8102,6 +8190,7 @@ dependencies:
                 None,
                 Some(&config),
                 Some(store.clone()),
+                None,
             )
             .expect("first call should return approval response");
         let first_json: serde_json::Value =
@@ -8168,6 +8257,7 @@ dependencies:
                 None,
                 Some(&config),
                 Some(store),
+                None,
             )
             .expect_err("retry should reach dependency parsing and fail");
         assert!(err.to_string().contains("Unsupported dependency runtime"));
@@ -8228,6 +8318,7 @@ dependencies:
                 &parent_dir,
                 Some(&gateway_dir),
                 &args.to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -8304,6 +8395,7 @@ dependencies:
                 None,
                 None,
                 None,
+                None,
             )
             .expect("should return structured error, not panic");
 
@@ -8355,6 +8447,7 @@ dependencies:
                 &parent_dir,
                 Some(&gateway_dir),
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -8412,6 +8505,7 @@ dependencies:
                 None,
                 None,
                 None,
+                None,
             )
             .expect_err("malformed capabilities should yield validation/parse error");
         let err_str = err.to_string();
@@ -8446,6 +8540,7 @@ dependencies:
                 &parent_dir,
                 Some(&gateway_dir),
                 &serde_json::to_string(&repaired_args).expect("json"),
+                None,
                 None,
                 None,
                 None,
@@ -8503,6 +8598,7 @@ dependencies:
                 &parent_dir,
                 Some(&gateway_dir),
                 &args.to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -8582,6 +8678,7 @@ Research agent instructions.
                 None,
                 None,
                 None,
+                None,
             )
             .expect("agent.exists should succeed");
 
@@ -8618,6 +8715,7 @@ Research agent instructions.
                 &caller_dir,
                 None,
                 &args.to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -8686,6 +8784,7 @@ Instructions.
                 &caller_dir,
                 None,
                 &args.to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -8788,6 +8887,7 @@ metadata:
                 &caller_dir,
                 None,
                 &args.to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -8896,6 +8996,7 @@ metadata:
                 None,
                 None,
                 None,
+                None,
             )
             .expect("agent.discover should succeed");
 
@@ -8982,6 +9083,7 @@ Research agent instructions.
                 None,
                 None,
                 None,
+                None,
             )
             .expect("agent.discover should succeed");
 
@@ -9039,6 +9141,7 @@ Research agent instructions.
                 &parent_dir,
                 Some(&gateway_dir),
                 &serde_json::to_string(&args).expect("json should encode"),
+                None,
                 None,
                 None,
                 None,
@@ -9114,6 +9217,7 @@ Research agent instructions.
             None,
             None,
             None,
+            None,
         );
 
         assert!(result.is_err(), "install should fail without script_entry");
@@ -9157,6 +9261,7 @@ Research agent instructions.
             &parent_dir,
             Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            None,
             None,
             None,
             None,
@@ -9210,6 +9315,7 @@ Research agent instructions.
             &parent_dir,
             Some(&gateway_dir),
             &serde_json::to_string(&args).expect("json should encode"),
+            None,
             None,
             None,
             None,
@@ -9291,6 +9397,7 @@ Research agent instructions.
                 None,
                 None,
                 Some(&config),
+                None,
                 None,
             )
             .expect("install should return approval request, not error");
@@ -9401,6 +9508,7 @@ Research agent instructions.
             None,
             Some(&config),
             None,
+            None,
         );
 
         // Should fail because the approval_ref doesn't exist
@@ -9481,6 +9589,7 @@ Research agent instructions.
                 None,
                 Some(&config),
                 None,
+                None,
             )
             .expect("low-risk install should succeed without approval");
 
@@ -9560,6 +9669,7 @@ Research agent instructions.
                 None,
                 Some(&config),
                 Some(store),
+                None,
             )
             .expect("install should return approval request");
 
@@ -9660,6 +9770,7 @@ Research agent instructions.
                 None,
                 Some(&config),
                 Some(store.clone()),
+                None,
             )
             .expect("install should return approval request");
 
@@ -9715,6 +9826,7 @@ Research agent instructions.
                 None,
                 Some(&config),
                 Some(store),
+                None,
             )
             .expect("retry should succeed with stored payload");
 
@@ -9802,6 +9914,7 @@ Research agent instructions.
                 None,
                 Some(&config),
                 Some(store.clone()),
+                None,
             )
             .expect("install should return approval request");
 
@@ -9868,6 +9981,7 @@ Research agent instructions.
                 None,
                 Some(&config),
                 Some(store),
+                None,
             )
             .expect("retry should succeed");
 

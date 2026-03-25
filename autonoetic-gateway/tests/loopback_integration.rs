@@ -9,20 +9,20 @@ use support::{spawn_gateway_server, EnvGuard, JsonRpcClient, OpenAiStub, TestWor
 async fn test_loopback_content_audit_and_negatives() {
     let stub = OpenAiStub::spawn(|_, body_json| async move {
         let messages = body_json["messages"].as_array().cloned().unwrap_or_default();
-        let latest_user_message = messages
-            .iter()
-            .rev()
-            .find_map(|message| {
-                if message["role"].as_str() == Some("user") {
-                    message["content"].as_str()
-                } else {
-                    None
-                }
-            })
+        let latest_user_idx = messages.iter().rposition(|message| {
+            message["role"].as_str() == Some("user")
+        });
+        let latest_user_message = latest_user_idx
+            .and_then(|i| messages[i]["content"].as_str())
             .unwrap_or("");
-        let has_tool_result_turn = messages
-            .iter()
-            .any(|message| message["role"].as_str() == Some("tool"));
+        // Tool results belong to the current user turn only (messages after the latest user).
+        let has_tool_result_turn = latest_user_idx
+            .map(|i| {
+                messages[(i + 1)..]
+                    .iter()
+                    .any(|message| message["role"].as_str() == Some("tool"))
+            })
+            .unwrap_or(false);
 
         if latest_user_message.contains("delay message") {
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -296,44 +296,7 @@ async fn test_loopback_content_audit_and_negatives() {
         "Expected exactly 3 session ends in agent history for session (write, read data, read missing)"
     );
 
-    // Gateway-owned log
-    let gateway_history_file = agents_dir
-        .join(".gateway")
-        .join("history")
-        .join("causal_chain.jsonl");
-    let gateway_history = std::fs::read_to_string(&gateway_history_file).unwrap_or_default();
-
-    let mut gateway_requests = 0;
-    let mut gateway_completions = 0;
-    let mut gateway_failures = 0;
-
-    for line in gateway_history.lines() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-            if value["session_id"].as_str() == Some(session_id) {
-                let action = value["action"].as_str().unwrap_or("");
-                if action == "event.ingest.requested" {
-                    gateway_requests += 1;
-                } else if action == "event.ingest.completed" {
-                    gateway_completions += 1;
-                } else if action == "event.ingest.failed" {
-                    gateway_failures += 1;
-                }
-            }
-        }
-    }
-
-    assert_eq!(
-        gateway_requests, 3,
-        "Expected exactly 3 gateway ingest requests for session"
-    );
-    assert_eq!(
-        gateway_completions, 3,
-        "Expected exactly 3 gateway ingest completions for session (all succeed; tool errors returned to agent)"
-    );
-    assert_eq!(
-        gateway_failures, 0,
-        "Expected 0 gateway failures (tool errors are returned to agent, not as gateway failures)"
-    );
+    // `.gateway/history/causal_chain.jsonl` is no longer populated (gateway uses gateway.db).
 
     server_task.abort();
 }

@@ -139,7 +139,11 @@ pub fn init_agent_scaffold(
     Ok(())
 }
 
-pub fn render_skill_template(agent_id: &str, template: Option<&str>, llm_config: &LlmTemplateConfig) -> String {
+pub fn render_skill_template(
+    agent_id: &str,
+    template: Option<&str>,
+    llm_config: &LlmTemplateConfig,
+) -> String {
     let (name_suffix, description, body) = match template.unwrap_or("generic") {
         "planner" => (
             "Planner",
@@ -172,7 +176,7 @@ pub fn render_skill_template(agent_id: &str, template: Option<&str>, llm_config:
     } else {
         ""
     };
-    
+
     format!(
         r#"---
 name: "{agent_id}"
@@ -246,7 +250,10 @@ pub fn handle_agent_presets(config_path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("{:<20} {:<30} {:<15} {}", "PRESET", "PROVIDER", "MODEL", "TEMP");
+    println!(
+        "{:<20} {:<30} {:<15} {}",
+        "PRESET", "PROVIDER", "MODEL", "TEMP"
+    );
     println!("{}", "-".repeat(80));
 
     for (name, preset) in &config.llm_presets {
@@ -341,7 +348,7 @@ pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Resu
 
     let config_content = DEFAULT_CONFIG_TEMPLATE.replace(
         "# agents_dir is set to absolute path based on config location",
-        &format!("agents_dir: \"{}\"", agents_dir_str)
+        &format!("agents_dir: \"{}\"", agents_dir_str),
     );
 
     std::fs::write(path, config_content)?;
@@ -350,10 +357,19 @@ pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Resu
     println!();
     println!("Next steps:");
     println!("  1. Edit the file to set your LLM provider and API keys");
-    println!("  2. Bootstrap agents: autonoetic agent bootstrap --config {}", path.display());
-    println!("  3. Start gateway: autonoetic gateway start --config {}", path.display());
+    println!(
+        "  2. Bootstrap agents: autonoetic agent bootstrap --config {}",
+        path.display()
+    );
+    println!(
+        "  3. Start gateway: autonoetic gateway start --config {}",
+        path.display()
+    );
     println!();
-    println!("Tip: Use 'autonoetic agent presets --config {}' to list configured presets.", path.display());
+    println!(
+        "Tip: Use 'autonoetic agent presets --config {}' to list configured presets.",
+        path.display()
+    );
 
     Ok(())
 }
@@ -403,18 +419,16 @@ pub fn handle_agent_bootstrap(
         let agent_id = bundle
             .file_name()
             .and_then(|value| value.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid bundle directory name: {}", bundle.display()))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("Invalid bundle directory name: {}", bundle.display())
+            })?;
         let target_dir = config.agents_dir.join(agent_id);
         if target_dir.exists() {
             if overwrite {
                 std::fs::remove_dir_all(&target_dir)?;
                 copy_dir_recursive(&bundle, &target_dir)?;
                 overwritten += 1;
-                println!(
-                    "Overwrote '{}' from {}",
-                    agent_id,
-                    bundle.display()
-                );
+                println!("Overwrote '{}' from {}", agent_id, bundle.display());
             } else {
                 skipped += 1;
                 println!(
@@ -427,11 +441,7 @@ pub fn handle_agent_bootstrap(
         }
         copy_dir_recursive(&bundle, &target_dir)?;
         copied += 1;
-        println!(
-            "Installed '{}' from {}",
-            agent_id,
-            bundle.display()
-        );
+        println!("Installed '{}' from {}", agent_id, bundle.display());
     }
 
     // Apply LLM presets from config to all installed agents
@@ -448,7 +458,8 @@ pub fn handle_agent_bootstrap(
             let agent_dir_name = entry.file_name().to_string_lossy().to_string();
 
             if let Ok(content) = std::fs::read_to_string(&skill_path) {
-                if let Some(updated) = apply_llm_preset_to_skill(&content, &config, &agent_dir_name) {
+                if let Some(updated) = apply_llm_preset_to_skill(&content, &config, &agent_dir_name)
+                {
                     std::fs::write(&skill_path, &updated)?;
                     patched += 1;
                     println!("  Patched LLM config for '{}'", agent_dir_name);
@@ -484,7 +495,8 @@ fn apply_llm_preset_to_skill(
 
     // Check if current content already has the right LLM
     if content.contains(&format!("model: \"{}\"", llm.model))
-        && content.contains(&format!("provider: \"{}\"", llm.provider)) {
+        && content.contains(&format!("provider: \"{}\"", llm.provider))
+    {
         // Even if model/provider match, check chat_only
         if !llm.chat_only || content.contains("chat_only") {
             return None; // Already correct
@@ -497,9 +509,15 @@ fn apply_llm_preset_to_skill(
     let re_temp = regex::Regex::new(r#"(temperature:\s*)[0-9.]+ "#).ok()?;
 
     let mut updated = content.to_string();
-    updated = re_provider.replace(&updated, format!("${{1}}\"{}\"", llm.provider)).to_string();
-    updated = re_model.replace(&updated, format!("${{1}}\"{}\"", llm.model)).to_string();
-    updated = re_temp.replace(&updated, format!("${{1}}{} ", llm.temperature)).to_string();
+    updated = re_provider
+        .replace(&updated, format!("${{1}}\"{}\"", llm.provider))
+        .to_string();
+    updated = re_model
+        .replace(&updated, format!("${{1}}\"{}\"", llm.model))
+        .to_string();
+    updated = re_temp
+        .replace(&updated, format!("${{1}}{} ", llm.temperature))
+        .to_string();
 
     // Handle chat_only
     if llm.chat_only {
@@ -507,10 +525,9 @@ fn apply_llm_preset_to_skill(
         if !updated.contains("chat_only") {
             // Add chat_only after temperature line
             let re_after_temp = regex::Regex::new(r#"(temperature:\s*[0-9.]+\s*\n)"#).ok()?;
-            updated = re_after_temp.replace(
-                &updated, 
-                format!("${{1}}      chat_only: true\n")
-            ).to_string();
+            updated = re_after_temp
+                .replace(&updated, format!("${{1}}      chat_only: true\n"))
+                .to_string();
         } else {
             // Update existing chat_only
             let re_co = regex::Regex::new(r#"(chat_only:\s*)(true|false)"#).ok()?;
@@ -546,7 +563,11 @@ fn resolve_reference_agents_dir(from: Option<&str>) -> anyhow::Result<std::path:
         // From autonoetic/autonoetic/ -> ../agents (autonoetic/agents)
         cargo_manifest.join("../agents"),
         // From autonoetic/autonoetic/ -> ../autonoetic/agents (same as above, explicit)
-        cargo_manifest.parent().and_then(|p| p.parent()).map(|p| p.join("agents")).unwrap_or_default(),
+        cargo_manifest
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("agents"))
+            .unwrap_or_default(),
     ];
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("agents"));
@@ -690,7 +711,11 @@ pub async fn run_agent_with_runtime(
 pub fn load_agent_runtime_context(
     config_path: &Path,
     agent_id: &str,
-) -> anyhow::Result<(autonoetic_types::agent::AgentManifest, String, std::path::PathBuf)> {
+) -> anyhow::Result<(
+    autonoetic_types::agent::AgentManifest,
+    String,
+    std::path::PathBuf,
+)> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let repo = autonoetic_gateway::AgentRepository::from_config(&config);
     let loaded = repo.get_sync(agent_id)?;
@@ -764,7 +789,10 @@ pub async fn run_agent_with_runtime_with_driver(
             }
             runtime.close_session("headless_complete_empty")?;
         }
-        Ok(TurnOutcome::Suspended { approval_request_id, .. }) => {
+        Ok(TurnOutcome::Suspended {
+            approval_request_id,
+            ..
+        }) => {
             println!("[Turn suspended pending approval: {}]", approval_request_id);
             runtime.close_session("headless_suspended")?;
         }
@@ -806,8 +834,19 @@ pub async fn run_interactive_session(
                     eprintln!("{}", u);
                 }
             }
-            Ok(TurnOutcome::Suspended { approval_request_id, .. }) => {
-                stdout.write_all(format!("[Turn suspended pending approval: {}]\n", approval_request_id).as_bytes()).await?;
+            Ok(TurnOutcome::Suspended {
+                approval_request_id,
+                ..
+            }) => {
+                stdout
+                    .write_all(
+                        format!(
+                            "[Turn suspended pending approval: {}]\n",
+                            approval_request_id
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
                 stdout.flush().await?;
             }
             Err(e) => {
@@ -847,8 +886,19 @@ pub async fn run_interactive_session(
                     eprintln!("{}", u);
                 }
             }
-            Ok(TurnOutcome::Suspended { approval_request_id, .. }) => {
-                stdout.write_all(format!("[Turn suspended pending approval: {}]\n", approval_request_id).as_bytes()).await?;
+            Ok(TurnOutcome::Suspended {
+                approval_request_id,
+                ..
+            }) => {
+                stdout
+                    .write_all(
+                        format!(
+                            "[Turn suspended pending approval: {}]\n",
+                            approval_request_id
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
                 stdout.flush().await?;
             }
             Err(e) => {
@@ -878,7 +928,10 @@ mod tests {
             request: &CompletionRequest,
         ) -> anyhow::Result<CompletionResponse> {
             for msg in &request.messages {
-                if msg.content.contains("sandbox command denied by ShellExec policy") {
+                if msg
+                    .content
+                    .contains("sandbox command denied by ShellExec policy")
+                {
                     anyhow::bail!("mock observed sandbox command denied by ShellExec policy");
                 }
             }
@@ -972,8 +1025,15 @@ Use tools when needed.
         );
         std::fs::write(&config_path, config_yaml).expect("config should write");
 
-        init_agent_scaffold(&config_path, "agent_bootstrap", Some("coder"), None, None, None)
-            .expect("scaffold should succeed");
+        init_agent_scaffold(
+            &config_path,
+            "agent_bootstrap",
+            Some("coder"),
+            None,
+            None,
+            None,
+        )
+        .expect("scaffold should succeed");
 
         let agent_dir = agents_dir.join("agent_bootstrap");
         let skill =
@@ -1012,16 +1072,21 @@ Use tools when needed.
     #[test]
     fn test_resolve_llm_config_uses_presets_from_config() {
         let mut config = GatewayConfig::default();
-        config.llm_presets.insert("fast".to_string(), autonoetic_types::config::LlmPreset {
-            provider: "openai".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            temperature: Some(0.0),
-            fallback_provider: None,
-            fallback_model: None,
-            chat_only: None,
-            context_window_tokens: None,
-        });
-        config.llm_preset_mapping.insert("coder".to_string(), "fast".to_string());
+        config.llm_presets.insert(
+            "fast".to_string(),
+            autonoetic_types::config::LlmPreset {
+                provider: "openai".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                temperature: Some(0.0),
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+            },
+        );
+        config
+            .llm_preset_mapping
+            .insert("coder".to_string(), "fast".to_string());
 
         let llm = resolve_llm_config(&config, Some("coder"), None, None, None);
         assert_eq!(llm.provider, "openai");
@@ -1033,7 +1098,13 @@ Use tools when needed.
     fn test_resolve_llm_config_cli_override_wins() {
         let config = GatewayConfig::default();
 
-        let llm = resolve_llm_config(&config, Some("coder"), None, Some("google"), Some("gemini-pro"));
+        let llm = resolve_llm_config(
+            &config,
+            Some("coder"),
+            None,
+            Some("google"),
+            Some("gemini-pro"),
+        );
         assert_eq!(llm.provider, "google");
         assert_eq!(llm.model, "gemini-pro");
     }
@@ -1078,7 +1149,10 @@ Use tools when needed.
         .expect("bootstrap should succeed");
 
         assert!(agents_dir.join("planner.default").join("SKILL.md").exists());
-        assert!(agents_dir.join("coder.default").join("runtime.lock").exists());
+        assert!(agents_dir
+            .join("coder.default")
+            .join("runtime.lock")
+            .exists());
     }
 
     #[test]

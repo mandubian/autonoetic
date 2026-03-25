@@ -6,8 +6,6 @@ use crate::execution::{
 };
 use crate::scheduler::append_task_board_entry;
 use crate::tracing::{EventScope, SessionId, TraceSession};
-#[cfg(test)]
-use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::task_board::{TaskBoardEntry, TaskStatus};
 use chrono::Utc;
@@ -398,23 +396,57 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                let session_id = params
+                let mut session_id = params
                     .session_id
                     .clone()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 let event_type = params.event_type.clone();
-                let target_agent_id = match self
-                    .resolve_ingest_target_agent_id(&session_id, params.target_agent_id.as_deref())
-                {
-                    Ok(value) => value,
-                    Err(e) => {
-                        return JsonRpcResponse::error(
-                            req.id,
-                            -32000,
-                            format!("event.ingest routing failed: {}", e),
-                        );
+                let mut ingest_rerouted_from_child = false;
+                let mut reroute_lead: Option<String> = None;
+                if params.event_type.trim() == "chat" {
+                    match crate::scheduler::workflow_store::reroute_chat_ingest_for_active_workflow_child_session(
+                        self.config.as_ref(),
+                        None,
+                        &session_id,
+                    ) {
+                        Ok(Some(reroute)) => {
+                            tracing::info!(
+                                target: "gateway.router",
+                                from_session = %session_id,
+                                root_session = %reroute.root_session_id,
+                                workflow_id = %reroute.workflow_id,
+                                "event.ingest chat rerouted from child workflow session to root planner session"
+                            );
+                            ingest_rerouted_from_child = true;
+                            reroute_lead = reroute.lead_agent_id;
+                            session_id = reroute.root_session_id;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("event.ingest routing failed: {}", e),
+                            );
+                        }
                     }
+                }
+                let explicit_target = if ingest_rerouted_from_child {
+                    reroute_lead.as_deref()
+                } else {
+                    params.target_agent_id.as_deref()
                 };
+                let target_agent_id =
+                    match self.resolve_ingest_target_agent_id(&session_id, explicit_target) {
+                        Ok(value) => value,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("event.ingest routing failed: {}", e),
+                            );
+                        }
+                    };
 
                 let ingress = IngressType::Ingest {
                     target_agent_id: target_agent_id.clone(),
@@ -489,6 +521,49 @@ impl JsonRpcRouter {
                             format!("event.ingest failed: {}", e),
                         )
                     }
+                }
+            }
+
+            "root_session.emergency_stop" => {
+                #[derive(Deserialize)]
+                struct EmergencyStopParams {
+                    root_session_id: String,
+                    reason: String,
+                    requested_by_type: String,
+                    requested_by_id: String,
+                    #[serde(default)]
+                    trigger_kind: Option<String>,
+                    #[serde(default)]
+                    source_agent_id: Option<String>,
+                }
+                let params: EmergencyStopParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for root_session.emergency_stop: {}", e),
+                        );
+                    }
+                };
+                let trigger = params
+                    .trigger_kind
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "manual".to_string());
+                match self
+                    .execution
+                    .emergency_stop_root_session(
+                        &params.root_session_id,
+                        &params.reason,
+                        &params.requested_by_type,
+                        &params.requested_by_id,
+                        &trigger,
+                        params.source_agent_id.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(v) => JsonRpcResponse::success(req.id, v),
+                    Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
                 }
             }
 
@@ -822,7 +897,6 @@ fn append_delegation_task_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::{init_gateway_causal_logger, log_gateway_causal_event};
     use crate::scheduler::{inbox_path, task_board_path, InboxEvent};
     use autonoetic_types::task_board::TaskBoardEntry;
     use tempfile::TempDir;

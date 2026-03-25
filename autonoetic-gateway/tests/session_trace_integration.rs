@@ -144,7 +144,7 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
 
     let session_id = "session-multi-agent-test";
 
-    let response = client
+    let _response = client
         .event_ingest(
             "test-multi-1",
             parent_id,
@@ -173,11 +173,25 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
 
     let mut all_events: Vec<(String, String)> = Vec::new();
 
+    let trace_label = |entry: &autonoetic_types::causal_chain::CausalChainEntry| -> String {
+        let tool = entry
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("tool_name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if entry.category == "tool_invoke" && !tool.is_empty() {
+            format!("{}/{} {}", entry.category, entry.action, tool)
+        } else {
+            format!("{}/{}", entry.category, entry.action)
+        }
+    };
+
     if gateway_causal_path.exists() {
         let entries = read_causal_entries(&gateway_causal_path)?;
         for entry in entries {
             if entry.session_id == session_id {
-                all_events.push(("gateway".to_string(), entry.action.clone()));
+                all_events.push(("gateway".to_string(), trace_label(&entry)));
             }
         }
     }
@@ -186,7 +200,7 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
         let entries = read_causal_entries(&parent_causal_path)?;
         for entry in entries {
             if entry.session_id == session_id {
-                all_events.push((parent_id.to_string(), entry.action.clone()));
+                all_events.push((parent_id.to_string(), trace_label(&entry)));
             }
         }
     }
@@ -195,7 +209,7 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
         let entries = read_causal_entries(&child_causal_path)?;
         for entry in entries {
             if entry.session_id == session_id {
-                all_events.push((child_id.to_string(), entry.action.clone()));
+                all_events.push((child_id.to_string(), trace_label(&entry)));
             }
         }
     }
@@ -270,7 +284,7 @@ Reply with "Done".
 
     let session_id = "session-deterministic-1";
 
-    let response = client
+    let _response = client
         .event_ingest(
             "test-2",
             agent_id,

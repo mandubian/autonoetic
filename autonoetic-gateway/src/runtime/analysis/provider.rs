@@ -156,6 +156,12 @@ pub enum AnalysisAction {
 /// # Example
 ///
 /// ```rust
+/// use autonoetic_gateway::runtime::analysis::provider::{
+///     AnalysisProvider, CapabilityAnalysis, CapabilityEvidence, FileToAnalyze, SecurityAnalysis,
+///     SecurityThreat, SecurityThreatType, ThreatSeverity,
+/// };
+///
+/// #[derive(Debug)]
 /// struct MyAnalyzer;
 ///
 /// impl AnalysisProvider for MyAnalyzer {
@@ -164,21 +170,44 @@ pub enum AnalysisAction {
 ///     }
 ///
 ///     fn analyze_capabilities(&self, files: &[FileToAnalyze]) -> CapabilityAnalysis {
-///         // Custom capability detection logic
 ///         CapabilityAnalysis {
 ///             inferred_types: vec!["NetworkAccess".to_string()],
-///             // ...
+///             excessive: vec![],
+///             missing: vec![],
+///             confidence: 0.9,
+///             evidence: vec![CapabilityEvidence {
+///                 file: files.first().map(|f| f.path.clone()).unwrap_or_default(),
+///                 line: Some(1),
+///                 pattern: "requests.get(".to_string(),
+///                 capability_type: "NetworkAccess".to_string(),
+///                 confidence: 0.9,
+///             }],
+///             provider: "my_custom_analyzer".to_string(),
 ///         }
 ///     }
 ///
 ///     fn analyze_security(&self, files: &[FileToAnalyze]) -> SecurityAnalysis {
-///         // Custom security analysis logic
 ///         SecurityAnalysis {
 ///             passed: true,
-///             // ...
+///             threats: vec![SecurityThreat {
+///                 threat_type: SecurityThreatType::Custom("none".to_string()),
+///                 severity: ThreatSeverity::Info,
+///                 description: "No critical threats detected".to_string(),
+///                 file: files.first().map(|f| f.path.clone()).unwrap_or_default(),
+///                 line: Some(1),
+///                 pattern: "n/a".to_string(),
+///                 confidence: 0.8,
+///             }],
+///             remote_access_detected: true,
+///             confidence: 0.8,
+///             provider: "my_custom_analyzer".to_string(),
 ///         }
 ///     }
 /// }
+///
+/// let analyzer = MyAnalyzer;
+/// let _ = analyzer.analyze_capabilities(&[]);
+/// let _ = analyzer.analyze_security(&[]);
 /// ```
 pub trait AnalysisProvider: Send + Sync + std::fmt::Debug {
     /// Name of this provider (e.g., "pattern", "llm", "hybrid")

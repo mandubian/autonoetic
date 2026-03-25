@@ -51,4 +51,7 @@ pub enum Capability {
     /// Execute scripts/code in the sandbox.
     /// The `patterns` field limits which commands can be run.
     CodeExecution { patterns: Vec<String> },
+
+    /// Request a gateway-level emergency stop for a root session (dedicated responders only).
+    EmergencyStop,
 }

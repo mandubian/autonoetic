@@ -1,11 +1,10 @@
-use autonoetic_gateway::execution::{gateway_causal_path, GatewayExecutionService};
+use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::scheduler::{
     append_inbox_event, background_state_path, run_scheduler_tick,
 };
 use autonoetic_types::background::{
     BackgroundState, ReevaluationState, ScheduledAction, WakeReason,
 };
-use autonoetic_types::causal_chain::CausalChainEntry;
 use autonoetic_types::config::GatewayConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,24 +53,6 @@ fn write_reevaluation_state(
     Ok(())
 }
 
-fn read_jsonl_entries(path: &Path) -> anyhow::Result<Vec<CausalChainEntry>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let body = std::fs::read_to_string(path)?;
-    body.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).map_err(anyhow::Error::from))
-        .collect()
-}
-
-fn count_action(entries: &[CausalChainEntry], session_id: &str, action: &str) -> usize {
-    entries
-        .iter()
-        .filter(|entry| entry.session_id == session_id && entry.action == action)
-        .count()
-}
-
 fn background_session(agent_id: &str) -> String {
     format!("background::{agent_id}")
 }
@@ -116,19 +97,6 @@ async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Re
     ));
     assert_eq!(state.last_result.as_deref(), Some("skipped"));
 
-    let gateway_entries = read_jsonl_entries(&gateway_causal_path(&config))?;
-    assert_eq!(
-        count_action(
-            &gateway_entries,
-            &session_id,
-            "background.should_wake.completed"
-        ),
-        1
-    );
-    assert_eq!(
-        count_action(&gateway_entries, &session_id, "background.wake.skipped"),
-        1
-    );
     Ok(())
 }
 
@@ -168,17 +136,6 @@ async fn test_background_scheduler_wake_on_new_work_through_public_api() -> anyh
         .join("skills")
         .join("from_public_inbox.md")
         .exists());
-    let session_id = background_session(agent_id);
-    let gateway_entries = read_jsonl_entries(&gateway_causal_path(&config))?;
-    assert_eq!(
-        count_action(&gateway_entries, &session_id, "background.wake.requested"),
-        1
-    );
-    assert_eq!(
-        count_action(&gateway_entries, &session_id, "background.wake.completed"),
-        1
-    );
-
     let state: BackgroundState = serde_json::from_str(&std::fs::read_to_string(
         background_state_path(&config, agent_id),
     )?)?;
@@ -248,11 +205,14 @@ async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result
 
     run_scheduler_tick(execution).await?;
 
-    let gateway_entries = read_jsonl_entries(&gateway_causal_path(&config))?;
-    assert_eq!(
-        count_action(&gateway_entries, &session_id, "background.wake.completed"),
-        2
-    );
+    let state_after_second: BackgroundState = serde_json::from_str(&std::fs::read_to_string(
+        background_state_path(&config, agent_id),
+    )?)?;
+    assert_eq!(state_after_second.last_result.as_deref(), Some("executed"));
+    assert!(matches!(
+        state_after_second.last_wake_reason,
+        Some(WakeReason::Timer { .. })
+    ));
 
     Ok(())
 }
@@ -331,28 +291,6 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
         Some("background_success")
     );
 
-    let session_id = background_session(agent_id);
-    let gateway_entries = read_jsonl_entries(&gateway_causal_path(&config))?;
-    assert_eq!(
-        count_action(
-            &gateway_entries,
-            &session_id,
-            "background.approval.requested"
-        ),
-        1
-    );
-    assert_eq!(
-        count_action(
-            &gateway_entries,
-            &session_id,
-            "background.approval.completed"
-        ),
-        1
-    );
-    assert_eq!(
-        count_action(&gateway_entries, &session_id, "background.wake.completed"),
-        1
-    );
     assert_eq!(decision.agent_id, agent_id);
     Ok(())
 }

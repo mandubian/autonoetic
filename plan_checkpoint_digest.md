@@ -1085,33 +1085,35 @@ Add a first-class `user.ask` tool that suspends execution and resumes from check
 - [x] **2B.3** Implement `user.ask` native tool in `tools.rs`. Arguments: `{ kind, question, context, options, allow_freeform }`. Always available.
 - [x] **2B.4** On `user.ask`, persist interaction row, save checkpoint, and stop the current turn cleanly.
 - [x] **2B.5** Add gateway APIs / CLI plumbing to answer an interaction by `interaction_id` with either `answer_option_id` or `answer_text`. CLI: `gateway interactions {list, answer, cancel}`.
-- [ ] **2B.6** Implement `resume_from_user_interaction()` in `execution.rs`: load checkpoint, inject the recorded answer into resumed state, and continue execution.
-- [ ] **2B.7** Wire chat UI rendering so questions with options are shown as structured prompts instead of plain assistant text only.
-- [ ] **2B.8** Extend `trace` commands to display user interactions alongside workflow and causal history.
-- [ ] **2B.9** Integration test: agent calls `user.ask` → session suspends → user answers → agent resumes from checkpoint with preserved loop guard and history.
-- [ ] **2B.10** Integration test: option-based answer resumes with selected option id and canonical value.
-- [ ] **2B.11** Integration test: freeform answer resumes with raw user text and is captured in digest + causal history.
-- [ ] **2B.12** Document and enforce incoming user message routing during active workflows: default route to lead/planner session; do not auto-interrupt running child tasks.
-- [ ] **2B.13** Integration test: user sends a new message while async child tasks are running → planner receives it → child tasks continue unless planner cancels them explicitly.
+- [x] **2B.6** Implement `resume_from_user_interaction()` in `execution.rs`: load checkpoint, inject the recorded answer into resumed state, and continue execution. (`spawn_agent_once` resumes when latest checkpoint is `UserInputRequired` and the store row is `answered`; checkpoint now saves assistant prefix + `pending_tool_state`.)
+- [x] **2B.7** Wire chat UI rendering so questions with options are shown as structured prompts instead of plain assistant text only. (Chat polls `user_interactions` via gateway store; renders Signal cards with numbered options + CLI hints; suppresses placeholder `[No response]` when a card was added.)
+- [x] **2B.8** Extend `trace` commands to display user interactions alongside workflow and causal history.
+- [x] **2B.9** Integration test: agent calls `user.ask` → session suspends → user answers → agent resumes from checkpoint with preserved loop guard and history.
+- [x] **2B.10** Integration test: option-based answer resumes with selected option id and canonical value.
+- [x] **2B.11** Integration test: freeform answer resumes with raw user text and is captured in digest + causal history. (Freeform text asserted in persisted `session_history`; `execution_traces` rows cover dispatched native tools — injected resume tool results are not re-logged as new traces.)
+- [x] **2B.12** Document and enforce incoming user message routing during active workflows: default route to lead/planner session; do not auto-interrupt running child tasks.
+- [x] **2B.13** Integration test: user sends a new message while async child tasks are running → planner receives it → child tasks continue unless planner cancels them explicitly.
 
 ### Phase 2C: Emergency Stop / Circuit Breaker
 Add a true root-session emergency stop path for running workflows, sessions, and sandbox child processes.
 
-- [ ] **2C.1** Extend `WorkflowRunStatus` and `TaskRunStatus` in `autonoetic-types/src/workflow.rs` with `EmergencyStopping`, `EmergencyStopped`, `Aborting`, and `Aborted`. Preserve serde compatibility for existing states.
-- [ ] **2C.2** Add `emergency_stops` and `active_executions` tables to `GatewayStore::open()` in `gateway_store.rs`, with store APIs for create/update/list and stale-heartbeat reconciliation.
-- [ ] **2C.3** Introduce an in-memory `ActiveExecutionRegistry` in the gateway runtime to track `tokio` abort handles and sandbox/middleware process kill handles keyed by root session / workflow / task / session.
-- [ ] **2C.4** Register workflow child tasks before `tokio::spawn` in `scheduler.rs`, and unregister them on normal completion, failure, approval suspension, or abort.
-- [ ] **2C.5** Register sandbox child process ownership before `wait_with_output()` in both lifecycle and native-tool execution paths so emergency stop can kill already-running child processes.
-- [ ] **2C.6** Implement `root_session.emergency_stop` plus CLI/API/chat plumbing. Behavior: persist stop request, mark the root workflow/session `EmergencyStopping`, cancel queued tasks, abort live tasks/processes, cancel pending approvals/interactions in scope, then finalize status.
-- [ ] **2C.6a** Add an internal gateway self-protection entrypoint that invokes the same stop pipeline when security policy detects a hard-stop breach.
-- [ ] **2C.6b** Reserve a dedicated privileged capability/tool path for the emergency-manager agent as the only agent-authorized requester; do not expose emergency stop through ordinary workflow delegation tools.
-- [ ] **2C.7** Write a terminal checkpoint with `YieldReason::EmergencyStop { stop_id }` and prevent auto-resume from that checkpoint.
-- [ ] **2C.8** Surface emergency-stop state in `trace` / workflow inspection commands, including partial-stop failures and any `lost` active executions after restart.
-- [ ] **2C.9** Integration test: root workflow with two running async children receives emergency stop → queued work cancelled, running tasks aborted, workflow ends `EmergencyStopped`.
+- [x] **2C.1** Extend `WorkflowRunStatus` and `TaskRunStatus` in `autonoetic-types/src/workflow.rs` with `EmergencyStopping`, `EmergencyStopped`, `Aborting`, and `Aborted`. Preserve serde compatibility for existing states.
+- [x] **2C.2** Add `emergency_stops` and `active_executions` tables to `GatewayStore::open()` in `gateway_store.rs`, with store APIs for create/update/list and stale-heartbeat reconciliation.
+- [x] **2C.3** Introduce an in-memory `ActiveExecutionRegistry` in the gateway runtime to track `tokio` abort handles and sandbox/middleware process kill handles keyed by root session / workflow / task / session.
+- [x] **2C.4** Register workflow child tasks before `tokio::spawn` in `scheduler.rs`, and unregister them on normal completion, failure, approval suspension, or abort.
+- [x] **2C.5** Register sandbox child process ownership before `wait_with_output()` in both lifecycle and native-tool execution paths so emergency stop can kill already-running child processes.
+- [x] **2C.6** Implement `root_session.emergency_stop` plus CLI/API/chat plumbing. Behavior: persist stop request, mark the root workflow/session `EmergencyStopping`, cancel queued tasks, abort live tasks/processes, cancel pending approvals/interactions in scope, then finalize status.
+- [x] **2C.6a** Add an internal gateway self-protection entrypoint that invokes the same stop pipeline when security policy detects a hard-stop breach.
+- [x] **2C.6b** Reserve a dedicated privileged capability/tool path for the emergency-manager agent as the only agent-authorized requester; do not expose emergency stop through ordinary workflow delegation tools.
+- [x] **2C.7** Write a terminal checkpoint with `YieldReason::EmergencyStop { stop_id }` and prevent auto-resume from that checkpoint.
+- [x] **2C.8** Surface emergency-stop state in `trace` / workflow inspection commands, including partial-stop failures and any `lost` active executions after restart.
+- [x] **2C.9** Integration test: root workflow with two running async children receives emergency stop → queued work cancelled, running tasks aborted, workflow ends `EmergencyStopped`.
 - [ ] **2C.10** Integration test: sandbox child process running under `wait_with_output()` receives emergency stop → process is killed and task ends `Aborted`.
 - [ ] **2C.11** Integration test: emergency stop during pending approval or `user.ask` interaction cancels the pending gate and does not allow resume.
 - [ ] **2C.12** Restart test: gateway crashes after stop requested but before completion → stale `active_executions` reconciled on startup and stop finishes as `stopped` or `partially_stopped` with audit details.
 - [ ] **2C.13** Authorization test: user/operator, gateway security subsystem, and the dedicated emergency-manager agent path are accepted; all other agents are denied.
+
+**Current 2C remainder:** explicit sandbox-child kill integration coverage (`2C.10`), restart reconciliation test (`2C.12`), and full authorization matrix test (`2C.13`).
 
 ### Phase 3: Live Digest
 Replace `timeline.md` with a richer real-time narrative.

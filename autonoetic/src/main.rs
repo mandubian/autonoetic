@@ -1,7 +1,7 @@
 mod cli;
 
 use clap::Parser;
-use cli::common::{Cli, Commands, dirs_or_default, mcp_registry_path};
+use cli::common::{dirs_or_default, mcp_registry_path, Cli, Commands};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,7 +41,13 @@ async fn main() -> anyhow::Result<()> {
         },
 
         Commands::Agent(args) => match &args.command {
-            cli::common::AgentCommands::Init { agent_id, template, preset, provider, model } => {
+            cli::common::AgentCommands::Init {
+                agent_id,
+                template,
+                preset,
+                provider,
+                model,
+            } => {
                 cli::agent::init_agent_scaffold(
                     &config_path,
                     agent_id,
@@ -126,12 +132,8 @@ async fn main() -> anyhow::Result<()> {
                 agent,
                 json,
             } => {
-                cli::trace::handle_trace_follow(
-                    &config_path,
-                    session_id,
-                    agent.as_deref(),
-                    *json,
-                ).await?;
+                cli::trace::handle_trace_follow(&config_path, session_id, agent.as_deref(), *json)
+                    .await?;
             }
             cli::common::TraceCommands::Fork {
                 session_id,
@@ -151,7 +153,8 @@ async fn main() -> anyhow::Result<()> {
                     agent.as_deref(),
                     *interactive,
                     *json,
-                ).await?;
+                )
+                .await?;
             }
             cli::common::TraceCommands::History {
                 session_id,
@@ -185,13 +188,8 @@ async fn main() -> anyhow::Result<()> {
                 json,
                 follow,
             } => {
-                cli::trace::handle_trace_graph(
-                    &config_path,
-                    session_or_workflow,
-                    *json,
-                    *follow,
-                )
-                .await?;
+                cli::trace::handle_trace_graph(&config_path, session_or_workflow, *json, *follow)
+                    .await?;
             }
         },
 

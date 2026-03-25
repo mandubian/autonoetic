@@ -391,6 +391,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
         None,
         Some(&config),
         None,
+        None,
     );
 
     // The call should succeed (not return approval_required)
@@ -461,6 +462,7 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
         Some("test-session"),
         None,
         Some(&config),
+        None,
         None,
     );
 
@@ -561,6 +563,7 @@ requests.get("https://api.cache-test.dev")"#;
         Some("test-session"),
         None,
         Some(&config),
+        None,
         None,
     );
 

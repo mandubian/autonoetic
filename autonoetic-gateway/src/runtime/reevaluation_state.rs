@@ -104,6 +104,7 @@ pub fn execute_scheduled_action(
                 None,
                 _config,
                 gateway_store,
+                None,
             )?;
 
             let parsed: serde_json::Value = serde_json::from_str(&result).map_err(|error| {

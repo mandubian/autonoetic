@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct LlmAnalyzer {
     /// Configuration for the LLM provider
-    config: LlmAnalysisConfig,
+    _config: LlmAnalysisConfig,
 }
 
 /// Configuration for LLM-based analysis.
@@ -98,13 +98,13 @@ impl LlmAnalyzer {
     /// Create a new LLM analyzer with default configuration.
     pub fn new() -> Self {
         Self {
-            config: LlmAnalysisConfig::default(),
+            _config: LlmAnalysisConfig::default(),
         }
     }
 
     /// Create with custom configuration.
     pub fn with_config(config: LlmAnalysisConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 
     /// Build the analysis prompt for capability detection.

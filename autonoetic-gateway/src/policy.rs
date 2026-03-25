@@ -489,6 +489,14 @@ impl PolicyEngine {
         false
     }
 
+    /// Privileged: request gateway emergency stop for a root session.
+    pub fn can_request_emergency_stop(&self) -> bool {
+        self.manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::EmergencyStop))
+    }
+
     /// Return the configured child-agent delegation limit, if any.
     pub fn spawn_agent_limit(&self) -> Option<u32> {
         self.manifest.capabilities.iter().find_map(|cap| {
