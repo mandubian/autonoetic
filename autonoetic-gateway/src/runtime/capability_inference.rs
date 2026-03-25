@@ -256,6 +256,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::AgentMessage { .. } => "AgentMessage",
         Capability::SandboxFunctions { .. } => "SandboxFunctions",
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation",
+        Capability::EmergencyStop => "EmergencyStop",
     }
 }
 
@@ -340,6 +341,7 @@ pub fn types_to_capabilities(types: &[String]) -> Vec<Capability> {
                 min_interval_secs: 60,
                 allow_reasoning: false,
             },
+            "EmergencyStop" => Capability::EmergencyStop,
             _ => Capability::ReadAccess {
                 scopes: vec!["*".to_string()],
             }, // Default fallback

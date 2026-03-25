@@ -199,7 +199,8 @@ async fn test_pending_notifications_accept_current_payloads_and_fail_invalid() -
         })?,
     );
     n_lower.request_id = Some("apr-mix0001".to_string());
-    n_lower.created_at = "2026-03-22T15:00:00Z".to_string();
+    let mix_base = chrono::Utc::now();
+    n_lower.created_at = mix_base.to_rfc3339();
 
     // 2) Another current Signal payload (valid)
     let mut n_modern = NotificationRecord::new(
@@ -216,7 +217,7 @@ async fn test_pending_notifications_accept_current_payloads_and_fail_invalid() -
         })?,
     );
     n_modern.request_id = Some("apr-mix0002".to_string());
-    n_modern.created_at = "2026-03-22T15:00:01Z".to_string();
+    n_modern.created_at = (mix_base + chrono::Duration::seconds(1)).to_rfc3339();
 
     // 3) Invalid payload should be marked failed (never delivered)
     let mut n_invalid = NotificationRecord::new(
@@ -226,7 +227,7 @@ async fn test_pending_notifications_accept_current_payloads_and_fail_invalid() -
         serde_json::json!({"foo": "bar"}),
     );
     n_invalid.request_id = Some("apr-mix0003".to_string());
-    n_invalid.created_at = "2026-03-22T15:00:02Z".to_string();
+    n_invalid.created_at = (mix_base + chrono::Duration::seconds(2)).to_rfc3339();
 
     store.create_notification_record(&n_lower)?;
     store.create_notification_record(&n_modern)?;
@@ -406,7 +407,7 @@ async fn test_pending_notification_delivery_retries_then_marks_failed() -> anyho
         })?,
     );
     n.request_id = Some("apr-retry0001".to_string());
-    n.created_at = "2026-03-22T17:00:00Z".to_string();
+    n.created_at = chrono::Utc::now().to_rfc3339();
     store.create_notification_record(&n)?;
 
     let execution = Arc::new(GatewayExecutionService::new(

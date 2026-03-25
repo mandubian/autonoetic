@@ -129,6 +129,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::AgentMessage { .. } => "AgentMessage",
         Capability::SandboxFunctions { .. } => "SandboxFunctions",
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation",
+        Capability::EmergencyStop => "EmergencyStop",
     }
 }
 

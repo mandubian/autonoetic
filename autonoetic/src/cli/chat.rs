@@ -25,10 +25,12 @@ use super::agent::format_llm_usage_for_cli;
 use super::common::{
     default_terminal_channel_id, default_terminal_sender_id, terminal_channel_envelope,
 };
-use autonoetic_types::agent::LlmExchangeUsage;
 use autonoetic_gateway::router::{
     JsonRpcRequest as GatewayJsonRpcRequest, JsonRpcResponse as GatewayJsonRpcResponse,
 };
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use autonoetic_types::agent::LlmExchangeUsage;
+use autonoetic_types::background::UserInteraction;
 
 // ============================================================================
 // Constants
@@ -77,14 +79,16 @@ struct App {
     target_hint: String,
     // Mouse selection - stored as CONTENT positions (row, col), not screen positions
     selecting: bool,
-    sel_start: Option<(usize, usize)>,  // (content_row, content_col)
-    sel_end: Option<(usize, usize)>,     // (content_row, content_col)
+    sel_start: Option<(usize, usize)>, // (content_row, content_col)
+    sel_end: Option<(usize, usize)>,   // (content_row, content_col)
     signal_resume_by_internal_id: HashMap<u64, SignalResumeRef>,
     signal_resume_inflight: HashSet<String>,
     seen_workflow_event_ids: HashSet<String>,
     workflow_events_bootstrapped: bool,
     current_workflow_id: Option<String>,
     workflow_status_line: String,
+    /// `user.ask` cards we already showed for this TUI session (avoid duplicate polls).
+    seen_user_interaction_prompts: HashSet<String>,
     // Persistent clipboard — must stay alive so arboard's background ownership
     // thread keeps running and clipboard managers have time to capture the content.
     clipboard: Option<arboard::Clipboard>,
@@ -111,6 +115,7 @@ impl App {
             workflow_events_bootstrapped: false,
             current_workflow_id: None,
             workflow_status_line: "workflow: n/a".to_string(),
+            seen_user_interaction_prompts: HashSet::new(),
             // Safe clipboard initialization - arboard can panic on headless/SSH systems
             clipboard: std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None),
         }
@@ -198,7 +203,9 @@ fn hydrate_session_history(
 
     let history_json = store.read_string(&handle)?;
     let history: Vec<autonoetic_gateway::llm::Message> = serde_json::from_str(&history_json)
-        .map_err(|e| anyhow::anyhow!("Invalid session_history payload for {}: {}", session_id, e))?;
+        .map_err(|e| {
+            anyhow::anyhow!("Invalid session_history payload for {}: {}", session_id, e)
+        })?;
 
     let mut restored = 0usize;
     for msg in history {
@@ -228,13 +235,107 @@ fn hydrate_session_history(
     Ok(restored)
 }
 
+/// Pending `user.ask` rows for this terminal session: exact session plus any under the same root
+/// (planner chat can surface child-session questions).
+fn list_pending_user_interactions_for_terminal_session(
+    store: &GatewayStore,
+    session_id: &str,
+) -> anyhow::Result<Vec<UserInteraction>> {
+    let root = autonoetic_gateway::runtime::content_store::root_session_id(session_id);
+    let mut by_id: HashMap<String, UserInteraction> = HashMap::new();
+    for i in store.get_pending_interactions_for_session(session_id)? {
+        by_id.insert(i.interaction_id.clone(), i);
+    }
+    for i in store.get_pending_interactions_for_root_session(&root)? {
+        by_id.entry(i.interaction_id.clone()).or_insert(i);
+    }
+    let mut v: Vec<_> = by_id.into_values().collect();
+    v.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(v)
+}
+
+/// Multi-line card for the TUI (Signal role), mirroring structured approval cards.
+fn format_user_interaction_prompt(interaction: &UserInteraction) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "User input required — {}",
+        interaction.interaction_id
+    ));
+    lines.push(format!("kind: {}", interaction.kind.as_str()));
+    lines.push(format!("question: {}", interaction.question));
+    if let Some(ctx) = &interaction.context {
+        if !ctx.trim().is_empty() {
+            lines.push(String::new());
+            lines.push("context:".to_string());
+            for ln in ctx.lines() {
+                lines.push(format!("  {}", ln));
+            }
+        }
+    }
+    if !interaction.options.is_empty() {
+        lines.push(String::new());
+        lines.push("Options (use --option with the id):".to_string());
+        for (n, o) in interaction.options.iter().enumerate() {
+            lines.push(format!("  {}. [{}] {} → {}", n + 1, o.id, o.label, o.value));
+        }
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "freeform: {}",
+        if interaction.allow_freeform {
+            "allowed (see --text)"
+        } else {
+            "not allowed — choose an option id"
+        }
+    ));
+    lines.push(String::new());
+    lines.push("Answer (CLI):".to_string());
+    if !interaction.options.is_empty() {
+        lines.push(format!(
+            "  autonoetic gateway interactions answer --interaction-id {} --option <id>",
+            interaction.interaction_id
+        ));
+    }
+    if interaction.allow_freeform {
+        lines.push(format!(
+            "  autonoetic gateway interactions answer --interaction-id {} --text \"…\"",
+            interaction.interaction_id
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Append structured cards for new pending interactions. Returns how many were added.
+fn append_new_pending_user_interaction_prompts(
+    app: &mut App,
+    store: &GatewayStore,
+    session_id: &str,
+) -> anyhow::Result<usize> {
+    let pending = list_pending_user_interactions_for_terminal_session(store, session_id)?;
+    let mut added = 0usize;
+    for interaction in pending {
+        if app
+            .seen_user_interaction_prompts
+            .contains(&interaction.interaction_id)
+        {
+            continue;
+        }
+        app.seen_user_interaction_prompts
+            .insert(interaction.interaction_id.clone());
+        let card = format_user_interaction_prompt(&interaction);
+        app.add_message(MessageRole::Signal, card);
+        added += 1;
+    }
+    Ok(added)
+}
+
 fn signal_resume_key(signal_session_id: &str, request_id: &str) -> String {
     format!("{}::{}", signal_session_id, request_id)
 }
 
-
-
-fn format_workflow_event_card(event: &autonoetic_types::workflow::WorkflowEventRecord) -> Option<String> {
+fn format_workflow_event_card(
+    event: &autonoetic_types::workflow::WorkflowEventRecord,
+) -> Option<String> {
     let ts_short: String = event.occurred_at.chars().take(19).collect();
     let task = event.task_id.as_deref().unwrap_or("-");
     let status = event
@@ -261,7 +362,10 @@ fn format_workflow_event_card(event: &autonoetic_types::workflow::WorkflowEventR
             } else {
                 "tool execution".to_string()
             };
-            Some(format!("⏸ [{}] Approval required: {} ({})", ts_short, task, kind))
+            Some(format!(
+                "⏸ [{}] Approval required: {} ({})",
+                ts_short, task, kind
+            ))
         }
         "task.approved" => Some(format!("✅ [{}] Approval approved: {}", ts_short, task)),
         "task.rejected" => Some(format!("❌ [{}] Approval rejected: {}", ts_short, task)),
@@ -272,13 +376,16 @@ fn format_workflow_event_card(event: &autonoetic_types::workflow::WorkflowEventR
         "task.paused" => Some(format!("⏸ [{}] Task paused: {}", ts_short, task)),
         "workflow.join.satisfied" => Some(format!("✅ [{}] Workflow join satisfied", ts_short)),
         "workflow.checkpoint.saved" => Some(format!("💾 [{}] Workflow checkpoint saved", ts_short)),
-        "task.checkpoint.saved" => Some(format!("💾 [{}] Task checkpoint saved: {}", ts_short, task)),
+        "task.checkpoint.saved" => {
+            Some(format!("💾 [{}] Task checkpoint saved: {}", ts_short, task))
+        }
         "task.updated" if status == "runnable" => {
             Some(format!("🔁 [{}] Task resumed: {}", ts_short, task))
         }
-        "task.updated" => {
-            Some(format!("🔄 [{}] Task updated: {} ({})", ts_short, task, status))
-        }
+        "task.updated" => Some(format!(
+            "🔄 [{}] Task updated: {} ({})",
+            ts_short, task, status
+        )),
         other => {
             // Catch-all: show unknown event types instead of silently dropping them
             Some(format!("⚡ [{}] {} (task: {})", ts_short, other, task))
@@ -343,7 +450,9 @@ fn refresh_workflow_status_line(
     let mut awaiting = 0usize;
     let mut done = 0usize;
 
-    if let Ok(tasks) = autonoetic_gateway::scheduler::list_task_runs_for_workflow(config, None, &workflow_id) {
+    if let Ok(tasks) =
+        autonoetic_gateway::scheduler::list_task_runs_for_workflow(config, None, &workflow_id)
+    {
         for t in tasks {
             match t.status {
                 autonoetic_types::workflow::TaskRunStatus::Pending => queued += 1,
@@ -352,20 +461,19 @@ fn refresh_workflow_status_line(
                 autonoetic_types::workflow::TaskRunStatus::AwaitingApproval => awaiting += 1,
                 autonoetic_types::workflow::TaskRunStatus::Succeeded
                 | autonoetic_types::workflow::TaskRunStatus::Failed
-                | autonoetic_types::workflow::TaskRunStatus::Cancelled => done += 1,
+                | autonoetic_types::workflow::TaskRunStatus::Cancelled
+                | autonoetic_types::workflow::TaskRunStatus::Aborted => done += 1,
                 autonoetic_types::workflow::TaskRunStatus::Paused => {}
+                autonoetic_types::workflow::TaskRunStatus::Aborting => {
+                    running += 1
+                }
             }
         }
     }
 
     app.workflow_status_line = format!(
         "wf:{} {} | run:{} queue:{} wait:{} done:{}",
-        workflow_id,
-        status,
-        running,
-        queued,
-        awaiting,
-        done
+        workflow_id, status, running, queued, awaiting, done
     );
 }
 
@@ -607,17 +715,17 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     let mut row: usize = 0;
 
     // Selection bounds are stored as CONTENT coordinates (content_row, content_col).
-    let (content_sel_top, content_sel_bot, sel_col_start_override, sel_col_end_override) = 
+    let (content_sel_top, content_sel_bot, sel_col_start_override, sel_col_end_override) =
         match (app.sel_start, app.sel_end) {
-        (Some((r1, c1)), Some((r2, c2))) => {
-            let lo_row = r1.min(r2);
-            let hi_row = r1.max(r2);
-            let lo_col = c1.min(c2);
-            let hi_col = c1.max(c2);
-            (lo_row, hi_row, lo_col, hi_col)
-        }
-        _ => (usize::MAX, usize::MAX, 0, 0),
-    };
+            (Some((r1, c1)), Some((r2, c2))) => {
+                let lo_row = r1.min(r2);
+                let hi_row = r1.max(r2);
+                let lo_col = c1.min(c2);
+                let hi_col = c1.max(c2);
+                (lo_row, hi_row, lo_col, hi_col)
+            }
+            _ => (usize::MAX, usize::MAX, 0, 0),
+        };
 
     for msg in &app.messages {
         let (icon, style) = match msg.role {
@@ -800,20 +908,25 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         if restored > 0 {
             app.add_message(
                 MessageRole::System,
-                format!("Restored {} message(s) from previous session history", restored),
+                format!(
+                    "Restored {} message(s) from previous session history",
+                    restored
+                ),
             );
         }
     }
-    
+
     // Show session info and workflow hint
     let root_session = autonoetic_gateway::runtime::content_store::root_session_id(&session_id);
     app.add_message(
         MessageRole::System,
         format!("Session: {} (root: {})", session_id, root_session),
     );
-    
+
     // Check if workflow exists for this session
-    if let Ok(Some(wf_id)) = autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(&config, root_session) {
+    if let Ok(Some(wf_id)) =
+        autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(&config, root_session)
+    {
         app.add_message(
             MessageRole::System,
             format!("🔗 Connected to workflow: {}", wf_id),
@@ -824,7 +937,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             format!("ℹ No workflow found for root session '{}'. Use --session-id to connect to an existing workflow.", root_session),
         );
     }
-    
+
     app.add_message(
         MessageRole::System,
         format!("Connecting to {}...", gateway_addr),
@@ -842,22 +955,30 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
 
     // Open gateway store for approvals and signals (same path as gateway daemon)
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config.as_ref());
-    let gateway_store = match autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir) {
-        Ok(store) => {
-            app.add_message(
-                MessageRole::System,
-                format!("✓ Gateway store connected: {}", gateway_dir.display()),
-            );
-            Some(store)
-        }
-        Err(e) => {
-            app.add_message(
-                MessageRole::System,
-                format!("⚠ Gateway store unavailable: {} (approvals may not be visible)", e),
-            );
-            None
-        }
-    };
+    let gateway_store =
+        match autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir) {
+            Ok(store) => {
+                app.add_message(
+                    MessageRole::System,
+                    format!("✓ Gateway store connected: {}", gateway_dir.display()),
+                );
+                Some(store)
+            }
+            Err(e) => {
+                app.add_message(
+                    MessageRole::System,
+                    format!(
+                        "⚠ Gateway store unavailable: {} (approvals may not be visible)",
+                        e
+                    ),
+                );
+                None
+            }
+        };
+
+    if let Some(ref store) = gateway_store {
+        let _ = append_new_pending_user_interaction_prompts(&mut app, store, &session_id);
+    }
 
     // Main loop
     loop {
@@ -865,7 +986,10 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         let stream = match TcpStream::connect(&gateway_addr).await {
             Ok(s) => s,
             Err(e) => {
-                app.add_message(MessageRole::System, format!("Gateway connection failed (reconnecting in 3s): {}", e));
+                app.add_message(
+                    MessageRole::System,
+                    format!("Gateway connection failed (reconnecting in 3s): {}", e),
+                );
                 terminal.draw(|f| draw(f, &app))?;
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
@@ -894,7 +1018,10 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             break; // User quit explicitly
         }
 
-        app.add_message(MessageRole::System, "Gateway disconnected, reconnecting in 3s...".to_string());
+        app.add_message(
+            MessageRole::System,
+            "Gateway disconnected, reconnecting in 3s...".to_string(),
+        );
         terminal.draw(|f| draw(f, &app))?;
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
@@ -978,6 +1105,24 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         .and_then(|v| v.get("assistant_reply").and_then(|r| r.as_str().map(ToOwned::to_owned)))
                                         .unwrap_or_else(|| "[No response]".to_string());
 
+                                    let new_user_prompts = if let Some(store) = gateway_store {
+                                        append_new_pending_user_interaction_prompts(
+                                            app, store, session_id,
+                                        )
+                                        .unwrap_or_else(|e| {
+                                            tracing::warn!(
+                                                target: "chat",
+                                                error = %e,
+                                                "pending user interaction poll failed"
+                                            );
+                                            0
+                                        })
+                                    } else {
+                                        0
+                                    };
+                                    let reply_is_placeholder =
+                                        reply.trim().is_empty() || reply == "[No response]";
+
                                     if let Some(structured) = extract_structured_approval(&reply) {
                                         app.add_message(MessageRole::Signal, structured.card);
                                     } else if let Some(req_id) = extract_approval_request_id(&reply) {
@@ -987,7 +1132,9 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         );
                                     }
 
-                                    app.add_message(MessageRole::Assistant, reply);
+                                    if !(new_user_prompts > 0 && reply_is_placeholder) {
+                                        app.add_message(MessageRole::Assistant, reply);
+                                    }
 
                                     if let Some(arr) =
                                         result_json.and_then(|v| v.get("llm_usage"))
@@ -1228,7 +1375,10 @@ async fn check_signals(
             || previous_workflow_status.starts_with("workflow: error");
         let curr_is_active = app.workflow_status_line.starts_with("wf:");
         if curr_is_active && (prev_is_na || app.current_workflow_id.is_none()) {
-            app.add_message(MessageRole::System, format!("🔗 Workflow connected: {}", app.workflow_status_line));
+            app.add_message(
+                MessageRole::System,
+                format!("🔗 Workflow connected: {}", app.workflow_status_line),
+            );
             processed_any = true;
         }
     }
@@ -1267,7 +1417,10 @@ async fn check_signals(
                     if should_bootstrap {
                         let recap_count = events.len().min(20);
                         if recap_count > 0 {
-                            app.add_message(MessageRole::System, "── workflow recap ──".to_string());
+                            app.add_message(
+                                MessageRole::System,
+                                "── workflow recap ──".to_string(),
+                            );
                             let start_idx = events.len().saturating_sub(recap_count);
                             for event in &events[start_idx..] {
                                 if let Some(card) = format_workflow_event_card(event) {
@@ -1348,6 +1501,18 @@ async fn check_signals(
         }
     }
 
+    if let Some(store) = store {
+        match append_new_pending_user_interaction_prompts(app, store, session_id) {
+            Ok(n) if n > 0 => processed_any = true,
+            Err(e) => tracing::warn!(
+                target: "chat",
+                error = %e,
+                "Failed to poll pending user interactions"
+            ),
+            _ => {}
+        }
+    }
+
     tracing::debug!(target: "chat", processed_any = processed_any, total_messages = app.messages.len(), "check_signals: complete");
     processed_any
 }
@@ -1358,7 +1523,8 @@ async fn check_signals(
 /// thread stays alive after the write — clipboard managers have time to see the
 /// content before it is released.
 fn copy_selection_to_clipboard(app: &mut App) {
-    let (Some((start_row, start_col)), Some((end_row, end_col))) = (app.sel_start, app.sel_end) else {
+    let (Some((start_row, start_col)), Some((end_row, end_col))) = (app.sel_start, app.sel_end)
+    else {
         return;
     };
 
@@ -1444,7 +1610,11 @@ fn copy_selection_to_clipboard(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_approval_request_id, extract_structured_approval, format_workflow_event_card,
+        extract_approval_request_id, extract_structured_approval, format_user_interaction_prompt,
+        format_workflow_event_card,
+    };
+    use autonoetic_types::background::{
+        UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
     };
     use autonoetic_types::workflow::WorkflowEventRecord;
 
@@ -1533,7 +1703,9 @@ mod tests {
         assert_eq!(parsed.request_id.as_deref(), Some("apr-89abcdef"));
         assert!(parsed.card.contains("kind: agent_install"));
         assert!(parsed.card.contains("agent: weather.fetcher"));
-        assert!(parsed.card.contains("retry field: promotion_gate.install_approval_ref"));
+        assert!(parsed
+            .card
+            .contains("retry field: promotion_gate.install_approval_ref"));
     }
 
     #[test]
@@ -1571,5 +1743,51 @@ mod tests {
         );
         let line = format_workflow_event_card(&event).expect("event should render");
         assert!(line.contains("Approval rejected: task-42"));
+    }
+
+    #[test]
+    fn test_format_user_interaction_prompt_lists_options() {
+        let interaction = UserInteraction {
+            interaction_id: "ui-deadbeef".to_string(),
+            session_id: "s1".to_string(),
+            root_session_id: "s1".to_string(),
+            agent_id: "lead".to_string(),
+            turn_id: "turn-1".to_string(),
+            kind: UserInteractionKind::Decision,
+            question: "Ship it?".to_string(),
+            context: Some("Release is tagged.".to_string()),
+            options: vec![
+                UserInteractionOption {
+                    id: "yes".to_string(),
+                    label: "Yes".to_string(),
+                    value: "ship".to_string(),
+                },
+                UserInteractionOption {
+                    id: "no".to_string(),
+                    label: "No".to_string(),
+                    value: "hold".to_string(),
+                },
+            ],
+            allow_freeform: true,
+            status: UserInteractionStatus::Pending,
+            answer_option_id: None,
+            answer_text: None,
+            answered_by: None,
+            created_at: "2026-03-25T00:00:00Z".to_string(),
+            answered_at: None,
+            expires_at: None,
+            workflow_id: None,
+            task_id: None,
+            checkpoint_turn_id: None,
+        };
+        let card = format_user_interaction_prompt(&interaction);
+        assert!(card.contains("ui-deadbeef"));
+        assert!(card.contains("kind: decision"));
+        assert!(card.contains("Ship it?"));
+        assert!(card.contains("Release is tagged."));
+        assert!(card.contains("[yes]"));
+        assert!(card.contains("→ ship"));
+        assert!(card.contains("--option <id>"));
+        assert!(card.contains("--text"));
     }
 }

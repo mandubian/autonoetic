@@ -82,47 +82,8 @@ async fn test_event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
     assert!(joined_messages.contains("Gateway event type: webhook"));
     assert!(joined_messages.contains("Incoming deployment event"));
 
-    let gateway_entries = read_causal_entries(
-        &agents_dir
-            .join(".gateway")
-            .join("history")
-            .join("causal_chain.jsonl"),
-    )?;
-
-    // Per-turn correlation: gateway entries should reference the session
-    let gateway_session_entries: Vec<_> = gateway_entries
-        .iter()
-        .filter(|e| e.session_id == session_id)
-        .collect();
-
-    assert!(
-        !gateway_session_entries.is_empty(),
-        "Gateway should have entries for session {}",
-        session_id
-    );
-    assert!(
-        gateway_session_entries
-            .iter()
-            .any(|entry| entry.action == "event.ingest.requested"),
-        "Gateway should have event.ingest.requested for session"
-    );
-    assert!(
-        gateway_session_entries
-            .iter()
-            .any(|entry| entry.action == "event.ingest.completed"),
-        "Gateway should have event.ingest.completed for session"
-    );
-
-    // Verify turn_id consistency - all gateway entries for this session should have matching turn_id
-    let turn_ids: std::collections::HashSet<_> = gateway_session_entries
-        .iter()
-        .filter_map(|e| e.turn_id.as_ref())
-        .collect();
-    assert!(
-        turn_ids.len() <= 1,
-        "All gateway entries for same session should share turn_id, found: {:?}",
-        turn_ids
-    );
+    // Gateway-wide causal_chain.jsonl is no longer written (events go to gateway.db).
+    // This test still verifies per-session agent causal traces under the agent directory.
 
     let agent_entries = read_causal_entries(
         &agents_dir
@@ -152,20 +113,15 @@ async fn test_event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
         session_id
     );
 
-    // Cross-source turn correlation: gateway and agent entries should share turn_id
-    if let (Some(gateway_turn), Some(agent_turn)) = (
-        gateway_session_entries
-            .first()
-            .and_then(|e| e.turn_id.as_ref()),
-        agent_session_entries
-            .first()
-            .and_then(|e| e.turn_id.as_ref()),
-    ) {
-        assert_eq!(
-            gateway_turn, agent_turn,
-            "Gateway and agent should share turn_id for proper per-turn correlation"
-        );
-    }
+    let turn_ids: std::collections::HashSet<_> = agent_session_entries
+        .iter()
+        .filter_map(|e| e.turn_id.as_ref())
+        .collect();
+    assert!(
+        turn_ids.len() <= 1,
+        "Agent entries for this session should share turn_id, found: {:?}",
+        turn_ids
+    );
 
     server.abort();
     Ok(())

@@ -214,6 +214,7 @@ fn install_policy_restricted_agent(
     agent_id: &str,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(agent_dir.join("scripts"))?;
+    std::fs::create_dir_all(agent_dir.join("state"))?;
 
     std::fs::write(
         agent_dir.join("scripts/write.py"),

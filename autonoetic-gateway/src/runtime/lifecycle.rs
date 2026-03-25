@@ -6,7 +6,8 @@ use crate::llm::{CompletionRequest, LlmDriver, Message, StopReason, ToolDefiniti
 use crate::policy::PolicyEngine;
 use crate::runtime::artifact::extract_artifacts_from_text;
 use crate::runtime::checkpoint::{
-    prune_checkpoints, save_checkpoint, LlmConfigSnapshot, SessionCheckpoint, YieldReason,
+    prune_checkpoints, save_checkpoint, LlmConfigSnapshot, PendingToolCall, PendingToolState,
+    SessionCheckpoint, YieldReason,
 };
 use crate::runtime::disclosure::DisclosureState;
 use crate::runtime::guard::LoopGuard;
@@ -116,6 +117,8 @@ pub struct AgentExecutor {
     pub task_id: Option<String>,
     /// SHA-256 of runtime.lock content, captured at session start for reproducibility.
     pub runtime_lock_hash: Option<String>,
+    /// Emergency-stop hooks (sandbox PIDs, etc.); same registry as [`crate::execution::GatewayExecutionService`].
+    pub active_executions: Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
 }
 
 impl AgentExecutor {
@@ -148,6 +151,7 @@ impl AgentExecutor {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            active_executions: None,
         }
     }
 
@@ -201,6 +205,14 @@ impl AgentExecutor {
         self
     }
 
+    pub fn with_active_executions(
+        mut self,
+        registry: Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
+    ) -> Self {
+        self.active_executions = registry;
+        self
+    }
+
     fn ensure_session_id(&mut self) -> String {
         if let Some(id) = &self.session_id {
             return id.clone();
@@ -243,6 +255,7 @@ impl AgentExecutor {
         history: &[Message],
         turn_id: &str,
         yield_reason: YieldReason,
+        pending_tool_state: Option<PendingToolState>,
     ) -> SessionCheckpoint {
         let llm_config_snapshot = self
             .manifest
@@ -272,7 +285,7 @@ impl AgentExecutor {
             yield_reason,
             content_store_refs: vec![],
             created_at: chrono::Utc::now().to_rfc3339(),
-            pending_tool_state: None,
+            pending_tool_state,
             llm_rounds_consumed: llm_rounds,
             tool_invocations_consumed: 0, // tracked separately if needed
             tokens_consumed: tokens,
@@ -414,7 +427,8 @@ impl AgentExecutor {
         loop {
             // Loop guard check — save checkpoint before propagating max-turns error
             if let Err(e) = self.guard.check_loop() {
-                let cp = self.build_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached);
+                let cp =
+                    self.build_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached, None);
                 self.save_checkpoint_if_possible(&cp);
                 return Err(e);
             }
@@ -422,7 +436,12 @@ impl AgentExecutor {
             // Budget check — save checkpoint before propagating budget-exhausted error
             if let Some(budget) = self.session_budget.as_ref() {
                 if let Err(e) = budget.check_pre_llm(&session_id) {
-                    let cp = self.build_checkpoint(history, &turn_id, YieldReason::BudgetExhausted);
+                    let cp = self.build_checkpoint(
+                        history,
+                        &turn_id,
+                        YieldReason::BudgetExhausted,
+                        None,
+                    );
                     self.save_checkpoint_if_possible(&cp);
                     return Err(e);
                 }
@@ -550,8 +569,12 @@ impl AgentExecutor {
                         response.usage.output_tokens,
                         estimated_cost_usd,
                     ) {
-                        let cp =
-                            self.build_checkpoint(history, &turn_id, YieldReason::BudgetExhausted);
+                        let cp = self.build_checkpoint(
+                            history,
+                            &turn_id,
+                            YieldReason::BudgetExhausted,
+                            None,
+                        );
                         self.save_checkpoint_if_possible(&cp);
                         return Err(e);
                     }
@@ -667,12 +690,29 @@ impl AgentExecutor {
                                 history,
                                 &turn_id,
                                 YieldReason::BudgetExhausted,
+                                None,
                             );
                             self.save_checkpoint_if_possible(&cp);
                             return Err(e);
                         }
                     }
 
+                    let tool_run_ctx =
+                        match (self.active_executions.as_ref(), self.session_id.as_ref()) {
+                            (Some(reg), Some(sid)) => {
+                                Some(crate::runtime::active_execution_registry::NativeToolRunContext {
+                                    registry: reg.clone(),
+                                    root_session_id:
+                                        crate::runtime::session_timeline::base_session_id(sid)
+                                            .to_string(),
+                                    workflow_id: self.workflow_id.clone(),
+                                    task_id: self.task_id.clone(),
+                                    session_id: sid.clone(),
+                                    agent_id: self.manifest.agent.id.clone(),
+                                })
+                            }
+                            _ => None,
+                        };
                     let mut processor = ToolCallProcessor::new(
                         &mut mcp_runtime,
                         &self.registry,
@@ -681,6 +721,7 @@ impl AgentExecutor {
                         secret_store.as_mut(),
                         self.config.as_deref(),
                         self.gateway_store.clone(),
+                        tool_run_ctx,
                     )
                     .with_session_context(self.session_id.clone(), Some(turn_id.clone()));
 
@@ -773,6 +814,7 @@ impl AgentExecutor {
                             YieldReason::ApprovalRequired {
                                 approval_request_id: request_id.clone(),
                             },
+                            None,
                         );
                         self.save_checkpoint_if_possible(&cp);
 
@@ -802,17 +844,44 @@ impl AgentExecutor {
                     });
 
                     if let Some((pending_call_id, interaction_id)) = interaction_info {
-                        // User interaction required — save checkpoint and suspend.
+                        // User interaction required — persist assistant prefix + completed tool
+                        // results, then checkpoint (pending `user.ask` has no result until resume).
                         let completed_results = results[..results.len() - 1].to_vec();
                         let remaining_calls = response.tool_calls[results.len()..].to_vec();
 
-                        // Save checkpoint with UserInputRequired yield reason
+                        let pending_tc = response
+                            .tool_calls
+                            .iter()
+                            .find(|tc| tc.id == pending_call_id)
+                            .expect("pending user interaction call id must match a tool call");
+
+                        history.push(assistant_msg);
+                        for (id, name, result) in &completed_results {
+                            history.push(Message::tool_result(
+                                id.clone(),
+                                name.clone(),
+                                result.clone(),
+                            ));
+                        }
+
+                        let pending_tool_state = Some(PendingToolState {
+                            completed_tool_results: completed_results.clone(),
+                            pending_tool_call: PendingToolCall {
+                                call_id: pending_call_id.clone(),
+                                tool_name: pending_tc.name.clone(),
+                                arguments: pending_tc.arguments.clone(),
+                                approval_response: None,
+                            },
+                            remaining_tool_calls: remaining_calls.clone(),
+                        });
+
                         let cp = self.build_checkpoint(
                             history,
                             &turn_id,
                             YieldReason::UserInputRequired {
                                 interaction_id: interaction_id.clone(),
                             },
+                            pending_tool_state,
                         );
                         self.save_checkpoint_if_possible(&cp);
 
@@ -824,17 +893,6 @@ impl AgentExecutor {
                             pending_call_id = %pending_call_id,
                             "Turn suspended at user interaction boundary"
                         );
-
-                        // Inject the assistant message and tool results into history
-                        // so the checkpoint has full context for resume
-                        history.push(assistant_msg);
-                        for (id, name, result) in &completed_results {
-                            history.push(Message::tool_result(
-                                id.clone(),
-                                name.clone(),
-                                result.clone(),
-                            ));
-                        }
 
                         // Return Completed (not Suspended) — user interaction suspension
                         // doesn't use the TurnContinuation path. The resume happens via
@@ -934,7 +992,8 @@ impl AgentExecutor {
                     }
 
                     // Save checkpoint at hibernation yield point
-                    let cp = self.build_checkpoint(history, &turn_id, YieldReason::Hibernation);
+                    let cp =
+                        self.build_checkpoint(history, &turn_id, YieldReason::Hibernation, None);
                     self.save_checkpoint_if_possible(&cp);
                     if let Some(config) = self.config.as_ref() {
                         // Prune old checkpoints, keep last 3
@@ -1549,6 +1608,7 @@ mod tests {
             _turn_id: Option<&str>,
             _config: Option<&autonoetic_types::config::GatewayConfig>,
             _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
         ) -> anyhow::Result<String> {
             Ok(serde_json::json!({
                 "ok": false,

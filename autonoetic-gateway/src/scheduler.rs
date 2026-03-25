@@ -315,7 +315,8 @@ pub async fn process_queued_workflow_tasks(
             match existing.status {
                 autonoetic_types::workflow::TaskRunStatus::Succeeded
                 | autonoetic_types::workflow::TaskRunStatus::Failed
-                | autonoetic_types::workflow::TaskRunStatus::Cancelled => {
+                | autonoetic_types::workflow::TaskRunStatus::Cancelled
+                | autonoetic_types::workflow::TaskRunStatus::Aborted => {
                     let _ = workflow_store::dequeue_task(
                         &config,
                         store,
@@ -449,6 +450,7 @@ pub async fn process_queued_workflow_tasks(
 
         // Spawn background execution
         let exec = execution.clone();
+        let reg = execution.active_executions();
         let agent_id = queued_task.agent_id.clone();
         let message = queued_task.message.clone();
         let session_id = queued_task.child_session_id.clone();
@@ -458,12 +460,34 @@ pub async fn process_queued_workflow_tasks(
         let t_id = queued_task.task_id.clone();
         let cfg = config.clone();
 
-        tokio::spawn(async move {
-            spawn_task_execution(
-                exec, cfg, wf_id, t_id, agent_id, message, session_id, source_id, metadata,
-            )
-            .await;
+        let join = tokio::spawn({
+            let reg = reg.clone();
+            let wf_for_reg = wf_id.clone();
+            let tid_for_reg = t_id.clone();
+            async move {
+                struct Unreg {
+                    reg: Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>,
+                    wf: String,
+                    tid: String,
+                }
+                impl Drop for Unreg {
+                    fn drop(&mut self) {
+                        self.reg
+                            .unregister_workflow_task(&self.wf, &self.tid);
+                    }
+                }
+                let _unreg = Unreg {
+                    reg,
+                    wf: wf_for_reg,
+                    tid: tid_for_reg,
+                };
+                spawn_task_execution(
+                    exec, cfg, wf_id, t_id, agent_id, message, session_id, source_id, metadata,
+                )
+                .await;
+            }
         });
+        reg.register_workflow_task(&queued_task.workflow_id, &queued_task.task_id, join.abort_handle());
     }
 
     Ok(())
@@ -518,9 +542,81 @@ async fn spawn_task_execution(
         checkpoint_context,
     );
 
+    let execution_id = format!("exec-wf-{}-{}", t_id, &uuid::Uuid::new_v4().to_string()[..8]);
+    let workflow_run = match workflow_store::load_workflow_run(&cfg, store, &wf_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            tracing::error!(
+                target: "workflow",
+                workflow_id = %wf_id,
+                task_id = %t_id,
+                "missing workflow run for async task"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "workflow",
+                workflow_id = %wf_id,
+                error = %e,
+                "load_workflow_run failed for async task"
+            );
+            return;
+        }
+    };
+
+    let finish_active_row = {
+        let gs = exec.gateway_store();
+        let eid = execution_id.clone();
+        move |status: &str| {
+            if let Some(ref g) = gs {
+                if let Err(e) = g.complete_active_execution(&eid, status, None) {
+                    tracing::debug!(
+                        target: "workflow",
+                        execution_id = %eid,
+                        error = %e,
+                        "complete_active_execution"
+                    );
+                }
+            }
+        }
+    };
+
+    if let Some(gs) = exec.gateway_store() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let row = gateway_store::ActiveExecutionRecord {
+            execution_id: execution_id.clone(),
+            root_session_id: workflow_run.root_session_id.clone(),
+            workflow_id: Some(wf_id.clone()),
+            task_id: Some(t_id.clone()),
+            session_id: session_id.clone(),
+            agent_id: agent_id.clone(),
+            execution_kind: "workflow_task".to_string(),
+            driver: None,
+            pid: None,
+            host_id: gateway_store::default_gateway_host_id(),
+            status: "running".to_string(),
+            started_at: now.clone(),
+            heartbeat_at: now,
+            stop_requested_at: None,
+            stopped_at: None,
+            stop_id: None,
+        };
+        if let Err(e) = gs.upsert_active_execution(&row) {
+            tracing::warn!(
+                target: "workflow",
+                task_id = %t_id,
+                error = %e,
+                "upsert_active_execution"
+            );
+        }
+    }
+
     let heartbeat_cfg = cfg.clone();
     let heartbeat_wf_id = wf_id.clone();
     let heartbeat_task_id = t_id.clone();
+    let heartbeat_exec_id = execution_id.clone();
+    let heartbeat_gs = exec.gateway_store();
     let heartbeat_interval_secs = task_claim_heartbeat_interval_secs(cfg.as_ref());
     let heartbeat = tokio::spawn(async move {
         let mut interval =
@@ -529,10 +625,13 @@ async fn spawn_task_execution(
             interval.tick().await;
             let _ = workflow_store::refresh_task_claim_heartbeat(
                 &heartbeat_cfg,
-                None, // Heartbeat in async task currently doesn't have easy access to store without more refactoring
+                None,
                 &heartbeat_wf_id,
                 &heartbeat_task_id,
             );
+            if let Some(ref g) = heartbeat_gs {
+                let _ = g.touch_active_execution_heartbeat(&heartbeat_exec_id);
+            }
         }
     });
 
@@ -591,6 +690,7 @@ async fn spawn_task_execution(
                     approval_request_id = %request_id,
                     "Turn suspended at approval gate; continuation saved; task awaiting approval"
                 );
+                finish_active_row("stopped");
                 return;
             }
 
@@ -625,6 +725,7 @@ async fn spawn_task_execution(
                 }),
             );
             let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
+            finish_active_row("stopped");
         }
         Err(e) => {
             if let Err(inner) = workflow_store::update_task_run_status(
@@ -647,6 +748,7 @@ async fn spawn_task_execution(
                 serde_json::json!({ "status": "failed", "error": e.to_string() }),
             );
             let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
+            finish_active_row("stopped");
         }
     }
 }
@@ -673,6 +775,15 @@ pub async fn process_runnable_workflow_tasks(
         let store = execution.gateway_store();
         let store = store.as_deref();
         let workflow_run = workflow_store::load_workflow_run(&config, store, &wf_id)?;
+        if let Some(ref wr) = workflow_run {
+            if matches!(
+                wr.status,
+                autonoetic_types::workflow::WorkflowRunStatus::EmergencyStopping
+                    | autonoetic_types::workflow::WorkflowRunStatus::EmergencyStopped
+            ) {
+                continue;
+            }
+        }
         let tasks = workflow_store::list_task_runs_for_workflow(&config, store, &wf_id)?;
 
         for task in tasks {
@@ -693,6 +804,20 @@ pub async fn process_runnable_workflow_tasks(
             );
 
             if workflow_store::queued_task_exists(&config, &wf_id, &task.task_id) {
+                if let Err(e) = workflow_store::refresh_queued_task_message_from_task_checkpoint(
+                    &config,
+                    store,
+                    &wf_id,
+                    &task.task_id,
+                ) {
+                    tracing::warn!(
+                        target: "workflow",
+                        error = %e,
+                        workflow_id = %wf_id,
+                        task_id = %task.task_id,
+                        "Failed to refresh queued task from checkpoint"
+                    );
+                }
                 continue;
             }
 

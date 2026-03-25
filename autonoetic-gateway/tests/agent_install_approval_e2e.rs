@@ -176,6 +176,7 @@ async fn test_agent_install_full_approval_flow() {
             None,
             Some(&config),
             None,
+            None,
         )
         .expect("install should return approval request, not error");
 
@@ -288,6 +289,7 @@ async fn test_agent_install_full_approval_flow() {
             None,
             Some(&config),
             None,
+            None,
         )
         .expect("retry should succeed with stored payload");
 
@@ -373,6 +375,7 @@ async fn test_agent_install_rejects_retry_when_payload_missing() {
             None,
             Some(&config),
             None,
+            None,
         )
         .expect("install should return approval request");
 
@@ -448,6 +451,7 @@ async fn test_agent_install_rejects_retry_when_payload_missing() {
         None,
         Some(&config),
         None,
+        None,
     );
 
     // The retry MUST fail — stored payload is missing, so the gateway
@@ -520,6 +524,7 @@ async fn test_agent_install_rejects_invalid_approval_ref() {
         None,
         Some(&config),
         None,
+        None,
     );
 
     // Invalid approval_ref returns an error (not a JSON response)
@@ -578,6 +583,7 @@ async fn test_agent_install_approval_policies() {
             None,
             Some(&config_always),
             None,
+            None,
         )
         .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&result_always).unwrap();
@@ -607,6 +613,7 @@ async fn test_agent_install_approval_policies() {
             None,
             None,
             Some(&config_never),
+            None,
             None,
         )
         .unwrap();

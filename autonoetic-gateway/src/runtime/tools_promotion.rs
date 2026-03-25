@@ -99,6 +99,7 @@ impl NativeTool for PromotionRecordTool {
         turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: PromotionRecordArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -206,6 +207,7 @@ impl NativeTool for PromotionQueryTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: PromotionQueryArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;

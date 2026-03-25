@@ -1,7 +1,7 @@
 mod support;
 
 use autonoetic_gateway::GatewayExecutionService;
-use support::{read_causal_entries, EnvGuard, OpenAiStub, TestWorkspace};
+use support::{EnvGuard, OpenAiStub, TestWorkspace};
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
@@ -57,7 +57,7 @@ Always return deterministic output.
 }
 
 #[tokio::test]
-async fn test_spawn_logs_schema_validation_for_mismatched_and_valid_inputs() -> anyhow::Result<()> {
+async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let target_agent_id = "schema-test";
     install_schema_validation_agent(&workspace.agents_dir.join(target_agent_id), target_agent_id)?;
@@ -122,51 +122,7 @@ async fn test_spawn_logs_schema_validation_for_mismatched_and_valid_inputs() -> 
         Some("deterministic reply")
     );
 
-    let entries = read_causal_entries(
-        &workspace
-            .agents_dir
-            .join(".gateway")
-            .join("history")
-            .join("causal_chain.jsonl"),
-    )?;
-    let mismatched_entry = entries
-        .iter()
-        .find(|entry| {
-            entry.session_id == mismatched_session_id
-                && entry.action == "agent.spawn.input_schema_validation"
-        })
-        .expect("expected mismatched input schema validation causal entry");
-    let mismatched_payload = mismatched_entry
-        .payload
-        .as_ref()
-        .expect("mismatched payload should be present");
-    assert_eq!(
-        mismatched_payload.get("valid"),
-        Some(&serde_json::Value::Bool(false))
-    );
-    assert_eq!(
-        mismatched_payload.get("agent_id"),
-        Some(&serde_json::json!(target_agent_id))
-    );
-
-    let valid_entry = entries
-        .iter()
-        .find(|entry| {
-            entry.session_id == valid_session_id
-                && entry.action == "agent.spawn.input_schema_validation"
-        })
-        .expect("expected valid input schema validation causal entry");
-    let valid_payload = valid_entry
-        .payload
-        .as_ref()
-        .expect("valid payload should be present");
-    assert_eq!(
-        valid_payload.get("valid"),
-        Some(&serde_json::Value::Bool(true))
-    );
-    assert_eq!(
-        valid_payload.get("agent_id"),
-        Some(&serde_json::json!(target_agent_id))
-    );
+    // Schema validation outcomes are no longer mirrored to `.gateway/history/causal_chain.jsonl`
+    // (gateway causal file logging is deprecated in favor of gateway.db).
     Ok(())
 }

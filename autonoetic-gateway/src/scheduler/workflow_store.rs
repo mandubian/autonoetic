@@ -298,6 +298,8 @@ fn workflow_run_status_snake(s: WorkflowRunStatus) -> &'static str {
         WorkflowRunStatus::WaitingChildren => "waiting_children",
         WorkflowRunStatus::BlockedApproval => "blocked_approval",
         WorkflowRunStatus::Resumable => "resumable",
+        WorkflowRunStatus::EmergencyStopping => "emergency_stopping",
+        WorkflowRunStatus::EmergencyStopped => "emergency_stopped",
         WorkflowRunStatus::Completed => "completed",
         WorkflowRunStatus::Failed => "failed",
         WorkflowRunStatus::Cancelled => "cancelled",
@@ -311,6 +313,8 @@ fn task_run_status_snake(s: TaskRunStatus) -> &'static str {
         TaskRunStatus::Running => "running",
         TaskRunStatus::AwaitingApproval => "awaiting_approval",
         TaskRunStatus::Paused => "paused",
+        TaskRunStatus::Aborting => "aborting",
+        TaskRunStatus::Aborted => "aborted",
         TaskRunStatus::Succeeded => "succeeded",
         TaskRunStatus::Failed => "failed",
         TaskRunStatus::Cancelled => "cancelled",
@@ -537,9 +541,9 @@ pub fn update_task_run_status(
         }
     }
 
-    let event_type = match &status {
+        let event_type = match &status {
         TaskRunStatus::Succeeded => "task.completed",
-        TaskRunStatus::Failed | TaskRunStatus::Cancelled => "task.failed",
+        TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Aborted => "task.failed",
         TaskRunStatus::AwaitingApproval => "task.awaiting_approval",
         TaskRunStatus::Running => "task.started",
         _ => "task.updated",
@@ -564,7 +568,7 @@ pub fn update_task_run_status(
     if let Some(wf) = load_workflow_run(config, store, workflow_id)? {
         let (causal_action, causal_status) = match status {
             TaskRunStatus::Succeeded => ("workflow.task.completed", EntryStatus::Success),
-            TaskRunStatus::Failed | TaskRunStatus::Cancelled => {
+            TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Aborted => {
                 ("workflow.task.failed", EntryStatus::Error)
             }
             TaskRunStatus::AwaitingApproval => {
@@ -602,9 +606,16 @@ pub fn update_task_run_status(
         // Check join condition after terminal task updates
         let is_terminal = matches!(
             status,
-            TaskRunStatus::Succeeded | TaskRunStatus::Failed | TaskRunStatus::Cancelled
+            TaskRunStatus::Succeeded
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled
+                | TaskRunStatus::Aborted
         );
-        if is_terminal && !wf.join_task_ids.is_empty() {
+        let wf_not_emergency_stopped = !matches!(
+            wf.status,
+            WorkflowRunStatus::EmergencyStopping | WorkflowRunStatus::EmergencyStopped
+        );
+        if is_terminal && wf_not_emergency_stopped && !wf.join_task_ids.is_empty() {
             if let Ok(true) = check_join_condition(config, store, workflow_id) {
                 let mut wf_mut = wf;
                 wf_mut.status = WorkflowRunStatus::Resumable;
@@ -811,6 +822,44 @@ pub fn queued_task_exists(config: &GatewayConfig, workflow_id: &str, task_id: &s
     queued_task_path(config, workflow_id, task_id).exists()
 }
 
+/// When a queue file already exists but the task checkpoint has a newer `resume_message`
+/// (e.g. after `approval_resolved`), update the queued task payload in place.
+pub fn refresh_queued_task_message_from_task_checkpoint(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    task_id: &str,
+) -> anyhow::Result<()> {
+    if !queued_task_exists(config, workflow_id, task_id) {
+        return Ok(());
+    }
+    let Some(cp) = load_task_checkpoint(config, store, workflow_id, task_id)? else {
+        return Ok(());
+    };
+    if cp.step != "approval_resolved" {
+        return Ok(());
+    }
+    let resume_raw = cp.state.get("resume_message");
+    let rm = match resume_raw {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(v) => serde_json::to_string(v)?,
+        None => return Ok(()),
+    };
+    let path = queued_task_path(config, workflow_id, task_id);
+    let mut q: QueuedTaskRun = read_json_file(&path)?;
+    if q.message != rm {
+        q.message = rm;
+        write_json_file(&path, &q)?;
+        tracing::info!(
+            target: "workflow",
+            workflow_id = %workflow_id,
+            task_id = %task_id,
+            "Refreshed queued task message from approval task checkpoint"
+        );
+    }
+    Ok(())
+}
+
 /// Enqueue a task for async execution by the scheduler.
 /// Also updates the workflow's `queued_task_ids` and `join_task_ids`.
 pub fn enqueue_task(
@@ -825,6 +874,12 @@ pub fn enqueue_task(
 
     let mut run = load_workflow_run(config, store, &queued.workflow_id)?
         .ok_or_else(|| anyhow::anyhow!("workflow '{}' not found", queued.workflow_id))?;
+    anyhow::ensure!(
+        run.status != WorkflowRunStatus::EmergencyStopping
+            && run.status != WorkflowRunStatus::EmergencyStopped,
+        "workflow '{}' is in emergency stop; refusing new queued work",
+        queued.workflow_id
+    );
     if !run.queued_task_ids.contains(&queued.task_id) {
         run.queued_task_ids.push(queued.task_id.clone());
     }
@@ -992,7 +1047,10 @@ pub fn check_join_condition(
         for task_id in task_ids {
             match load_task_run(config, store, workflow_id, task_id)? {
                 Some(task) => match task.status {
-                    TaskRunStatus::Succeeded | TaskRunStatus::Failed | TaskRunStatus::Cancelled => {
+                    TaskRunStatus::Succeeded
+                    | TaskRunStatus::Failed
+                    | TaskRunStatus::Cancelled
+                    | TaskRunStatus::Aborted => {
                         continue;
                     }
                     _ => {
@@ -1011,6 +1069,144 @@ pub fn check_join_condition(
         }
     }
     Ok(false)
+}
+
+#[derive(Debug, Clone)]
+pub struct EmergencyStopWorkflowSummary {
+    pub workflow_id: String,
+    pub tasks_aborted: u32,
+    pub queued_removed: u32,
+    pub already_stopped: bool,
+}
+
+/// Durably halt a workflow: dequeue work, abort non-terminal tasks, mark workflow
+/// [`WorkflowRunStatus::EmergencyStopped`].
+///
+/// In-memory tokio work must be aborted separately (see scheduler + active execution registry).
+pub fn apply_emergency_stop_to_workflow(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    stop_id: &str,
+) -> anyhow::Result<EmergencyStopWorkflowSummary> {
+    let mut run = load_workflow_run(config, store, workflow_id)?
+        .ok_or_else(|| anyhow::anyhow!("workflow '{}' not found", workflow_id))?;
+
+    if run.status == WorkflowRunStatus::EmergencyStopped {
+        return Ok(EmergencyStopWorkflowSummary {
+            workflow_id: workflow_id.to_string(),
+            tasks_aborted: 0,
+            queued_removed: 0,
+            already_stopped: true,
+        });
+    }
+
+    let root_sid = run.root_session_id.clone();
+
+    run.status = WorkflowRunStatus::EmergencyStopping;
+    run.updated_at = now_rfc3339();
+    save_workflow_run(config, store, &run)?;
+
+    let queued = load_queued_tasks(config, store, workflow_id)?;
+    let mut queued_removed = 0u32;
+    for q in queued {
+        dequeue_task(config, store, workflow_id, &q.task_id)?;
+        let _ = release_task_claim(config, store, workflow_id, &q.task_id);
+        queued_removed += 1;
+    }
+
+    let tasks = list_task_runs_for_workflow(config, store, workflow_id)?;
+    let mut tasks_aborted = 0u32;
+    for mut task in tasks {
+        let terminal = matches!(
+            task.status,
+            TaskRunStatus::Succeeded
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled
+                | TaskRunStatus::Aborted
+        );
+        if terminal {
+            continue;
+        }
+        let _ = release_task_claim(config, store, workflow_id, &task.task_id);
+        if let Err(e) = crate::runtime::continuation::delete_continuation(config, &task.task_id) {
+            tracing::debug!(
+                target: "workflow",
+                task_id = %task.task_id,
+                error = %e,
+                "continuation delete during emergency stop (may be absent)"
+            );
+        }
+
+        task.status = TaskRunStatus::Aborted;
+        task.updated_at = now_rfc3339();
+        task.result_summary = Some(format!("emergency_stop:{stop_id}"));
+        save_task_run(config, store, &task)?;
+
+        append_workflow_event(
+            config,
+            store,
+            &WorkflowEventRecord {
+                event_id: new_event_id(),
+                workflow_id: workflow_id.to_string(),
+                task_id: Some(task.task_id.clone()),
+                event_type: "task.failed".to_string(),
+                agent_id: Some(task.agent_id.clone()),
+                payload: serde_json::json!({ "status": "aborted", "stop_id": stop_id }),
+                occurred_at: now_rfc3339(),
+            },
+        )?;
+
+        crate::scheduler::workflow_causal::mirror_orchestration_event(
+            config,
+            &root_sid,
+            "workflow.task.failed",
+            EntryStatus::Error,
+            serde_json::json!({
+                "workflow_id": workflow_id,
+                "task_id": task.task_id,
+                "workflow_event_type": "task.failed",
+                "target_agent_id": task.agent_id,
+                "child_session_id": task.session_id,
+                "parent_session_id": task.parent_session_id,
+                "emergency_stop": stop_id,
+            }),
+        );
+        tasks_aborted += 1;
+    }
+
+    run.queued_task_ids.clear();
+    run.status = WorkflowRunStatus::EmergencyStopped;
+    run.updated_at = now_rfc3339();
+    save_workflow_run(config, store, &run)?;
+
+    append_workflow_event(
+        config,
+        store,
+        &WorkflowEventRecord {
+            event_id: new_event_id(),
+            workflow_id: workflow_id.to_string(),
+            task_id: None,
+            event_type: "workflow.emergency_stopped".to_string(),
+            agent_id: None,
+            payload: serde_json::json!({ "stop_id": stop_id }),
+            occurred_at: now_rfc3339(),
+        },
+    )?;
+    if let Err(e) = refresh_workflow_graph_markdown(config, store, workflow_id) {
+        tracing::warn!(
+            target: "workflow",
+            error = %e,
+            "Failed to refresh workflow graph after emergency stop"
+        );
+    }
+
+    Ok(EmergencyStopWorkflowSummary {
+        workflow_id: workflow_id.to_string(),
+        tasks_aborted,
+        queued_removed,
+        already_stopped: false,
+    })
 }
 
 /// Generate a compact, single-line summary of a workflow's current state.
@@ -1040,7 +1236,7 @@ pub fn compact_workflow_summary(
         match t.status {
             TaskRunStatus::Running | TaskRunStatus::Runnable => running += 1,
             TaskRunStatus::Succeeded => succeeded += 1,
-            TaskRunStatus::Failed | TaskRunStatus::Cancelled => failed += 1,
+            TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Aborted => failed += 1,
             _ => other += 1,
         }
     }
@@ -1072,6 +1268,8 @@ pub fn compact_workflow_summary(
         WorkflowRunStatus::Resumable => " [RESUMABLE]",
         WorkflowRunStatus::BlockedApproval => " [BLOCKED]",
         WorkflowRunStatus::WaitingChildren => " [WAITING]",
+        WorkflowRunStatus::EmergencyStopping => " [EMERGENCY_STOPPING]",
+        WorkflowRunStatus::EmergencyStopped => " [EMERGENCY_STOPPED]",
         _ => "",
     };
 
@@ -1177,6 +1375,96 @@ pub fn resolve_task_id_for_session(
         if q.child_session_id == session_id {
             return Ok(Some(q.task_id));
         }
+    }
+    Ok(None)
+}
+
+/// When [`reroute_chat_ingest_for_active_workflow_child_session`] applies, callers should send
+/// user chat to the workflow root and optional workflow [`WorkflowRun::lead_agent_id`].
+#[derive(Debug, Clone)]
+pub struct ChatIngestWorkflowReroute {
+    pub root_session_id: String,
+    pub workflow_id: String,
+    pub lead_agent_id: Option<String>,
+}
+
+fn workflow_run_is_active_for_user_chat_routing(run: &WorkflowRun) -> bool {
+    !matches!(
+        run.status,
+        WorkflowRunStatus::Completed
+            | WorkflowRunStatus::Failed
+            | WorkflowRunStatus::Cancelled
+            | WorkflowRunStatus::EmergencyStopping
+            | WorkflowRunStatus::EmergencyStopped
+    )
+}
+
+fn session_matches_child_task_or_queue(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    run: &WorkflowRun,
+    session_id: &str,
+) -> anyhow::Result<bool> {
+    if session_id == run.root_session_id {
+        return Ok(false);
+    }
+    let tasks = list_task_runs_for_workflow(config, store, workflow_id)?;
+    if tasks.iter().any(|t| t.session_id == session_id) {
+        return Ok(true);
+    }
+    let queued = load_queued_tasks(config, store, workflow_id)?;
+    Ok(queued.iter().any(|q| q.child_session_id == session_id))
+}
+
+/// If `session_id` is a **child** delegation session inside a **non-terminal** workflow, return
+/// the workflow root session and lead agent so `event.ingest` chat can target the planner.
+///
+/// When the session is already a workflow root (present in the workflow index), returns `None`.
+/// This scans persisted runs under `workflows/runs/` (typically few rows per gateway).
+pub fn reroute_chat_ingest_for_active_workflow_child_session(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    session_id: &str,
+) -> anyhow::Result<Option<ChatIngestWorkflowReroute>> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(None);
+    }
+
+    if resolve_workflow_id_for_root_session(config, session_id)?.is_some() {
+        return Ok(None);
+    }
+
+    let runs_root = workflows_root(config).join("runs");
+    if !runs_root.is_dir() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(&runs_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let workflow_id = entry.file_name().to_string_lossy().to_string();
+        let Some(run) = load_workflow_run(config, store, &workflow_id)? else {
+            continue;
+        };
+        if !workflow_run_is_active_for_user_chat_routing(&run) {
+            continue;
+        }
+        if !session_matches_child_task_or_queue(config, store, &workflow_id, &run, session_id)? {
+            continue;
+        }
+        let lead = run.lead_agent_id.trim();
+        return Ok(Some(ChatIngestWorkflowReroute {
+            root_session_id: run.root_session_id.clone(),
+            workflow_id,
+            lead_agent_id: if lead.is_empty() {
+                None
+            } else {
+                Some(lead.to_string())
+            },
+        }));
     }
     Ok(None)
 }
@@ -1497,6 +1785,91 @@ mod tests {
         let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
         assert!(!events.is_empty());
         assert_eq!(events[0].event_type, "workflow.started");
+    }
+
+    #[test]
+    fn reroute_chat_ingest_child_session_to_root() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let mut wf =
+            ensure_workflow_for_root_session(&cfg, None, "root-2b12", Some("planner.default"))
+                .unwrap();
+        wf.status = WorkflowRunStatus::WaitingChildren;
+        let tid = "task-child-1".to_string();
+        wf.join_task_ids = vec![tid.clone()];
+        wf.updated_at = now_rfc3339();
+        save_workflow_run(&cfg, None, &wf).unwrap();
+        let ts = now_rfc3339();
+        let child_session = "root-2b12/delegation-coder";
+        let task = TaskRun {
+            task_id: tid,
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: child_session.to_string(),
+            parent_session_id: "root-2b12".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: ts.clone(),
+            updated_at: ts,
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: Some("g1".to_string()),
+            message: None,
+            metadata: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+
+        assert!(
+            reroute_chat_ingest_for_active_workflow_child_session(&cfg, None, child_session)
+                .unwrap()
+                .is_some_and(|r| {
+                    r.root_session_id == "root-2b12"
+                        && r.lead_agent_id.as_deref() == Some("planner.default")
+                })
+        );
+        assert!(
+            reroute_chat_ingest_for_active_workflow_child_session(&cfg, None, "root-2b12")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reroute_chat_ingest_skips_completed_workflow() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let mut wf =
+            ensure_workflow_for_root_session(&cfg, None, "root-term", Some("planner.default"))
+                .unwrap();
+        wf.status = WorkflowRunStatus::Completed;
+        wf.updated_at = now_rfc3339();
+        save_workflow_run(&cfg, None, &wf).unwrap();
+        let ts = now_rfc3339();
+        let child_session = "root-term/child-x";
+        let task = TaskRun {
+            task_id: "t1".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: child_session.to_string(),
+            parent_session_id: "root-term".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: ts.clone(),
+            updated_at: ts,
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+        assert!(
+            reroute_chat_ingest_for_active_workflow_child_session(&cfg, None, child_session)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

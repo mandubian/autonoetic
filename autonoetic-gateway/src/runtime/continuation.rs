@@ -231,6 +231,7 @@ pub fn execute_approved_action(
                 None,
                 Some(config),
                 gateway_store,
+                None,
             )
         }
 
@@ -277,6 +278,7 @@ pub fn execute_approved_action(
                 None,
                 Some(config),
                 gateway_store,
+                None,
             )
         }
 

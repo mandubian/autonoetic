@@ -80,6 +80,7 @@ fn test_artifact_build_mints_session_scoped_ref() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
 
     let v: serde_json::Value = serde_json::from_str(&out)?;
@@ -140,6 +141,7 @@ fn test_artifact_build_mints_workflow_scoped_ref_when_indexed() -> anyhow::Resul
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
 
     let v: serde_json::Value = serde_json::from_str(&out)?;
@@ -191,6 +193,7 @@ fn test_artifact_build_reuse_does_not_mint_second_ref() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let v1: serde_json::Value = serde_json::from_str(&out1)?;
     assert_eq!(v1.get("reused"), Some(&serde_json::json!(false)));
@@ -207,6 +210,7 @@ fn test_artifact_build_reuse_does_not_mint_second_ref() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let v2: serde_json::Value = serde_json::from_str(&out2)?;
     assert_eq!(v2.get("reused"), Some(&serde_json::json!(true)));
@@ -284,6 +288,7 @@ fn test_artifact_resolve_ref_success() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let build_v: serde_json::Value = serde_json::from_str(&build_out)?;
     let artifact_ref = build_v["artifact_ref"].as_str().expect("artifact_ref");
@@ -309,6 +314,7 @@ fn test_artifact_resolve_ref_success() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
 
     let resolve_v: serde_json::Value = serde_json::from_str(&resolve_out)?;
@@ -359,6 +365,7 @@ fn test_artifact_resolve_ref_wrong_scope_fails() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let build_v: serde_json::Value = serde_json::from_str(&build_out)?;
     let artifact_ref = build_v["artifact_ref"].as_str().expect("artifact_ref");
@@ -382,6 +389,7 @@ fn test_artifact_resolve_ref_wrong_scope_fails() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     );
 
     assert!(result.is_err());
@@ -426,6 +434,7 @@ fn test_artifact_resolve_ref_missing_ref_fails() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     );
 
     assert!(result.is_err());
@@ -474,6 +483,7 @@ fn test_artifact_resolve_ref_expired_ref_fails() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let build_v: serde_json::Value = serde_json::from_str(&build_out)?;
     let artifact_ref = build_v["artifact_ref"].as_str().expect("artifact_ref");
@@ -512,6 +522,7 @@ fn test_artifact_resolve_ref_expired_ref_fails() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     );
 
     assert!(result.is_err());
@@ -560,6 +571,7 @@ fn test_artifact_resolve_ref_revoked_ref_fails() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     )?;
     let build_v: serde_json::Value = serde_json::from_str(&build_out)?;
     let artifact_id = build_v["artifact_id"].as_str().expect("artifact_id");
@@ -597,6 +609,7 @@ fn test_artifact_resolve_ref_revoked_ref_fails() -> anyhow::Result<()> {
         None,
         Some(&config),
         Some(store.clone()),
+        None,
     );
 
     assert!(result.is_err());
