@@ -972,6 +972,10 @@ Make causal chain data and execution results queryable. This is foundation for a
 - [x] **1.16** Integration test: child task returns short `artifact_ref`; parent resolves and inspects artifact successfully without file-handle inlining.
 - [ ] **1.17** (Optional) Add `artifact_shares` table + signed share envelope workflow for cross-gateway artifact transfer.
 
+**Post-review remediation (2026-03-25):**
+- [x] **1.4a** Runtime wiring fix: `tool_call_processor.rs` now persists `execution_traces` for both success and failure paths during live tool execution (including `sandbox.exec` stdout/stderr/exit_code extraction and normalized error typing).
+- [x] **1.8a** Config enforcement fix: lifecycle now resolves evidence mode from `GatewayConfig.evidence_mode` (env var only as fallback when config is absent), and tracer construction uses the resolved mode directly.
+
 #### Phase 1A: Concrete PR Slices (Artifact Refs) — ✅ Completed
 
 This breaks `1.12`–`1.17` into independently shippable PRs with explicit file touch points.
@@ -1068,6 +1072,10 @@ Generalize `TurnContinuation` into a universal `SessionCheckpoint` at all yield 
 - [x] **2.8** Subsume session snapshot into checkpoint: modify `SessionFork::fork()` to read from checkpoint. Keep `session_snapshot.rs` for backward compatibility; add `fork_from_checkpoint()` method.
 - [x] **2.9** Integration test: agent runs 3 turns → hibernates → checkpoint saved → new executor loads checkpoint → agent continues from turn 4 with correct history and loop guard state.
 - [x] **2.10** Integration test: agent hits budget limit → checkpoint saved → respawn with increased budget → agent continues.
+
+**Post-review remediation (2026-03-25):**
+- [x] **2.7a** Spawn-path wiring fix: `spawn_agent_once` now checks for latest checkpoint (after continuation lookup) and resumes from checkpoint state as an alternative to fresh start.
+- [x] **2.7b** Safety fix: checkpoint files are deleted only after successful resumed execution (both in `spawn_agent_once` consumption and `respawn_from_checkpoint`), preventing recovery-state loss on mid-resume failure.
 
 ### Phase 2B: Human Interaction Suspension
 Add a first-class `user.ask` tool that suspends execution and resumes from checkpoint with the human's answer.

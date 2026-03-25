@@ -244,7 +244,11 @@ impl AgentExecutor {
         turn_id: &str,
         yield_reason: YieldReason,
     ) -> SessionCheckpoint {
-        let llm_config_snapshot = self.manifest.llm_config.as_ref().map(LlmConfigSnapshot::from_config);
+        let llm_config_snapshot = self
+            .manifest
+            .llm_config
+            .as_ref()
+            .map(LlmConfigSnapshot::from_config);
 
         // Gather budget counters from the session budget registry
         let (llm_rounds, tokens, cost) = self
@@ -327,13 +331,27 @@ impl AgentExecutor {
         let session_id = self.ensure_session_id();
         let turn_id = self.next_turn_id();
 
-        let evidence_mode = EvidenceMode::parse(
-            &std::env::var("AUTONOETIC_EVIDENCE_MODE").unwrap_or_else(|_| "full".to_string()),
-        )?;
+        let evidence_mode_raw = self
+            .config
+            .as_ref()
+            .map(|cfg| cfg.evidence_mode.clone())
+            .unwrap_or_else(|| {
+                std::env::var("AUTONOETIC_EVIDENCE_MODE").unwrap_or_else(|_| "full".to_string())
+            });
+        let evidence_mode = EvidenceMode::parse(&evidence_mode_raw)?;
 
         let mut tracer = {
-            let mut t = SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?
-                .with_turn_id(&turn_id);
+            let mut t = if self.config.is_some() {
+                SessionTracer::new_with_evidence_mode(
+                    &self.agent_dir,
+                    &self.manifest.agent.id,
+                    &session_id,
+                    &evidence_mode_raw,
+                )?
+            } else {
+                SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?
+            }
+            .with_turn_id(&turn_id);
             if let Some(gateway_dir) = &self.gateway_dir {
                 t = t.with_timeline(gateway_dir);
             }
@@ -396,11 +414,7 @@ impl AgentExecutor {
         loop {
             // Loop guard check — save checkpoint before propagating max-turns error
             if let Err(e) = self.guard.check_loop() {
-                let cp = self.build_checkpoint(
-                    history,
-                    &turn_id,
-                    YieldReason::MaxTurnsReached,
-                );
+                let cp = self.build_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached);
                 self.save_checkpoint_if_possible(&cp);
                 return Err(e);
             }
@@ -408,11 +422,7 @@ impl AgentExecutor {
             // Budget check — save checkpoint before propagating budget-exhausted error
             if let Some(budget) = self.session_budget.as_ref() {
                 if let Err(e) = budget.check_pre_llm(&session_id) {
-                    let cp = self.build_checkpoint(
-                        history,
-                        &turn_id,
-                        YieldReason::BudgetExhausted,
-                    );
+                    let cp = self.build_checkpoint(history, &turn_id, YieldReason::BudgetExhausted);
                     self.save_checkpoint_if_possible(&cp);
                     return Err(e);
                 }
@@ -540,11 +550,8 @@ impl AgentExecutor {
                         response.usage.output_tokens,
                         estimated_cost_usd,
                     ) {
-                        let cp = self.build_checkpoint(
-                            history,
-                            &turn_id,
-                            YieldReason::BudgetExhausted,
-                        );
+                        let cp =
+                            self.build_checkpoint(history, &turn_id, YieldReason::BudgetExhausted);
                         self.save_checkpoint_if_possible(&cp);
                         return Err(e);
                     }
@@ -653,10 +660,9 @@ impl AgentExecutor {
                     assistant_msg.tool_calls = response.tool_calls.clone();
 
                     if let Some(budget) = self.session_budget.as_ref() {
-                        if let Err(e) = budget.reserve_tool_invocations(
-                            &session_id,
-                            response.tool_calls.len() as u64,
-                        ) {
+                        if let Err(e) = budget
+                            .reserve_tool_invocations(&session_id, response.tool_calls.len() as u64)
+                        {
                             let cp = self.build_checkpoint(
                                 history,
                                 &turn_id,
@@ -928,11 +934,7 @@ impl AgentExecutor {
                     }
 
                     // Save checkpoint at hibernation yield point
-                    let cp = self.build_checkpoint(
-                        history,
-                        &turn_id,
-                        YieldReason::Hibernation,
-                    );
+                    let cp = self.build_checkpoint(history, &turn_id, YieldReason::Hibernation);
                     self.save_checkpoint_if_possible(&cp);
                     if let Some(config) = self.config.as_ref() {
                         // Prune old checkpoints, keep last 3
