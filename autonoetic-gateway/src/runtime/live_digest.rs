@@ -36,6 +36,8 @@ pub struct LiveDigestWriter {
     session_error_total: u32,
     /// True if this is a resumed session (from checkpoint/hibernation).
     is_resumed: bool,
+    /// Buffer for the current turn. Flushed atomically at end_turn().
+    turn_buffer: Option<String>,
 }
 
 impl LiveDigestWriter {
@@ -70,6 +72,7 @@ impl LiveDigestWriter {
             session_tool_total: 0,
             session_error_total: 0,
             is_resumed,
+            turn_buffer: None,
         })
     }
 
@@ -87,6 +90,28 @@ impl LiveDigestWriter {
         }
     }
 
+    /// Write a string into the current turn buffer (not yet flushed).
+    fn buf_write(&mut self, s: &str) {
+        if let Some(buf) = &mut self.turn_buffer {
+            buf.push_str(s);
+        }
+    }
+
+    /// Flush the turn buffer to disk as a single atomic write.
+    fn flush_buffer(&mut self) -> anyhow::Result<()> {
+        if let Some(buf) = self.turn_buffer.take() {
+            if !buf.is_empty() {
+                let mut f = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?;
+                f.write_all(buf.as_bytes())?;
+            }
+        }
+        self.turn_buffer = None;
+        Ok(())
+    }
+
     /// Mark this session as resumed from hibernation/checkpoint.
     /// Call before start_turn() when resuming.
     pub fn mark_resumed(&mut self) {
@@ -100,15 +125,25 @@ impl LiveDigestWriter {
         if existing.contains(&marker) {
             return Ok(());
         }
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
+        use std::fmt::Write;
         let ts = chrono::Utc::now().to_rfc3339();
-        writeln!(f)?;
-        writeln!(f, "{marker}")?;
-        writeln!(f, "**Agent:** `{}` | **Started:** {ts}", cell(agent_id))?;
-        writeln!(f, "**Task:** {}", cell(&truncate_chars(task_preview, 500)))?;
-        writeln!(f)?;
-        writeln!(f, "---")?;
-        writeln!(f)?;
+        let mut buf = String::new();
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "{marker}");
+        let _ = writeln!(buf, "**Agent:** `{}` | **Started:** {ts}", cell(agent_id));
+        let _ = writeln!(
+            buf,
+            "**Task:** {}",
+            cell(&truncate_chars(task_preview, 500))
+        );
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "---");
+        let _ = writeln!(buf);
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        f.write_all(buf.as_bytes())?;
         Ok(())
     }
 
@@ -119,18 +154,24 @@ impl LiveDigestWriter {
         let ts = chrono::Utc::now().to_rfc3339();
         let hdr = self.header();
         let agent = &self.agent_id;
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
+
+        // Start new turn buffer
+        let mut turn = String::new();
 
         // Resume marker
         if self.is_resumed {
-            writeln!(f, "---")?;
-            writeln!(f, "*↻ `{agent}` resumed from hibernation*")?;
-            writeln!(f)?;
+            use std::fmt::Write;
+            let _ = writeln!(turn, "---");
+            let _ = writeln!(turn, "*↻ `{agent}` resumed from hibernation*");
+            let _ = writeln!(turn);
             self.is_resumed = false;
         }
 
-        writeln!(f, "{hdr} `{agent}` — Turn {n} — {ts}")?;
-        writeln!(f)?;
+        use std::fmt::Write;
+        let _ = writeln!(turn, "{hdr} `{agent}` — Turn {n} — {ts}");
+        let _ = writeln!(turn);
+
+        self.turn_buffer = Some(turn);
         Ok(())
     }
 
@@ -142,50 +183,60 @@ impl LiveDigestWriter {
         in_tok: u64,
         out_tok: u64,
     ) -> anyhow::Result<()> {
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
-        writeln!(
-            f,
+        use std::fmt::Write;
+        let mut line = String::new();
+        let _ = writeln!(
+            line,
             "*LLM:* `{}` | stop: `{}` | tool calls: {} | tokens in/out: {}/{}*",
             cell(model_short),
             cell(stop_reason),
             tool_calls,
             in_tok,
             out_tok
-        )?;
-        writeln!(f)?;
+        );
+        let _ = writeln!(line);
+        self.buf_write(&line);
         Ok(())
     }
 
     pub fn record_llm_retry_note(&mut self, attempt: usize, max: usize) -> anyhow::Result<()> {
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
-        writeln!(
-            f,
+        use std::fmt::Write;
+        let mut line = String::new();
+        let _ = writeln!(
+            line,
             "*Note: empty LLM response (stop reason Other); retry {attempt}/{max}.*"
-        )?;
-        writeln!(f)?;
+        );
+        let _ = writeln!(line);
+        self.buf_write(&line);
         Ok(())
     }
 
     pub fn record_action(&mut self, line: &str) -> anyhow::Result<()> {
         self.tools_in_open_turn += 1;
         self.session_tool_total += 1;
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
-        writeln!(f, "**Action:** {}", redact_text_for_logs(line))?;
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = writeln!(buf, "**Action:** {}", redact_text_for_logs(line));
+        self.buf_write(&buf);
         Ok(())
     }
 
     pub fn record_result(&mut self, line: &str) -> anyhow::Result<()> {
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
-        writeln!(f, "**Result:** {}", redact_text_for_logs(line))?;
-        writeln!(f)?;
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = writeln!(buf, "**Result:** {}", redact_text_for_logs(line));
+        let _ = writeln!(buf);
+        self.buf_write(&buf);
         Ok(())
     }
 
     pub fn record_error(&mut self, line: &str) -> anyhow::Result<()> {
         self.session_error_total += 1;
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
-        writeln!(f, "**Error:** {}", redact_text_for_logs(line))?;
-        writeln!(f)?;
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = writeln!(buf, "**Error:** {}", redact_text_for_logs(line));
+        let _ = writeln!(buf);
+        self.buf_write(&buf);
         Ok(())
     }
 
@@ -197,14 +248,16 @@ impl LiveDigestWriter {
             "lesson" => "Lesson",
             other => other,
         };
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
-        writeln!(
-            f,
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = writeln!(
+            buf,
             "**{}:** {}",
             label,
             cell(&truncate_chars(&redact_text_for_logs(content.trim()), 2000))
-        )?;
-        writeln!(f)?;
+        );
+        let _ = writeln!(buf);
+        self.buf_write(&buf);
         Ok(())
     }
 
@@ -213,58 +266,69 @@ impl LiveDigestWriter {
         question: &str,
         options_summary: Option<&str>,
     ) -> anyhow::Result<()> {
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
-        writeln!(
-            f,
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = writeln!(
+            buf,
             "**User question (`user.ask`):** {}",
             cell(&truncate_chars(&redact_text_for_logs(question), 800))
-        )?;
+        );
         if let Some(o) = options_summary.filter(|s| !s.is_empty()) {
-            writeln!(
-                f,
+            let _ = writeln!(
+                buf,
                 "**Options:** {}",
                 cell(&truncate_chars(&redact_text_for_logs(o), 600))
-            )?;
+            );
         }
-        writeln!(f)?;
+        let _ = writeln!(buf);
+        self.buf_write(&buf);
         Ok(())
     }
 
     pub fn end_turn(&mut self) -> anyhow::Result<()> {
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
+        use std::fmt::Write;
         if self.tools_in_open_turn > 0 {
-            writeln!(
-                f,
+            let mut line = String::new();
+            let _ = writeln!(
+                line,
                 "*Turn wrap-up: {} tool call(s) in this block.*",
                 self.tools_in_open_turn
-            )?;
-            writeln!(f)?;
+            );
+            let _ = writeln!(line);
+            self.buf_write(&line);
         }
-        writeln!(f, "---")?;
-        writeln!(f)?;
-        Ok(())
+        self.buf_write("---\n\n");
+        // Flush the entire turn to disk in one write
+        self.flush_buffer()
     }
 
     pub fn write_session_summary(&mut self, outcome_reason: &str) -> anyhow::Result<()> {
         let hdr = self.header();
         let agent = &self.agent_id;
-        let mut f = OpenOptions::new().append(true).open(&self.path)?;
+        use std::fmt::Write;
         let ts = chrono::Utc::now().to_rfc3339();
-        writeln!(f, "{hdr} `{agent}` — Session summary — {ts}")?;
-        writeln!(f)?;
-        writeln!(
-            f,
+        let mut buf = String::new();
+        let _ = writeln!(buf, "{hdr} `{agent}` — Session summary — {ts}");
+        let _ = writeln!(buf);
+        let _ = writeln!(
+            buf,
             "**Outcome:** {}",
             cell(&truncate_chars(&redact_text_for_logs(outcome_reason), 200))
-        )?;
-        writeln!(
-            f,
+        );
+        let _ = writeln!(
+            buf,
             "**Digest turns:** {} | **Tool invocations (session):** {} | **Errors (session):** {}",
             self.digest_turn_seq, self.session_tool_total, self.session_error_total
-        )?;
-        writeln!(f)?;
-        writeln!(f, "---")?;
-        writeln!(f)?;
+        );
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "---");
+        let _ = writeln!(buf);
+        // Flush directly (not through turn_buffer since this may run after end_turn)
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        f.write_all(buf.as_bytes())?;
         Ok(())
     }
 }
@@ -503,6 +567,7 @@ mod tests {
         }
         let mut w2 = LiveDigestWriter::open(&gw, "s2", "agent.a").unwrap();
         w2.start_turn().unwrap();
+        w2.end_turn().unwrap();
         let body = std::fs::read_to_string(w2.path()).unwrap();
         assert!(body.contains("## `agent.a` — Turn 1"));
         assert!(body.contains("## `agent.a` — Turn 2"));
@@ -522,8 +587,10 @@ mod tests {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
         let mut w = LiveDigestWriter::open(&gw, "s3", "agent.a").unwrap();
+        w.start_turn().unwrap();
         w.record_annotation("observation", "Authorization: Bearer top-secret-value")
             .unwrap();
+        w.end_turn().unwrap();
         let body = std::fs::read_to_string(w.path()).unwrap();
         assert!(body.contains("***REDACTED***"));
         assert!(!body.contains("top-secret-value"));
