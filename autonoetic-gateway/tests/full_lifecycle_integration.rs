@@ -266,17 +266,22 @@ fn test_knowledge_persistence() {
     println!("✅ Knowledge persistence works");
 }
 
-/// Test: Session snapshot and fork
+/// Test: Session fork from checkpoint
 #[test]
 fn test_session_snapshot_fork() {
     use autonoetic_gateway::llm::Message;
-    use autonoetic_gateway::runtime::session_snapshot::{SessionFork, SessionSnapshot};
+    use autonoetic_gateway::runtime::checkpoint::{
+        save_checkpoint, SessionCheckpoint, SessionFork, YieldReason,
+    };
+    use autonoetic_gateway::runtime::guard::LoopGuardState;
+    use autonoetic_types::config::GatewayConfig;
 
     let workspace = TestWorkspace::new().unwrap();
-    let gateway_dir = workspace.path().join(".gateway");
-    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let config = GatewayConfig {
+        agents_dir: workspace.path().to_path_buf(),
+        ..Default::default()
+    };
 
-    // Create a session with history
     let history = vec![
         Message::user("Hello"),
         Message::assistant("Hi! How can I help you?"),
@@ -284,22 +289,42 @@ fn test_session_snapshot_fork() {
         Message::assistant("I'll create that for you."),
     ];
 
-    // Capture snapshot
-    let snapshot =
-        SessionSnapshot::capture("original-session", &history, 2, None, None, &gateway_dir)
-            .unwrap();
-
-    assert_eq!(snapshot.turn_count, 2);
-    assert_eq!(snapshot.history.len(), 4);
+    // Save a checkpoint (simulating an active session that was hibernated)
+    let cp = SessionCheckpoint {
+        history: history.clone(),
+        turn_counter: 2,
+        loop_guard_state: LoopGuardState {
+            max_loops_without_progress: 10,
+            current_loops: 0,
+            last_failure_hash: None,
+            consecutive_failures: 0,
+        },
+        agent_id: "test-agent".to_string(),
+        session_id: "original-session".to_string(),
+        turn_id: "turn-0002".to_string(),
+        workflow_id: None,
+        task_id: None,
+        runtime_lock_hash: None,
+        llm_config_snapshot: None,
+        tool_registry_version: None,
+        yield_reason: YieldReason::Hibernation,
+        content_store_refs: vec![],
+        created_at: chrono::Utc::now().to_rfc3339(),
+        pending_tool_state: None,
+        llm_rounds_consumed: 2,
+        tool_invocations_consumed: 0,
+        tokens_consumed: 200,
+        estimated_cost_usd: 0.002,
+    };
+    save_checkpoint(&config, &cp).unwrap();
 
     // Fork with branch message
     let fork = SessionFork::fork(
-        &snapshot,
+        &config,
+        "original-session",
         Some("forked-session"),
         Some("Try a different approach"),
-        &gateway_dir,
-    )
-    .unwrap();
+    ).unwrap();
 
     assert_eq!(fork.new_session_id, "forked-session");
     assert_eq!(fork.source_session_id, "original-session");
@@ -311,7 +336,7 @@ fn test_session_snapshot_fork() {
         .content
         .contains("different approach"));
 
-    println!("✅ Session snapshot and fork works");
+    println!("✅ Session fork from checkpoint works");
 }
 
 /// Test: Full artifact lifecycle (create, share, persist)

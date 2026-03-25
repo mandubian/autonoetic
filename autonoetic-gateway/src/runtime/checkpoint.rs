@@ -333,6 +333,87 @@ pub fn compute_runtime_lock_hash(agent_dir: &Path) -> Option<String> {
     Some(format!("{:x}", hash))
 }
 
+// ---------------------------------------------------------------------------
+// Session fork from checkpoint
+// ---------------------------------------------------------------------------
+
+/// Fork a session from a checkpoint.
+///
+/// Replaces the old `SessionSnapshot`-based fork. The checkpoint already contains
+/// full conversation history, so forking reads from the checkpoint file.
+#[derive(Debug)]
+pub struct SessionFork {
+    /// New session ID.
+    pub new_session_id: String,
+    /// Source session ID.
+    pub source_session_id: String,
+    /// Fork turn number.
+    pub fork_turn: usize,
+    /// Content handle of the copied history.
+    pub history_handle: String,
+    /// Initial history for the forked session (including branch message if any).
+    pub initial_history: Vec<Message>,
+}
+
+impl SessionFork {
+    /// Creates a new session by forking from the latest checkpoint of a source session.
+    pub fn fork(
+        config: &GatewayConfig,
+        source_session_id: &str,
+        new_session_id: Option<&str>,
+        branch_message: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let checkpoint = load_latest_checkpoint(config, source_session_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No checkpoint found for session '{}'. Cannot fork without a checkpoint.",
+                source_session_id
+            )
+        })?;
+        Self::fork_from_checkpoint(config, &checkpoint, new_session_id, branch_message)
+    }
+
+    /// Creates a new session by forking from a specific checkpoint.
+    pub fn fork_from_checkpoint(
+        config: &GatewayConfig,
+        checkpoint: &SessionCheckpoint,
+        new_session_id: Option<&str>,
+        branch_message: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let gw_dir = config.agents_dir.join(".gateway");
+        let store = crate::runtime::content_store::ContentStore::new(&gw_dir)?;
+
+        let new_session_id = new_session_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("fork-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+
+        // Build history from checkpoint
+        let mut history = checkpoint.history.clone();
+
+        // Add branch message if provided
+        if let Some(msg_text) = branch_message {
+            history.push(crate::llm::Message::user(msg_text));
+        }
+
+        // Copy history to new session
+        let history_json = serde_json::to_string(&history)?;
+        let history_handle = store.write(history_json.as_bytes())?;
+        store.register_name(&new_session_id, "session_history", &history_handle)?;
+
+        Ok(SessionFork {
+            new_session_id,
+            source_session_id: checkpoint.session_id.clone(),
+            fork_turn: checkpoint.turn_counter as usize,
+            history_handle,
+            initial_history: history,
+        })
+    }
+
+    /// Returns the initial history for the forked session.
+    pub fn initial_history(&self) -> &[Message] {
+        &self.initial_history
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

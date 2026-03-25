@@ -1377,35 +1377,31 @@ pub async fn handle_trace_fork(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
-    let _store = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
 
-    // Load snapshot from source session
-    let mut snapshot =
-        autonoetic_gateway::runtime::session_snapshot::SessionSnapshot::load_from_session(
+    // Fork from the latest checkpoint of the source session
+    let fork = if let Some(turn) = at_turn {
+        // Fork from a specific turn's checkpoint
+        let checkpoint =
+            autonoetic_gateway::runtime::checkpoint::load_checkpoint(
+                &config,
+                source_session_id,
+                &format!("turn-{:04}", turn),
+            )?
+            .ok_or_else(|| anyhow::anyhow!("No checkpoint found for session '{}' at turn {}", source_session_id, turn))?;
+        autonoetic_gateway::runtime::checkpoint::SessionFork::fork_from_checkpoint(
+            &config,
+            &checkpoint,
+            new_session_id,
+            branch_message,
+        )?
+    } else {
+        autonoetic_gateway::runtime::checkpoint::SessionFork::fork(
+            &config,
             source_session_id,
-            &gateway_dir,
-        )?;
-
-    // If at_turn is specified, truncate history to that turn
-    if let Some(turn) = at_turn {
-        // Each turn is typically user + assistant messages, so we estimate:
-        // turn 1 = 2 messages (user, assistant), turn 2 = 4 messages, etc.
-        // But we need to be more precise - find the turn boundaries
-        let target_message_count = turn * 2; // Approximate: user + assistant per turn
-        if target_message_count < snapshot.history.len() {
-            snapshot.history.truncate(target_message_count);
-            snapshot.turn_count = turn;
-        }
-    }
-
-    // Fork the session
-    let fork = autonoetic_gateway::runtime::session_snapshot::SessionFork::fork(
-        &snapshot,
-        new_session_id,
-        branch_message,
-        &gateway_dir,
-    )?;
+            new_session_id,
+            branch_message,
+        )?
+    };
 
     if !json_output {
         println!("Session forked successfully!");

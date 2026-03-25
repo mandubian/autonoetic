@@ -39,6 +39,15 @@ impl GatewayServer {
             &gateway_dir,
         )?);
 
+        // Apply data retention policy on startup
+        if let Err(e) = gateway_store.apply_retention_policy(&self.config.retention) {
+            tracing::warn!(
+                target: "gateway_store",
+                error = %e,
+                "Failed to apply retention policy"
+            );
+        }
+
         let jsonrpc_router = Arc::new(crate::router::JsonRpcRouter::new(
             self.config.as_ref().clone(),
             Some(gateway_store.clone()),

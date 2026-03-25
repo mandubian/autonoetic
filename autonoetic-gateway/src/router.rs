@@ -591,33 +591,12 @@ impl JsonRpcRouter {
                     }
                 };
 
-                let gateway_dir = self.config.agents_dir.join(".gateway");
-
-                // Load snapshot from source session
-                let snapshot =
-                    match crate::runtime::session_snapshot::SessionSnapshot::load_from_session(
-                        &params.source_session_id,
-                        &gateway_dir,
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return JsonRpcResponse::error(
-                                req.id,
-                                -32000,
-                                format!(
-                                    "Failed to load snapshot from session '{}': {}",
-                                    params.source_session_id, e
-                                ),
-                            );
-                        }
-                    };
-
-                // Fork the session
-                let fork = match crate::runtime::session_snapshot::SessionFork::fork(
-                    &snapshot,
+                // Fork from the latest checkpoint of the source session
+                let fork = match crate::runtime::checkpoint::SessionFork::fork(
+                    &self.config,
+                    &params.source_session_id,
                     params.new_session_id.as_deref(),
                     params.branch_message.as_deref(),
-                    &gateway_dir,
                 ) {
                     Ok(f) => f,
                     Err(e) => {

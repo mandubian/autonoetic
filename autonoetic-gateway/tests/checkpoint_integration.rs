@@ -5,10 +5,9 @@
 use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
     delete_checkpoint, list_checkpoints, load_checkpoint, load_latest_checkpoint,
-    prune_checkpoints, save_checkpoint, SessionCheckpoint, YieldReason,
+    prune_checkpoints, save_checkpoint, SessionCheckpoint, SessionFork, YieldReason,
 };
 use autonoetic_gateway::runtime::guard::LoopGuardState;
-use autonoetic_gateway::runtime::session_snapshot::SessionFork;
 use autonoetic_types::config::GatewayConfig;
 
 /// Helper to create a test config with temp directory.
@@ -166,16 +165,15 @@ fn test_checkpoint_deletion() {
 #[test]
 fn test_fork_from_checkpoint_preserves_history() {
     let temp = tempfile::tempdir().expect("tempdir should create");
-    let gateway_dir = temp.path().join(".gateway");
-    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let config = test_config(&temp);
 
     let checkpoint = make_checkpoint("original-session", "turn-002", 2, YieldReason::Hibernation);
 
     let fork = SessionFork::fork_from_checkpoint(
+        &config,
         &checkpoint,
         Some("forked-session"),
         Some("Try a different approach"),
-        &gateway_dir,
     )
     .expect("fork should succeed");
 
@@ -192,8 +190,7 @@ fn test_fork_from_checkpoint_preserves_history() {
 #[test]
 fn test_fork_from_checkpoint_no_branch() {
     let temp = tempfile::tempdir().expect("tempdir should create");
-    let gateway_dir = temp.path().join(".gateway");
-    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let config = test_config(&temp);
 
     let checkpoint = make_checkpoint(
         "source-session",
@@ -203,10 +200,10 @@ fn test_fork_from_checkpoint_no_branch() {
     );
 
     let fork = SessionFork::fork_from_checkpoint(
+        &config,
         &checkpoint,
         Some("continued-session"),
         None, // No branch message
-        &gateway_dir,
     )
     .expect("fork should succeed");
 
