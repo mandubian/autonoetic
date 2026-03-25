@@ -14,6 +14,11 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Memory Architecture](#memory-architecture)
 - [Content Storage](#content-storage)
 - [Causal Chain](#causal-chain)
+- [Session Checkpoints](#session-checkpoints)
+- [Queryable Event Store](#queryable-event-store)
+- [Live Digest](#live-digest)
+- [Unified Gateway Database](#unified-gateway-database)
+- [Emergency Stop](#emergency-stop)
 - [Design Principles](#design-principles)
 
 ---
@@ -361,6 +366,217 @@ autonoetic trace rebuild <session_id>  # Reconstruct unified timeline
 autonoetic trace follow <session_id>   # Watch live events
 autonoetic trace fork <session_id>     # Fork from checkpoint
 autonoetic trace history <session_id>  # View conversation history
+```
+
+---
+
+## Session Checkpoints
+
+Universal execution snapshots saved at every yield point for crash recovery and session forking.
+
+### Storage
+
+```
+.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json
+```
+
+### Checkpoint Structure
+
+```json
+{
+  "session_id": "session-123",
+  "turn_id": "turn-042",
+  "turn_counter": 42,
+  "history": [...],                    // Full conversation history
+  "yield_reason": "Hibernation",       // Why execution stopped
+  "loop_guard_state": {...},           // Failure tracking state
+  "agent_id": "coder.default",
+  "workflow_id": "wf-abc",
+  "runtime_lock_hash": "sha256:...",
+  "llm_config_snapshot": {...},
+  "created_at": "2026-03-15T10:30:00Z"
+}
+```
+
+### Yield Reasons
+
+| Reason | Trigger |
+|--------|---------|
+| `Hibernation` | EndTurn / StopSequence between turns |
+| `BudgetExhausted` | Session budget depleted |
+| `ApprovalRequired` | Tool needs approval gate |
+| `UserInputRequired` | `user.ask` pending answer |
+| `EmergencyStop` | Operator circuit breaker |
+| `MaxTurnsReached` | Loop guard limit |
+| `Error` | Recoverable error |
+
+### Session Forking
+
+```bash
+# Fork from latest checkpoint
+autonoetic trace fork session-123 --new-session fork-456 --branch "Try different approach"
+
+# Fork from specific turn
+autonoetic trace fork session-123 --at-turn 10 --new-session fork-456
+```
+
+The fork reads from the checkpoint file, copies history, and creates a new session with optional branch message.
+
+---
+
+## Queryable Event Store
+
+Causal chain events are mirrored to SQLite for agent learning queries.
+
+### Tables
+
+**`causal_events`** — Queryable mirror of causal chain JSONL:
+
+| Column | Description |
+|--------|-------------|
+| `event_id` | UUID matching JSONL log_id |
+| `agent_id`, `session_id`, `turn_id` | Context |
+| `category` | tool_invoke, llm, lifecycle, memory... |
+| `action` | requested, completed, failure... |
+| `status` | SUCCESS, ERROR, DENIED |
+| `target` | Tool name, model name, etc. |
+| `payload` | Full JSON (not truncated) |
+| `timestamp` | RFC3339 |
+
+**`execution_traces`** — Full code execution results:
+
+| Column | Description |
+|--------|-------------|
+| `trace_id` | UUID |
+| `tool_name` | sandbox.exec, agent.install... |
+| `command` | The executed command |
+| `exit_code` | Process exit code |
+| `stdout`, `stderr` | Full output (not truncated) |
+| `duration_ms` | Execution wall time |
+| `success` | Boolean |
+| `error_type` | compilation, runtime, permission, timeout... |
+
+### Agent Learning Tools
+
+**`execution.search`** — Query past executions:
+```json
+{
+  "tool_name": "sandbox.exec",
+  "success": false,
+  "error_type": "compilation",
+  "command_pattern": "%client.rs%",
+  "limit": 5
+}
+```
+
+**`knowledge.search_by_tags`** — Search tagged memories:
+```json
+{
+  "tags": ["type:error_lesson", "domain:http"],
+  "limit": 10
+}
+```
+
+---
+
+## Live Digest
+
+Real-time session narrative replacing the flat timeline.md.
+
+### Storage
+
+```
+.gateway/sessions/{session_id}/digest.md
+```
+
+### Structure
+
+```markdown
+# Session Digest: {session_id}
+Agent: {agent_id} | Started: {timestamp}
+
+---
+
+## Turn 1 — {timestamp}
+**Action:** Called `sandbox.exec` with `python3 tests/run_all.py`
+**Result:** 12 tests passed, 1 failed
+**Reasoning:** Running full test suite first.
+
+## Turn 2 — {timestamp}
+**Action:** Edited `src/http/client.rs`
+**Error:** Compilation failed — missing `Send` bound
+**Fix:** Added `+ Send` to trait bound
+**Artifact:** Modified `src/http/client.rs` (art_8f2a)
+```
+
+### Tools
+
+- **`digest.annotate`** — Agent adds reasoning/decision notes
+- **`digest.query`** — Search past session digests
+
+---
+
+## Unified Gateway Database
+
+All transactional state in a single SQLite database:
+
+```
+.gateway/gateway.db
+├── workflow_runs          # Workflow orchestration
+├── task_runs              # Task execution state
+├── workflow_events        # Event log
+├── approvals              # Approval gates
+├── user_interactions      # user.ask questions/answers
+├── emergency_stops        # Circuit breaker audit
+├── active_executions      # Running execution leases
+├── queued_tasks           # Scheduler queue
+├── memories               # Tier 2 durable memory
+├── causal_events          # Queryable event mirror
+├── execution_traces       # Full execution results
+└── artifact_refs          # Short ref → digest mapping
+```
+
+### Retention Policy
+
+Configured in gateway config:
+
+```yaml
+retention:
+  execution_traces_days: 30   # 0 = forever
+  causal_events_days: 90      # 0 = forever
+```
+
+Applied automatically on gateway startup.
+
+---
+
+## Emergency Stop
+
+Root-session circuit breaker for operator intervention.
+
+### Authorization
+
+| Requester | Allowed |
+|-----------|---------|
+| User/Operator | ✓ |
+| Gateway (security_policy) | ✓ |
+| Agent with `EmergencyStop` capability | ✓ |
+| Other agents | ✗ Permission Denied |
+
+### Behavior
+
+1. Persist stop request to `emergency_stops` table
+2. Mark workflow `EmergencyStopping`
+3. Kill sandbox child processes (SIGKILL)
+4. Abort running tokio tasks
+5. Cancel pending approvals and user interactions
+6. Write terminal checkpoint with `YieldReason::EmergencyStop`
+7. Finalize status to `EmergencyStopped`
+
+### CLI
+
+```bash
+autonoetic gateway emergency-stop <root_session_id> --reason "Security incident"
 ```
 
 ---

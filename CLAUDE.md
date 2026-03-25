@@ -75,12 +75,17 @@ Reference bundles are under `agents/`:
 ### Key Concepts
 
 - **Causal Chain**: Every session produces a hash-chained audit trail of turns and events
+- **Checkpoint**: Universal session snapshots at every yield point (hibernation, approval, budget exhaustion, emergency stop). Enables crash recovery and session forking.
+- **Queryable Event Store**: Causal events mirrored to SQLite (`causal_events` table) for agent learning queries
+- **Execution Traces**: Full code execution results (stdout, stderr, exit_code) in `execution_traces` table — not truncated
+- **Live Digest**: Real-time session narrative in `digest.md`, replacing flat timeline
 - **Artifact Store**: Content-addressed (SHA-256) storage; agents pass handles, not inline blobs
 - **RuntimeLock**: Pinned execution closure for reproducible agent runs (`runtime.lock`)
 - **Cognitive Capsule**: Portable export of an agent bundle plus its runtime closure
 - **Skill Promotion**: Successful tactics can be crystallized into reusable Skills
 - **Turn Continuation**: Approval-gated workflow turns are suspended to disk (`.gateway/continuations/<task_id>.json`) and resumed with real tool results, avoiding synthetic retry prompts
-- **Approval Delivery Split**: Workflow-bound approvals resume through continuation + scheduler requeue; non-workflow sessions still use durable notification delivery
+- **Emergency Stop**: Root-session circuit breaker that kills processes, aborts tasks, cancels pending gates
+- **Retention Policy**: Configurable pruning of `execution_traces` (default: 30 days) and `causal_events` (default: 90 days)
 
 ### HTTP API
 
@@ -100,3 +105,4 @@ Notable suite for approval continuation:
 - `docs/CLI.md` — Complete CLI reference
 - `docs/separation-of-powers.md` — Agent vs gateway responsibilities
 - `docs/remote-agents-http-api.md` — HTTP API and SDK transport
+- `docs/agent-learning.md` — How agents learn from past sessions using execution.search, knowledge.search_by_tags, digest.query
