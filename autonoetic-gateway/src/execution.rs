@@ -614,10 +614,12 @@ impl GatewayExecutionService {
 
             use crate::runtime::lifecycle::TurnOutcome;
 
-            // --- Turn continuation resume (approval-unblocked tasks) ---
-            // When a task_id is provided and a continuation file exists on disk,
-            // this run is a resume after operator approval rather than a fresh start.
-            let (outcome, resume_initial_message) = if let Some(t_id) = task_id {
+            // --- Turn continuation / checkpoint resume ---
+            // Priority order:
+            // 1) Turn continuation (approval-unblocked workflow task)
+            // 2) Session checkpoint (hibernation/budget/max-turns/manual/error)
+            // 3) Fresh start
+            let (outcome, resume_initial_message, consumed_checkpoint_turn_id) = if let Some(t_id) = task_id {
                 if let Ok(Some(cont)) = crate::runtime::continuation::load_continuation(&self.config, t_id) {
                     tracing::info!(
                         target: "continuation",
@@ -697,10 +699,11 @@ impl GatewayExecutionService {
                             Some(cont.session_id.clone()),
                             Some(cont.turn_id.clone()),
                         );
-                        let mut tracer = crate::runtime::session_tracer::SessionTracer::new(
+                        let mut tracer = crate::runtime::session_tracer::SessionTracer::new_with_evidence_mode(
                             &runtime.agent_dir,
                             &runtime.manifest.agent.id,
                             &cont.session_id,
+                            &self.config.evidence_mode,
                         )?;
                         let (_, results) = proc
                             .process_tool_calls(
@@ -741,9 +744,134 @@ impl GatewayExecutionService {
                     let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
 
                     let outcome = runtime.execute_with_history(&mut history).await?;
-                    (outcome, initial_msg)
+                    (outcome, initial_msg, None)
                 } else {
-                    // No continuation on disk — normal first run.
+                    // No continuation on disk — optionally resume from latest checkpoint.
+                    let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint(
+                        &self.config,
+                        session_id,
+                    )?;
+                    if let Some(checkpoint) = checkpoint {
+                        if matches!(
+                            checkpoint.yield_reason,
+                            crate::runtime::checkpoint::YieldReason::EmergencyStop { .. }
+                        ) {
+                            anyhow::bail!(
+                                "Cannot auto-resume session '{}' from EmergencyStop checkpoint",
+                                session_id
+                            );
+                        }
+                        if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
+                            tracing::info!(
+                                target: "checkpoint",
+                                agent_id = %runtime.manifest.agent.id,
+                                session_id = %session_id,
+                                turn_counter = checkpoint.turn_counter,
+                                yield_reason = ?checkpoint.yield_reason,
+                                "Resuming session from latest checkpoint"
+                            );
+                            runtime.guard = crate::runtime::guard::LoopGuard::restore(
+                                checkpoint.loop_guard_state.clone(),
+                            );
+                            runtime.session_started = true;
+                            runtime.turn_counter = checkpoint.turn_counter;
+                            runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+
+                            let mut history = checkpoint.history.clone();
+                            history.push(Message::user(message.to_string()));
+                            let initial_msg = checkpoint
+                                .history
+                                .iter()
+                                .find(|m| matches!(m.role, crate::llm::Role::User))
+                                .map(|m| m.content.clone())
+                                .unwrap_or_default();
+
+                            let outcome = runtime.execute_with_history(&mut history).await?;
+                            (outcome, initial_msg, Some(checkpoint.turn_id))
+                        } else {
+                            tracing::debug!(
+                                target: "checkpoint",
+                                session_id = %session_id,
+                                yield_reason = ?checkpoint.yield_reason,
+                                "Skipping checkpoint auto-resume for unsupported yield reason"
+                            );
+                            let mut history = build_initial_history(
+                                &runtime.agent_dir,
+                                &runtime.instructions,
+                                &runtime.initial_user_message,
+                                session_id,
+                            );
+                            let outcome = runtime.execute_with_history(&mut history).await?;
+                            (outcome, runtime.initial_user_message.clone(), None)
+                        }
+                    } else {
+                        let mut history = build_initial_history(
+                            &runtime.agent_dir,
+                            &runtime.instructions,
+                            &runtime.initial_user_message,
+                            session_id,
+                        );
+                        let outcome = runtime.execute_with_history(&mut history).await?;
+                        (outcome, runtime.initial_user_message.clone(), None)
+                    }
+                }
+            } else {
+                let checkpoint =
+                    crate::runtime::checkpoint::load_latest_checkpoint(&self.config, session_id)?;
+                if let Some(checkpoint) = checkpoint {
+                    if matches!(
+                        checkpoint.yield_reason,
+                        crate::runtime::checkpoint::YieldReason::EmergencyStop { .. }
+                    ) {
+                        anyhow::bail!(
+                            "Cannot auto-resume session '{}' from EmergencyStop checkpoint",
+                            session_id
+                        );
+                    }
+                    if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
+                        tracing::info!(
+                            target: "checkpoint",
+                            agent_id = %runtime.manifest.agent.id,
+                            session_id = %session_id,
+                            turn_counter = checkpoint.turn_counter,
+                            yield_reason = ?checkpoint.yield_reason,
+                            "Resuming session from latest checkpoint"
+                        );
+                        runtime.guard = crate::runtime::guard::LoopGuard::restore(
+                            checkpoint.loop_guard_state.clone(),
+                        );
+                        runtime.session_started = true;
+                        runtime.turn_counter = checkpoint.turn_counter;
+                        runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+
+                        let mut history = checkpoint.history.clone();
+                        history.push(Message::user(message.to_string()));
+                        let initial_msg = checkpoint
+                            .history
+                            .iter()
+                            .find(|m| matches!(m.role, crate::llm::Role::User))
+                            .map(|m| m.content.clone())
+                            .unwrap_or_default();
+
+                        let outcome = runtime.execute_with_history(&mut history).await?;
+                        (outcome, initial_msg, Some(checkpoint.turn_id))
+                    } else {
+                        tracing::debug!(
+                            target: "checkpoint",
+                            session_id = %session_id,
+                            yield_reason = ?checkpoint.yield_reason,
+                            "Skipping checkpoint auto-resume for unsupported yield reason"
+                        );
+                        let mut history = build_initial_history(
+                            &runtime.agent_dir,
+                            &runtime.instructions,
+                            &runtime.initial_user_message,
+                            session_id,
+                        );
+                        let outcome = runtime.execute_with_history(&mut history).await?;
+                        (outcome, runtime.initial_user_message.clone(), None)
+                    }
+                } else {
                     let mut history = build_initial_history(
                         &runtime.agent_dir,
                         &runtime.instructions,
@@ -751,17 +879,8 @@ impl GatewayExecutionService {
                         session_id,
                     );
                     let outcome = runtime.execute_with_history(&mut history).await?;
-                    (outcome, runtime.initial_user_message.clone())
+                    (outcome, runtime.initial_user_message.clone(), None)
                 }
-            } else {
-                let mut history = build_initial_history(
-                    &runtime.agent_dir,
-                    &runtime.instructions,
-                    &runtime.initial_user_message,
-                    session_id,
-                );
-                let outcome = runtime.execute_with_history(&mut history).await?;
-                (outcome, runtime.initial_user_message.clone())
             };
 
             let resolved_session_id = runtime
@@ -776,6 +895,22 @@ impl GatewayExecutionService {
                     (None, Some(approval_request_id))
                 }
             };
+
+            if let Some(checkpoint_turn_id) = consumed_checkpoint_turn_id {
+                if let Err(e) = crate::runtime::checkpoint::delete_checkpoint(
+                    &self.config,
+                    session_id,
+                    &checkpoint_turn_id,
+                ) {
+                    tracing::warn!(
+                        target: "checkpoint",
+                        session_id = %session_id,
+                        turn_id = %checkpoint_turn_id,
+                        error = %e,
+                        "Failed to delete consumed checkpoint"
+                    );
+                }
+            }
 
             persist_session_context_turn(
                 &runtime.agent_dir,
@@ -893,8 +1028,7 @@ impl GatewayExecutionService {
             .ok_or_else(|| anyhow::anyhow!("Agent '{}' is missing llm_config", agent_id))?;
         let driver = build_driver(llm_config, self.http_client.clone())?;
 
-        let openrouter_catalog =
-            Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
+        let openrouter_catalog = Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
         let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
         let mut runtime = AgentExecutor::new(
             loaded.manifest,
@@ -910,15 +1044,11 @@ impl GatewayExecutionService {
         .with_openrouter_catalog(Some(openrouter_catalog))
         .with_middleware(middleware)
         .with_session_id(session_id.to_string())
-        .with_workflow_context(
-            workflow_id.map(String::from),
-            task_id.map(String::from),
-        );
+        .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from));
 
         // Restore executor state from checkpoint
-        runtime.guard = crate::runtime::guard::LoopGuard::restore(
-            checkpoint.loop_guard_state.clone(),
-        );
+        runtime.guard =
+            crate::runtime::guard::LoopGuard::restore(checkpoint.loop_guard_state.clone());
         runtime.session_started = true;
         runtime.turn_counter = checkpoint.turn_counter;
         runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
@@ -927,21 +1057,6 @@ impl GatewayExecutionService {
         let mut history = checkpoint.history.clone();
         if let Some(msg) = additional_message {
             history.push(Message::user(msg));
-        }
-
-        // Clear the checkpoint file for this session (we're consuming it)
-        if let Err(e) = crate::runtime::checkpoint::delete_checkpoint(
-            &self.config,
-            session_id,
-            &checkpoint.turn_id,
-        ) {
-            tracing::warn!(
-                target: "checkpoint",
-                session_id = %session_id,
-                turn_id = %checkpoint.turn_id,
-                error = %e,
-                "Failed to delete checkpoint after loading"
-            );
         }
 
         let outcome = runtime.execute_with_history(&mut history).await?;
@@ -997,6 +1112,21 @@ impl GatewayExecutionService {
             source_agent_id.unwrap_or(agent_id),
             agent_id,
         );
+
+        // Delete consumed checkpoint only after successful resume execution.
+        if let Err(e) = crate::runtime::checkpoint::delete_checkpoint(
+            &self.config,
+            session_id,
+            &checkpoint.turn_id,
+        ) {
+            tracing::warn!(
+                target: "checkpoint",
+                session_id = %session_id,
+                turn_id = %checkpoint.turn_id,
+                error = %e,
+                "Failed to delete consumed checkpoint"
+            );
+        }
 
         Ok(SpawnResult {
             agent_id: agent_id.to_string(),
@@ -1345,6 +1475,20 @@ pub fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn should_auto_resume_checkpoint_yield_reason(
+    yield_reason: &crate::runtime::checkpoint::YieldReason,
+) -> bool {
+    use crate::runtime::checkpoint::YieldReason;
+    matches!(
+        yield_reason,
+        YieldReason::Hibernation
+            | YieldReason::BudgetExhausted
+            | YieldReason::MaxTurnsReached
+            | YieldReason::ManualStop
+            | YieldReason::Error(_)
+    )
 }
 
 fn build_initial_history(

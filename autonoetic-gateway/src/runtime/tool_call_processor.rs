@@ -10,10 +10,12 @@ use crate::runtime::session_tracer::SessionTracer;
 use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tools::NativeToolRegistry;
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::causal_chain::ExecutionTraceRecord;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::disclosure::DisclosureClass;
-use autonoetic_types::tool_error::ToolError;
+use autonoetic_types::tool_error::{ToolError, ToolErrorType};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 pub struct ToolCallProcessor<'a> {
     mcp_runtime: &'a mut McpToolRuntime,
@@ -89,10 +91,12 @@ impl<'a> ToolCallProcessor<'a> {
 
         for tc in tool_calls {
             tracer.log_tool_requested(&tc.name, &tc.arguments)?;
+            let started_at = Instant::now();
 
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
                 Ok(res) => {
+                    self.record_execution_trace(tc, &res, started_at.elapsed(), None)?;
                     // Success - log and continue
                     self.log_memory_tool_event(tracer, &tc.name, &res);
                     tracer.log_tool_completed(&tc.name, &res)?;
@@ -102,6 +106,13 @@ impl<'a> ToolCallProcessor<'a> {
                 Err(e) => {
                     // Convert to structured error
                     let tool_error: ToolError = e.into();
+                    let error_json = tool_error.to_json_string();
+                    self.record_execution_trace(
+                        tc,
+                        &error_json,
+                        started_at.elapsed(),
+                        Some(&tool_error),
+                    )?;
 
                     // Log the failure to causal chain - this must succeed
                     // as audit trail integrity is critical for governance
@@ -117,7 +128,6 @@ impl<'a> ToolCallProcessor<'a> {
                     }
 
                     // Recoverable errors are returned as structured JSON
-                    let error_json = tool_error.to_json_string();
                     tracer.log_tool_completed(&tc.name, &error_json)?;
                     error_json
                 }
@@ -131,6 +141,77 @@ impl<'a> ToolCallProcessor<'a> {
         }
 
         Ok((had_any_success, results))
+    }
+
+    fn record_execution_trace(
+        &self,
+        tc: &ToolCall,
+        result_json: &str,
+        duration: Duration,
+        tool_error: Option<&ToolError>,
+    ) -> anyhow::Result<()> {
+        let Some(store) = &self.gateway_store else {
+            return Ok(());
+        };
+        let session_id = self
+            .session_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session_id missing while recording execution trace"))?;
+
+        let canonical_tool_name = Self::canonical_tool_name(&tc.name).to_string();
+        let parsed_result = serde_json::from_str::<serde_json::Value>(result_json).ok();
+        let success = infer_trace_success(parsed_result.as_ref(), tool_error);
+        let error_type = infer_trace_error_type(parsed_result.as_ref(), tool_error);
+        let error_summary = infer_trace_error_summary(parsed_result.as_ref(), tool_error);
+        let command = infer_trace_command(&canonical_tool_name, &tc.arguments);
+        let exit_code = parsed_result
+            .as_ref()
+            .and_then(|v| v.get("exit_code"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        let stdout = parsed_result
+            .as_ref()
+            .and_then(|v| v.get("stdout"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let stderr = parsed_result
+            .as_ref()
+            .and_then(|v| v.get("stderr"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let approval_required = parsed_result
+            .as_ref()
+            .and_then(|v| v.get("approval_required"))
+            .and_then(|v| v.as_bool())
+            .map(|required| if required { 1 } else { 0 });
+        let approval_request_id = parsed_result
+            .as_ref()
+            .and_then(|v| v.get("request_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let trace = ExecutionTraceRecord {
+            trace_id: uuid::Uuid::new_v4().to_string(),
+            event_id: None,
+            agent_id: self.manifest.agent.id.clone(),
+            session_id: session_id.clone(),
+            turn_id: self.turn_id.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            tool_name: canonical_tool_name,
+            command,
+            exit_code,
+            stdout,
+            stderr,
+            duration_ms: duration.as_millis().min(i64::MAX as u128) as i64,
+            success: if success { 1 } else { 0 },
+            error_type,
+            error_summary,
+            approval_required,
+            approval_request_id,
+            arguments: Some(tc.arguments.clone()),
+            result: Some(result_json.to_string()),
+        };
+        store.create_execution_trace(&trace)
     }
 
     async fn execute_tool_call(
@@ -249,6 +330,99 @@ fn tool_result_requires_approval(result: &str) -> bool {
         .ok()
         .and_then(|parsed| parsed.get("approval_required").and_then(|v| v.as_bool()))
         .unwrap_or(false)
+}
+
+fn infer_trace_success(
+    parsed_result: Option<&serde_json::Value>,
+    tool_error: Option<&ToolError>,
+) -> bool {
+    if tool_error.is_some() {
+        return false;
+    }
+    let Some(parsed) = parsed_result else {
+        return true;
+    };
+    if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
+        return ok;
+    }
+    if let Some(approval_required) = parsed.get("approval_required").and_then(|v| v.as_bool()) {
+        return !approval_required;
+    }
+    if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
+        return exit_code == 0;
+    }
+    true
+}
+
+fn normalize_error_type(raw: &str) -> String {
+    match raw {
+        "execution" | "fatal" => "runtime".to_string(),
+        _ => raw.to_string(),
+    }
+}
+
+fn infer_trace_error_type(
+    parsed_result: Option<&serde_json::Value>,
+    tool_error: Option<&ToolError>,
+) -> Option<String> {
+    if let Some(err) = tool_error {
+        let mapped = match err.error_type {
+            ToolErrorType::Validation => "validation",
+            ToolErrorType::Permission => "permission",
+            ToolErrorType::Resource => "resource",
+            ToolErrorType::Execution | ToolErrorType::Fatal => "runtime",
+        };
+        return Some(mapped.to_string());
+    }
+    parsed_result
+        .and_then(|v| v.get("error_type"))
+        .and_then(|v| v.as_str())
+        .map(normalize_error_type)
+}
+
+fn infer_trace_error_summary(
+    parsed_result: Option<&serde_json::Value>,
+    tool_error: Option<&ToolError>,
+) -> Option<String> {
+    if let Some(err) = tool_error {
+        return Some(err.message.clone());
+    }
+    let Some(parsed) = parsed_result else {
+        return None;
+    };
+    if let Some(summary) = parsed.get("error_summary").and_then(|v| v.as_str()) {
+        return Some(summary.to_string());
+    }
+    if let Some(message) = parsed.get("message").and_then(|v| v.as_str()) {
+        return Some(message.to_string());
+    }
+    if let Some(stderr) = parsed.get("stderr").and_then(|v| v.as_str()) {
+        let first_line = stderr.lines().next().unwrap_or(stderr).trim();
+        if !first_line.is_empty() {
+            return Some(first_line.to_string());
+        }
+    }
+    parsed
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .map(|code| format!("exit_code={code}"))
+}
+
+fn infer_trace_command(tool_name: &str, arguments_json: &str) -> Option<String> {
+    if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments_json) {
+        if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
+            return Some(command.to_string());
+        }
+        if let Some(command) = args.get("cmd").and_then(|v| v.as_str()) {
+            return Some(command.to_string());
+        }
+        if tool_name == "sandbox.exec" {
+            if let Some(script) = args.get("script").and_then(|v| v.as_str()) {
+                return Some(script.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -556,6 +730,101 @@ mod tests {
         }
     }
 
+    struct TraceSuccessTool;
+
+    impl NativeTool for TraceSuccessTool {
+        fn name(&self) -> &'static str {
+            "test.trace.success"
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "Returns sandbox-style successful payload".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" }
+                    },
+                    "required": ["command"]
+                }),
+            }
+        }
+
+        fn is_available(&self, _manifest: &AgentManifest) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _manifest: &AgentManifest,
+            _policy: &PolicyEngine,
+            _agent_dir: &Path,
+            _gateway_dir: Option<&Path>,
+            arguments_json: &str,
+            _session_id: Option<&str>,
+            _turn_id: Option<&str>,
+            _config: Option<&autonoetic_types::config::GatewayConfig>,
+            _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        ) -> anyhow::Result<String> {
+            let parsed: serde_json::Value = serde_json::from_str(arguments_json)?;
+            let command = parsed
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "ok": true,
+                "exit_code": 0,
+                "stdout": format!("ran: {command}"),
+                "stderr": "",
+            })
+            .to_string())
+        }
+    }
+
+    struct TraceFailureTool;
+
+    impl NativeTool for TraceFailureTool {
+        fn name(&self) -> &'static str {
+            "test.trace.failure"
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "Returns tagged execution failure".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" }
+                    },
+                    "required": ["command"]
+                }),
+            }
+        }
+
+        fn is_available(&self, _manifest: &AgentManifest) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _manifest: &AgentManifest,
+            _policy: &PolicyEngine,
+            _agent_dir: &Path,
+            _gateway_dir: Option<&Path>,
+            _arguments_json: &str,
+            _session_id: Option<&str>,
+            _turn_id: Option<&str>,
+            _config: Option<&autonoetic_types::config::GatewayConfig>,
+            _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        ) -> anyhow::Result<String> {
+            Err(anyhow::Error::from(tagged::Tagged::execution(
+                anyhow::anyhow!("command crashed"),
+            )))
+        }
+    }
+
     #[tokio::test]
     async fn test_approval_required_stops_remaining_tool_calls() {
         let temp = tempdir().unwrap();
@@ -696,6 +965,90 @@ mod tests {
         assert_eq!(parsed_success.get("ok").unwrap(), true);
         // knowledge.store returns "id" field, not "memory_id"
         assert!(parsed_success.get("id").is_some() || parsed_success.get("memory_id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_process_tool_calls_writes_execution_traces() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        registry.register(Box::new(TraceSuccessTool));
+        registry.register(Box::new(TraceFailureTool));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+        )
+        .with_session_context(
+            Some("trace-session".to_string()),
+            Some("turn-000001".to_string()),
+        );
+
+        let tool_calls = vec![
+            ToolCall {
+                id: "tc1".to_string(),
+                name: "test.trace.success".to_string(),
+                arguments: r#"{"command":"echo hi"}"#.to_string(),
+            },
+            ToolCall {
+                id: "tc2".to_string(),
+                name: "test.trace.failure".to_string(),
+                arguments: r#"{"command":"false"}"#.to_string(),
+            },
+        ];
+
+        let (_had_success, _results) = processor
+            .process_tool_calls(
+                &tool_calls,
+                temp.path(),
+                Some(gateway_dir.as_path()),
+                &mut SessionTracer::test_tracer(),
+            )
+            .await
+            .unwrap();
+
+        let traces = store
+            .search_execution_traces(None, None, None, None, Some("test-agent"), 10)
+            .unwrap();
+        assert_eq!(traces.len(), 2);
+        for trace in &traces {
+            assert_eq!(trace.session_id, "trace-session");
+            assert_eq!(trace.turn_id.as_deref(), Some("turn-000001"));
+        }
+
+        let fail = traces
+            .iter()
+            .find(|t| t.tool_name == "test.trace.failure")
+            .expect("failure trace should exist");
+        assert_eq!(fail.success, 0);
+        assert_eq!(fail.error_type.as_deref(), Some("runtime"));
+        assert_eq!(fail.command.as_deref(), Some("false"));
+
+        let success = traces
+            .iter()
+            .find(|t| t.tool_name == "test.trace.success")
+            .expect("success trace should exist");
+        assert_eq!(success.success, 1);
+        assert_eq!(success.command.as_deref(), Some("echo hi"));
+        assert_eq!(success.exit_code, Some(0));
+        assert!(success
+            .stdout
+            .as_deref()
+            .unwrap_or_default()
+            .contains("echo hi"));
     }
 
     #[test]

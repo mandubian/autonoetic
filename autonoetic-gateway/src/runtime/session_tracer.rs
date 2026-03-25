@@ -172,9 +172,27 @@ pub struct SessionTracer {
 
 impl SessionTracer {
     pub fn new(agent_dir: &Path, agent_id: &str, session_id: &str) -> anyhow::Result<Self> {
-        let causal_logger = init_causal_logger(agent_dir)?;
         let evidence_store = EvidenceStore::from_env(agent_dir, session_id)?;
+        Self::new_with_evidence_store(agent_dir, agent_id, session_id, evidence_store)
+    }
 
+    pub fn new_with_evidence_mode(
+        agent_dir: &Path,
+        agent_id: &str,
+        session_id: &str,
+        evidence_mode: &str,
+    ) -> anyhow::Result<Self> {
+        let evidence_store = EvidenceStore::from_config(agent_dir, session_id, evidence_mode)?;
+        Self::new_with_evidence_store(agent_dir, agent_id, session_id, evidence_store)
+    }
+
+    fn new_with_evidence_store(
+        agent_dir: &Path,
+        agent_id: &str,
+        session_id: &str,
+        evidence_store: EvidenceStore,
+    ) -> anyhow::Result<Self> {
+        let causal_logger = init_causal_logger(agent_dir)?;
         Ok(Self {
             causal_logger,
             agent_id: agent_id.to_string(),
