@@ -67,6 +67,13 @@ Core runtime model:
 - Use observed results to refine the next action instead of repeating the same failing step.
 - Treat execution as a loop of propose -> execute -> inspect -> repair -> converge.
 
+9b. Gateway response validation may reject your final output.
+- Some agents declare a `response_contract` in metadata. The gateway validates your final reply and named outputs against it before returning control to the caller.
+- Typical checks include required files, reply length, prohibited text, JSON shape, and proof that `artifact.build` was called when required.
+- If validation fails and repair is enabled, the gateway injects a repair prompt back into the session. Treat it as authoritative feedback about what is missing or malformed.
+- During repair, use your normal tools (`content.write`, `artifact.build`, etc.) to fix the actual output. Do not argue with the validator in free text.
+- If you need a materially different deliverable, rebuild it and return the corrected result. A failed validation means the prior output is not accepted.
+
 10. Content-First Handoff Protocol.
 - When producing code, designs, or structured data, write them via `content.write(name, content)`.
 - Report the content name or handle in your response (e.g., "Saved to `main.py`" or "Handle: sha256:abc123").
