@@ -76,6 +76,8 @@ fn test_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 
@@ -149,12 +151,12 @@ capabilities: []
         "digest missing header"
     );
     assert!(
-        digest.contains("**Observation:**") && digest.contains("User prefers short answers"),
+        digest.contains("👀 **Observation:**") && digest.contains("User prefers short answers"),
         "annotation missing: {digest}"
     );
-    assert!(digest.contains("— Turn "), "expected turn headings");
+    assert!(digest.contains("**Turn 1**"), "expected turn headings");
     assert!(
-        digest.contains("— Session summary"),
+        digest.contains("Session summary"),
         "expected session summary: {digest}"
     );
     assert!(
