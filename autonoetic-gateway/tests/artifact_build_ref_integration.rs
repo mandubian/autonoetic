@@ -41,6 +41,8 @@ fn writer_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 
@@ -248,6 +250,8 @@ fn reader_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 
