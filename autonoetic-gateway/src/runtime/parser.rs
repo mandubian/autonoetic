@@ -47,6 +47,8 @@ struct AutonoeticMetadata {
     gateway_url: Option<String>,
     #[serde(default)]
     gateway_token: Option<String>,
+    #[serde(default)]
+    response_contract: Option<serde_json::Value>,
 }
 
 /// Parser for `SKILL.md` files.
@@ -119,6 +121,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         script_entry: meta.script_entry,
         gateway_url: meta.gateway_url,
         gateway_token: meta.gateway_token,
+        response_contract: meta.response_contract,
     }
 }
 
