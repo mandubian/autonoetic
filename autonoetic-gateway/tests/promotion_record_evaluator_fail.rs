@@ -86,6 +86,8 @@ fn evolution_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 
@@ -118,6 +120,8 @@ fn evaluator_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 
@@ -331,6 +335,8 @@ async fn test_promotion_auditor_fail_rejected() {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     };
 
     let audit_args = serde_json::json!({

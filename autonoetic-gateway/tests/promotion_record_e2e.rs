@@ -87,6 +87,8 @@ fn evolution_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 
@@ -119,6 +121,8 @@ fn evaluator_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 
@@ -151,6 +155,8 @@ fn auditor_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 

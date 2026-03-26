@@ -114,17 +114,18 @@ When called for promotion evaluation (before `agent.install`), you are a **requi
 ## Recording Promotion (CRITICAL)
 
 After completing your audit, you MUST call `promotion.record` to persist the result.
-Today that tool still records a `content_handle`, so when auditing an artifact:
+When auditing an artifact:
 
 - treat the artifact as the primary review object
-- use the canonical source content handle for the artifact when calling `promotion.record`
+- call `promotion.record` with the exact `artifact_id` you reviewed
 - include the `artifact_id` in your summary and findings so the audit is bound to the reviewed closure in practice
+- if delegation metadata includes `require_promotion_record=true`, your session will be treated as incomplete unless this tool call happens before you finish
 
 Example:
 
 ```
 promotion.record({
-  "content_handle": "<canonical source handle for the reviewed artifact>",
+  "artifact_id": "art_xxxxxxxx",
   "role": "auditor",
   "pass": <true if auditor_pass is true, false otherwise>,
   "findings": [<your findings array>],
@@ -153,6 +154,7 @@ For promotable executable artifacts, review the artifact closure rather than loo
 1. Inspect the candidate with `artifact.inspect`
 2. Audit the artifact file set, entrypoints, import/source behavior, and implied capabilities
 3. Ensure the reviewed artifact is the one intended for install/promotion
+4. Record promotion using that same `artifact_id`
 4. Reference the same `artifact_id` in your findings summary
 
 ## Content System

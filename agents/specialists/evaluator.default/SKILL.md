@@ -29,6 +29,23 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
     validation: "soft"
+    response_contract:
+      max_reply_length_chars: 8000
+      output_schema:
+        type: object
+        required: ["status", "evaluator_pass", "summary"]
+        properties:
+          status:
+            type: string
+          evaluator_pass:
+            type: boolean
+          summary:
+            type: string
+      prohibited_text_patterns:
+        - "BEGIN RSA PRIVATE KEY"
+        - "-----BEGIN"
+      validation_max_loops: 2
+      validation_max_duration_ms: 2000
 ---
 # Evaluator
 
@@ -83,17 +100,18 @@ Set `evaluator_pass: false` when:
 ## Recording Promotion (CRITICAL)
 
 After completing your evaluation, you MUST call `promotion.record` to persist the result.
-Today that tool still records a `content_handle`, so when evaluating an artifact:
+When evaluating an artifact:
 
 - use the artifact as the primary review object
-- record the canonical source content handle for the artifact, usually the main entrypoint or source file handle you were given
+- call `promotion.record` with the exact `artifact_id` you reviewed
 - include the `artifact_id` in your summary and findings so the review remains traceable to the reviewed closure
+- if delegation metadata includes `require_promotion_record=true`, your session will be treated as incomplete unless this tool call happens before you finish
 
 Example:
 
 ```
 promotion.record({
-  "content_handle": "<canonical source handle for the reviewed artifact>",
+  "artifact_id": "art_xxxxxxxx",
   "role": "evaluator",
   "pass": <true if evaluator_pass is true, false otherwise>,
   "findings": [<your findings array>],
@@ -109,6 +127,25 @@ This records the promotion to the PromotionStore and causal chain. Without this 
 If your evaluation fails (evaluator_pass=false), you MUST still call `promotion.record` with pass=false to document the failure.
 
 Exception: if execution is blocked on operator approval, the evaluation is not complete yet. In that case, do not call `promotion.record` until the operator approves and you can finish the evaluation, or until approval is explicitly denied and you are reporting a final failed outcome.
+
+## Gateway Response Validation & Repair (CRITICAL)
+
+When the gateway returns a validation error (repair prompt), your evaluation output violated a declared constraint. Repair means fixing the deliverable itself, not reinterpreting the findings.
+
+**What repair means for evaluator.default:**
+
+1. **When output_schema constraint fails:** Rewrite your JSON evaluation report to include all required fields (`status`, `evaluator_pass`, `summary`) and ensure it parses as valid JSON.
+2. **When max_reply_length_chars constraint fails:** Reduce the verbosity of your report — shorten findings descriptions, condense the summary, or remove verbose explanation.
+3. **When prohibited_text_patterns constraint fails:** Remove any forbidden text (secrets, keys, private paths) from your report, even if it was discovered during testing.
+4. **When approval is blocking execution:** Do NOT attempt to produce a fake "complete" report to satisfy validation. Stop in the blocked state and wait for approval resolution.
+
+**Do NOT during repair:**
+
+- Argue that your findings are correct without rewriting them to satisfy the constraint.
+- Claim that a JSON report is "pretty much valid" when it fails to parse.
+- Force a partial evaluation into a shape that looks complete just to pass length/schema validation.
+
+Repair attempts are bounded by `validation_max_loops` and `validation_max_duration_ms`; if you exceed those bounds, the gateway will return a final error and the evaluation will be marked incomplete.
 
 ## Running Tests
 
@@ -137,7 +174,7 @@ When the task is about candidate executable artifacts for promotion or installat
 2. Review the declared entrypoints and file set, including import/source and file-open behavior
 3. Run deterministic validation against that artifact
 4. Report findings against the same `artifact_id`
-5. Record promotion using the canonical content handle plus the `artifact_id` in the summary/findings
+5. Record promotion using that same `artifact_id`
 
 ## Allowed Commands
 
