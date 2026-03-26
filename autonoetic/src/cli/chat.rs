@@ -67,6 +67,77 @@ struct SignalResumeRef {
     request_id: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WorkflowOverview {
+    workflow_id: Option<String>,
+    status: String,
+    running: usize,
+    queued: usize,
+    awaiting: usize,
+    done: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SessionOverview {
+    root_session_id: String,
+    workflow: WorkflowOverview,
+    pending_user_interactions: usize,
+    latest_signal: Option<String>,
+}
+
+impl SessionOverview {
+    fn status_line(&self) -> String {
+        let workflow = if let Some(workflow_id) = &self.workflow.workflow_id {
+            format!(
+                "wf:{} {} | run:{} queue:{} wait:{} done:{}",
+                workflow_id,
+                self.workflow.status,
+                self.workflow.running,
+                self.workflow.queued,
+                self.workflow.awaiting,
+                self.workflow.done
+            )
+        } else {
+            let root = if self.root_session_id.len() > 16 {
+                format!("{}...", &self.root_session_id[..16])
+            } else {
+                self.root_session_id.clone()
+            };
+            format!("workflow: n/a (session: {})", root)
+        };
+
+        let ask = if self.pending_user_interactions > 0 {
+            format!(" | ask:{}", self.pending_user_interactions)
+        } else {
+            String::new()
+        };
+
+        let latest_signal = self
+            .latest_signal
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                let compact = value.lines().next().unwrap_or(value).trim();
+                let shortened: String = compact.chars().take(60).collect();
+                if compact.chars().count() > 60 {
+                    format!(" | event:{}...", shortened)
+                } else {
+                    format!(" | event:{}", shortened)
+                }
+            })
+            .unwrap_or_default();
+
+        format!("{}{}{}", workflow, ask, latest_signal)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SessionPollSnapshot {
+    overview: SessionOverview,
+    pending_interactions: Vec<UserInteraction>,
+}
+
 struct App {
     messages: Vec<ChatMessage>,
     input: String,
@@ -75,6 +146,8 @@ struct App {
     next_id: u64,
     spinner_frame: usize,
     scroll_offset: usize,
+    last_max_scroll_offset: usize,
+    follow_output: bool,
     session_id: String,
     target_hint: String,
     // Mouse selection - stored as CONTENT positions (row, col), not screen positions
@@ -86,7 +159,7 @@ struct App {
     seen_workflow_event_ids: HashSet<String>,
     workflow_events_bootstrapped: bool,
     current_workflow_id: Option<String>,
-    workflow_status_line: String,
+    session_overview: SessionOverview,
     /// `user.ask` cards we already showed for this TUI session (avoid duplicate polls).
     seen_user_interaction_prompts: HashSet<String>,
     // Persistent clipboard — must stay alive so arboard's background ownership
@@ -104,6 +177,8 @@ impl App {
             next_id: 1,
             spinner_frame: 0,
             scroll_offset: 0,
+            last_max_scroll_offset: 0,
+            follow_output: true,
             session_id,
             target_hint,
             selecting: false,
@@ -114,7 +189,7 @@ impl App {
             seen_workflow_event_ids: HashSet::new(),
             workflow_events_bootstrapped: false,
             current_workflow_id: None,
-            workflow_status_line: "workflow: n/a".to_string(),
+            session_overview: SessionOverview::default(),
             seen_user_interaction_prompts: HashSet::new(),
             // Safe clipboard initialization - arboard can panic on headless/SSH systems
             clipboard: std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None),
@@ -123,8 +198,9 @@ impl App {
 
     fn add_message(&mut self, role: MessageRole, content: String) {
         self.messages.push(ChatMessage { role, content });
-        // Keep scroll at 0 to show from top - this was the original behavior
-        self.scroll_offset = 0;
+        if self.follow_output {
+            self.scroll_offset = self.last_max_scroll_offset;
+        }
     }
 
     fn next_id(&mut self) -> u64 {
@@ -185,6 +261,44 @@ impl App {
         if self.cursor_pos < self.input.len() {
             let next = self.input[self.cursor_pos..].chars().next().unwrap();
             self.cursor_pos += next.len_utf8();
+        }
+    }
+
+    fn content_line_count(&self) -> usize {
+        let mut count = 0usize;
+        for msg in &self.messages {
+            count = count.saturating_add(msg.content.lines().count());
+            count = count.saturating_add(1);
+        }
+        if !self.pending.is_empty() {
+            count = count.saturating_add(1);
+        }
+        count
+    }
+
+    fn scroll_messages_up(&mut self, lines: usize) {
+        if self.follow_output {
+            self.scroll_offset = self.last_max_scroll_offset;
+            self.follow_output = false;
+        }
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    }
+
+    fn scroll_messages_down(&mut self, lines: usize) {
+        let next = self.scroll_offset.saturating_add(lines);
+        if next >= self.last_max_scroll_offset {
+            self.scroll_offset = self.last_max_scroll_offset;
+            self.follow_output = true;
+        } else {
+            self.scroll_offset = next;
+        }
+    }
+
+    fn effective_scroll_offset(&self) -> usize {
+        if self.follow_output {
+            self.last_max_scroll_offset
+        } else {
+            self.scroll_offset.min(self.last_max_scroll_offset)
         }
     }
 }
@@ -254,6 +368,76 @@ fn list_pending_user_interactions_for_terminal_session(
     Ok(v)
 }
 
+fn poll_session_snapshot(
+    config: &autonoetic_types::config::GatewayConfig,
+    store: Option<&GatewayStore>,
+    session_id: &str,
+) -> anyhow::Result<SessionPollSnapshot> {
+    let root_session_id = autonoetic_gateway::runtime::content_store::root_session_id(session_id);
+    let pending_interactions = match store {
+        Some(store) => list_pending_user_interactions_for_terminal_session(store, session_id)?,
+        None => Vec::new(),
+    };
+
+    let workflow_id = autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(
+        config,
+        &root_session_id,
+    )?;
+
+    let workflow = if let Some(workflow_id) = workflow_id {
+        let status = autonoetic_gateway::scheduler::load_workflow_run(config, None, &workflow_id)
+            .ok()
+            .flatten()
+            .map(|run| format!("{:?}", run.status).to_lowercase())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let mut running = 0usize;
+        let mut queued = 0usize;
+        let mut awaiting = 0usize;
+        let mut done = 0usize;
+
+        if let Ok(tasks) =
+            autonoetic_gateway::scheduler::list_task_runs_for_workflow(config, None, &workflow_id)
+        {
+            for task in tasks {
+                match task.status {
+                    autonoetic_types::workflow::TaskRunStatus::Pending => queued += 1,
+                    autonoetic_types::workflow::TaskRunStatus::Runnable
+                    | autonoetic_types::workflow::TaskRunStatus::Running => running += 1,
+                    autonoetic_types::workflow::TaskRunStatus::AwaitingApproval => awaiting += 1,
+                    autonoetic_types::workflow::TaskRunStatus::Succeeded
+                    | autonoetic_types::workflow::TaskRunStatus::Failed
+                    | autonoetic_types::workflow::TaskRunStatus::Cancelled
+                    | autonoetic_types::workflow::TaskRunStatus::Aborted => done += 1,
+                    autonoetic_types::workflow::TaskRunStatus::Paused => {}
+                    autonoetic_types::workflow::TaskRunStatus::Aborting => running += 1,
+                }
+            }
+        }
+
+        WorkflowOverview {
+            workflow_id: Some(workflow_id),
+            status,
+            running,
+            queued,
+            awaiting,
+            done,
+        }
+    } else {
+        WorkflowOverview::default()
+    };
+
+    Ok(SessionPollSnapshot {
+        overview: SessionOverview {
+            root_session_id: root_session_id.to_string(),
+            workflow,
+            pending_user_interactions: pending_interactions.len(),
+            latest_signal: None,
+        },
+        pending_interactions,
+    })
+}
+
 /// Multi-line card for the TUI (Signal role), mirroring structured approval cards.
 fn format_user_interaction_prompt(interaction: &UserInteraction) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -308,10 +492,8 @@ fn format_user_interaction_prompt(interaction: &UserInteraction) -> String {
 /// Append structured cards for new pending interactions. Returns how many were added.
 fn append_new_pending_user_interaction_prompts(
     app: &mut App,
-    store: &GatewayStore,
-    session_id: &str,
-) -> anyhow::Result<usize> {
-    let pending = list_pending_user_interactions_for_terminal_session(store, session_id)?;
+    pending: &[UserInteraction],
+) -> usize {
     let mut added = 0usize;
     for interaction in pending {
         if app
@@ -323,10 +505,14 @@ fn append_new_pending_user_interaction_prompts(
         app.seen_user_interaction_prompts
             .insert(interaction.interaction_id.clone());
         let card = format_user_interaction_prompt(&interaction);
+        app.session_overview.latest_signal = Some(format!(
+            "user.ask {}",
+            interaction.interaction_id
+        ));
         app.add_message(MessageRole::Signal, card);
         added += 1;
     }
-    Ok(added)
+    added
 }
 
 fn signal_resume_key(signal_session_id: &str, request_id: &str) -> String {
@@ -393,88 +579,6 @@ fn format_workflow_event_card(
     };
 
     text
-}
-
-fn refresh_workflow_status_line(
-    app: &mut App,
-    config: &autonoetic_types::config::GatewayConfig,
-    root_session_id: &str,
-) {
-    tracing::debug!(
-        target: "chat",
-        agents_dir = %config.agents_dir.display(),
-        root_session_id = %root_session_id,
-        "refresh_workflow_status_line: resolving workflow"
-    );
-    let resolved = autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(
-        config,
-        root_session_id,
-    );
-    match &resolved {
-        Ok(Some(wf_id)) => {
-            tracing::debug!(target: "chat", workflow_id = %wf_id, "refresh_workflow_status_line: found workflow");
-        }
-        Ok(None) => {
-            tracing::debug!(target: "chat", "refresh_workflow_status_line: no workflow found");
-            // Show helpful hint when no workflow found
-            if app.workflow_status_line.starts_with("workflow: n/a") {
-                app.workflow_status_line = format!(
-                    "workflow: n/a (session: {})",
-                    if root_session_id.len() > 16 {
-                        format!("{}...", &root_session_id[..16])
-                    } else {
-                        root_session_id.to_string()
-                    }
-                );
-            }
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(target: "chat", error = %e, "refresh_workflow_status_line: resolution failed");
-            app.workflow_status_line = format!("workflow: error ({})", e);
-            return;
-        }
-    }
-    let Some(workflow_id) = resolved.ok().flatten() else {
-        return;
-    };
-
-    let status = autonoetic_gateway::scheduler::load_workflow_run(config, None, &workflow_id)
-        .ok()
-        .flatten()
-        .map(|run| format!("{:?}", run.status).to_lowercase())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let mut running = 0usize;
-    let mut queued = 0usize;
-    let mut awaiting = 0usize;
-    let mut done = 0usize;
-
-    if let Ok(tasks) =
-        autonoetic_gateway::scheduler::list_task_runs_for_workflow(config, None, &workflow_id)
-    {
-        for t in tasks {
-            match t.status {
-                autonoetic_types::workflow::TaskRunStatus::Pending => queued += 1,
-                autonoetic_types::workflow::TaskRunStatus::Runnable
-                | autonoetic_types::workflow::TaskRunStatus::Running => running += 1,
-                autonoetic_types::workflow::TaskRunStatus::AwaitingApproval => awaiting += 1,
-                autonoetic_types::workflow::TaskRunStatus::Succeeded
-                | autonoetic_types::workflow::TaskRunStatus::Failed
-                | autonoetic_types::workflow::TaskRunStatus::Cancelled
-                | autonoetic_types::workflow::TaskRunStatus::Aborted => done += 1,
-                autonoetic_types::workflow::TaskRunStatus::Paused => {}
-                autonoetic_types::workflow::TaskRunStatus::Aborting => {
-                    running += 1
-                }
-            }
-        }
-    }
-
-    app.workflow_status_line = format!(
-        "wf:{} {} | run:{} queue:{} wait:{} done:{}",
-        workflow_id, status, running, queued, awaiting, done
-    );
 }
 
 // ============================================================================
@@ -813,7 +917,7 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let p = Paragraph::new(Text::from(lines))
-        .scroll((app.scroll_offset as u16, 0))
+        .scroll((app.effective_scroll_offset() as u16, 0))
         .block(
             Block::default()
                 .borders(Borders::LEFT)
@@ -823,7 +927,7 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let workflow = &app.workflow_status_line;
+    let workflow = app.session_overview.status_line();
     let text = if !app.pending.is_empty() {
         format!(
             "{} {} pending | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C",
@@ -977,7 +1081,10 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         };
 
     if let Some(ref store) = gateway_store {
-        let _ = append_new_pending_user_interaction_prompts(&mut app, store, &session_id);
+        if let Ok(snapshot) = poll_session_snapshot(config.as_ref(), Some(store), &session_id) {
+            app.session_overview = snapshot.overview.clone();
+            let _ = append_new_pending_user_interaction_prompts(&mut app, &snapshot.pending_interactions);
+        }
     }
 
     // Main loop
@@ -1066,6 +1173,16 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
         // Only draw when something changed
         if needs_redraw {
+            let area = terminal.size()?;
+            let messages_height = area.height.saturating_sub(5) as usize;
+            app.last_max_scroll_offset = app
+                .content_line_count()
+                .saturating_sub(messages_height);
+            if app.follow_output {
+                app.scroll_offset = app.last_max_scroll_offset;
+            } else {
+                app.scroll_offset = app.scroll_offset.min(app.last_max_scroll_offset);
+            }
             terminal.draw(|f| draw(f, app))?;
             needs_redraw = false;
         }
@@ -1106,17 +1223,25 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         .unwrap_or_else(|| "[No response]".to_string());
 
                                     let new_user_prompts = if let Some(store) = gateway_store {
-                                        append_new_pending_user_interaction_prompts(
-                                            app, store, session_id,
-                                        )
-                                        .unwrap_or_else(|e| {
-                                            tracing::warn!(
-                                                target: "chat",
-                                                error = %e,
-                                                "pending user interaction poll failed"
-                                            );
-                                            0
-                                        })
+                                        match poll_session_snapshot(config, Some(store), session_id) {
+                                            Ok(snapshot) => {
+                                                app.session_overview.root_session_id = snapshot.overview.root_session_id.clone();
+                                                app.session_overview.workflow = snapshot.overview.workflow.clone();
+                                                app.session_overview.pending_user_interactions = snapshot.overview.pending_user_interactions;
+                                                append_new_pending_user_interaction_prompts(
+                                                    app,
+                                                    &snapshot.pending_interactions,
+                                                )
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "chat",
+                                                    error = %e,
+                                                    "pending user interaction poll failed"
+                                                );
+                                                0
+                                            }
+                                        }
                                     } else {
                                         0
                                     };
@@ -1124,8 +1249,24 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         reply.trim().is_empty() || reply == "[No response]";
 
                                     if let Some(structured) = extract_structured_approval(&reply) {
+                                        app.session_overview.latest_signal = Some(
+                                            structured
+                                                .request_id
+                                                .as_deref()
+                                                .map(|id| format!("approval {}", id))
+                                                .unwrap_or_else(|| {
+                                                    structured
+                                                        .card
+                                                        .lines()
+                                                        .next()
+                                                        .unwrap_or("approval required")
+                                                        .to_string()
+                                                }),
+                                        );
                                         app.add_message(MessageRole::Signal, structured.card);
                                     } else if let Some(req_id) = extract_approval_request_id(&reply) {
+                                        app.session_overview.latest_signal =
+                                            Some(format!("approval {}", req_id));
                                         app.add_message(
                                             MessageRole::Signal,
                                             format!("Approval required: {}", req_id),
@@ -1222,11 +1363,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
 fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
     match mouse.kind {
         crossterm::event::MouseEventKind::ScrollUp => {
-            app.scroll_offset += 3;
+            app.scroll_messages_up(3);
             true
         }
         crossterm::event::MouseEventKind::ScrollDown => {
-            app.scroll_offset = app.scroll_offset.saturating_sub(3);
+            app.scroll_messages_down(3);
             true
         }
         crossterm::event::MouseEventKind::Down(btn) => {
@@ -1236,7 +1377,7 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
                     // Convert screen coordinates to content coordinates
                     // Layout: status (1 row) + separator (1 row) = messages start at row 2
                     // Messages widget has left border (1 col) + prefix (2 cols) = text at col 3
-                    let content_row = (mouse.row as usize - 2) + app.scroll_offset;
+                    let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.selecting = true;
                     app.sel_start = Some((content_row, content_col));
@@ -1260,7 +1401,7 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
             if btn == crossterm::event::MouseButton::Left && app.selecting {
                 // Only complete selection if mouse is in messages area
                 if mouse.row >= 2 {
-                    let content_row = (mouse.row as usize - 2) + app.scroll_offset;
+                    let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.sel_end = Some((content_row, content_col));
                     app.selecting = false;
@@ -1280,7 +1421,7 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
             if btn == crossterm::event::MouseButton::Left && app.selecting {
                 // Only update if in messages area
                 if mouse.row >= 2 {
-                    let content_row = (mouse.row as usize - 2) + app.scroll_offset;
+                    let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.sel_end = Some((content_row, content_col));
                 }
@@ -1338,13 +1479,13 @@ fn handle_key(
             if key.modifiers.contains(KeyModifiers::SHIFT)
                 || key.modifiers.contains(KeyModifiers::CONTROL) =>
         {
-            app.scroll_offset += 3;
+            app.scroll_messages_up(3);
         }
         KeyCode::Down
             if key.modifiers.contains(KeyModifiers::SHIFT)
                 || key.modifiers.contains(KeyModifiers::CONTROL) =>
         {
-            app.scroll_offset = app.scroll_offset.saturating_sub(3);
+            app.scroll_messages_down(3);
         }
 
         _ => {}
@@ -1361,33 +1502,40 @@ async fn check_signals(
     session_id: &str,
     _tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
 ) -> bool {
-    let root_session_id = autonoetic_gateway::runtime::content_store::root_session_id(session_id);
     let mut processed_any = false;
+
+    let snapshot = match poll_session_snapshot(config, store, session_id) {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            tracing::warn!(target: "chat", error = %e, "Failed to poll session snapshot");
+            return false;
+        }
+    };
+
+    let root_session_id = snapshot.overview.root_session_id.clone();
 
     tracing::debug!(target: "chat", session_id = %session_id, root_session_id = %root_session_id, "check_signals: starting");
 
-    let previous_workflow_status = app.workflow_status_line.clone();
-    refresh_workflow_status_line(app, config, &root_session_id);
-    if app.workflow_status_line != previous_workflow_status {
+    let previous_overview = app.session_overview.clone();
+    app.session_overview.root_session_id = snapshot.overview.root_session_id.clone();
+    app.session_overview.workflow = snapshot.overview.workflow.clone();
+    app.session_overview.pending_user_interactions = snapshot.overview.pending_user_interactions;
+    if app.session_overview != previous_overview {
         processed_any = true;
         // Show notification when workflow becomes active or changes
-        let prev_is_na = previous_workflow_status.starts_with("workflow: n/a")
-            || previous_workflow_status.starts_with("workflow: error");
-        let curr_is_active = app.workflow_status_line.starts_with("wf:");
+        let prev_is_na = previous_overview.workflow.workflow_id.is_none();
+        let curr_is_active = app.session_overview.workflow.workflow_id.is_some();
         if curr_is_active && (prev_is_na || app.current_workflow_id.is_none()) {
             app.add_message(
                 MessageRole::System,
-                format!("🔗 Workflow connected: {}", app.workflow_status_line),
+                format!("🔗 Workflow connected: {}", app.session_overview.status_line()),
             );
             processed_any = true;
         }
     }
 
-    match autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(
-        config,
-        &root_session_id,
-    ) {
-        Ok(Some(workflow_id)) => {
+    match snapshot.overview.workflow.workflow_id.clone() {
+        Some(workflow_id) => {
             tracing::debug!(target: "chat", workflow_id = %workflow_id, "Resolved workflow ID");
 
             // Detect workflow ID change → force re-bootstrap
@@ -1424,6 +1572,7 @@ async fn check_signals(
                             let start_idx = events.len().saturating_sub(recap_count);
                             for event in &events[start_idx..] {
                                 if let Some(card) = format_workflow_event_card(event) {
+                                    app.session_overview.latest_signal = Some(card.clone());
                                     app.add_message(MessageRole::Signal, card);
                                 }
                             }
@@ -1461,6 +1610,7 @@ async fn check_signals(
                                         card = %card,
                                         "Formatted workflow event card"
                                     );
+                                    app.session_overview.latest_signal = Some(card.clone());
                                     app.add_message(MessageRole::Signal, card);
                                     processed_any = true;
                                 } else {
@@ -1493,24 +1643,14 @@ async fn check_signals(
                 }
             }
         }
-        Ok(None) => {
+        None => {
             // No workflow found - this is normal if session is not connected to a workflow
-        }
-        Err(e) => {
-            tracing::warn!(target: "chat", error = %e, "Failed to resolve workflow");
         }
     }
 
-    if let Some(store) = store {
-        match append_new_pending_user_interaction_prompts(app, store, session_id) {
-            Ok(n) if n > 0 => processed_any = true,
-            Err(e) => tracing::warn!(
-                target: "chat",
-                error = %e,
-                "Failed to poll pending user interactions"
-            ),
-            _ => {}
-        }
+    let new_prompts = append_new_pending_user_interaction_prompts(app, &snapshot.pending_interactions);
+    if new_prompts > 0 {
+        processed_any = true;
     }
 
     tracing::debug!(target: "chat", processed_any = processed_any, total_messages = app.messages.len(), "check_signals: complete");

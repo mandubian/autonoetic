@@ -664,6 +664,7 @@ pub async fn handle_agent_run(
     message: Option<&str>,
     interactive: bool,
     headless: bool,
+    response_validation: Option<super::common::ResponseValidationMode>,
 ) -> anyhow::Result<()> {
     info!(
         "Running Agent {} (interactive: {}, headless: {})",
@@ -672,7 +673,15 @@ pub async fn handle_agent_run(
     if let Some(msg) = message {
         info!("Kickoff message: {}", msg);
     }
-    run_agent_with_runtime(config_path, agent_id, message, interactive, headless).await
+    run_agent_with_runtime(
+        config_path,
+        agent_id,
+        message,
+        interactive,
+        headless,
+        response_validation,
+    )
+    .await
 }
 
 pub async fn run_agent_with_runtime(
@@ -681,8 +690,11 @@ pub async fn run_agent_with_runtime(
     kickoff_message: Option<&str>,
     interactive: bool,
     headless: bool,
+    response_validation: Option<super::common::ResponseValidationMode>,
 ) -> anyhow::Result<()> {
-    let gateway_config = Arc::new(autonoetic_gateway::config::load_config(config_path)?);
+    let mut loaded_config = autonoetic_gateway::config::load_config(config_path)?;
+    super::common::apply_response_validation_override(&mut loaded_config, response_validation);
+    let gateway_config = Arc::new(loaded_config);
     let repo = autonoetic_gateway::AgentRepository::from_config(&gateway_config);
     let loaded = repo.get_sync(agent_id)?;
     let manifest = loaded.manifest;

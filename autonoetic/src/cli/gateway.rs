@@ -11,8 +11,10 @@ pub async fn handle_gateway_start(
     daemon: bool,
     port: Option<u16>,
     tls: bool,
+    response_validation: Option<super::common::ResponseValidationMode>,
 ) -> anyhow::Result<()> {
-    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let mut config = autonoetic_gateway::config::load_config(config_path)?;
+    super::common::apply_response_validation_override(&mut config, response_validation);
     let repo = autonoetic_gateway::AgentRepository::from_config(&config);
     let agents = repo.list().await?;
     let mcp_runtime = activate_registered_mcp_servers(config_path).await?;
