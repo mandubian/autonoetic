@@ -1234,6 +1234,53 @@ The agent doesn't need to be told to use these — the system prompts document t
 
 ---
 
+## Backlog: Workspace Output Capture for Foreign Agents
+
+Current state: native Autonoetic agents can share outputs by calling `content.write` and package them via `artifact.build`, but foreign agents that only write files inside the sandbox workspace have no automatic export path into the content store. Implicit artifacts exist, but they currently capture only task metadata/summary, not file outputs.
+
+**Goal:** make foreign or legacy agents interoperable without weakening the artifact trust boundary.
+
+**Design rules:**
+
+1. The sandbox workspace is a **capture surface**, not the artifact itself.
+2. Artifacts remain immutable, content-addressed bundles; review/install/execution continue to consume artifacts, not live directories.
+3. Foreign-agent outputs become shareable by gateway-managed capture from designated workspace paths.
+4. Only captured outputs are promoted into session-visible content and implicit artifacts; scratch/state paths stay private.
+
+**Sandbox directory contract:**
+
+- `/workspace/in` — read-only mounted inputs (session content and/or resolved artifact inputs)
+- `/workspace/out` — writable output tree; gateway scans and imports this subtree on task completion
+- `/workspace/tmp` — writable scratch space; never auto-imported
+- `/workspace/state` — optional persistent/private runtime state; never auto-imported by default
+
+**Capture contract:**
+
+- On successful task completion, gateway walks `/workspace/out`
+- For each regular file:
+  - import bytes into the content store
+  - register a stable session-visible name under the child session manifest
+  - include imported handles in the child `SpawnResult.files`
+- Gateway then creates an implicit artifact that references the imported files, not just a summary blob
+- The implicit artifact is `shareable` by default but not automatically `installable` unless later promoted/validated
+
+**Artifact classes / promotion states:**
+
+- `explicit` — built by `artifact.build`; intended package; preferred for review/install/execution
+- `implicit` — gateway-generated from captured outputs; shareable and inspectable; may require repackaging or explicit promotion before install
+- `promotion_state`: `scratch | shareable | reviewable | promotable`
+
+**Backlog tasks:**
+
+- [ ] **W.1** Define sandbox workspace contract (`/workspace/in`, `/workspace/out`, `/workspace/tmp`, `/workspace/state`) and enforce it in sandbox mounting code.
+- [ ] **W.2** Add gateway-side output capture on task completion: import `/workspace/out/**` files into the content store and register names in the child session manifest.
+- [ ] **W.3** Extend implicit artifacts from summary-only metadata to a real captured-output manifest with file handles, timestamps, and source session/task provenance.
+- [ ] **W.4** Add policy controls for capture (`max_files`, `max_total_bytes`, allowed extensions/globs, excluded paths`) so foreign agents cannot flood artifacts with caches or secrets.
+- [ ] **W.5** Add an artifact classification field (`explicit` vs `implicit`) plus promotion-state checks so install/review policy can distinguish captured foreign outputs from deliberate packages.
+- [ ] **W.6** Add integration tests covering: foreign agent writes to `/workspace/out`; files appear in `SpawnResult.files`; implicit artifact exposes captured outputs; install path rejects unpromoted implicit artifacts.
+
+---
+
 ## Backlog: Remote Agent Spawn (Gateway-Orchestrated)
 
 Current state: `spawn_agent_once` starts local sandbox processes on the same host as the gateway. "Remote agent" support today is HTTP content access for externally launched agents, not gateway-orchestrated remote process placement.
@@ -1258,3 +1305,158 @@ Today, digest coverage uses direct calls to `run_post_session_digest_with_driver
 - [ ] **D.E2E.3** Assertions: `post_session_narrative.md` registered under the root session; at least one extracted memory in `gateway.db` with expected scope/tags; `execution_traces` rows visible from the digest prompt path when tools ran.
 - [ ] **D.E2E.4** CLI assertion: `autonoetic trace digest <session_id> --config <temp>` exits 0 and stdout contains a marker string from the digest LLM output (same workspace layout as **D.E2E.1**).
 - [ ] **D.E2E.5** (Optional) Same run: JSON-RPC `digest.query` (or tool batch) returns the narrative fragment and memory ids for parity with agent-visible behavior.
+
+---
+
+## Backlog: Response Validation Gate
+
+Generalize the promotion-record enforcement pattern into a symmetric response validation framework. Gateway validates agent outputs against declared constraints before returning `SpawnResult` to caller. Failures trigger repair feedback to agent (bounded by same guards as promotion validation).
+
+**Concept:** Gateway reads response, checks immediate rules/constraints, and returns `ToolError` with repair hint if violations found. Agent can iterate to fix violations (within loop/duration bounds).
+
+### Phase RV: Response Validation Enforcement
+
+**Contract Categories:**
+
+1. **Required Outputs** — Agent must produce X, Y, Z artifacts or structured fields.
+2. **Output Governance** — Limits: max artifact count, max total size, file naming constraints.
+3. **Consistency Checks** — No contradictory outputs, no dangling references, state assumptions validated.
+4. **Safety Scanning** — No secret leaks in reply text, no forbidden paths, no policy breaches.
+5. **Quality Checks** — Declarable assertions: minimum code coverage, required docstrings, valid JSON schema, etc.
+
+**Metadata Extension:**
+
+```yaml
+metadata:
+  response_contract:
+    required_artifacts:
+      - "main_report.md"
+      - "recommendations.json"
+    max_artifacts: 5
+    max_total_size_mb: 100
+    max_reply_length_chars: 8000
+    output_schema:
+      type: object
+      properties:
+        summary: { type: string, minLength: 10 }
+        status: { enum: ["success", "partial", "failed"] }
+    prohibited_text_patterns:
+      - "API_KEY_.*=.*"  # no hardcoded secrets
+      - "/etc/passwd|/root/"  # no dangerous paths
+    validation_max_loops: 3  # default 1, max 8
+    validation_max_duration_ms: 2000  # default 500, max 30000
+```
+
+**Implementation Tasks:**
+
+- [x] **RV.1** Define `ResponseContract` struct in `autonoetic-types/src/agent.rs` with all contract categories above. Make fields optional with sensible defaults.
+- [x] **RV.2** Add `parse_response_contract()` function in `autonoetic-gateway/src/runtime/response_validation.rs` to extract and validate contract from spawn metadata. Enforce bounds: loops (1-8), duration (0-30000ms), max_artifacts (1-100), and reject invalid `prohibited_text_patterns` regexes at parse time.
+- [x] **RV.3** Implement `validate_spawn_response()` function in `response_validation.rs`. Takes `SpawnResult` and contract. Returns `Vec<ValidationViolation>`. Checks in order: required artifacts present, count limits, explicit `max_total_size_mb` not-implemented error, reply length, regex-based text pattern scanning, and strict output schema validation (declared schema requires a valid JSON reply).
+- [x] **RV.4** Add bounded validation loop via `bounded_validate()`: runs checks up to `max_loops` times within `max_duration_ms` wall-clock time. Retries between attempts with 50ms sleep.
+- [x] **RV.5** Emit clear `ToolError` messages including which constraint was violated and repair hint. Surface response-validation failures from `spawn_agent_once()` as structured serialized `ToolError` JSON so `error_type` and `repair_hint` are preserved across the spawn boundary. Example: "response validation failed: [required_artifacts] required artifact 'deployment.yaml' not present in spawn output".
+- [x] **RV.6** Wire `bounded_validate()` into `spawn_agent_once()`: after child session ends and promotion enforcement, before returning `SpawnResult`. Skipped when `suspended_for_approval` is Some or `response_validation.enabled` is false.
+- [x] **RV.7** Bounded repair window (gated by `response_validation.repair_enabled`):
+  - `validate_and_maybe_repair()` in `execution.rs` runs validation after spawn completes
+  - On failure: builds a repair prompt via `build_repair_prompt()` and calls `respawn_from_checkpoint()` to re-enter the same session
+  - The agent sees structured feedback (violations + repair hints) and can fix using normal tools
+  - Loop is bounded by `validation_max_loops` (1-8) and `validation_max_duration_ms` (0-30000)
+  - On success or exhaustion, returns final `SpawnResult` or structured error with session context
+  - `violations_to_final_error()` produces clear error messages including session_id for caller re-spawn
+</content>
+  - **Subtasks (all completed):**
+  - [x] RV.7a: `build_repair_prompt()` — structured feedback from violations
+  - [x] RV.7b: `validate_and_maybe_repair()` — bounded repair loop using `respawn_from_checkpoint()`
+  - [x] RV.7c: `respawn_from_checkpoint()` — re-enters session with repair prompt
+  - [x] RV.7d: Bounded guards — loops (1-8) and duration deadline
+  - [x] RV.7e: `violations_to_final_error()` — clear errors with session context
+  - [x] RV.7f: Tracing — `response.validation.fail/repass/fail/exhausted`
+  - [x] RV.7g: Abort on suspension during repair
+  - [x] RV.7h: Integration tests (2 repair tests)
+- [x] **RV.8** Update agent system prompts to document response contracts and repair expectations. Highlight: "Gateway may refuse your response if it violates declared constraints; you have N attempts to repair."
+- [x] **RV.9** Debug logging: tracing at `info` level on pass (attempt, elapsed_ms), `debug` level on each failed attempt (violations, attempt number), `warn` level on exhaustion.
+- [x] **RV.10** Unit tests (in `autonoetic-gateway/src/runtime/response_validation.rs`, 17 tests):
+  - `test_required_artifacts_present` — passes when all required artifacts exist.
+  - `test_required_artifacts_missing` — fails with clear hint when missing.
+  - `test_artifact_count_limit` — fails when count exceeds max.
+  - `test_max_total_size_mb_not_implemented_yet` — explicit validation error: `size-based response validation is not implemented yet`.
+  - `test_text_pattern_scanning` — detects secret patterns via regex matching.
+  - `test_text_pattern_case_insensitive` — case-insensitive regex matching.
+  - `test_output_schema_validation` — validates JSON schema (required, type, enum, minLength).
+  - `test_reply_length_limit` — fails when reply exceeds max chars.
+  - `test_no_violations_when_contract_empty` — empty contract passes.
+  - `test_multiple_violations` — catches all violations at once.
+  - `test_parse_response_contract` / `test_parse_response_contract_absent` / `test_parse_response_contract_invalid_regex` — metadata parsing and regex validation.
+  - `test_normalize_clamps_bounds` — loop/duration/artifact bounds clamped.
+  - `test_violations_to_tool_error` — correct ToolError construction.
+  - `test_non_json_reply_fails_schema_validation` — non-JSON reply is rejected when schema is declared.
+  - `test_missing_reply_fails_schema_validation` — missing reply is rejected when schema is declared.
+- [x] **RV.11** Integration test (`autonoetic-gateway/tests/response_validation_integration.rs`, 6 tests):
+  - `test_response_validation_passes_with_valid_output` — no contract = pass.
+  - `test_response_validation_skipped_when_disabled` — disabled config = contract ignored.
+  - `test_response_validation_fails_on_missing_required_artifact` — missing artifact → ToolError.
+  - `test_response_validation_fails_on_prohibited_text` — secret leak → ToolError.
+  - `test_response_validation_fails_on_non_json_reply_when_schema_declared` — plain-text reply rejected when schema requires JSON.
+  - `test_response_validation_skipped_on_suspended_session` — suspended = no validation.
+  - `test_response_validation_repair_enabled_includes_session_context` — repair mode includes session_id in error.
+  - `test_response_validation_repair_loop_exhausted_after_two_attempts` — LLM called multiple times, repair runs.
+  - `test_response_validation_repair_success_path` — agent receives repair feedback and attempts fix (proves loop runs).
+- [x] **RV.12** Feature flag: `response_validation.enabled` in `GatewayConfig` via `ResponseValidationConfig`. Default false (benign). Also has `repair_enabled` field for future repair window.
+- [x] **RV.13** CLI flag: `--response-validation on|off|repair` to override config per invocation. Repair mode enables bounded retry window.
+- [x] **RV.14** Documentation: Add `docs/response-validation-gate.md` with contract examples, repair semantics, bounded repair window behavior, and specialist guidance for coder/evaluator roles.
+- [x] **RV.15** Implement real size-based validation for `max_total_size_mb` using authoritative byte sizes from the content store and/or artifact manifests. Until then, fail fast with `size-based response validation is not implemented yet` instead of silently ignoring the field.
+
+**Additional artifact hardening (post-RV implementation):**
+
+- [x] **RV.H1** Harden artifact immutability checks: `artifact.inspect` now verifies manifest `artifact_id` and recomputed digest before returning data; persisted artifact manifests are written read-only to make corruption/tampering visible instead of silently trusted.
+
+**Post-Implementation Corrections (RV Phase):**
+
+After initial RV.7 implementation, three correctness gaps and scaffolding were identified and fixed:
+
+1. **User Interaction Suspension Not Detected** (FIXED):
+   - **Gap**: During repair loop in `validate_and_maybe_repair()`, if agent called `user.ask`, the session would checkpoint with `YieldReason::UserInputRequired` but repair loop would not detect it (only checked `suspended_for_approval`).
+   - **Fix**: Added checkpoint inspection after `respawn_from_checkpoint()` to check if `YieldReason::UserInputRequired` was set; abort repair loop if true.
+   - **Code**: execution.rs lines 1436–1445 (new user.ask suspension check).
+
+2. **Deadline Guard Was Soft, Not Hard** (FIXED):
+   - **Gap**: `validation_max_duration_ms` deadline was only checked before respawn attempt, not after; respawn could take unlimited time and still succeed.
+   - **Fix**: Added deadline check after `respawn_from_checkpoint()` completes (line 1447–1453) to enforce hard deadline.
+   - **Code**: execution.rs lines 1447–1453 (post-respawn deadline check).
+
+3. **Revised-Reply Tool Scaffolding Removed** (RESOLVED):
+   - **Gap**: Fields `revised_reply: Option<Arc<Mutex<Option<String>>>>` were added to `NativeToolRunContext` and `AgentExecutor` but no tool or consumer was implemented.
+   - **Decision**: Removed scaffolding. The current repair model (plain-text feedback + normal tools) is sufficient; agents can use `content.write`, `artifact.build`, etc. to fix issues. No need for a special `response.revise_reply` tool.
+   - **Code**: Removed from active_execution_registry.rs (line 20), lifecycle.rs (lines 126, 161, 759).
+
+4. **Success-Path Integration Test Added** (COMPLETE):
+   - **Gap**: Tests covered error paths (missing artifacts, prohibited text, schema violations, exhaustion) but no test proved agent receives repair feedback and attempts fix on retry.
+   - **Fix**: Added `test_response_validation_repair_success_path` to demonstrate repair loop runs (multiple LLM calls with different prompts).
+   - **Code**: response_validation_integration.rs lines 560–650 (new test).
+
+**RV.7 Status**: Implementation is now feature-complete with all correctness gaps closed. Hard guards, deadline enforcement, and user interaction handling all work as specified. Tests cover error paths, exhaustion scenario, and repair loop invocation.
+
+**Integration Notes:**
+
+- Validation runs **after** promotion-record enforcement, so both contracts apply in sequence.
+- Bounded repair window uses same guard infrastructure as promotion validation (max loops, max duration).
+- Before `RV.7` lands, repeated validation attempts observe the same immutable `SpawnResult`; in practice keep `validation_max_loops=1` unless validation is changed to re-read durable output state or invoke a real repair round.
+- Matches "separation of powers": agent proposes output, gateway validates and may reject; agent decides how to repair.
+- Compatible with promotion.record flow: promotion records are part of output, can be checked as required artifact.
+- Evidence mode (`full`/`errors`/`off`) applies to response validation: capture failed constraints in evidence files.
+- Causal events logged: `action: "response.validation"`, `status: "pass"/"fail"`, violations captured in details.
+- Repair tool (`tools.revise_output()`) is internal, not exposed to agents unless repair window is enabled.
+
+**Success Criteria:**
+
+1. **Required outputs** enforced: agent must produce declared artifacts or validation fails.
+2. **Output size/count bounded**: governance limits prevent runaway responses.
+3. **Safety scanning works**: secret patterns and dangerous paths detected and rejected.
+4. **Clear repair path**: agents understand why validation failed and what to fix.
+5. **Bounded repair window** (when enabled): agent has N attempts + time budget to repair, then hard fail.
+6. **Audit trail**: all validation decisions logged in causal events and execution traces.
+7. **No false positives**: valid outputs pass even with complex schemas or pattern matching.
+8. **Performance**: validation completes in < 500ms for typical responses (adjustable via config).
+
+**Rationale:**
+
+Agents should not be trusted to self-police their output quality. The gateway, as the authority over resource allocation and contract enforcement, should validate responses against declared rules. This is the symmetric counterpart to input schema enforcement: we validate before execution (inputs), and we validate after execution (outputs). Both are deterministic, non-negotiable rules that the agent can repair if they fail, keeping the separation-of-powers boundary clean: agent reasons and proposes, gateway decides and enforces.
