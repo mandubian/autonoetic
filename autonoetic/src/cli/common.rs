@@ -2,6 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 use autonoetic_gateway::llm::{CompletionRequest, Message};
+use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::causal_chain::CausalChainEntry;
 use std::collections::BTreeMap;
 
@@ -9,6 +10,34 @@ use std::collections::BTreeMap;
 pub use autonoetic_mcp::{
     AgentExecutor as McpAgentExecutor, McpClient, McpServer, McpTool, McpTransportConfig,
 };
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponseValidationMode {
+    On,
+    Off,
+    Repair,
+}
+
+pub fn apply_response_validation_override(
+    config: &mut GatewayConfig,
+    mode: Option<ResponseValidationMode>,
+) {
+    match mode {
+        Some(ResponseValidationMode::On) => {
+            config.response_validation.enabled = true;
+            config.response_validation.repair_enabled = false;
+        }
+        Some(ResponseValidationMode::Off) => {
+            config.response_validation.enabled = false;
+            config.response_validation.repair_enabled = false;
+        }
+        Some(ResponseValidationMode::Repair) => {
+            config.response_validation.enabled = true;
+            config.response_validation.repair_enabled = true;
+        }
+        None => {}
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -74,6 +103,9 @@ pub enum GatewayCommands {
         /// Force TLS wrapping on the OFP federation port
         #[arg(long)]
         tls: bool,
+        /// Override gateway response validation mode for this daemon run.
+        #[arg(long, value_enum)]
+        response_validation: Option<ResponseValidationMode>,
     },
     /// Gracefully terminates a background Gateway daemon
     Stop,
@@ -197,6 +229,9 @@ pub enum AgentCommands {
         /// Boots the agent headless
         #[arg(long)]
         headless: bool,
+        /// Override response validation mode for this local run.
+        #[arg(long, value_enum)]
+        response_validation: Option<ResponseValidationMode>,
     },
     /// Lists all local Agents registered with the Gateway
     List,

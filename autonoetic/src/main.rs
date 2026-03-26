@@ -23,8 +23,20 @@ async fn main() -> anyhow::Result<()> {
 
     match &cli.command {
         Commands::Gateway(args) => match &args.command {
-            cli::common::GatewayCommands::Start { daemon, port, tls } => {
-                cli::gateway::handle_gateway_start(&config_path, *daemon, *port, *tls).await?;
+            cli::common::GatewayCommands::Start {
+                daemon,
+                port,
+                tls,
+                response_validation,
+            } => {
+                cli::gateway::handle_gateway_start(
+                    &config_path,
+                    *daemon,
+                    *port,
+                    *tls,
+                    *response_validation,
+                )
+                .await?;
             }
             cli::common::GatewayCommands::Stop => {
                 cli::gateway::handle_gateway_stop();
@@ -68,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
                 message,
                 interactive,
                 headless,
+                response_validation,
             } => {
                 cli::agent::handle_agent_run(
                     &config_path,
@@ -75,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
                     message.as_deref(),
                     *interactive,
                     *headless,
+                    *response_validation,
                 )
                 .await?;
             }
