@@ -88,6 +88,11 @@ pub struct AgentManifest {
     pub io: Option<AgentIO>,
     #[serde(default)]
     pub middleware: Option<Middleware>,
+    /// Response contract declared in the agent's own SKILL.md frontmatter.
+    /// When present, the gateway uses this as the default contract for any
+    /// spawn of this agent (unless the caller supplies an override in spawn metadata).
+    #[serde(default)]
+    pub response_contract: Option<serde_json::Value>,
     /// Execution mode: Script (fast path, no LLM) or Reasoning (default, LLM-driven).
     #[serde(default)]
     pub execution_mode: ExecutionMode,
@@ -133,6 +138,86 @@ pub struct AgentIO {
     /// JSON Schema describing produced output.
     #[serde(default)]
     pub returns: Option<serde_json::Value>,
+}
+
+/// Response contract declared in agent metadata for post-execution validation.
+///
+/// When present, the gateway validates the agent's SpawnResult against these
+/// constraints before returning to the caller. Violations trigger a ToolError
+/// with a repair hint; the agent may retry within bounded loop/duration limits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResponseContract {
+    /// Artifact names the agent must produce (e.g. "main_report.md").
+    #[serde(default)]
+    pub required_artifacts: Vec<String>,
+
+    /// Maximum number of artifacts allowed. Default: no limit.
+    #[serde(default)]
+    pub max_artifacts: Option<usize>,
+
+    /// Maximum total artifact size in megabytes. Default: no limit.
+    #[serde(default)]
+    pub max_total_size_mb: Option<u64>,
+
+    /// Maximum reply length in characters. Default: no limit.
+    #[serde(default)]
+    pub max_reply_length_chars: Option<usize>,
+
+    /// Optional JSON Schema the reply text must conform to (when the reply is JSON).
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+
+    /// Regex patterns that must NOT appear in the reply text.
+    /// Used for safety scanning (secret leaks, forbidden paths, etc.).
+    #[serde(default)]
+    pub prohibited_text_patterns: Vec<String>,
+
+    /// Minimum number of successful `artifact.build` tool invocations required
+    /// in this session branch. This is durable evidence from execution traces,
+    /// not inferred from reply text.
+    #[serde(default)]
+    pub min_artifact_builds: Option<u32>,
+
+    /// Max validation retry loops (1–8). Default: 1.
+    #[serde(default = "default_validation_max_loops")]
+    pub validation_max_loops: u32,
+
+    /// Max wall-clock duration for validation retries in milliseconds (0–30000). Default: 500.
+    #[serde(default = "default_validation_max_duration_ms")]
+    pub validation_max_duration_ms: u64,
+}
+
+fn default_validation_max_loops() -> u32 {
+    1
+}
+
+fn default_validation_max_duration_ms() -> u64 {
+    500
+}
+
+impl ResponseContract {
+    /// Clamp loop/duration bounds to allowed ranges.
+    pub fn normalize(&mut self) {
+        self.validation_max_loops = self.validation_max_loops.clamp(1, 8);
+        self.validation_max_duration_ms = self.validation_max_duration_ms.clamp(0, 30_000);
+        if let Some(n) = self.max_artifacts {
+            self.max_artifacts = Some(n.clamp(1, 100));
+        }
+        if let Some(n) = self.min_artifact_builds {
+            self.min_artifact_builds = Some(n.clamp(0, 32));
+        }
+    }
+
+    /// Returns true if no validation rules are declared.
+    pub fn is_empty(&self) -> bool {
+        self.required_artifacts.is_empty()
+            && self.max_artifacts.is_none()
+            && self.max_total_size_mb.is_none()
+            && self.max_reply_length_chars.is_none()
+            && self.output_schema.is_none()
+            && self.prohibited_text_patterns.is_empty()
+            && self.min_artifact_builds.is_none()
+    }
 }
 
 /// Lightweight metadata about a discovered agent on disk.
