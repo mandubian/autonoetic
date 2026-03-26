@@ -4,7 +4,7 @@ use crate::agent::AgentRepository;
 use crate::causal_chain::CausalLogger;
 use crate::llm::{build_driver, Message};
 use crate::runtime::active_execution_registry::ActiveExecutionRegistry;
-use crate::runtime::lifecycle::{compose_system_instructions, AgentExecutor};
+use crate::runtime::lifecycle::AgentExecutor;
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::session_budget::SessionBudgetRegistry;
@@ -577,7 +577,7 @@ impl GatewayExecutionService {
         source_agent_id: Option<&str>,
         is_message: bool,
         ingest_event_type: Option<&str>,
-        _metadata: Option<&serde_json::Value>,
+        metadata: Option<&serde_json::Value>,
         // Workflow / task context for turn continuation saves on approval suspension.
         workflow_id: Option<&str>,
         task_id: Option<&str>,
@@ -594,7 +594,7 @@ impl GatewayExecutionService {
         anyhow::ensure!(!agent_id.trim().is_empty(), "agent_id must not be empty");
         anyhow::ensure!(!message.trim().is_empty(), "message must not be empty");
 
-        let result = self
+        let mut result = self
             .execute_with_reliability_controls(agent_id, || async move {
                 let repo = AgentRepository::from_config(&self.config);
 
@@ -1062,6 +1062,7 @@ impl GatewayExecutionService {
                                 &runtime.instructions,
                                 &runtime.initial_user_message,
                                 session_id,
+                                runtime.manifest.response_contract.as_ref(),
                             );
                             let outcome = runtime.execute_with_history(&mut history).await?;
                             (outcome, runtime.initial_user_message.clone(), None)
@@ -1072,6 +1073,7 @@ impl GatewayExecutionService {
                             &runtime.instructions,
                             &runtime.initial_user_message,
                             session_id,
+                            runtime.manifest.response_contract.as_ref(),
                         );
                         let outcome = runtime.execute_with_history(&mut history).await?;
                         (outcome, runtime.initial_user_message.clone(), None)
@@ -1172,6 +1174,7 @@ impl GatewayExecutionService {
                             &runtime.instructions,
                             &runtime.initial_user_message,
                             session_id,
+                            runtime.manifest.response_contract.as_ref(),
                         );
                         let outcome = runtime.execute_with_history(&mut history).await?;
                         (outcome, runtime.initial_user_message.clone(), None)
@@ -1182,6 +1185,7 @@ impl GatewayExecutionService {
                         &runtime.instructions,
                         &runtime.initial_user_message,
                         session_id,
+                        runtime.manifest.response_contract.as_ref(),
                     );
                     let outcome = runtime.execute_with_history(&mut history).await?;
                     (outcome, runtime.initial_user_message.clone(), None)
@@ -1287,7 +1291,259 @@ impl GatewayExecutionService {
                 &result,
             );
         }
+
+        // Response validation gate: check the result against the response contract declared
+        // in spawn metadata; run bounded repair loop when repair_enabled is set.
+        // Fallback: when the caller supplies no metadata contract, use the contract declared
+        // in the agent's own SKILL.md frontmatter (loaded via AgentRepository).
+        // Validation is skipped for suspended sessions (they haven't finished producing output).
+        if self.config.response_validation.enabled && result.suspended_for_approval.is_none() {
+            // Resolve effective contract: caller-supplied metadata first, then manifest default.
+            let manifest_contract: Option<serde_json::Value> = if metadata
+                .and_then(|m| m.get("response_contract"))
+                .is_none()
+            {
+                AgentRepository::from_config(&self.config)
+                    .get_sync(agent_id)
+                    .ok()
+                    .and_then(|loaded| loaded.manifest.response_contract)
+            } else {
+                None
+            };
+            let effective_metadata: Option<serde_json::Value> = if manifest_contract.is_some() {
+                Some(serde_json::json!({ "response_contract": manifest_contract }))
+            } else {
+                None
+            };
+            let metadata_ref: Option<&serde_json::Value> = effective_metadata
+                .as_ref()
+                .or(metadata);
+            match crate::runtime::response_validation::parse_response_contract(metadata_ref) {
+                Ok(Some(contract)) => {
+                    result = self
+                        .validate_and_maybe_repair(
+                            agent_id,
+                            result,
+                            &contract,
+                            source_agent_id,
+                            workflow_id,
+                            task_id,
+                        )
+                        .await?;
+                }
+                Ok(None) => {} // no contract in metadata — skip validation
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "invalid response_contract in metadata: {}",
+                        e
+                    ));
+                }
+            }
+        }
+
         Ok(result)
+    }
+
+    /// Validate a `SpawnResult` against a `ResponseContract` and, when repair is enabled,
+    /// re-enter the child agent session (via its hibernation checkpoint) to give the agent
+    /// a bounded number of repair attempts.
+    ///
+    /// Repair feedback is injected as a structured user message so the agent can call its
+    /// normal tools (`content.write`, `artifact.build`, etc.) to fix the issue.  After each
+    /// repair turn the fresh durable state is re-collected and re-validated.
+    ///
+    /// Hard guards enforced:
+    /// - `contract.validation_max_loops` — total rounds including the initial execution
+    ///   (repair attempts = max_loops - 1; default: 1, meaning no repair).
+    /// - `contract.validation_max_duration_ms` — wall-clock deadline across all repair rounds.
+    /// - Session suspension during repair (approval gate / user.ask) → repair aborted.
+    async fn validate_and_maybe_repair(
+        &self,
+        agent_id: &str,
+        mut result: SpawnResult,
+        contract: &autonoetic_types::agent::ResponseContract,
+        source_agent_id: Option<&str>,
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        use crate::runtime::response_validation::{
+            build_repair_prompt, validate_session_evidence, validate_spawn_response,
+            violations_to_final_error,
+        };
+
+        let max_loops = (contract.validation_max_loops as usize).max(1);
+        let max_duration_ms = contract.validation_max_duration_ms;
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(max_duration_ms as u64);
+        let repair_enabled = self.config.response_validation.repair_enabled;
+
+        // Initial validation.
+        let gateway_dir = self.config.agents_dir.join(".gateway");
+
+        let mut violations = validate_spawn_response(&result, contract, Some(&gateway_dir));
+        violations.extend(validate_session_evidence(
+            self.gateway_store.as_deref(),
+            &result.session_id,
+            contract,
+        ));
+        if violations.is_empty() {
+            tracing::debug!(
+                target: "response_validation",
+                agent_id = %agent_id,
+                session_id = %result.session_id,
+                "response.validation.pass"
+            );
+            return Ok(result);
+        }
+
+        tracing::warn!(
+            target: "response_validation",
+            agent_id = %agent_id,
+            session_id = %result.session_id,
+            violation_count = violations.len(),
+            "response.validation.fail"
+        );
+
+        // When repair is disabled or only one loop is allowed, fail immediately.
+        // Include session context in the error when repair mode is on so the caller
+        // can identify the session for higher-level recovery.
+        if !repair_enabled || max_loops <= 1 {
+            return Err(violations_to_final_error(
+                &violations,
+                &result.session_id,
+                repair_enabled, // include context when repair mode active
+            ));
+        }
+
+        // Repair loop: attempt up to (max_loops - 1) rounds.
+        let max_repair_rounds = max_loops - 1;
+        for attempt in 1..=max_repair_rounds {
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    attempt = attempt,
+                    "response.repair.exhausted: deadline reached"
+                );
+                return Err(violations_to_final_error(&violations, &result.session_id, true));
+            }
+
+            let repair_msg = build_repair_prompt(&violations, attempt, max_repair_rounds);
+
+            tracing::info!(
+                target: "response_validation",
+                agent_id = %agent_id,
+                session_id = %result.session_id,
+                attempt = attempt,
+                max_repair_rounds = max_repair_rounds,
+                "response.repair.start"
+            );
+
+            let repaired = match self
+                .respawn_from_checkpoint(
+                    agent_id,
+                    &result.session_id,
+                    Some(&repair_msg),
+                    source_agent_id,
+                    workflow_id,
+                    task_id,
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        error = %e,
+                        "response.repair.error: respawn failed"
+                    );
+                    return Err(violations_to_final_error(&violations, &result.session_id, true));
+                }
+            };
+
+            // If the agent suspended for approval during repair we cannot continue the
+            // repair loop — abort and surface the original violations.
+            if repaired.suspended_for_approval.is_some() {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    "response.repair.aborted: session suspended for approval during repair"
+                );
+                return Err(anyhow::anyhow!(
+                    "repair aborted: agent suspended for approval during repair; session: {}",
+                    result.session_id
+                ));
+            }
+
+            // Check if the agent ended with a user interaction (user.ask) suspension.
+            // If the latest checkpoint is UserInputRequired (not yet answered), abort repair.
+            if let Ok(Some(cp)) =
+                crate::runtime::checkpoint::load_latest_checkpoint(&self.config, &repaired.session_id)
+            {
+                if matches!(
+                    cp.yield_reason,
+                    crate::runtime::checkpoint::YieldReason::UserInputRequired { .. }
+                ) {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        session_id = %repaired.session_id,
+                        "response.repair.aborted: session suspended for user interaction during repair"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "repair aborted: agent suspended for user interaction during repair; session: {}",
+                        result.session_id
+                    ));
+                }
+            }
+
+            // Check deadline after respawn completes (hard enforcement post-respawn).
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    attempt = attempt,
+                    "response.repair.exhausted: deadline reached after respawn"
+                );
+                return Err(violations_to_final_error(&violations, &result.session_id, true));
+            }
+
+            // Re-validate against the fresh state returned by respawn_from_checkpoint.
+            violations = validate_spawn_response(&repaired, contract, Some(&gateway_dir));
+            violations.extend(validate_session_evidence(
+                self.gateway_store.as_deref(),
+                &repaired.session_id,
+                contract,
+            ));
+            result = repaired;
+
+            if violations.is_empty() {
+                tracing::info!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    session_id = %result.session_id,
+                    attempt = attempt,
+                    "response.repair.pass"
+                );
+                return Ok(result);
+            }
+
+            tracing::warn!(
+                target: "response_validation",
+                agent_id = %agent_id,
+                attempt = attempt,
+                violation_count = violations.len(),
+                "response.repair.fail"
+            );
+        }
+
+        tracing::warn!(
+            target: "response_validation",
+            agent_id = %agent_id,
+            "response.repair.exhausted: max_loops reached"
+        );
+        Err(violations_to_final_error(&violations, &result.session_id, true))
     }
 
     /// Resume execution after a `user.ask` interaction was answered in the gateway store.
@@ -2027,8 +2283,11 @@ fn build_initial_history(
     instructions: &str,
     user_message: &str,
     session_id: &str,
+    response_contract: Option<&serde_json::Value>,
 ) -> Vec<Message> {
-    let mut history = vec![Message::system(compose_system_instructions(instructions))];
+    let mut history = vec![Message::system(
+        crate::runtime::lifecycle::compose_system_instructions_with_metadata(instructions, response_contract)
+    )];
     match SessionContext::load(agent_dir, session_id).and_then(|context| {
         Ok(context
             .render_prompt()
@@ -2167,6 +2426,7 @@ mod tests {
             "System prompt",
             "What did I ask you to remember?",
             "session-1",
+            None,
         );
 
         assert_eq!(history.len(), 3);

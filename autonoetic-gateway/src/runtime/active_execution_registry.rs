@@ -81,7 +81,11 @@ impl ActiveExecutionRegistry {
     }
 
     /// Track a sandbox or script child process until it exits (see [`SandboxPidGuard`]).
-    pub fn register_sandbox_child_pid(self: &Arc<Self>, root_session_id: &str, pid: u32) -> SandboxPidGuard {
+    pub fn register_sandbox_child_pid(
+        self: &Arc<Self>,
+        root_session_id: &str,
+        pid: u32,
+    ) -> SandboxPidGuard {
         let reg_id = format!("sb-{}", uuid::Uuid::new_v4());
         self.sandbox_child_pids.lock().unwrap().insert(
             reg_id.clone(),
