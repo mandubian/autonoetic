@@ -24,6 +24,10 @@ pub fn session_depth(session_id: &str) -> usize {
 /// Multiple agents writing to the same digest file is expected — each agent opens its
 /// own writer with its `agent_id` and `session_id`. Turn headers and summaries are
 /// labelled with the agent. Header level follows nesting depth (## root, ### depth-1 …).
+///
+/// **Group Chat Model**: Headers are only written on agent context switches (when a
+/// different agent's turn appears). Consecutive turns by the same agent are bundled
+/// under one header to reduce noise.
 pub struct LiveDigestWriter {
     path: PathBuf,
     /// Agent that owns this writer instance.
@@ -40,6 +44,69 @@ pub struct LiveDigestWriter {
     turn_buffer: Option<String>,
 }
 
+/// Get the last agent that was logged to the digest file.
+fn get_last_logged_agent(path: &Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines().rev() {
+            if let Some(agent) = extract_agent_from_header(line) {
+                return Some(agent);
+            }
+        }
+    }
+    None
+}
+
+/// Extract agent_id from a digest header line (e.g., "### 👑 planner.default" or "### planner.default")
+fn extract_agent_from_header(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("### ") || trimmed.starts_with("## ") {
+        let rest = trimmed.splitn(2, ' ').nth(1)?;
+        let without_emoji =
+            rest.trim_start_matches(|c: char| c.is_whitespace() || !c.is_alphabetic());
+        Some(without_emoji.to_string())
+    } else {
+        None
+    }
+}
+
+/// Get an emoji for an agent type (planner, specialist, auditor, etc.)
+fn get_agent_emoji(agent_id: &str) -> &'static str {
+    if agent_id.contains("planner") {
+        "👑"
+    } else if agent_id.contains("coder") {
+        "👨‍💻"
+    } else if agent_id.contains("researcher") {
+        "🔍"
+    } else if agent_id.contains("architect") {
+        "🏗️"
+    } else if agent_id.contains("debugger") {
+        "🐛"
+    } else if agent_id.contains("auditor") {
+        "🕵️"
+    } else if agent_id.contains("builder") || agent_id.contains("evolution") {
+        "🤖"
+    } else if agent_id.contains("evaluator") {
+        "📊"
+    } else if agent_id.contains("memory") {
+        "🧠"
+    } else {
+        "🤖"
+    }
+}
+
+/// Format timestamp as HH:MM:SS only.
+fn format_time_hhmmss(timestamp: &str) -> String {
+    timestamp
+        .split('T')
+        .nth(1)
+        .and_then(|t| t.split('.').next())
+        .unwrap_or(timestamp)
+        .to_string()
+}
+
 impl LiveDigestWriter {
     pub fn open(gateway_dir: &Path, session_id: &str, agent_id: &str) -> anyhow::Result<Self> {
         let base = base_session_id(session_id);
@@ -50,7 +117,7 @@ impl LiveDigestWriter {
 
         let (digest_turn_seq, is_resumed) = if path.exists() {
             let existing_turns = count_turn_headers(&path)?;
-            (existing_turns, existing_turns > 0)
+            (existing_turns, false)
         } else {
             let mut f = std::fs::File::create(&path)?;
             writeln!(f, "# Live session digest: `{}`", base)?;
@@ -126,11 +193,11 @@ impl LiveDigestWriter {
             return Ok(());
         }
         use std::fmt::Write;
-        let ts = chrono::Utc::now().to_rfc3339();
+        let ts = format_time_hhmmss(&chrono::Utc::now().to_rfc3339());
         let mut buf = String::new();
         let _ = writeln!(buf);
         let _ = writeln!(buf, "{marker}");
-        let _ = writeln!(buf, "**Agent:** `{}` | **Started:** {ts}", cell(agent_id));
+        let _ = writeln!(buf, "**Agent:** `{}` | **Started:** [{ts}]", cell(agent_id));
         let _ = writeln!(
             buf,
             "**Task:** {}",
@@ -151,8 +218,7 @@ impl LiveDigestWriter {
         self.digest_turn_seq += 1;
         self.tools_in_open_turn = 0;
         let n = self.digest_turn_seq;
-        let ts = chrono::Utc::now().to_rfc3339();
-        let hdr = self.header();
+        let ts = format_time_hhmmss(&chrono::Utc::now().to_rfc3339());
         let agent = &self.agent_id;
 
         // Start new turn buffer
@@ -162,14 +228,27 @@ impl LiveDigestWriter {
         if self.is_resumed {
             use std::fmt::Write;
             let _ = writeln!(turn, "---");
-            let _ = writeln!(turn, "*↻ `{agent}` resumed from hibernation*");
+            let _ = writeln!(turn, "### ↻ `{agent}` — Resumed from hibernation [{ts}]");
             let _ = writeln!(turn);
             self.is_resumed = false;
+            self.turn_buffer = Some(turn);
+            return Ok(());
         }
 
+        // Group chat model: only write header on context switch
+        let last_agent = get_last_logged_agent(&self.path);
+        let agent_with_emoji = format!("{} {}", get_agent_emoji(agent), agent);
+
+        if last_agent.as_deref() != Some(agent) {
+            use std::fmt::Write;
+            let _ = writeln!(turn, "\n---");
+            let _ = writeln!(turn, "### {}", agent_with_emoji);
+            let _ = writeln!(turn);
+        }
+
+        // Turn header with number and timestamp
         use std::fmt::Write;
-        let _ = writeln!(turn, "{hdr} `{agent}` — Turn {n} — {ts}");
-        let _ = writeln!(turn);
+        let _ = writeln!(turn, "**Turn {}** [{}]", n, ts);
 
         self.turn_buffer = Some(turn);
         Ok(())
@@ -177,25 +256,12 @@ impl LiveDigestWriter {
 
     pub fn record_llm_round(
         &mut self,
-        model_short: &str,
-        stop_reason: &str,
-        tool_calls: usize,
-        in_tok: u64,
-        out_tok: u64,
+        _model_short: &str,
+        _stop_reason: &str,
+        _tool_calls: usize,
+        _in_tok: u64,
+        _out_tok: u64,
     ) -> anyhow::Result<()> {
-        use std::fmt::Write;
-        let mut line = String::new();
-        let _ = writeln!(
-            line,
-            "*LLM:* `{}` | stop: `{}` | tool calls: {} | tokens in/out: {}/{}*",
-            cell(model_short),
-            cell(stop_reason),
-            tool_calls,
-            in_tok,
-            out_tok
-        );
-        let _ = writeln!(line);
-        self.buf_write(&line);
         Ok(())
     }
 
@@ -216,7 +282,7 @@ impl LiveDigestWriter {
         self.session_tool_total += 1;
         use std::fmt::Write;
         let mut buf = String::new();
-        let _ = writeln!(buf, "**Action:** {}", redact_text_for_logs(line));
+        let _ = writeln!(buf, "* 🛠️ **Tool:** {}", redact_text_for_logs(line));
         self.buf_write(&buf);
         Ok(())
     }
@@ -224,7 +290,7 @@ impl LiveDigestWriter {
     pub fn record_result(&mut self, line: &str) -> anyhow::Result<()> {
         use std::fmt::Write;
         let mut buf = String::new();
-        let _ = writeln!(buf, "**Result:** {}", redact_text_for_logs(line));
+        let _ = writeln!(buf, "* 📄 **Result:** {}", redact_text_for_logs(line));
         let _ = writeln!(buf);
         self.buf_write(&buf);
         Ok(())
@@ -234,29 +300,29 @@ impl LiveDigestWriter {
         self.session_error_total += 1;
         use std::fmt::Write;
         let mut buf = String::new();
-        let _ = writeln!(buf, "**Error:** {}", redact_text_for_logs(line));
+        let _ = writeln!(buf, "* ❌ **Error:** {}", redact_text_for_logs(line));
         let _ = writeln!(buf);
         self.buf_write(&buf);
         Ok(())
     }
 
     pub fn record_annotation(&mut self, kind: &str, content: &str) -> anyhow::Result<()> {
-        let label = match kind {
-            "reasoning" => "Reasoning",
-            "decision" => "Decision",
-            "observation" => "Observation",
-            "lesson" => "Lesson",
-            other => other,
+        let (emoji, label) = match kind {
+            "reasoning" => ("🧠", "Reasoning"),
+            "decision" => ("🧠", "Decision"),
+            "observation" => ("👀", "Observation"),
+            "lesson" => ("💡", "Lesson"),
+            other => ("📝", other),
         };
         use std::fmt::Write;
         let mut buf = String::new();
         let _ = writeln!(
             buf,
-            "**{}:** {}",
+            "* {} **{}:** {}",
+            emoji,
             label,
             cell(&truncate_chars(&redact_text_for_logs(content.trim()), 2000))
         );
-        let _ = writeln!(buf);
         self.buf_write(&buf);
         Ok(())
     }
@@ -285,20 +351,27 @@ impl LiveDigestWriter {
         Ok(())
     }
 
-    pub fn end_turn(&mut self) -> anyhow::Result<()> {
+    pub fn record_delegation_start(&mut self, agent_id: &str, task_preview: &str) -> anyhow::Result<()> {
         use std::fmt::Write;
-        if self.tools_in_open_turn > 0 {
-            let mut line = String::new();
-            let _ = writeln!(
-                line,
-                "*Turn wrap-up: {} tool call(s) in this block.*",
-                self.tools_in_open_turn
-            );
-            let _ = writeln!(line);
-            self.buf_write(&line);
-        }
-        self.buf_write("---\n\n");
-        // Flush the entire turn to disk in one write
+        let mut buf = String::new();
+        let _ = writeln!(
+            buf,
+            "* 🚀 **Delegating to:** `{}`",
+            redact_text_for_logs(agent_id)
+        );
+        let _ = writeln!(
+            buf,
+            "  *Task:* {}",
+            cell(&truncate_chars(&redact_text_for_logs(task_preview), 300))
+        );
+        let _ = writeln!(buf);
+        self.buf_write(&buf);
+        // Flush immediately so it appears before the child's session logs
+        self.flush_buffer()
+    }
+
+    pub fn end_turn(&mut self) -> anyhow::Result<()> {
+        self.buf_write("\n");
         self.flush_buffer()
     }
 
@@ -352,16 +425,15 @@ pub fn append_user_ask_answer_best_effort(
     };
     let _ = writeln!(
         f,
-        "**User answer (`user.ask` / `{}`):** {}",
+        "* 🙋 **User answer (`user.ask` / `{}`):** {}",
         cell(interaction_id),
         cell(&truncate_chars(&redact_text_for_logs(answer_summary), 1200))
     );
-    let _ = writeln!(f);
 }
 
 fn count_turn_headers(path: &Path) -> anyhow::Result<u32> {
     let s = std::fs::read_to_string(path)?;
-    let n = s.lines().filter(|l| l.contains(" — Turn ")).count();
+    let n = s.lines().filter(|l| l.contains("**Turn ")).count();
     Ok(n as u32)
 }
 
@@ -551,9 +623,10 @@ mod tests {
         w.record_annotation("lesson", "note").unwrap();
         w.end_turn().unwrap();
         let body = std::fs::read_to_string(w.path()).unwrap();
-        assert!(body.contains("# Live session digest"));
-        assert!(body.contains("## `agent.a` — Turn 1"));
-        assert!(body.contains("**Lesson:** note"));
+assert!(body.contains("# Live session digest"));
+        assert!(body.contains("### 🤖 agent.a"));
+        assert!(body.contains("**Turn 1**"));
+        assert!(body.contains("💡 **Lesson:** note"));
     }
 
     #[test]
@@ -569,8 +642,9 @@ mod tests {
         w2.start_turn().unwrap();
         w2.end_turn().unwrap();
         let body = std::fs::read_to_string(w2.path()).unwrap();
-        assert!(body.contains("## `agent.a` — Turn 1"));
-        assert!(body.contains("## `agent.a` — Turn 2"));
+assert!(body.contains("### 🤖 agent.a"));
+        assert!(body.contains("**Turn 1**"));
+        assert!(body.contains("**Turn 2**"));
     }
 
     #[test]
