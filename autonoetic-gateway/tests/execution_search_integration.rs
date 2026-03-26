@@ -43,6 +43,8 @@ fn test_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+
+        response_contract: None,
     }
 }
 

@@ -542,9 +542,18 @@ impl SessionTracer {
         let redacted_args = redact_text_for_logs(arguments);
         if tool_name != "digest.annotate" {
             if let Some(w) = &self.live_digest {
-                let line = format_tool_action_line(tool_name, &redacted_args);
-                if let Err(e) = w.lock().unwrap().record_action(&line) {
-                    tracing::warn!(target: "live_digest", error = %e, "digest record_action failed");
+                let mut guard = w.lock().unwrap();
+                if tool_name == "agent.spawn" {
+                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) {
+                        let target = args["agent_id"].as_str().unwrap_or("unknown");
+                        let msg = args["message"].as_str().unwrap_or("");
+                        let _ = guard.record_delegation_start(target, msg);
+                    }
+                } else {
+                    let line = format_tool_action_line(tool_name, &redacted_args);
+                    if let Err(e) = guard.record_action(&line) {
+                        tracing::warn!(target: "live_digest", error = %e, "digest record_action failed");
+                    }
                 }
             }
         }
