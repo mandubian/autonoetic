@@ -100,6 +100,17 @@ impl ArtifactStore {
         hasher.update(bundle_json.as_bytes());
         format!("sha256:{:x}", hasher.finalize())
     }
+    
+    /// Recomputes the canonical digest for a persisted artifact bundle.
+    ///
+    /// The digest is defined over the manifest bytes with the `digest` field blanked,
+    /// matching the build-time computation.
+    fn compute_bundle_digest(bundle: &ArtifactBundle) -> anyhow::Result<String> {
+        let mut canonical = bundle.clone();
+        canonical.digest.clear();
+        let bundle_json = serde_json::to_string(&canonical)?;
+        Ok(Self::compute_digest(&bundle_json))
+    }
 
     /// Sorted (name, handle) pairs and sorted entrypoints for identity checks on dedup.
     fn normalized_artifact_identity(
@@ -279,6 +290,9 @@ impl ArtifactStore {
         let manifest_path = dir.join("manifest.json");
         let json = serde_json::to_string_pretty(bundle)?;
         std::fs::write(&manifest_path, json)?;
+        let mut perms = std::fs::metadata(&manifest_path)?.permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&manifest_path, perms)?;
 
         // Update index
         let mut index = self.load_index()?;
@@ -404,6 +418,20 @@ impl ArtifactStore {
 
         let json = std::fs::read_to_string(&manifest_path)?;
         let bundle: ArtifactBundle = serde_json::from_str(&json)?;
+        anyhow::ensure!(
+            bundle.artifact_id == artifact_id,
+            "artifact '{}' manifest claims different artifact_id '{}'",
+            artifact_id,
+            bundle.artifact_id
+        );
+        let expected_digest = Self::compute_bundle_digest(&bundle)?;
+        anyhow::ensure!(
+            bundle.digest == expected_digest,
+            "artifact '{}' digest mismatch: manifest has '{}' but recomputed digest is '{}'. Possible tampering or corruption.",
+            artifact_id,
+            bundle.digest,
+            expected_digest
+        );
         Ok(bundle)
     }
 
@@ -672,15 +700,51 @@ mod tests {
                 }
             }
         }
+        let mut perms = std::fs::metadata(&manifest_path).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&manifest_path, perms).unwrap();
         std::fs::write(&manifest_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
         let err = store
             .build(&["a.txt".into()], None, "s1")
             .expect_err("corrupt manifest must block reuse");
         assert!(
-            err.to_string().contains("identity mismatch"),
+            err.to_string().contains("identity mismatch")
+                || err.to_string().contains("digest mismatch"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_artifact_inspect_rejects_digest_mismatch() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let handle = content_store.write(b"print('hello')").unwrap();
+        content_store
+            .register_name("session-1", "main.py", &handle)
+            .unwrap();
+
+        let bundle = store.build(&["main.py".to_string()], Some(&["main.py".to_string()]), "session-1").unwrap();
+        let manifest_path = gw
+            .join("artifacts")
+            .join(&bundle.artifact_id)
+            .join("manifest.json");
+
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        raw["digest"] = serde_json::Value::String("sha256:deadbeef".to_string());
+        let mut perms = std::fs::metadata(&manifest_path).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&manifest_path, perms).unwrap();
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let err = store.inspect(&bundle.artifact_id).expect_err("tampered digest must fail inspect");
+        assert!(err.to_string().contains("digest mismatch"));
     }
 
     #[test]
