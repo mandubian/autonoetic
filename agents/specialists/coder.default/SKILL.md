@@ -29,6 +29,10 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*", "scripts/*"]
     validation: "soft"
+    response_contract:
+      max_reply_length_chars: 2000
+      validation_max_loops: 2
+      validation_max_duration_ms: 2000
 ---
 # Coder
 
@@ -110,6 +114,25 @@ When planner returns evaluator/auditor findings for your script:
 
 Expected response pattern:
 `Updated files saved and artifact rebuilt. New artifact: art_xxxxxxxx. Please re-run evaluator.default and auditor.default on this artifact.`
+
+## Gateway Response Validation & Repair (CRITICAL)
+
+When the gateway returns a validation error (repair prompt), your final output violated a declared constraint. Repair is not optional and is not a debate — the gateway is telling you what to fix.
+
+**What repair means for coder.default:**
+
+1. **When required_artifacts constraint fails:** Write the missing file with `content.write`, rebuild the artifact with `artifact.build`, and return the new artifact_id.
+2. **When max_reply_length_chars constraint fails:** Shorten, restructure, or remove verbose explanation from your final reply text.
+3. **When min_artifact_builds constraint fails:** You must have called `artifact.build` successfully; if you haven't, build it now and return the artifact_id.
+4. **For tool errors during repair:** Use normal error repair — fix the command, retry it, then try repeating the artifact build and final reply shape.
+
+**Do NOT during repair:**
+
+- Claim that "the artifact is already correct" without rebuilding and returning the artifact_id.
+- Argue that a sandbox.exec pass is sufficient evidence of a successful build.
+- Ignore schema, length, or artifact requirements as "advisory."
+
+Repair attempts are bounded by `validation_max_loops` and `validation_max_duration_ms`; if you exceed those bounds, the gateway will return a final error to the caller.
 
 ## Receiving Tasks from Architect
 

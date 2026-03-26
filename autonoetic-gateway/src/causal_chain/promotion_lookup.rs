@@ -21,10 +21,10 @@ impl PromotionLookup {
         &self.history_dir
     }
 
-    /// Finds all promotion.record causal chain entries for a given content handle.
+    /// Finds all promotion.record causal chain entries for a given artifact id.
     pub fn find_promotion_entries(
         &self,
-        content_handle: &str,
+        artifact_id: &str,
     ) -> anyhow::Result<Vec<CausalChainEntry>> {
         let entries = read_all_entries_across_segments(&self.history_dir)?;
         let mut matching = Vec::new();
@@ -33,8 +33,8 @@ impl PromotionLookup {
             if entry.category == "tool" && entry.action == "promotion.record" {
                 if let Some(payload) = &entry.payload {
                     if let Some(args) = payload.get("arguments") {
-                        if let Some(handle) = args.get("content_handle") {
-                            if handle.as_str() == Some(content_handle) {
+                        if let Some(recorded_artifact_id) = args.get("artifact_id") {
+                            if recorded_artifact_id.as_str() == Some(artifact_id) {
                                 matching.push(entry);
                             }
                         }
@@ -47,13 +47,13 @@ impl PromotionLookup {
     }
 
     /// Verifies that a successful promotion.record call exists in the causal chain
-    /// for the given content handle and role.
+    /// for the given artifact id and role.
     pub fn verify_promotion(
         &self,
-        content_handle: &str,
+        artifact_id: &str,
         role: &PromotionRole,
     ) -> anyhow::Result<bool> {
-        let entries = self.find_promotion_entries(content_handle)?;
+        let entries = self.find_promotion_entries(artifact_id)?;
         let role_str = role.as_str();
 
         for entry in entries {
@@ -80,13 +80,13 @@ impl PromotionLookup {
         Ok(false)
     }
 
-    /// Returns the agent_id that recorded the promotion for a given content handle and role.
+    /// Returns the agent_id that recorded the promotion for a given artifact id and role.
     pub fn get_recorder(
         &self,
-        content_handle: &str,
+        artifact_id: &str,
         role: &PromotionRole,
     ) -> anyhow::Result<Option<String>> {
-        let entries = self.find_promotion_entries(content_handle)?;
+        let entries = self.find_promotion_entries(artifact_id)?;
         let role_str = role.as_str();
 
         for entry in entries {
@@ -134,7 +134,7 @@ mod tests {
                 autonoetic_types::causal_chain::EntryStatus::Success,
                 Some(serde_json::json!({
                     "arguments": {
-                        "content_handle": "sha256:abc123",
+                        "artifact_id": "art_abc123",
                         "role": "evaluator",
                         "pass": true
                     }
@@ -144,7 +144,7 @@ mod tests {
 
         let lookup = PromotionLookup::new(history_dir);
         let result = lookup
-            .verify_promotion("sha256:abc123", &PromotionRole::Evaluator)
+            .verify_promotion("art_abc123", &PromotionRole::Evaluator)
             .unwrap();
 
         assert!(result);
@@ -168,7 +168,7 @@ mod tests {
                 autonoetic_types::causal_chain::EntryStatus::Success,
                 Some(serde_json::json!({
                     "arguments": {
-                        "content_handle": "sha256:abc123",
+                        "artifact_id": "art_abc123",
                         "role": "evaluator",
                         "pass": true
                     }
@@ -178,7 +178,7 @@ mod tests {
 
         let lookup = PromotionLookup::new(history_dir);
         let result = lookup
-            .verify_promotion("sha256:different", &PromotionRole::Evaluator)
+            .verify_promotion("art_different", &PromotionRole::Evaluator)
             .unwrap();
 
         assert!(!result);
@@ -202,7 +202,7 @@ mod tests {
                 autonoetic_types::causal_chain::EntryStatus::Success,
                 Some(serde_json::json!({
                     "arguments": {
-                        "content_handle": "sha256:abc123",
+                        "artifact_id": "art_abc123",
                         "role": "evaluator",
                         "pass": true
                     }
@@ -212,7 +212,7 @@ mod tests {
 
         let lookup = PromotionLookup::new(history_dir);
         let result = lookup
-            .verify_promotion("sha256:abc123", &PromotionRole::Auditor)
+            .verify_promotion("art_abc123", &PromotionRole::Auditor)
             .unwrap();
 
         assert!(!result);

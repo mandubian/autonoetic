@@ -263,12 +263,12 @@ If the coder finishes but fails to provide a valid `artifact_id` (e.g., due to a
 
 **Step 3: evaluator validates the artifact before install**
 ```
-agent.spawn("evaluator.default", message="Validate artifact [artifact_id] with artifact.inspect and artifact-closed sandbox execution when applicable. Return evaluator_pass, tests_run/tests_passed/tests_failed, findings, and recommendation. IMPORTANT: call promotion.record for this validation outcome (pass or fail) using the canonical source content_handle for the artifact; include artifact_id in summary/findings. A failed gate must still be recorded — do not skip promotion.record on failure.")
+agent.spawn("evaluator.default", message="Validate artifact [artifact_id] with artifact.inspect and artifact-closed sandbox execution when applicable. Return evaluator_pass, tests_run/tests_passed/tests_failed, findings, and recommendation. IMPORTANT: call promotion.record for this validation outcome (pass or fail) using artifact_id [artifact_id]. Include artifact_id in summary/findings. A failed gate must still be recorded — do not skip promotion.record on failure.", metadata={"delegated_role":"evaluator","promotion_role":"evaluator","promotion_artifact_id":"[artifact_id]","require_promotion_record":true,"parent_goal":"Promote artifact [artifact_id]"})
 ```
 
 **Step 4: auditor reviews risk and capability coverage for the same artifact**
 ```
-agent.spawn("auditor.default", message="Audit artifact [artifact_id] for correctness/security/reproducibility using artifact.inspect. Return auditor_pass, findings, and recommendation. IMPORTANT: call promotion.record for this audit outcome (pass or fail) using the canonical source content_handle for the artifact; include artifact_id in summary/findings. A failed gate must still be recorded — do not skip promotion.record on failure.")
+agent.spawn("auditor.default", message="Audit artifact [artifact_id] for correctness/security/reproducibility using artifact.inspect. Return auditor_pass, findings, and recommendation. IMPORTANT: call promotion.record for this audit outcome (pass or fail) using artifact_id [artifact_id]. Include artifact_id in summary/findings. A failed gate must still be recorded — do not skip promotion.record on failure.", metadata={"delegated_role":"auditor","promotion_role":"auditor","promotion_artifact_id":"[artifact_id]","require_promotion_record":true,"parent_goal":"Promote artifact [artifact_id]"})
 ```
 
 **Step 5: if evaluator/auditor fail, send findings back to coder and iterate**
@@ -276,11 +276,11 @@ agent.spawn("auditor.default", message="Audit artifact [artifact_id] for correct
 agent.spawn("coder.default", message="Fix the implementation using these evaluator/auditor findings: [...]. Save updated files with content.write, rebuild the artifact, and return the new artifact_id plus key file names.")
 ```
 
-Repeat Steps 3-5 until evaluator/auditor both return pass=true **and** each has called `promotion.record` for the **current** artifact attempt (including after failures — both roles should record outcomes so the promotion trail is complete).
+Repeat Steps 3-5 until evaluator/auditor both return pass=true **and** each has called `promotion.record` for the **current** artifact attempt (including after failures — both roles should record outcomes so the promotion trail is complete). When spawning these promotion gates, include `promotion_artifact_id`, `promotion_role`, and `require_promotion_record=true` in `metadata`.
 
 **Step 6: specialized_builder installs the agent with promotion evidence**
 ```
-agent.spawn("specialized_builder.default", message="Install a new script agent called 'weather-fetcher' using artifact_id [artifact_id]. Include promotion_gate with evaluator_pass=true, auditor_pass=true, and concrete security_analysis/capability_analysis evidence. Include the canonical source content handle only for promotion.record linkage if needed.")
+agent.spawn("specialized_builder.default", message="Install a new script agent called 'weather-fetcher' using artifact_id [artifact_id]. Include promotion_gate with evaluator_pass=true, auditor_pass=true, and concrete security_analysis/capability_analysis evidence.")
 ```
 
 **Step 7: post-install smoke test before user-facing use**
@@ -296,7 +296,7 @@ agent.spawn("weather-fetcher", message={"location": "Paris"})
 **CRITICAL ENFORCEMENT:**
 
 - Do NOT proceed to Step 6 if evaluator or auditor returned pass=false
-- Do NOT proceed to Step 6 if evaluator or auditor did not call `promotion.record` for the latest validation/audit of the artifact you intend to install (pass **or** fail must be recorded; failures still require a record before you iterate or abandon)
+- Do NOT proceed to Step 6 if evaluator or auditor did not call `promotion.record` for the latest validation/audit of the artifact you intend to install (pass **or** fail must be recorded; failures still require a record before you iterate or abandon). Use promotion metadata so the gateway can reject incomplete gate sessions immediately.
 - The specialized_builder will verify promotion records via PromotionStore — fabricated booleans will be rejected
 - If evaluator/auditor fail, iterate with coder until they pass **and** each gate has a successful pass record for the **final** artifact
 
@@ -342,6 +342,18 @@ When calling `agent.spawn`, always include structured metadata for audit trail:
 ```
 
 This metadata is preserved in the causal chain for governance review.
+
+For promotion-gate delegations, extend this metadata with:
+
+```json
+{
+  "promotion_role": "evaluator",
+  "promotion_artifact_id": "art_xxxxxxxx",
+  "require_promotion_record": true
+}
+```
+
+The gateway uses this only to verify that the delegated promotion session actually wrote the required `promotion.record` entry.
 
 ### Handling Approval Responses (CRITICAL)
 
