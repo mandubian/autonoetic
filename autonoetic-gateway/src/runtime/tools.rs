@@ -5763,6 +5763,7 @@ impl NativeTool for AgentInstallTool {
             script_entry: args.script_entry.clone(),
             gateway_url: args.gateway_url.clone(),
             gateway_token: args.gateway_token.clone(),
+            response_contract: None,
         };
 
         let mut install_validation_error: Option<String> = None;
@@ -6848,14 +6849,8 @@ pub fn default_registry() -> NativeToolRegistry {
     // Human interaction tools
     registry.register(Box::new(UserAskTool));
     registry.register(Box::new(UserInteractionStatusTool));
+    // Digest tools
     registry.register(Box::new(DigestAnnotateTool));
-    // Promotion tools
-    registry.register(Box::new(
-        crate::runtime::tools_promotion::PromotionRecordTool,
-    ));
-    registry.register(Box::new(
-        crate::runtime::tools_promotion::PromotionQueryTool,
-    ));
     registry
 }
 
@@ -6939,6 +6934,8 @@ mod tests {
             script_entry: None,
             gateway_url: None,
             gateway_token: None,
+
+            response_contract: None,
         }
     }
 
@@ -7062,12 +7059,11 @@ mod tests {
         let manifest_none = test_manifest(vec![]);
         // SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool, UserAskTool, UserInteractionStatusTool, DigestAnnotateTool are always available
         assert_eq!(registry.available_definitions(&manifest_none).len(), 6);
-
         let manifest_shell = test_manifest(vec![Capability::CodeExecution {
             patterns: vec!["*".into()],
         }]);
         let defs = registry.available_definitions(&manifest_shell);
-        // sandbox.exec (1) + SessionEscalateTool, ApprovalStatusTool, ExecutionSearchTool, UserAskTool, UserInteractionStatusTool, DigestAnnotateTool (6) = 7
+        // sandbox.exec (1) + always-available (6) = 7
         assert_eq!(defs.len(), 7);
         assert!(defs.iter().any(|d| d.name == "sandbox.exec"));
 
@@ -7082,8 +7078,8 @@ mod tests {
         // execution.search (1) +
         // knowledge.store, knowledge.recall, knowledge.search, knowledge.search_by_tags, digest.query (5) +
         // knowledge.share (1) +
-        // promotion.query (1) + always-available (6) = 19
-        assert_eq!(defs_all.len(), 19);
+        // always-available (6) = 18
+        assert_eq!(defs_all.len(), 18);
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
