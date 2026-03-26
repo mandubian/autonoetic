@@ -24,6 +24,7 @@ pub mod post_session_digest;
 pub mod promotion_store;
 pub mod reevaluation_state;
 pub mod remote_access;
+pub mod response_validation;
 pub mod session_budget;
 pub mod session_context;
 pub mod session_tracer;

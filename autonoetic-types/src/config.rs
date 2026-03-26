@@ -242,6 +242,12 @@ pub struct GatewayConfig {
     /// Data retention settings (days). 0 = retain forever.
     #[serde(default)]
     pub retention: RetentionConfig,
+
+    /// Response validation gate configuration.
+    /// When enabled, the gateway validates agent outputs against declared constraints
+    /// in agent metadata before returning SpawnResult to the caller.
+    #[serde(default)]
+    pub response_validation: ResponseValidationConfig,
 }
 
 /// Configuration for evidence storage.
@@ -285,6 +291,28 @@ fn default_retention_execution_traces_days() -> u32 {
 }
 fn default_retention_causal_events_days() -> u32 {
     90
+}
+
+/// Configuration for the response validation gate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseValidationConfig {
+    /// Enable response validation. Default: false (benign until explicitly enabled).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Override mode per invocation: "on" = validate only, "repair" = validate + bounded retry.
+    /// Default: use `enabled` flag for "on" behavior; repair requires explicit opt-in.
+    #[serde(default)]
+    pub repair_enabled: bool,
+}
+
+impl Default for ResponseValidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repair_enabled: false,
+        }
+    }
 }
 
 /// Configuration for pluggable code analysis.
@@ -454,6 +482,7 @@ impl Default for GatewayConfig {
             evidence_mode: default_evidence_mode(),
             digest_agent: DigestAgentConfig::default(),
             retention: RetentionConfig::default(),
+            response_validation: ResponseValidationConfig::default(),
         }
     }
 }
