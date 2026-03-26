@@ -14,7 +14,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Memory Architecture](#memory-architecture)
 - [Content Storage](#content-storage)
 - [Causal Chain](#causal-chain)
-- [Session Checkpoints](#session-checkpoints)
+- [Session Checkpoints, Continuations, and Forks](#session-checkpoints-continuations-and-forks)
 - [Queryable Event Store](#queryable-event-store)
 - [Live Digest](#live-digest)
 - [Unified Gateway Database](#unified-gateway-database)
@@ -370,17 +370,21 @@ autonoetic trace history <session_id>  # View conversation history
 
 ---
 
-## Session Checkpoints
+## Session Checkpoints, Continuations, and Forks
+
+Three interrelated mechanisms enable restarting sessions from a given step:
+
+| Mechanism | Purpose | Storage |
+|-----------|---------|---------|
+| **Checkpoint** | Universal snapshot at every yield point | `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json` |
+| **Turn Continuation** | Suspend/resume at approval boundaries | `.gateway/continuations/{task_id}.json` |
+| **Session Fork** | Branch a new session from any checkpoint | Copies checkpoint history to a new session |
+
+### Checkpoints
 
 Universal execution snapshots saved at every yield point for crash recovery and session forking.
 
-### Storage
-
-```
-.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json
-```
-
-### Checkpoint Structure
+#### Checkpoint Structure
 
 ```json
 {
@@ -394,33 +398,162 @@ Universal execution snapshots saved at every yield point for crash recovery and 
   "workflow_id": "wf-abc",
   "runtime_lock_hash": "sha256:...",
   "llm_config_snapshot": {...},
+  "tool_registry_version": "...",
+  "content_store_refs": [...],
+  "pending_tool_state": {...},
+  "llm_rounds_consumed": 3,
+  "tool_invocations_consumed": 12,
+  "tokens_consumed": 4500,
+  "estimated_cost_usd": 0.04,
   "created_at": "2026-03-15T10:30:00Z"
 }
 ```
 
-### Yield Reasons
+#### Yield Reasons
 
-| Reason | Trigger |
-|--------|---------|
-| `Hibernation` | EndTurn / StopSequence between turns |
-| `BudgetExhausted` | Session budget depleted |
-| `ApprovalRequired` | Tool needs approval gate |
-| `UserInputRequired` | `user.ask` pending answer |
-| `EmergencyStop` | Operator circuit breaker |
-| `MaxTurnsReached` | Loop guard limit |
-| `Error` | Recoverable error |
+| Reason | Trigger | Auto-Resume? |
+|--------|---------|--------------|
+| `Hibernation` | EndTurn / StopSequence between turns | Yes |
+| `BudgetExhausted` | Session budget depleted | Yes (after budget reset) |
+| `ApprovalRequired` | Tool needs approval gate | Via turn continuation |
+| `UserInputRequired` | `user.ask` pending answer | Yes (when answered) |
+| `EmergencyStop` | Operator circuit breaker | **No** (blocks auto-resume) |
+| `MaxTurnsReached` | Loop guard limit | Yes |
+| `ManualStop` | Operator/user interrupt | Yes |
+| `Error` | Recoverable error | Yes |
+
+#### Checkpoint Management
+
+```bash
+# List all checkpoints for a session
+autonoetic trace checkpoints <session_id>
+
+# View checkpoint details (via the JSON-RPC API or inspecting files)
+ls .gateway/checkpoints/<session_id>/
+```
+
+Checkpoints are pruned automatically (default: keep last N per session).
+
+### Turn Continuation (Approval-Gated Turns)
+
+When a tool call requires operator approval, the turn is **suspended to disk** rather than failing or retrying with synthetic prompts. On approval, execution resumes seamlessly with real tool results.
+
+#### Suspension Flow
+
+1. Agent requests a privileged tool call (e.g., `agent.install`, `sandbox.exec` on a new resource)
+2. Gateway evaluates policy → approval required
+3. Gateway saves a `TurnContinuation` to `.gateway/continuations/{task_id}.json`
+4. Gateway checkpoints the session with `YieldReason::ApprovalRequired`
+5. Turn execution pauses; approval request is emitted
+
+#### Continuation Structure
+
+```json
+{
+  "task_id": "task-abc",
+  "session_id": "session-123",
+  "turn_id": "turn-042",
+  "history": [...],                           // Full conversation up to suspension
+  "assistant_message": "...",                  // The assistant message containing the tool call
+  "completed_tool_results": [...],             // Results from already-executed tool calls
+  "pending_tool_call": {...},                  // The tool call awaiting approval
+  "remaining_tool_calls": [...],               // Tool calls to execute after approval
+  "approval_request_id": "approval-xyz",
+  "workflow_id": "wf-abc",
+  "suspended_at": "2026-03-15T10:30:00Z",
+  "loop_guard_state": {...}
+}
+```
+
+#### Resume Flow
+
+1. Operator approves (or rejects) the approval request
+2. Gateway loads the continuation from disk
+3. Gateway executes the approved action (sandbox exec or agent install)
+4. Gateway injects the real tool result into conversation history
+5. Gateway executes any remaining tool calls from the original batch
+6. Gateway reconstructs the full history and resumes the reasoning loop
+7. Continuation file is deleted
+
+#### Approval Timeout
+
+The scheduler periodically checks for timed-out approvals. If a continuation's `suspended_at` exceeds the configured timeout, the task is failed, checkpointed, and the continuation file is cleaned up.
+
+### Auto-Resume Behavior
+
+When a session is re-entered (e.g., gateway restart, new event for an existing session), the gateway checks for the latest checkpoint and evaluates whether to auto-resume:
+
+| Yield Reason | Auto-Resume Condition |
+|--------------|----------------------|
+| `Hibernation` | Always |
+| `BudgetExhausted` | Budget available again |
+| `MaxTurnsReached` | Always |
+| `ManualStop` | Always |
+| `Error` | Always |
+| `UserInputRequired` | Interaction status is `Answered` |
+| `ApprovalRequired` | Via turn continuation (approval resolved) |
+| `EmergencyStop` | **Never** — requires manual re-activation |
 
 ### Session Forking
 
+Create a new session that starts from the conversation state at any checkpoint, optionally with a branch message for exploring alternative paths.
+
+#### CLI
+
 ```bash
 # Fork from latest checkpoint
-autonoetic trace fork session-123 --new-session fork-456 --branch "Try different approach"
+autonoetic trace fork session-123
 
-# Fork from specific turn
-autonoetic trace fork session-123 --at-turn 10 --new-session fork-456
+# Fork from a specific turn
+autonoetic trace fork session-123 --at-turn 5
+
+# Fork with a branch message (try a different approach)
+autonoetic trace fork session-123 --at-turn 5 --message "try a different approach"
+
+# Fork into a different agent
+autonoetic trace fork session-123 --agent researcher.default
+
+# Fork and immediately start chatting
+autonoetic trace fork session-123 --at-turn 5 --interactive
+
+# Machine-readable output
+autonoetic trace fork session-123 --json
 ```
 
-The fork reads from the checkpoint file, copies history, and creates a new session with optional branch message.
+#### JSON-RPC API
+
+Method: `session.fork`
+
+```json
+{
+  "source_session_id": "session-123",
+  "branch_message": "optional: try a different approach",
+  "new_session_id": "optional: custom-id (auto-generated if omitted)",
+  "target_agent_id": "optional: fork into a different agent"
+}
+```
+
+Response:
+
+```json
+{
+  "new_session_id": "fork-xxxx",
+  "source_session_id": "session-123",
+  "fork_turn": 42,
+  "history_handle": "sha256:...",
+  "message_count": 5
+}
+```
+
+#### How Forking Works
+
+1. Loads the checkpoint's conversation history from the content store
+2. Generates a new session ID (`fork-{uuid}`) or uses the provided one
+3. Optionally appends a branch message to the history
+4. Stores the history under the new session ID
+5. Returns fork metadata (new session ID, source, fork turn, history handle)
+
+Forks can themselves be forked (multi-level branching). Forking fails if no checkpoint exists for the source session.
 
 ---
 
