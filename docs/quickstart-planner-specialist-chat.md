@@ -25,9 +25,14 @@ cargo run -p autonoetic -- agent init-config --output /tmp/autonoetic-demo/confi
 ```
 
 This creates a config with:
-- Gateway settings (ports, limits)
+- Gateway settings (ports, limits, scheduler)
+- Response validation with repair enabled
+- Agent install approval policy (risk-based)
+- Schema enforcement, code analysis, retention
 - LLM presets (agentic, coding, research, fallback)
 - Template-to-preset mappings for automatic LLM selection
+
+See `docs/config-reference.md` for the full configuration reference.
 
 ### Alternative: Manual config
 
@@ -39,24 +44,64 @@ port: 4000
 ofp_port: 4200
 tls: false
 default_lead_agent_id: "planner.default"
-max_concurrent_spawns: 4
+node_id: "demo"
+node_name: "demo"
+max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4
-background_scheduler_enabled: false
+
+sandbox:
+  share_net: true
+  dev_mode: host-bind
+
+background_scheduler_enabled: true
+background_tick_secs: 5
+background_min_interval_secs: 60
+max_background_due_per_tick: 32
+
+response_validation:
+  enabled: true
+  repair_enabled: true
+
+agent_install_approval_policy: risk_based
+
+approval_timeout_secs: 600
+
+schema_enforcement:
+  mode: deterministic
+  audit: true
+
+evidence_mode: full
+
+code_analysis:
+  capability_provider: pattern
+  security_provider: pattern
+  require_capabilities: true
+  require_approval_for:
+    - NetworkAccess
+    - CodeExecution
+
+retention:
+  execution_traces_days: 30
+  causal_events_days: 90
 
 # LLM presets for role-specific model selection
 llm_presets:
   agentic:
     provider: "openrouter"
-    model: "google/gemini-2.5-flash-lite"
+    model: "minimax/minimax-m2.7"
     temperature: 0.2
   coding:
     provider: "openrouter"
-    model: "google/gemini-2.5-flash-lite"
+    model: "minimax/minimax-m2.7"
     temperature: 0.1
   research:
     provider: "openrouter"
-    model: "google/gemini-2.5-flash-lite"
+    model: "minimax/minimax-m2.7"
     temperature: 0.3
+  fallback:
+    provider: "openai"
+    model: "gpt-4o"
+    temperature: 0.2
 
 # Template → Preset mapping
 llm_preset_mapping:
@@ -230,11 +275,21 @@ When no preset is specified, each template uses a role-optimized default:
 From `autonoetic/`:
 
 ```bash
-AUTONOETIC_NODE_ID=demo \
-AUTONOETIC_NODE_NAME=demo \
 AUTONOETIC_SHARED_SECRET=demo-secret \
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway start
 ```
+
+The only required environment variable is `AUTONOETIC_SHARED_SECRET` (kept out of config.yaml for security). Node identity and sandbox settings are read from `config.yaml` by default.
+
+Env vars override config values when set:
+
+| Env var | Config equivalent | Required |
+|---------|-------------------|----------|
+| `AUTONOETIC_SHARED_SECRET` | — | **Yes** |
+| `AUTONOETIC_NODE_ID` | `node_id` | No (config or default: `"gateway"`) |
+| `AUTONOETIC_NODE_NAME` | `node_name` | No (config or default: `"gateway"`) |
+| `AUTONOETIC_BWRAP_SHARE_NET` | `sandbox.share_net` | No (config or default: `false`) |
+| `AUTONOETIC_BWRAP_DEV_MODE` | `sandbox.dev_mode` | No (config or default: `"legacy"`) |
 
 Do not set `AUTONOETIC_LLM_API_KEY` when using provider-specific keys. It is a global override.
 
@@ -244,28 +299,18 @@ If you previously exported overrides in your shell, clear them before starting t
 unset AUTONOETIC_LLM_API_KEY AUTONOETIC_LLM_BASE_URL
 ```
 
-### Bubblewrap compatibility toggles (optional)
+### Sandbox compatibility
 
-Default sandbox behavior is unchanged (strict network namespace + legacy `/dev` handling).  
-For environments where `bwrap --unshare-net` cannot configure loopback or where `/dev/null` writes fail, you can enable compatibility flags:
-
-| Env var | Values | Effect | Default |
-|---|---|---|---|
-| `AUTONOETIC_BWRAP_SHARE_NET` | `1/true/yes/on` or `0/false/no/off` | Adds `--share-net` (uses host network namespace) | Off |
-| `AUTONOETIC_BWRAP_DEV_MODE` | `legacy`, `minimal`, `host-bind` | Controls `/dev` mount strategy (`legacy`: unchanged, `minimal`: `--dev /dev`, `host-bind`: `--dev-bind /dev /dev`) | `legacy` |
-
-Recommended for this environment:
+The `sandbox` section in config.yaml handles environments where `bwrap --unshare-net` cannot configure loopback or where `/dev/null` writes fail. The quickstart config already sets `share_net: true` and `dev_mode: host-bind`. To override per-session via env vars:
 
 ```bash
-AUTONOETIC_NODE_ID=demo \
-AUTONOETIC_NODE_NAME=demo \
 AUTONOETIC_SHARED_SECRET=demo-secret \
 AUTONOETIC_BWRAP_SHARE_NET=1 \
 AUTONOETIC_BWRAP_DEV_MODE=host-bind \
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway start
 ```
 
-This is intentionally opt-in so other environments keep the previous bwrap command shape.
+Env vars always take precedence over config values.
 
 ## 5) Open terminal chat with implicit routing
 
@@ -459,3 +504,13 @@ If a command matches an agent's `CodeExecution` pattern but still fails with per
 
 - `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` means the host/kernel blocks loopback setup in isolated net namespaces. Use `AUTONOETIC_BWRAP_SHARE_NET=1` for that environment.
 - `curl` reporting `HTTP:200` together with `Failure writing output to destination` means the request succeeded but output write failed (often `/dev/null` or destination path). Use writable paths (for example `/tmp/...`) and, if needed, `AUTONOETIC_BWRAP_DEV_MODE=host-bind` or `minimal`.
+
+## Related Docs
+
+- `docs/config-reference.md` — full `config.yaml` field reference
+- `docs/ARCHITECTURE.md` — system design and data flow
+- `docs/AGENTS.md` — agent roles, routing, SKILL.md format
+- `docs/response-validation-gate.md` — validation and repair internals
+- `docs/session-budget.md` — per-session resource limits
+- `docs/code-analysis.md` — capability and security analysis
+- `docs/CLI.md` — CLI command reference

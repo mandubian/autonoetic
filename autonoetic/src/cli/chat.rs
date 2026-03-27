@@ -372,6 +372,7 @@ fn poll_session_snapshot(
     config: &autonoetic_types::config::GatewayConfig,
     store: Option<&GatewayStore>,
     session_id: &str,
+    previous_latest_signal: Option<String>,
 ) -> anyhow::Result<SessionPollSnapshot> {
     let root_session_id = autonoetic_gateway::runtime::content_store::root_session_id(session_id);
     let pending_interactions = match store {
@@ -432,7 +433,7 @@ fn poll_session_snapshot(
             root_session_id: root_session_id.to_string(),
             workflow,
             pending_user_interactions: pending_interactions.len(),
-            latest_signal: None,
+            latest_signal: previous_latest_signal,
         },
         pending_interactions,
     })
@@ -777,6 +778,14 @@ fn extract_structured_approval(text: &str) -> Option<StructuredApprovalView> {
 
 fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
+
+    if area.height < 8 || area.width < 20 {
+        let p = Paragraph::new("Terminal too small — resize to continue")
+            .style(Style::default().fg(Color::Yellow));
+        f.render_widget(p, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -944,7 +953,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         )
     };
 
-    let p = Paragraph::new(Span::styled(text, Style::default().fg(Color::DarkGray)));
+    let p = Paragraph::new(Span::styled(text, Style::default().fg(Color::White)));
     f.render_widget(p, area);
 }
 
@@ -1081,7 +1090,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         };
 
     if let Some(ref store) = gateway_store {
-        if let Ok(snapshot) = poll_session_snapshot(config.as_ref(), Some(store), &session_id) {
+        if let Ok(snapshot) = poll_session_snapshot(config.as_ref(), Some(store), &session_id, app.session_overview.latest_signal.clone()) {
             app.session_overview = snapshot.overview.clone();
             let _ = append_new_pending_user_interaction_prompts(&mut app, &snapshot.pending_interactions);
         }
@@ -1222,8 +1231,17 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         .and_then(|v| v.get("assistant_reply").and_then(|r| r.as_str().map(ToOwned::to_owned)))
                                         .unwrap_or_else(|| "[No response]".to_string());
 
-                                    let new_user_prompts = if let Some(store) = gateway_store {
-                                        match poll_session_snapshot(config, Some(store), session_id) {
+                                    // Try to extract user interactions directly from response (zero latency),
+                                    // then fall back to store polling.
+                                    let new_user_prompts_from_response = result_json
+                                        .and_then(|v| v.get("pending_user_interactions"))
+                                        .and_then(|v| serde_json::from_value::<Vec<UserInteraction>>(v.clone()).ok())
+                                        .map(|interactions| append_new_pending_user_interaction_prompts(app, &interactions));
+
+                                    let new_user_prompts = if new_user_prompts_from_response.is_some() {
+                                        new_user_prompts_from_response.unwrap()
+                                    } else if let Some(store) = gateway_store {
+                                        match poll_session_snapshot(config, Some(store), session_id, app.session_overview.latest_signal.clone()) {
                                             Ok(snapshot) => {
                                                 app.session_overview.root_session_id = snapshot.overview.root_session_id.clone();
                                                 app.session_overview.workflow = snapshot.overview.workflow.clone();
@@ -1504,13 +1522,17 @@ async fn check_signals(
 ) -> bool {
     let mut processed_any = false;
 
-    let snapshot = match poll_session_snapshot(config, store, session_id) {
-        Ok(snapshot) => snapshot,
-        Err(e) => {
-            tracing::warn!(target: "chat", error = %e, "Failed to poll session snapshot");
-            return false;
-        }
-    };
+    let snapshot = poll_session_snapshot(config, store, session_id, app.session_overview.latest_signal.clone())
+        .unwrap_or_else(|e| {
+            tracing::warn!(target: "chat", error = %e, "Failed to poll session snapshot, continuing with empty snapshot");
+            SessionPollSnapshot {
+                overview: SessionOverview {
+                    root_session_id: app.session_overview.root_session_id.clone(),
+                    ..SessionOverview::default()
+                },
+                pending_interactions: Vec::new(),
+            }
+        });
 
     let root_session_id = snapshot.overview.root_session_id.clone();
 
@@ -1567,7 +1589,7 @@ async fn check_signals(
                         if recap_count > 0 {
                             app.add_message(
                                 MessageRole::System,
-                                "── workflow recap ──".to_string(),
+                                "── recent events ──".to_string(),
                             );
                             let start_idx = events.len().saturating_sub(recap_count);
                             for event in &events[start_idx..] {
@@ -1576,7 +1598,7 @@ async fn check_signals(
                                     app.add_message(MessageRole::Signal, card);
                                 }
                             }
-                            app.add_message(MessageRole::System, "── live updates ──".to_string());
+                            app.add_message(MessageRole::System, "── upcoming ──".to_string());
                         }
                         // Mark ALL fetched events as seen, not just the recap window,
                         // so events outside the recap don't re-appear as "new" on next poll.

@@ -1,11 +1,12 @@
 //! Sandbox runner supporting bubblewrap, docker, and firecracker.
 
 use autonoetic_types::causal_chain::EntryStatus;
+use autonoetic_types::config::SandboxConfig;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::{
@@ -22,6 +23,14 @@ const CCOS_SOCKET_ENV: &str = "CCOS_SOCKET_PATH";
 const SDK_SOCKET_BASENAME: &str = ".autonoetic_sdk.sock";
 const BWRAP_SHARE_NET_ENV: &str = "AUTONOETIC_BWRAP_SHARE_NET";
 const BWRAP_DEV_MODE_ENV: &str = "AUTONOETIC_BWRAP_DEV_MODE";
+
+static SANDBOX_CONFIG: OnceLock<SandboxConfig> = OnceLock::new();
+
+/// Initialize sandbox config from gateway config. Call once at startup.
+/// Env vars always override config values.
+pub fn init_sandbox_config(config: &SandboxConfig) {
+    SANDBOX_CONFIG.get_or_init(|| config.clone());
+}
 
 struct SdkBridgeGuard {
     stop: Arc<AtomicBool>,
@@ -725,11 +734,26 @@ fn append_bwrap_isolation_flags(argv: &mut Vec<String>) {
 }
 
 fn bwrap_share_net_enabled() -> bool {
-    parse_env_bool(std::env::var(BWRAP_SHARE_NET_ENV).ok().as_deref()).unwrap_or(false)
+    // Env var overrides config
+    if let Some(val) = parse_env_bool(std::env::var(BWRAP_SHARE_NET_ENV).ok().as_deref()) {
+        return val;
+    }
+    // Config value (if initialized)
+    SANDBOX_CONFIG.get().map(|c| c.share_net).unwrap_or(false)
 }
 
 fn bwrap_dev_mode() -> BwrapDevMode {
-    parse_bwrap_dev_mode(std::env::var(BWRAP_DEV_MODE_ENV).ok().as_deref())
+    // Env var overrides config
+    if let Some(val) = std::env::var(BWRAP_DEV_MODE_ENV).ok() {
+        if !val.trim().is_empty() {
+            return parse_bwrap_dev_mode(Some(&val));
+        }
+    }
+    // Config value (if initialized)
+    if let Some(config) = SANDBOX_CONFIG.get() {
+        return parse_bwrap_dev_mode(Some(&config.dev_mode));
+    }
+    BwrapDevMode::Legacy
 }
 
 fn parse_env_bool(value: Option<&str>) -> Option<bool> {
