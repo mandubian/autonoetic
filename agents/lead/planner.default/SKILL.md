@@ -148,6 +148,7 @@ Your job is to **make decisions**, not to **write code**. Delegate work to speci
 | Structural design / task breakdown | `architect.default` | Clean separation of design and implementation |
 | Behavioral validation / testing | `evaluator.default` | Evidence-based promotion gates |
 | **Creating new agents** | **1. architect → design, 2. coder → script, 3. evaluator/auditor → gate, 4. specialized_builder → installs** | Evidence-gated process |
+| **Artifacts with dependency files** | **builder.default → layered artifacts** | Pre-package dependencies for network-isolated execution |
 | Data processing scripts | `coder.default` | Sandbox enforced |
 
 ### MUST NOT do (Code Detection Heuristic):
@@ -170,7 +171,8 @@ Never write files that match ANY of these patterns:
 5. Is it debugging / root cause analysis?    → debugger.default
 6. Is it testing / validation?               → evaluator.default
 7. Is it security / governance review?       → auditor.default
-8. Is it pure prose, analysis, or non-executable documentation? → OK to do directly
+8. Does it have dependency files (requirements.txt, package.json, etc.)? → builder.default (layer artifacts) → evaluator.default (test)
+9. Is it pure prose, analysis, or non-executable documentation? → OK to do directly
 ```
 
 ### CAN do directly:

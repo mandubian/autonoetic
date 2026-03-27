@@ -442,6 +442,38 @@ pub fn append_user_ask_answer_best_effort(
     );
 }
 
+/// Best-effort: append response validation errors when validation fails after session ends.
+pub fn append_validation_error_best_effort(
+    gateway_dir: &Path,
+    base_session_id: &str,
+    error_message: &str,
+    repair_attempted: bool,
+) {
+    let path = gateway_dir
+        .join("sessions")
+        .join(base_session_id)
+        .join("digest.md");
+    if !path.exists() {
+        return;
+    }
+    let Ok(mut f) = OpenOptions::new().append(true).open(&path) else {
+        return;
+    };
+    let _ = writeln!(f, "---");
+    let _ = writeln!(f);
+    let _ = writeln!(f, "### ⚠️ Response Validation Failed");
+    let _ = writeln!(f);
+    if repair_attempted {
+        let _ = writeln!(f, "* ❌ **Error:** {}", cell(&truncate_chars(&redact_text_for_logs(error_message), 2000)));
+        let _ = writeln!(f, "* 📝 **Note:** Repair was attempted but the response still failed validation.");
+    } else {
+        let _ = writeln!(f, "* ❌ **Error:** {}", cell(&truncate_chars(&redact_text_for_logs(error_message), 2000)));
+    }
+    let _ = writeln!(f);
+    let _ = writeln!(f, "---");
+    let _ = writeln!(f);
+}
+
 fn count_turn_headers(path: &Path) -> anyhow::Result<u32> {
     let s = std::fs::read_to_string(path)?;
     let n = s.lines().filter(|l| l.contains("**Turn ")).count();

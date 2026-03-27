@@ -35,7 +35,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
         input_names.push(path.to_string());
     }
     let bundle = artifact_store
-        .build(&input_names, None, session_id)
+        .build(&input_names, None, None, session_id)
         .unwrap();
     let promotion_store = PromotionStore::new(&gateway_dir).unwrap();
     let _ = promotion_store.record_promotion(

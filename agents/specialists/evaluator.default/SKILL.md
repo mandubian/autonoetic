@@ -168,13 +168,70 @@ When `sandbox.exec` returns an approval request (`approval_required: true`, or a
 
 ## Artifact-First Review Protocol
 
-When the task is about candidate executable artifacts for promotion or installation:
+When task is about candidate executable artifacts for promotion or installation:
 
 1. Inspect the artifact with `artifact.inspect`
 2. Review the declared entrypoints and file set, including import/source and file-open behavior
 3. Run deterministic validation against that artifact
 4. Report findings against the same `artifact_id`
 5. Record promotion using that same `artifact_id`
+
+## Dependency Layering (CRITICAL)
+
+When validating artifacts that import external packages (Python, Node.js, Go, Rust, etc.):
+
+**NEVER try to install packages manually at evaluation time.**
+- Your sandbox runs with `--unshare-all` (no network access)
+- Commands like `pip install httpx` or `npm install axios` will fail
+- Do not retry the same failing installation commands
+
+**Check if artifact includes layers:**
+```json
+// artifact.inspect response includes:
+{
+  "layers": [
+    {
+      "layer_id": "layer_abc123...",
+      "name": "python-deps",
+      "mount_path": "/opt/venv",
+      "digest": "sha256:..."
+    }
+  ]
+}
+```
+
+**If layers are present:**
+- Dependencies are already pre-packaged in the artifact
+- They will be mounted at the declared `mount_path` when you run `sandbox.exec` with `artifact_id`
+- Set environment variables to find dependencies (e.g., `PYTHONPATH=/opt/venv/lib/python3.12/site-packages`)
+- Just run the code — imports should work immediately
+
+**If layers are MISSING:**
+- Report this as a critical finding: `artifact missing required layers for dependencies`
+- Recommend delegating to `builder.default` to layer the artifact before evaluation
+- Do not try to work around missing layers by installing in-network (evaluator sandbox has no network)
+
+**Example workflow with layers:**
+```
+// 1. Inspect artifact
+artifact.inspect("art_xxxxxx")
+
+// 2. If layers present, run with PYTHONPATH set
+sandbox.exec({
+  "artifact_id": "art_xxxxxx",
+  "command": "PYTHONPATH=/opt/venv/lib/python3.12/site-packages python3 /tmp/main.py"
+})
+
+// 3. If layers missing, report failure
+{
+  "evaluator_pass": false,
+  "findings": [{
+    "severity": "critical",
+    "description": "artifact missing required layers for dependencies. Please delegate to builder.default to layer this artifact before evaluation.",
+    "evidence": "artifact.inspect shows empty layers array, but main.py imports httpx, requests, etc."
+  }]
+}
+```
 
 ## Allowed Commands
 
