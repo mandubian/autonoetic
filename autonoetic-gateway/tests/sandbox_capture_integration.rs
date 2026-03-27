@@ -12,6 +12,7 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
+use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -42,7 +43,9 @@ fn test_manifest() -> AgentManifest {
         },
         llm_config: None,
         limits: None,
-        capabilities: vec![],
+        capabilities: vec![Capability::CodeExecution {
+            patterns: vec!["*".to_string()],
+        }],
         background: None,
         disclosure: None,
         io: None,
@@ -56,7 +59,6 @@ fn test_manifest() -> AgentManifest {
 }
 
 #[test]
-#[ignore = "requires bubblewrap installed"]
 fn test_sandbox_exec_with_capture_paths() {
     if !is_bwrap_available() {
         eprintln!("bubblewrap not found, skipping test");
@@ -77,7 +79,7 @@ fn test_sandbox_exec_with_capture_paths() {
     let config = GatewayConfig::default();
 
     let venv_dir = agent_dir.join("venv");
-    std::fs::create_dir_all(venv_dir.join("lib")).unwrap();
+    std::fs::create_dir_all(venv_dir.join("lib/python3.12/site-packages/requests")).unwrap();
     std::fs::write(
         venv_dir.join("lib/python3.12/site-packages/requests/__init__.py"),
         b"# requests package",
@@ -124,7 +126,6 @@ fn test_sandbox_exec_with_capture_paths() {
 }
 
 #[test]
-#[ignore = "requires bubblewrap installed"]
 fn test_sandbox_exec_without_capture_paths() {
     if !is_bwrap_available() {
         eprintln!("bubblewrap not found, skipping test");
@@ -162,6 +163,9 @@ fn test_sandbox_exec_without_capture_paths() {
         None,
     );
 
+    if let Err(e) = &result {
+        eprintln!("sandbox.exec failed: {}", e);
+    }
     assert!(result.is_ok());
     let response_str = result.unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_str).unwrap();
@@ -171,7 +175,6 @@ fn test_sandbox_exec_without_capture_paths() {
 }
 
 #[test]
-#[ignore = "requires bubblewrap installed"]
 fn test_sandbox_exec_capture_multiple_paths() {
     if !is_bwrap_available() {
         eprintln!("bubblewrap not found, skipping test");
@@ -186,7 +189,7 @@ fn test_sandbox_exec_capture_multiple_paths() {
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     let venv_dir = agent_dir.join("venv");
-    std::fs::create_dir_all(venv_dir.join("lib")).unwrap();
+    std::fs::create_dir_all(venv_dir.join("lib/python3.12/site-packages/requests")).unwrap();
     std::fs::write(
         venv_dir.join("lib/python3.12/site-packages/requests/__init__.py"),
         b"# requests",
