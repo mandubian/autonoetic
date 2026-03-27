@@ -852,6 +852,12 @@ impl GatewayExecutionService {
 
                     let approved_result = match approval_req {
                         Some(ref req) if req.status == Some(autonoetic_types::background::ApprovalStatus::Approved) => {
+                            tracing::info!(
+                                target: "continuation",
+                                request_id = %cont.approval_request_id,
+                                task_id = %t_id,
+                                "Approval found - executing approved action"
+                            );
                             let decision = autonoetic_types::background::ApprovalDecision {
                                 request_id: req.request_id.clone(),
                                 agent_id: req.agent_id.clone(),
@@ -874,12 +880,28 @@ impl GatewayExecutionService {
                                 &self.config,
                                 self.gateway_store.clone(),
                             ) {
-                                Ok(r) => r,
-                                Err(e) => serde_json::json!({
-                                    "ok": false,
-                                    "error": e.to_string(),
-                                    "approval_ref": cont.approval_request_id,
-                                }).to_string(),
+                                Ok(r) => {
+                                    tracing::info!(
+                                        target: "continuation",
+                                        request_id = %cont.approval_request_id,
+                                        result_preview = %r.chars().take(100).collect::<String>(),
+                                        "Approved action executed successfully"
+                                    );
+                                    r
+                                },
+                                Err(e) => {
+                                    tracing::error!(
+                                        target: "continuation",
+                                        request_id = %cont.approval_request_id,
+                                        error = %e,
+                                        "Failed to execute approved action"
+                                    );
+                                    serde_json::json!({
+                                        "ok": false,
+                                        "error": e.to_string(),
+                                        "approval_ref": cont.approval_request_id,
+                                    }).to_string()
+                                }
                             }
                         }
                         Some(_) => {

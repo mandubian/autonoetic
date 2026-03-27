@@ -34,7 +34,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
         input_names.push(path.to_string());
     }
     let bundle = artifact_store
-        .build(&input_names, None, session_id)
+        .build(&input_names, None, None, session_id)
         .unwrap();
     let promotion_store = PromotionStore::new(&gateway_dir).unwrap();
     let _ = promotion_store.record_promotion(
@@ -111,7 +111,7 @@ async fn test_promotion_reject_no_records() {
         .register_name(session_id, "main.py", &handle)
         .unwrap();
     let bundle = artifact_store
-        .build(&["main.py".to_string()], None, session_id)
+        .build(&["main.py".to_string()], None, None, session_id)
         .unwrap();
     let artifact_id = bundle.artifact_id;
 
@@ -282,7 +282,7 @@ async fn test_promotion_reject_auditor_failed() {
     let handle = store.write(b"good script").unwrap();
     store.register_name(session_id, "main.py", &handle).unwrap();
     let bundle = artifact_store
-        .build(&["main.py".to_string()], None, session_id)
+        .build(&["main.py".to_string()], None, None, session_id)
         .unwrap();
     let artifact_id = bundle.artifact_id;
 
@@ -370,7 +370,7 @@ async fn test_promotion_reject_invalid_handle() {
         .register_name(session_id, "main.py", &handle)
         .unwrap();
     let bundle = artifact_store
-        .build(&["main.py".to_string()], None, session_id)
+        .build(&["main.py".to_string()], None, None, session_id)
         .unwrap();
     let artifact_id = bundle.artifact_id;
 

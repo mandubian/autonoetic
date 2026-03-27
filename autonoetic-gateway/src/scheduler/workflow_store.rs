@@ -615,7 +615,10 @@ pub fn update_task_run_status(
             wf.status,
             WorkflowRunStatus::EmergencyStopping | WorkflowRunStatus::EmergencyStopped
         );
-        if is_terminal && wf_not_emergency_stopped && !wf.join_task_ids.is_empty() {
+        // Bug fix: removed !wf.join_task_ids.is_empty() check - check_join_condition correctly
+        // returns true for empty join_task_ids, and workflows with empty join_task_ids need to
+        // transition to Resumable when tasks complete
+        if is_terminal && wf_not_emergency_stopped {
             if let Ok(true) = check_join_condition(config, store, workflow_id) {
                 let mut wf_mut = wf;
                 wf_mut.status = WorkflowRunStatus::Resumable;
@@ -946,6 +949,8 @@ pub fn dequeue_task(
         None => return Ok(()),
     };
     run.queued_task_ids.retain(|id| id != task_id);
+    // Also remove from active_task_ids when task completes (bug fix: tasks were staying active forever)
+    run.active_task_ids.retain(|id| id != task_id);
     run.updated_at = now_rfc3339();
     save_workflow_run(config, _store, &run)?;
     release_task_claim(config, _store, workflow_id, task_id)?;

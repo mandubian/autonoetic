@@ -747,6 +747,23 @@ async fn spawn_task_execution(
                 "failed".to_string(),
                 serde_json::json!({ "status": "failed", "error": e.to_string() }),
             );
+            // Append validation errors to digest for better visibility
+            let error_str = e.to_string();
+            let is_validation_error = error_str.contains("validation failed")
+                || error_str.contains("response_validation")
+                || error_str.contains("artifact_build_evidence")
+                || error_str.contains("repair");
+            if is_validation_error {
+                use crate::runtime::live_digest::base_session_id;
+                let base_session = base_session_id(&session_id);
+                let is_repair = error_str.contains("repair") || error_str.contains("deadline");
+                crate::runtime::live_digest::append_validation_error_best_effort(
+                    &cfg.agents_dir,
+                    &base_session,
+                    &error_str,
+                    is_repair,
+                );
+            }
             let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
             finish_active_row("stopped");
         }

@@ -646,6 +646,18 @@ impl NativeTool for SandboxExecTool {
                     "artifact_id": {
                         "type": "string",
                         "description": "Optional artifact ID. When provided, only artifact files are mounted into the sandbox (closed boundary). When omitted, all session content is mounted."
+                    },
+                    "capture_paths": {
+                        "type": "array",
+                        "description": "Paths inside the sandbox to capture as layers after execution completes. Each path is archived as a separate layer with its content-addressed digest. Use this to capture installed dependencies (e.g., venv/, site-packages/, node_modules/).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Absolute path inside the sandbox to capture (e.g., '/tmp/venv'). The path must exist and be accessible when capture occurs." },
+                                "mount_as": { "type": "string", "description": "The mount path where this layer will be mounted inside the sandbox when the artifact is later used (e.g., '/opt/venv'). This must match the expected path the artifact consumer expects." }
+                            },
+                            "required": ["path", "mount_as"]
+                        }
                     }
                 },
                 "required": ["command"],
@@ -1012,11 +1024,46 @@ impl NativeTool for SandboxExecTool {
                 });
             }
 
+            // Mount artifact layers if any
+            let bundle = artifact_store.inspect(artifact_id)?;
+            if !bundle.layers.is_empty() {
+                let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
+                for layer in &bundle.layers {
+                    let layer_temp_base = std::env::temp_dir()
+                        .join("autonoetic_layer")
+                        .join(&layer.layer_id);
+                    std::fs::create_dir_all(&layer_temp_base)?;
+
+                    if let Err(e) = layer_store.extract_to(&layer.layer_id, &layer_temp_base) {
+                        tracing::warn!(
+                            target: "sandbox",
+                            layer_id = %layer.layer_id,
+                            error = %e,
+                            "Failed to extract layer for sandbox mounting"
+                        );
+                        continue;
+                    }
+
+                    tracing::info!(
+                        target: "sandbox",
+                        layer_id = %layer.layer_id,
+                        mount_path = %layer.mount_path,
+                        "Mounting artifact layer into sandbox"
+                    );
+
+                    mounts.push(SandboxMount {
+                        source: layer_temp_base,
+                        dest: layer.mount_path.clone(),
+                    });
+                }
+            }
+
             tracing::info!(
                 target: "sandbox",
                 artifact_id = %artifact_id,
                 mount_count = mounts.len(),
-                "Mounting artifact files into sandbox (closed boundary)"
+                layer_count = bundle.layers.len(),
+                "Mounting artifact files + layers into sandbox (closed boundary)"
             );
 
             mounts
@@ -1060,6 +1107,76 @@ impl NativeTool for SandboxExecTool {
             "stdout": stdout,
             "stderr": stderr
         });
+
+        // Capture paths as layers if requested
+        if let Some(ref capture_paths) = args.capture_paths {
+            if !capture_paths.is_empty() {
+                if let Some(gw_dir) = gateway_dir {
+                    match crate::layer_store::LayerStore::new(gw_dir, Default::default()) {
+                        Ok(layer_store) => {
+                            let mut captured_layers = Vec::new();
+                            for cap in capture_paths {
+                                // Sandbox workspace is /tmp which maps to agent_dir on host.
+                                // Strip the /tmp prefix to get the host path.
+                                let sandbox_prefix = "/tmp";
+                                let host_path = if cap.path.starts_with(sandbox_prefix) {
+                                    agent_dir.join(cap.path.trim_start_matches(sandbox_prefix).trim_start_matches('/'))
+                                } else {
+                                    agent_dir.join(cap.path.trim_start_matches('/'))
+                                };
+
+                                if host_path.exists() {
+                                    match layer_store.create_from_dir(
+                                        &host_path,
+                                        &cap.path,
+                                        &cap.mount_as,
+                                    ) {
+                                        Ok(layer) => {
+                                            tracing::info!(
+                                                target: "sandbox",
+                                                path = %cap.path,
+                                                mount_as = %cap.mount_as,
+                                                layer_id = %layer.layer_id,
+                                                "Captured sandbox path as layer"
+                                            );
+                                            captured_layers.push(serde_json::json!({
+                                                "path": cap.path,
+                                                "mount_as": cap.mount_as,
+                                                "layer_id": layer.layer_id,
+                                                "digest": layer.digest,
+                                                "file_count": layer.file_count,
+                                                "size_bytes": layer.size_bytes,
+                                            }));
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "sandbox",
+                                                path = %cap.path,
+                                                error = %e,
+                                                "Failed to capture sandbox path as layer"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        target: "sandbox",
+                                        path = %cap.path,
+                                        host_path = %host_path.display(),
+                                        "Capture path does not exist in sandbox workspace"
+                                    );
+                                }
+                            }
+                            if !captured_layers.is_empty() {
+                                body["captured_layers"] = serde_json::Value::Array(captured_layers);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(target: "sandbox", error = %e, "Failed to create layer store for capture");
+                        }
+                    }
+                }
+            }
+        }
 
         // Classify known non-retryable sandbox environment failure so agents can
         // stop looping on identical retries and route to a different capability.
@@ -2303,6 +2420,20 @@ impl NativeTool for ArtifactBuildTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional list of entrypoint filenames (must be in inputs)"
+                    },
+                    "layers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "layer_id": { "type": "string" },
+                                "name": { "type": "string" },
+                                "mount_path": { "type": "string" },
+                                "digest": { "type": "string" }
+                            },
+                            "required": ["layer_id", "name", "mount_path", "digest"]
+                        },
+                        "description": "Optional list of layer references to include in the artifact"
                     }
                 },
                 "required": ["inputs"],
@@ -2328,6 +2459,7 @@ impl NativeTool for ArtifactBuildTool {
         struct Args {
             inputs: Vec<String>,
             entrypoints: Option<Vec<String>>,
+            layers: Option<Vec<autonoetic_types::layer::ArtifactLayer>>,
         }
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -2339,7 +2471,27 @@ impl NativeTool for ArtifactBuildTool {
         let sid = _session_id.unwrap_or(&_manifest.agent.id);
         let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
 
-        let bundle = store.build(&args.inputs, args.entrypoints.as_deref(), sid)?;
+        if let Some(ref layers) = args.layers {
+            let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
+            for layer in layers {
+                let manifest = layer_store.inspect(&layer.layer_id).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Layer '{}' referenced in artifact.build does not exist in layer store",
+                        layer.layer_id
+                    )
+                })?;
+                if manifest.digest != layer.digest {
+                    anyhow::bail!(
+                        "Layer digest mismatch for '{}': artifact.build references digest '{}' but layer store has '{}'",
+                        layer.layer_id,
+                        layer.digest,
+                        manifest.digest
+                    );
+                }
+            }
+        }
+
+        let bundle = store.build(&args.inputs, args.entrypoints.as_deref(), args.layers.as_deref(), sid)?;
 
         let root = crate::runtime::content_store::root_session_id(sid);
         let (scope_type, scope_id) = match config {
@@ -2454,7 +2606,7 @@ impl NativeTool for ArtifactInspectTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Inspect an artifact by ID. Returns file list, entrypoints, digests, and metadata. Use this to review artifacts before install/execution.".to_string(),
+            description: "Inspect an artifact by ID. Returns file list, entrypoints, layers, digests, and metadata. Use this to review artifacts before install/execution.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2504,6 +2656,12 @@ impl NativeTool for ArtifactInspectTool {
                 "name": f.name,
                 "handle": f.handle,
                 "alias": f.alias,
+            })).collect::<Vec<_>>(),
+            "layers": bundle.layers.iter().map(|l| serde_json::json!({
+                "layer_id": l.layer_id,
+                "name": l.name,
+                "mount_path": l.mount_path,
+                "digest": l.digest,
             })).collect::<Vec<_>>(),
             "entrypoints": bundle.entrypoints,
             "created_at": bundle.created_at,
@@ -4398,6 +4556,8 @@ impl NativeTool for AgentSpawnTool {
         }
 
         // --- Synchronous branch (existing behavior) ---
+        let wf_id_clone = workflow_id.clone();
+        let tid_clone = task_id.clone();
         let spawn_future = async move {
             execution
                 .spawn_agent_once(
@@ -4408,8 +4568,8 @@ impl NativeTool for AgentSpawnTool {
                     false,
                     None,
                     args.metadata.as_ref(),
-                    None,
-                    None,
+                    Some(&wf_id_clone),
+                    Some(&tid_clone),
                 )
                 .await
         };
@@ -6274,12 +6434,21 @@ pub(crate) struct SandboxExecArgs {
     /// When provided, only mount artifact files instead of all session content.
     #[serde(default)]
     artifact_id: Option<String>,
+    /// Paths inside the sandbox to capture as layers after execution.
+    #[serde(default)]
+    capture_paths: Option<Vec<CapturePath>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SandboxExecDependencies {
     pub runtime: String,
     pub packages: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CapturePath {
+    pub path: String,
+    pub mount_as: String,
 }
 
 fn dependency_plan_from_args_or_lock(
@@ -7044,7 +7213,7 @@ mod tests {
         }
 
         let bundle = artifact_store
-            .build(&input_names, None, session_id)
+            .build(&input_names, None, None, session_id)
             .unwrap();
 
         // Create promotion records so tests claiming evaluator_pass/auditor_pass are backed

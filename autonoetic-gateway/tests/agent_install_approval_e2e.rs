@@ -39,7 +39,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
     }
 
     let bundle = artifact_store
-        .build(&input_names, None, session_id)
+        .build(&input_names, None, None, session_id)
         .unwrap();
 
     // Create promotion records so tests claiming evaluator_pass/auditor_pass are backed

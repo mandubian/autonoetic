@@ -100,10 +100,10 @@ After `runner.process.wait_with_output()`:
 
 **File:** `autonoetic-gateway/src/artifact_store.rs`
 
-- [ ] Extend `build()` signature to accept optional `layers: Vec<ArtifactLayer>`
-- [ ] Validate each layer exists in `LayerStore` and digest matches
-- [ ] Include layers in the persisted manifest
-- [ ] Include layer digests in deterministic artifact ID computation
+- [x] Extend `build()` signature to accept optional `layers: Vec<ArtifactLayer>`
+- [x] Validate each layer exists in `LayerStore` and digest matches
+- [x] Include layers in the persisted manifest
+- [x] Include layer digests in deterministic artifact ID computation
 
 **Tests:**
 - [ ] Build with layers succeeds when layers exist
@@ -116,8 +116,8 @@ After `runner.process.wait_with_output()`:
 
 **File:** `autonoetic-gateway/src/runtime/tools.rs`
 
-- [ ] Add `layers` field to `artifact.build` input schema
-- [ ] Parse `layers` arg in handler, pass to `artifact_store.build()`
+- [x] Add `layers` field to `artifact.build` input schema
+- [x] Parse `layers` arg in handler, pass to `artifact_store.build()`
 
 ---
 
@@ -127,9 +127,9 @@ After `runner.process.wait_with_output()`:
 
 **File:** `autonoetic-gateway/src/runtime/tools.rs` (resolve artifact section)
 
-- [ ] After resolving artifact files, also resolve layers
-- [ ] For each layer, extract to temp dir via `layer_store.extract_to()`
-- [ ] Add extraction dir as `SandboxMount` at declared `mount_path`
+- [x] After resolving artifact files, also resolve layers
+- [x] For each layer, extract to temp dir via `layer_store.extract_to()`
+- [x] Add extraction dir as `SandboxMount` at declared `mount_path`
 
 **Tests:**
 - [ ] `sandbox.exec` with layered artifact mounts files + layer
@@ -139,7 +139,7 @@ After `runner.process.wait_with_output()`:
 
 ### Task 4.2: Update `artifact.inspect`
 
-- [ ] Return `layers` field in inspect response so agents know what layers an artifact has
+- [x] Return `layers` field in inspect response so agents know what layers an artifact has
 
 ---
 
@@ -149,28 +149,28 @@ After `runner.process.wait_with_output()`:
 
 **File:** `agents/specialists/builder.default/`
 
-- [ ] Create `SKILL.md` with:
+- [x] Create `SKILL.md` with:
   - Role: build-time dependency resolution and artifact layering
   - Capabilities: `SandboxFunctions` (content., artifact., sandbox.exec), `ReadAccess`, `WriteAccess`, `CodeExecution`
   - Instructions: read requirements.txt, install deps via sandbox.exec with capture_paths, build artifact with layers
-- [ ] Create `runtime.lock` with empty dependencies
-- [ ] Create `sandbox.conf` with `share_net = true`
+- [x] Create `runtime.lock` with empty dependencies
+- [x] Create `sandbox.conf` with `share_net = true`
 
 ### Task 5.2: Update planner routing
 
 **File:** `agents/lead/planner.default/SKILL.md`
 
-- [ ] Add builder to delegation ladder between coder and evaluator
-- [ ] Rule: "if artifact has a dependency file (requirements.txt, package.json, etc.), delegate to builder before evaluator"
-- [ ] Builder receives artifact ID + dependency file name, returns layered artifact ID
+- [x] Add builder to delegation ladder between coder and evaluator
+- [x] Rule: "if artifact has a dependency file (requirements.txt, package.json, etc.), delegate to builder before evaluator"
+- [x] Builder receives artifact ID + dependency file name, returns layered artifact ID
 
 ### Task 5.3: Update evaluator instructions
 
 **File:** `agents/specialists/evaluator.default/SKILL.md`
 
-- [ ] Add instruction: "never try to install packages manually — deps should be in the artifact layers"
-- [ ] Add instruction: "use PYTHONPATH/NODE_PATH as declared in the artifact's layer mount_path"
-- [ ] Add instruction: "if deps are missing, report 'artifact missing required layers' instead of trying to install"
+- [x] Add instruction: "never try to install packages manually — deps should be in the artifact layers"
+- [x] Add instruction: "use PYTHONPATH/NODE_PATH as declared in the artifact's layer mount_path"
+- [x] Add instruction: "if deps are missing, report 'artifact missing required layers' instead of trying to install"
 
 ---
 
