@@ -4378,8 +4378,8 @@ impl NativeTool for AgentSpawnTool {
             let _ = crate::scheduler::update_task_run_status(
                 gw_config,
                 gateway_store.as_deref(),
-                &task_id,
                 &workflow_id,
+                &task_id,
                 TaskRunStatus::Pending,
                 Some("queued".to_string()),
             );
@@ -4422,6 +4422,54 @@ impl NativeTool for AgentSpawnTool {
 
         match spawn_result {
             Ok(result) => {
+                if let Some(request_id) = &result.suspended_for_approval {
+                    let summary = format!("awaiting approval {}", request_id);
+                    if let Err(e) = crate::scheduler::update_task_run_status(
+                        gw_config,
+                        gateway_store.as_deref(),
+                        &workflow_id,
+                        &task_id,
+                        TaskRunStatus::AwaitingApproval,
+                        Some(summary),
+                    ) {
+                        tracing::warn!(
+                            target: "workflow",
+                            error = %e,
+                            workflow_id = %workflow_id,
+                            task_id = %task_id,
+                            "Failed to persist task awaiting approval status"
+                        );
+                    }
+
+                    let _ = crate::scheduler::checkpoint_task(
+                        gw_config,
+                        gateway_store.as_deref(),
+                        &workflow_id,
+                        &task_id,
+                        "awaiting_approval".to_string(),
+                        serde_json::json!({
+                            "status": "awaiting_approval",
+                            "approval_request_id": request_id,
+                        }),
+                    );
+
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "status": "awaiting_approval",
+                        "workflow_id": workflow_id,
+                        "task_id": task_id,
+                        "agent_id": result.agent_id,
+                        "session_id": result.session_id,
+                        "approval_request_id": request_id,
+                        "assistant_reply": result.assistant_reply,
+                        "artifacts": result.artifacts,
+                        "files": result.files,
+                        "shared_knowledge": result.shared_knowledge,
+                        "llm_usage": result.llm_usage,
+                    })
+                    .to_string());
+                }
+
                 let summary = result.assistant_reply.as_ref().map(|s| {
                     const MAX: usize = 512;
                     if s.len() <= MAX {
@@ -4433,8 +4481,8 @@ impl NativeTool for AgentSpawnTool {
                 if let Err(e) = crate::scheduler::update_task_run_status(
                     gw_config,
                     gateway_store.as_deref(),
-                    &task_id,
                     &workflow_id,
+                    &task_id,
                     TaskRunStatus::Succeeded,
                     summary,
                 ) {
@@ -4466,8 +4514,8 @@ impl NativeTool for AgentSpawnTool {
                 if let Err(inner) = crate::scheduler::update_task_run_status(
                     gw_config,
                     gateway_store.as_deref(),
-                    &task_id,
                     &workflow_id,
+                    &task_id,
                     TaskRunStatus::Failed,
                     Some(e.to_string()),
                 ) {
@@ -6851,6 +6899,9 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(UserInteractionStatusTool));
     // Digest tools
     registry.register(Box::new(DigestAnnotateTool));
+    // Promotion tools
+    registry.register(Box::new(crate::runtime::tools_promotion::PromotionRecordTool));
+    registry.register(Box::new(crate::runtime::tools_promotion::PromotionQueryTool));
     registry
 }
 
@@ -7078,8 +7129,9 @@ mod tests {
         // execution.search (1) +
         // knowledge.store, knowledge.recall, knowledge.search, knowledge.search_by_tags, digest.query (5) +
         // knowledge.share (1) +
-        // always-available (6) = 18
-        assert_eq!(defs_all.len(), 18);
+        // promotion.query (1) +
+        // always-available (6) = 19
+        assert_eq!(defs_all.len(), 19);
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
