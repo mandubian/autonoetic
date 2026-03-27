@@ -74,6 +74,7 @@ The gateway is the security boundary and execution engine. It is NOT a rule engi
 | **JSON-RPC Router** | Accepts `event.ingest` and `agent.spawn` requests |
 | **Policy Engine** | Validates capabilities, ACLs, and disclosure rules |
 | **Execution Service** | Spawns agent sessions, manages lifecycle |
+| **Layer Store** | Content-addressed storage for compressed directory trees (artifact dependencies) |
 | **Content Store** | SHA-256 content-addressable storage for artifacts |
 | **Causal Chain** | Append-only JSONL audit log with hash-chain integrity |
 | **Scheduler** | Manages background reevaluation cadence and wake predicates |
@@ -151,6 +152,60 @@ Gateway: 1. Resolve name → handle from session manifest
 5. Planner receives artifacts in spawn response
 6. Specialized_builder reads artifacts via content.read()
 ```
+
+### Build Layer Flow
+
+```
+1. Builder agent (with network access) runs:
+   sandbox.exec({
+     "command": "pip install -r /tmp/requirements.txt --target /tmp/venv",
+     "capture_paths": [
+       {"path": "/tmp/venv", "mount_as": "/opt/venv"}
+     ]
+   })
+
+2. Gateway captures directory as layer:
+   - LayerStore.create_from_dir() → compresses venv/ as tar.zst
+   - Computes SHA-256 digest
+   - Stores at .gateway/layers/layer_{digest}/
+   - Returns captured_layer with layer_id, name, mount_path, digest
+
+3. Builder builds layered artifact:
+   artifact.build({
+     "inputs": ["main.py", "requirements.txt"],
+     "layers": [
+       {
+         "layer_id": "layer_abc123...",
+         "name": "python-deps",
+         "mount_path": "/opt/venv",
+         "digest": "sha256:..."
+       }
+     ]
+   })
+
+4. Artifact includes layer metadata:
+   - Deterministic ID includes file handles + layer digests
+   - Manifest stores layers array
+   - Evaluator receives layered artifact
+
+5. Evaluator runs with layered artifact:
+   sandbox.exec({
+     "artifact_id": "art_xxxxxx",
+     "command": "python3 /tmp/main.py"
+   })
+   ↓
+   Gateway:
+   - Extracts layer to temp dir via LayerStore.extract_to()
+   - Mounts at /opt/venv inside sandbox
+   - Imports work immediately (no pip install needed)
+```
+
+**Key Benefits:**
+- Dependencies installed once at build time
+- Same layer deduplicated across artifacts (by digest)
+- Network access limited to build phase
+- Evaluator runs in network-isolated sandbox
+
 
 ---
 
@@ -288,6 +343,11 @@ Content-addressable storage that works locally and remotely:
 ├── sessions/<session_id>/
 │   ├── manifest.json            # name → handle mappings
 │   └── artifacts.json           # Artifact metadata
+├── layers/                      # Compressed dependency directories
+│   ├── index.json             # digest → layer_id mapping
+│   └── layer_{id}/
+│       ├── manifest.json       # Layer metadata (layer_id, digest, file_count, size_bytes, created_at)
+│       └── contents.tar.zst  # Compressed tarball of directory
 └── knowledge.db                 # Tier 2 durable facts
 ```
 
