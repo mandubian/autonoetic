@@ -227,6 +227,101 @@ fn compute_total_output_size_bytes(
     Ok(total_bytes)
 }
 
+/// Validate that a required promotion.record was called during the session.
+///
+/// When metadata contains `require_promotion_record: true`, the gateway checks
+/// the PromotionStore for a matching record. Two failure modes:
+/// 1. No record exists at all → agent forgot to call `promotion.record` → repairable
+/// 2. Record exists but pass=false → evaluator/auditor rejected the artifact → terminal
+pub fn validate_promotion_record(
+    gateway_dir: Option<&Path>,
+    promotion_artifact_id: &str,
+    promotion_role: &str,
+) -> Vec<ValidationViolation> {
+    let mut violations = Vec::new();
+
+    let Some(gw_dir) = gateway_dir else {
+        violations.push(ValidationViolation {
+            rule: "promotion_record".into(),
+            message: "cannot verify promotion record: gateway directory unavailable".into(),
+            repair_hint: "Ensure the gateway directory is configured".into(),
+        });
+        return violations;
+    };
+
+    let store = match crate::runtime::promotion_store::PromotionStore::new(gw_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            violations.push(ValidationViolation {
+                rule: "promotion_record".into(),
+                message: format!("cannot load promotion store: {}", e),
+                repair_hint: "Ensure the gateway promotion store is accessible".into(),
+            });
+            return violations;
+        }
+    };
+
+    match store.get_promotion(promotion_artifact_id) {
+        None => {
+            violations.push(ValidationViolation {
+                rule: "promotion_record_missing".into(),
+                message: format!(
+                    "completed without a matching promotion.record within the session for artifact '{}' (role: {})",
+                    promotion_artifact_id, promotion_role
+                ),
+                repair_hint: format!(
+                    "Call promotion.record with artifact_id='{}', role='{}', pass=true (or false if validation failed). Example: promotion.record({{\"artifact_id\": \"{}\", \"role\": \"{}\", \"pass\": true}})",
+                    promotion_artifact_id, promotion_role, promotion_artifact_id, promotion_role
+                ),
+            });
+        }
+        Some(record) => {
+            let passed = match promotion_role {
+                "evaluator" => record.evaluator_pass,
+                "auditor" => record.auditor_pass,
+                _ => {
+                    violations.push(ValidationViolation {
+                        rule: "promotion_record".into(),
+                        message: format!("unknown promotion role '{}'", promotion_role),
+                        repair_hint: "Use 'evaluator' or 'auditor'".into(),
+                    });
+                    return violations;
+                }
+            };
+
+            if !passed {
+                let findings = match promotion_role {
+                    "evaluator" => &record.evaluator_findings,
+                    "auditor" => &record.auditor_findings,
+                    _ => &Vec::<autonoetic_types::promotion::Finding>::new(),
+                };
+                let findings_summary = if findings.is_empty() {
+                    "no findings provided".to_string()
+                } else {
+                    findings
+                        .iter()
+                        .map(|f| format!("[{:?}] {}", f.severity, f.description))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                violations.push(ValidationViolation {
+                    rule: "promotion_record_failed".into(),
+                    message: format!(
+                        "{} recorded pass=false for artifact '{}': {}",
+                        promotion_role, promotion_artifact_id, findings_summary
+                    ),
+                    repair_hint: format!(
+                        "The {} rejected the artifact. Fix the issues and re-run validation before installing.",
+                        promotion_role
+                    ),
+                });
+            }
+        }
+    }
+
+    violations
+}
+
 /// Validate durable tool-evidence requirements using gateway execution traces.
 pub fn validate_session_evidence(
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -298,7 +393,7 @@ pub fn build_repair_prompt(
     max_repair_rounds: usize,
 ) -> String {
     let remaining = max_repair_rounds - attempt + 1;
-    
+
     // Build violations section with reasoning
     let violations_section: Vec<String> = violations
         .iter()
@@ -311,9 +406,11 @@ pub fn build_repair_prompt(
                 "max_reply_length_chars" => "Your text reply is too long; be concise.",
                 "prohibited_text_pattern" => "Your reply contains sensitive data or unsafe content.",
                 "output_schema" => "Your output does not match the required JSON schema.",
+                "promotion_record_missing" => "You forgot to call promotion.record — this is required for artifact promotion gates.",
+                "promotion_record_failed" => "The evaluator or auditor rejected the artifact. This cannot be auto-repaired.",
                 _ => "Your output violates a declared constraint.",
             };
-            
+
             format!(
                 "{}. [{}] {}\n   Why: {}\n   Fix: {}",
                 i + 1,
@@ -327,7 +424,7 @@ pub fn build_repair_prompt(
 
     // Build repair instructions based on violation types
     let repair_examples = build_repair_examples(violations);
-    
+
     format!(
         "[GATEWAY_VALIDATION] REPAIR REQUIRED — Attempt {}/{}\n\
 ═══════════════════════════════════════════════════════════════════════\n\n\
@@ -364,7 +461,7 @@ Continue repairing your output.",
 /// Generate contextual repair examples based on violation types.
 fn build_repair_examples(violations: &[ValidationViolation]) -> String {
     let mut examples = Vec::new();
-    
+
     for v in violations {
         match v.rule.as_str() {
             "required_artifacts" => {
@@ -372,7 +469,7 @@ fn build_repair_examples(violations: &[ValidationViolation]) -> String {
                     "Required Artifact:\n  \
                      Use artifact.build({\"name\": \"filename.ext\", ...}) or \n  \
                      content.write(\"path/to/file\", contents) to create the file."
-                        .to_string()
+                        .to_string(),
                 );
             }
             "max_reply_length_chars" => {
@@ -388,7 +485,7 @@ fn build_repair_examples(violations: &[ValidationViolation]) -> String {
                     "Sensitive Data:\n  \
                      ❌ BAD:  api_key = \"sk-1234567890abcdef\"\n  \
                      ✓ GOOD: api_key = \"<use_credential_store>\" or \"${SECRET_API_KEY}\""
-                        .to_string()
+                        .to_string(),
                 );
             }
             "output_schema" => {
@@ -396,20 +493,28 @@ fn build_repair_examples(violations: &[ValidationViolation]) -> String {
                     "JSON Schema:\n  \
                      ❌ BAD:  \"result completed\"\n  \
                      ✓ GOOD: {\"status\": \"success\", \"result\": \"...\"}"
-                        .to_string()
+                        .to_string(),
                 );
             }
             "max_artifacts" => {
                 examples.push(
                     "Artifact Consolidation:\n  \
                      Combine similar files into fewer artifacts or use subdirectories."
+                        .to_string(),
+                );
+            }
+            "promotion_record_missing" => {
+                examples.push(
+                    "Promotion Record:\n  \
+                     Call promotion.record as a tool (not via sandbox.exec):\n  \
+                     promotion.record({\"artifact_id\": \"<your_artifact_id>\", \"role\": \"evaluator\", \"pass\": true, \"summary\": \"Tests passed\"})"
                         .to_string()
                 );
             }
             _ => {}
         }
     }
-    
+
     if examples.is_empty() {
         "Generic: Review your output carefully and ensure all violations are resolved.".to_string()
     } else {
@@ -429,7 +534,12 @@ pub fn violations_to_final_error(
 ) -> anyhow::Error {
     let summary: String = violations
         .iter()
-        .map(|v| format!("[{}] {} (repair_hint: {})", v.rule, v.message, v.repair_hint))
+        .map(|v| {
+            format!(
+                "[{}] {} (repair_hint: {})",
+                v.rule, v.message, v.repair_hint
+            )
+        })
         .collect::<Vec<_>>()
         .join("; ");
     if include_session_context {
@@ -750,13 +860,11 @@ mod tests {
 
     #[test]
     fn test_build_repair_prompt_contains_violations() {
-        let violations = vec![
-            ValidationViolation {
-                rule: "required_artifacts".into(),
-                message: "missing 'report.md'".into(),
-                repair_hint: "create report.md".into(),
-            },
-        ];
+        let violations = vec![ValidationViolation {
+            rule: "required_artifacts".into(),
+            message: "missing 'report.md'".into(),
+            repair_hint: "create report.md".into(),
+        }];
         let prompt = build_repair_prompt(&violations, 1, 2);
         assert!(prompt.contains("[GATEWAY_VALIDATION]"));
         assert!(prompt.contains("required_artifacts"));
@@ -790,5 +898,98 @@ mod tests {
         assert!(msg.contains("sess-abc"));
         assert!(msg.contains("Repair hints"));
         assert!(msg.contains("create x.md"));
+    }
+
+    #[test]
+    fn test_promotion_record_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let violations = validate_promotion_record(Some(temp.path()), "art_missing", "evaluator");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "promotion_record_missing");
+        assert!(violations[0].message.contains("art_missing"));
+        assert!(violations[0].repair_hint.contains("promotion.record"));
+    }
+
+    #[test]
+    fn test_promotion_record_evaluator_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::runtime::promotion_store::PromotionStore::new(temp.path()).unwrap();
+        use autonoetic_types::promotion::PromotionRole;
+        store
+            .record_promotion(
+                "art_good".to_string(),
+                None,
+                PromotionRole::Evaluator,
+                "evaluator.default",
+                true,
+                vec![],
+                Some("all good".to_string()),
+            )
+            .unwrap();
+
+        let violations = validate_promotion_record(Some(temp.path()), "art_good", "evaluator");
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn test_promotion_record_evaluator_fail() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::runtime::promotion_store::PromotionStore::new(temp.path()).unwrap();
+        use autonoetic_types::promotion::{Finding, FindingSeverity, PromotionRole};
+        store
+            .record_promotion(
+                "art_bad".to_string(),
+                None,
+                PromotionRole::Evaluator,
+                "evaluator.default",
+                false,
+                vec![Finding {
+                    severity: FindingSeverity::Error,
+                    description: "tests failed".to_string(),
+                    evidence: None,
+                }],
+                None,
+            )
+            .unwrap();
+
+        let violations = validate_promotion_record(Some(temp.path()), "art_bad", "evaluator");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "promotion_record_failed");
+        assert!(violations[0].message.contains("pass=false"));
+        assert!(violations[0].message.contains("tests failed"));
+    }
+
+    #[test]
+    fn test_promotion_record_auditor_fail() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::runtime::promotion_store::PromotionStore::new(temp.path()).unwrap();
+        use autonoetic_types::promotion::{Finding, FindingSeverity, PromotionRole};
+        store
+            .record_promotion(
+                "art_audit".to_string(),
+                None,
+                PromotionRole::Auditor,
+                "auditor.default",
+                false,
+                vec![Finding {
+                    severity: FindingSeverity::Critical,
+                    description: "security risk".to_string(),
+                    evidence: Some("found network access".to_string()),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let violations = validate_promotion_record(Some(temp.path()), "art_audit", "auditor");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "promotion_record_failed");
+        assert!(violations[0].message.contains("security risk"));
+    }
+
+    #[test]
+    fn test_promotion_record_no_gateway_dir() {
+        let violations = validate_promotion_record(None, "art_x", "evaluator");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "promotion_record");
     }
 }

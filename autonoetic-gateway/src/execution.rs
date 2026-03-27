@@ -1341,6 +1341,139 @@ impl GatewayExecutionService {
             }
         }
 
+        // Promotion record gate: if metadata requires a promotion.record, verify
+        // the PromotionStore has a matching record before returning the result.
+        // Two failure modes:
+        //   1. promotion_record_missing — agent forgot to call promotion.record → repairable
+        //   2. promotion_record_failed  — evaluator/auditor passed=false → terminal
+        if result.suspended_for_approval.is_none() {
+            let require_promotion = metadata
+                .and_then(|m| m.get("require_promotion_record"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if require_promotion {
+                let promotion_artifact_id = metadata
+                    .and_then(|m| m.get("promotion_artifact_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let promotion_role = metadata
+                    .and_then(|m| m.get("promotion_role"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("evaluator");
+
+                let gateway_dir = self.config.agents_dir.join(".gateway");
+                let promotion_violations =
+                    crate::runtime::response_validation::validate_promotion_record(
+                        Some(&gateway_dir),
+                        promotion_artifact_id,
+                        promotion_role,
+                    );
+
+                if !promotion_violations.is_empty() {
+                    let repair_enabled = self.config.response_validation.repair_enabled;
+                    let is_missing = promotion_violations
+                        .iter()
+                        .any(|v| v.rule == "promotion_record_missing");
+
+                    // pass=false is terminal — no point repairing
+                    // missing record is repairable if repair is enabled
+                    if is_missing && repair_enabled {
+                        let max_repair_rounds: usize = 2;
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(5000);
+
+                        for attempt in 1..=max_repair_rounds {
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+
+                            let repair_msg = crate::runtime::response_validation::build_repair_prompt(
+                                &promotion_violations,
+                                attempt,
+                                max_repair_rounds,
+                            );
+
+                            tracing::info!(
+                                target: "promotion_validation",
+                                agent_id = %agent_id,
+                                session_id = %result.session_id,
+                                attempt,
+                                "promotion.record repair attempt"
+                            );
+
+                            let repaired = match self
+                                .respawn_from_checkpoint(
+                                    agent_id,
+                                    &result.session_id,
+                                    Some(&repair_msg),
+                                    source_agent_id,
+                                    workflow_id,
+                                    task_id,
+                                )
+                                .await
+                            {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "promotion_validation",
+                                        agent_id = %agent_id,
+                                        error = %e,
+                                        "promotion.record repair: respawn failed"
+                                    );
+                                    break;
+                                }
+                            };
+
+                            if repaired.suspended_for_approval.is_some() {
+                                break;
+                            }
+
+                            let remaining = crate::runtime::response_validation::validate_promotion_record(
+                                Some(&gateway_dir),
+                                promotion_artifact_id,
+                                promotion_role,
+                            );
+                            result = repaired;
+
+                            if remaining.is_empty() {
+                                tracing::info!(
+                                    target: "promotion_validation",
+                                    agent_id = %agent_id,
+                                    session_id = %result.session_id,
+                                    attempt,
+                                    "promotion.record repair succeeded"
+                                );
+                                return Ok(result);
+                            }
+
+                            // If the agent recorded pass=false, stop repairing
+                            if remaining.iter().any(|v| v.rule == "promotion_record_failed") {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Final failure — return error with violations
+                    let summary: String = promotion_violations
+                        .iter()
+                        .map(|v| format!("[{}] {}", v.rule, v.message))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let hints: String = promotion_violations
+                        .iter()
+                        .map(|v| v.repair_hint.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(anyhow::anyhow!(
+                        "execution — {} Repair hints: {}",
+                        summary,
+                        hints
+                    ));
+                }
+            }
+        }
+
         Ok(result)
     }
 

@@ -186,7 +186,14 @@ impl LiveDigestWriter {
     }
 
     /// Session preamble: agent, start time, task preview. Idempotent per file.
+    ///
+    /// Only root sessions get this preamble. Child sessions already get the
+    /// emoji delegation block from the parent digest, and writing both would
+    /// produce near-duplicate entries.
     pub fn start_session(&mut self, agent_id: &str, task_preview: &str) -> anyhow::Result<()> {
+        if self.depth > 0 {
+            return Ok(());
+        }
         let marker = format!("<!-- autonoetic-session-started:{} -->", agent_id);
         let existing = std::fs::read_to_string(&self.path)?;
         if existing.contains(&marker) {
@@ -215,6 +222,10 @@ impl LiveDigestWriter {
     }
 
     pub fn start_turn(&mut self) -> anyhow::Result<()> {
+        let shared_turn_count = count_turn_headers(&self.path)?;
+        if shared_turn_count > self.digest_turn_seq {
+            self.digest_turn_seq = shared_turn_count;
+        }
         self.digest_turn_seq += 1;
         self.tools_in_open_turn = 0;
         let n = self.digest_turn_seq;
@@ -645,6 +656,33 @@ assert!(body.contains("# Live session digest"));
 assert!(body.contains("### 🤖 agent.a"));
         assert!(body.contains("**Turn 1**"));
         assert!(body.contains("**Turn 2**"));
+    }
+
+    #[test]
+    fn turn_numbers_follow_shared_file_across_writers() {
+        let tmp = tempdir().unwrap();
+        let gw = tmp.path().join(".gateway");
+
+        let mut planner = LiveDigestWriter::open(&gw, "root", "planner.default").unwrap();
+        planner.start_turn().unwrap();
+        planner.end_turn().unwrap();
+
+        {
+            let mut child = LiveDigestWriter::open(&gw, "root/coder.default-1", "coder.default").unwrap();
+            child.start_turn().unwrap();
+            child.end_turn().unwrap();
+            child.start_turn().unwrap();
+            child.end_turn().unwrap();
+        }
+
+        planner.start_turn().unwrap();
+        planner.end_turn().unwrap();
+
+        let body = std::fs::read_to_string(planner.path()).unwrap();
+        assert!(body.contains("**Turn 1**"));
+        assert!(body.contains("**Turn 2**"));
+        assert!(body.contains("**Turn 3**"));
+        assert!(body.contains("**Turn 4**"));
     }
 
     #[test]

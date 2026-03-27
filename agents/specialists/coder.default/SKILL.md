@@ -31,6 +31,7 @@ metadata:
     validation: "soft"
     response_contract:
       max_reply_length_chars: 2000
+      min_artifact_builds: 1
       validation_max_loops: 2
       validation_max_duration_ms: 2000
 ---
