@@ -4,20 +4,25 @@
 //! - sandbox.exec with capture_paths returns captured_layers
 //! - Captured layer contains expected files
 //! - sandbox.exec without capture_paths has no captured_layers in response
-//! - Capture path that doesn't exist returns error
 //! - Multiple capture paths produce multiple layers
-
-mod support;
+//!
+//! These tests require bubblewrap installed and are skipped if not available.
 
 use autonoetic_gateway::policy::PolicyEngine;
-use autonoetic_gateway::runtime::tools::{default_registry, NativeToolRunContext};
+use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentManifest, AgentIdentity, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::tool_error::ToolInvocationError;
-use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tempfile::tempdir;
+
+fn is_bwrap_available() -> bool {
+    std::process::Command::new("bwrap")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
 fn test_manifest() -> AgentManifest {
     AgentManifest {
@@ -36,19 +41,28 @@ fn test_manifest() -> AgentManifest {
             description: "Test agent".to_string(),
         },
         llm_config: None,
+        limits: None,
         capabilities: vec![],
-        execution_mode: Some("reasoning".to_string()),
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        response_contract: None,
+        execution_mode: ExecutionMode::Reasoning,
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
-        io: None,
-        middleware: None,
-        disclosure: None,
     }
 }
 
 #[test]
+#[ignore = "requires bubblewrap installed"]
 fn test_sandbox_exec_with_capture_paths() {
+    if !is_bwrap_available() {
+        eprintln!("bubblewrap not found, skipping test");
+        return;
+    }
+
     let td = tempdir().unwrap();
     let gw_dir = td.path().join(".gateway");
     std::fs::create_dir_all(&gw_dir).unwrap();
@@ -56,24 +70,21 @@ fn test_sandbox_exec_with_capture_paths() {
     let agent_dir = td.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
-    let config = GatewayConfig::default();
+    let manifest = test_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
-    let gateway_store = GatewayStore::open(&gw_dir).unwrap();
+    let gateway_store = Arc::new(GatewayStore::open(&gw_dir).unwrap());
+    let config = GatewayConfig::default();
 
-    // Create some files to capture
     let venv_dir = agent_dir.join("venv");
-    std::fs::create_dir_all(&venv_dir.join("lib")).unwrap();
+    std::fs::create_dir_all(venv_dir.join("lib")).unwrap();
     std::fs::write(
         venv_dir.join("lib/python3.12/site-packages/requests/__init__.py"),
         b"# requests package",
     )
     .unwrap();
 
-    let manifest = test_manifest();
-
-    let tool_name = "sandbox.exec";
-    let arguments = json!({
+    let arguments = serde_json::json!({
         "command": "echo 'test'",
         "capture_paths": [
             {
@@ -83,18 +94,17 @@ fn test_sandbox_exec_with_capture_paths() {
         ]
     });
 
-    let result = support::run_tool(
+    let result = registry.execute(
+        "sandbox.exec",
         &manifest,
         &policy,
         &agent_dir,
         Some(&gw_dir),
-        tool_name,
-        &arguments,
-        None,
+        &arguments.to_string(),
         None,
         None,
         Some(&config),
-        Some(&gateway_store),
+        Some(gateway_store.clone()),
         None,
     );
 
@@ -102,10 +112,7 @@ fn test_sandbox_exec_with_capture_paths() {
     let response_str = result.unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_str).unwrap();
 
-    // Check that command succeeded
     assert_eq!(response["ok"], true);
-
-    // Check that captured_layers was included
     assert!(response.get("captured_layers").is_some());
     let captured_layers = response["captured_layers"].as_array().unwrap();
 
@@ -117,7 +124,13 @@ fn test_sandbox_exec_with_capture_paths() {
 }
 
 #[test]
+#[ignore = "requires bubblewrap installed"]
 fn test_sandbox_exec_without_capture_paths() {
+    if !is_bwrap_available() {
+        eprintln!("bubblewrap not found, skipping test");
+        return;
+    }
+
     let td = tempdir().unwrap();
     let gw_dir = td.path().join(".gateway");
     std::fs::create_dir_all(&gw_dir).unwrap();
@@ -125,30 +138,27 @@ fn test_sandbox_exec_without_capture_paths() {
     let agent_dir = td.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
-    let config = GatewayConfig::default();
+    let manifest = test_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
-    let gateway_store = GatewayStore::open(&gw_dir).unwrap();
+    let gateway_store = Arc::new(GatewayStore::open(&gw_dir).unwrap());
+    let config = GatewayConfig::default();
 
-    let manifest = test_manifest();
-
-    let tool_name = "sandbox.exec";
-    let arguments = json!({
+    let arguments = serde_json::json!({
         "command": "echo 'test'"
     });
 
-    let result = support::run_tool(
+    let result = registry.execute(
+        "sandbox.exec",
         &manifest,
         &policy,
         &agent_dir,
         Some(&gw_dir),
-        tool_name,
-        &arguments,
-        None,
+        &arguments.to_string(),
         None,
         None,
         Some(&config),
-        Some(&gateway_store),
+        Some(gateway_store.clone()),
         None,
     );
 
@@ -156,15 +166,18 @@ fn test_sandbox_exec_without_capture_paths() {
     let response_str = result.unwrap();
     let response: serde_json::Value = serde_json::from_str(&response_str).unwrap();
 
-    // Check that command succeeded
     assert_eq!(response["ok"], true);
-
-    // Check that captured_layers was NOT included
     assert!(response.get("captured_layers").is_none());
 }
 
 #[test]
+#[ignore = "requires bubblewrap installed"]
 fn test_sandbox_exec_capture_multiple_paths() {
+    if !is_bwrap_available() {
+        eprintln!("bubblewrap not found, skipping test");
+        return;
+    }
+
     let td = tempdir().unwrap();
     let gw_dir = td.path().join(".gateway");
     std::fs::create_dir_all(&gw_dir).unwrap();
@@ -172,14 +185,8 @@ fn test_sandbox_exec_capture_multiple_paths() {
     let agent_dir = td.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
-    let config = GatewayConfig::default();
-    let policy = PolicyEngine::new(manifest.clone());
-    let registry = default_registry();
-    let gateway_store = GatewayStore::open(&gw_dir).unwrap();
-
-    // Create multiple directories to capture
     let venv_dir = agent_dir.join("venv");
-    std::fs::create_dir_all(&venv_dir.join("lib")).unwrap();
+    std::fs::create_dir_all(venv_dir.join("lib")).unwrap();
     std::fs::write(
         venv_dir.join("lib/python3.12/site-packages/requests/__init__.py"),
         b"# requests",
@@ -187,7 +194,7 @@ fn test_sandbox_exec_capture_multiple_paths() {
     .unwrap();
 
     let node_modules_dir = agent_dir.join("node_modules");
-    std::fs::create_dir_all(&node_modules_dir.join("axios")).unwrap();
+    std::fs::create_dir_all(node_modules_dir.join("axios")).unwrap();
     std::fs::write(
         node_modules_dir.join("axios/package.json"),
         b"{\"name\": \"axios\"}",
@@ -195,9 +202,12 @@ fn test_sandbox_exec_capture_multiple_paths() {
     .unwrap();
 
     let manifest = test_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let gateway_store = Arc::new(GatewayStore::open(&gw_dir).unwrap());
+    let config = GatewayConfig::default();
 
-    let tool_name = "sandbox.exec";
-    let arguments = json!({
+    let arguments = serde_json::json!({
         "command": "echo 'test'",
         "capture_paths": [
             {
@@ -211,18 +221,17 @@ fn test_sandbox_exec_capture_multiple_paths() {
         ]
     });
 
-    let result = support::run_tool(
+    let result = registry.execute(
+        "sandbox.exec",
         &manifest,
         &policy,
         &agent_dir,
         Some(&gw_dir),
-        tool_name,
-        &arguments,
-        None,
+        &arguments.to_string(),
         None,
         None,
         Some(&config),
-        Some(&gateway_store),
+        Some(gateway_store.clone()),
         None,
     );
 

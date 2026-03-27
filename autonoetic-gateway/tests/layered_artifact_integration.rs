@@ -11,9 +11,7 @@ use autonoetic_gateway::artifact_store::ArtifactStore;
 use autonoetic_gateway::layer_store::{LayerLimits, LayerStore};
 use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_types::layer::ArtifactLayer;
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::fs;
 use tempfile::tempdir;
 
 #[test]
