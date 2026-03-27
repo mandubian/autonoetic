@@ -53,6 +53,7 @@ When a message arrives at the gateway:
 | **Lead** | `planner.default` | Decomposes goals, routes to specialists |
 | **Researcher** | `researcher.default` | Gathers evidence, cites sources |
 | **Architect** | `architect.default` | Defines structure, interfaces, trade-offs |
+| **Builder** | `builder.default` | Resolves and packages build-time dependencies into artifact layers |
 | **Coder** | `coder.default` | Produces runnable artifacts |
 | **Debugger** | `debugger.default` | Isolates root causes, proposes fixes |
 | **Evaluator** | `evaluator.default` | Validates behavior with tests/metrics |

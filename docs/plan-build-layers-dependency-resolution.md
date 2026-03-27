@@ -180,31 +180,58 @@ After `runner.process.wait_with_output()`:
 
 **File:** `autonoetic-gateway/tests/layer_store_integration.rs`
 
-- [ ] End-to-end: create temp dir with files → create layer → extract → verify
-- [ ] Dedup test
-- [ ] Size limit enforcement
+- [x] End-to-end: create temp dir with files → create layer → extract → verify
+- [x] Dedup test
+- [x] Size limit enforcement
 
 ### Task 6.2: Capture paths integration test
 
 **File:** `autonoetic-gateway/tests/sandbox_capture_integration.rs`
 
-- [ ] `sandbox.exec` writes files → capture_paths → verify captured layer
-- [ ] `sandbox.exec` without capture_paths → no layers in response
+- [x] `sandbox.exec` writes files → capture_paths → verify captured layer
+- [x] `sandbox.exec` without capture_paths → no layers in response
 
 ### Task 6.3: Layered artifact integration test
 
 **File:** `autonoetic-gateway/tests/layered_artifact_integration.rs`
 
-- [ ] Build artifact with layers → inspect → verify layers in manifest
-- [ ] Run `sandbox.exec` with layered artifact → verify layer mounted correctly
-- [ ] Artifacts without layers still work identically
+- [x] Build artifact with layers → inspect → verify layers in manifest
+- [x] Run `sandbox.exec` with layered artifact → verify layer mounted correctly
+- [x] Artifacts without layers still work identically
 
 ### Task 6.4: Full lifecycle integration test
 
 **File:** `autonoetic-gateway/tests/build_layer_lifecycle_integration.rs`
 
-- [ ] Simulate the full flow: content.write → sandbox.exec with capture → artifact.build with layers → sandbox.exec with artifact
-- [ ] Verify the weather demo scenario no longer loops
+- [x] Simulate the full flow: content.write → sandbox.exec with capture → artifact.build with layers → sandbox.exec with artifact
+- [x] Verify the weather demo scenario no longer loops
+
+---
+
+## Phase 7: Documentation
+
+### Task 7.1: Update ARCHITECTURE.md
+
+- [x] Add "Layer Store" section to System Components table
+- [x] Add "Build Layer Flow" to Data Flow section
+- [x] Update "Content Storage" section to mention layers
+
+### Task 7.2: Update AGENTS.md
+
+- [x] Add builder to roles table
+- [x] Add builder to delegation ladder
+- [x] Document the `capture_paths` sandbox.exec parameter
+
+### Task 7.3: Update content-store.md or create layers.md
+
+- [x] Document layer storage layout
+- [x] Document `capture_paths` semantics
+- [x] Document layer-aware artifact.build
+- [x] Document sandbox.conf `share_net` option
+
+### Task 7.4: Update CLI.md
+
+- [ ] Document any new CLI commands for layer inspection (if added)
 
 ---
 
