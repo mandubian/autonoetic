@@ -42,3 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # HTTP
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
+
+# Archive/compression
+tar = "0.4"
+zstd = "0.13"

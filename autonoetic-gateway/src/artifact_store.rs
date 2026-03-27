@@ -15,6 +15,7 @@
 
 use crate::runtime::content_store::{root_session_id, ContentStore};
 use autonoetic_types::artifact::{ArtifactBundle, ArtifactFileEntry};
+use autonoetic_types::layer::ArtifactLayer;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,11 +52,12 @@ impl ArtifactStore {
         })
     }
 
-    /// Computes a deterministic artifact ID from sorted inputs and entrypoints.
-    /// Same inputs + entrypoints always produce the same artifact ID.
+    /// Computes a deterministic artifact ID from sorted inputs and entrypoints and layers.
+    /// Same inputs + entrypoints + layers always produce the same artifact ID.
     fn compute_deterministic_artifact_id(
         file_handles: &[String],
         entrypoints: Option<&[String]>,
+        layer_digests: &[String],
     ) -> String {
         let mut hasher = Sha256::new();
 
@@ -75,6 +77,14 @@ impl ArtifactStore {
                 hasher.update(ep.as_bytes());
                 hasher.update(b"\0");
             }
+        }
+
+        // Sort layer digests for determinism
+        let mut sorted_layers = layer_digests.to_vec();
+        sorted_layers.sort();
+        for digest in sorted_layers {
+            hasher.update(digest.as_bytes());
+            hasher.update(b"\0");
         }
 
         let hash = hasher.finalize();
@@ -100,7 +110,7 @@ impl ArtifactStore {
         hasher.update(bundle_json.as_bytes());
         format!("sha256:{:x}", hasher.finalize())
     }
-    
+
     /// Recomputes the canonical digest for a persisted artifact bundle.
     ///
     /// The digest is defined over the manifest bytes with the `digest` field blanked,
@@ -112,11 +122,13 @@ impl ArtifactStore {
         Ok(Self::compute_digest(&bundle_json))
     }
 
-    /// Sorted (name, handle) pairs and sorted entrypoints for identity checks on dedup.
+    /// Sorted (name, handle) pairs, sorted entrypoints, and sorted layer digests
+    /// for identity checks on dedup.
     fn normalized_artifact_identity(
         files: &[ArtifactFileEntry],
         entrypoints: &[String],
-    ) -> (Vec<(String, String)>, Vec<String>) {
+        layers: &[ArtifactLayer],
+    ) -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
         let mut pairs: Vec<(String, String)> = files
             .iter()
             .map(|f| (f.name.clone(), f.handle.clone()))
@@ -124,7 +136,9 @@ impl ArtifactStore {
         pairs.sort();
         let mut eps = entrypoints.to_vec();
         eps.sort();
-        (pairs, eps)
+        let mut layer_digests: Vec<String> = layers.iter().map(|l| l.digest.clone()).collect();
+        layer_digests.sort();
+        (pairs, eps, layer_digests)
     }
 
     /// Loads the artifact index from disk.
@@ -148,16 +162,18 @@ impl ArtifactStore {
 
     /// Builds an artifact from session-visible content.
     ///
-    /// With deduplication: if an artifact with the same inputs + entrypoints already exists,
+    /// With deduplication: if an artifact with the same inputs + entrypoints + layers already exists,
     /// returns the existing artifact (with `reused: true`). Otherwise creates a new artifact.
     ///
     /// - `inputs`: list of content names or handles to include
     /// - `entrypoints`: optional list of entrypoint filenames
+    /// - `layers`: optional list of layer references to include
     /// - `builder_session_id`: session that is building this artifact
     pub fn build(
         &self,
         inputs: &[String],
         entrypoints: Option<&[String]>,
+        layers: Option<&[ArtifactLayer]>,
         builder_session_id: &str,
     ) -> anyhow::Result<ArtifactBundle> {
         anyhow::ensure!(!inputs.is_empty(), "artifact inputs must not be empty");
@@ -221,19 +237,34 @@ impl ArtifactStore {
             Vec::new()
         };
 
-        // Phase 2: Compute deterministic artifact ID from handles + entrypoints
-        let artifact_id =
-            Self::compute_deterministic_artifact_id(&file_handles, Some(ep.as_slice()));
+        // Normalize layers
+        let layers_vec: Vec<ArtifactLayer> = layers
+            .map(|l| {
+                let mut l = l.to_vec();
+                l.sort_by_key(|layer| layer.layer_id.clone());
+                l
+            })
+            .unwrap_or_default();
+        let layer_digests: Vec<String> = layers_vec.iter().map(|l| l.digest.clone()).collect();
+
+        // Phase 2: Compute deterministic artifact ID from handles + entrypoints + layers
+        let artifact_id = Self::compute_deterministic_artifact_id(
+            &file_handles,
+            Some(ep.as_slice()),
+            &layer_digests,
+        );
 
         // Phase 3: Check if artifact already exists (deduplication)
         if self.artifact_exists(&artifact_id) {
             let existing_bundle = self.inspect(&artifact_id)?;
-            let (want_pairs, want_eps) = Self::normalized_artifact_identity(&files, &ep);
-            let (got_pairs, got_eps) = Self::normalized_artifact_identity(
+            let (want_pairs, want_eps, want_layers) =
+                Self::normalized_artifact_identity(&files, &ep, &layers_vec);
+            let (got_pairs, got_eps, got_layers) = Self::normalized_artifact_identity(
                 &existing_bundle.files,
                 &existing_bundle.entrypoints,
+                &existing_bundle.layers,
             );
-            if want_pairs != got_pairs || want_eps != got_eps {
+            if want_pairs != got_pairs || want_eps != got_eps || want_layers != got_layers {
                 anyhow::bail!(
                     "artifact id '{}' already exists but its manifest does not match the requested inputs (identity mismatch). Refusing reuse; remove or repair the on-disk artifact if it is corrupted.",
                     artifact_id
@@ -256,6 +287,7 @@ impl ArtifactStore {
         let bundle = ArtifactBundle {
             artifact_id: artifact_id.clone(),
             files,
+            layers: layers_vec,
             entrypoints: ep,
             digest: String::new(), // computed below
             created_at,
@@ -276,6 +308,7 @@ impl ArtifactStore {
             target: "artifact_store",
             artifact_id = %bundle.artifact_id,
             file_count = bundle.files.len(),
+            layer_count = bundle.layers.len(),
             "Built new artifact"
         );
 
@@ -489,6 +522,7 @@ mod tests {
             .build(
                 &["main.py".into(), "utils.py".into()],
                 Some(&["main.py".into()]),
+                None,
                 "session-1",
             )
             .unwrap();
@@ -542,6 +576,7 @@ mod tests {
                     "tests/test_weather_fetch.py".into(),
                 ],
                 Some(&["weather_fetch.py".into()]),
+                None,
                 "demo-session/coder.default-abc",
             )
             .unwrap();
@@ -586,6 +621,7 @@ mod tests {
             .build(
                 &["main.py".into()],
                 Some(&["main.py".into()]),
+                None,
                 "demo-session/coder.default-abc",
             )
             .unwrap();
@@ -616,8 +652,8 @@ mod tests {
         let h = content_store.write(b"data").unwrap();
         content_store.register_name("s1", "data.txt", &h).unwrap();
 
-        let b1 = store.build(&["data.txt".into()], None, "s1").unwrap();
-        let b2 = store.build(&["data.txt".into()], None, "s1").unwrap();
+        let b1 = store.build(&["data.txt".into()], None, None, "s1").unwrap();
+        let b2 = store.build(&["data.txt".into()], None, None, "s1").unwrap();
 
         assert_eq!(b1.artifact_id, b2.artifact_id);
         assert!(!b1.reused);
@@ -641,7 +677,12 @@ mod tests {
         content_store.register_name("s1", "main.py", &h).unwrap();
 
         // Entrypoint not in inputs should fail
-        let result = store.build(&["main.py".into()], Some(&["missing.py".into()]), "s1");
+        let result = store.build(
+            &["main.py".into()],
+            Some(&["missing.py".into()]),
+            None,
+            "s1",
+        );
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -661,9 +702,9 @@ mod tests {
         let h = content_store.write(b"v1").unwrap();
         content_store.register_name("s1", "file.txt", &h).unwrap();
 
-        let bundle = store.build(&["file.txt".into()], None, "s1").unwrap();
+        let bundle = store.build(&["file.txt".into()], None, None, "s1").unwrap();
 
-        let bundle2 = store.build(&["file.txt".into()], None, "s1").unwrap();
+        let bundle2 = store.build(&["file.txt".into()], None, None, "s1").unwrap();
 
         assert_eq!(bundle.artifact_id, bundle2.artifact_id);
         assert!(!bundle.reused);
@@ -683,7 +724,7 @@ mod tests {
         let h = content_store.write(b"payload").unwrap();
         content_store.register_name("s1", "a.txt", &h).unwrap();
 
-        let bundle = store.build(&["a.txt".into()], None, "s1").unwrap();
+        let bundle = store.build(&["a.txt".into()], None, None, "s1").unwrap();
         let manifest_path = gw
             .join("artifacts")
             .join(&bundle.artifact_id)
@@ -706,7 +747,7 @@ mod tests {
         std::fs::write(&manifest_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
         let err = store
-            .build(&["a.txt".into()], None, "s1")
+            .build(&["a.txt".into()], None, None, "s1")
             .expect_err("corrupt manifest must block reuse");
         assert!(
             err.to_string().contains("identity mismatch")
@@ -729,7 +770,14 @@ mod tests {
             .register_name("session-1", "main.py", &handle)
             .unwrap();
 
-        let bundle = store.build(&["main.py".to_string()], Some(&["main.py".to_string()]), "session-1").unwrap();
+        let bundle = store
+            .build(
+                &["main.py".to_string()],
+                Some(&["main.py".to_string()]),
+                None,
+                "session-1",
+            )
+            .unwrap();
         let manifest_path = gw
             .join("artifacts")
             .join(&bundle.artifact_id)
@@ -743,7 +791,9 @@ mod tests {
         std::fs::set_permissions(&manifest_path, perms).unwrap();
         std::fs::write(&manifest_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
-        let err = store.inspect(&bundle.artifact_id).expect_err("tampered digest must fail inspect");
+        let err = store
+            .inspect(&bundle.artifact_id)
+            .expect_err("tampered digest must fail inspect");
         assert!(err.to_string().contains("digest mismatch"));
     }
 
@@ -768,7 +818,7 @@ mod tests {
             .unwrap();
 
         // Root can build artifact from child's session-visible content
-        let bundle = store.build(&["code.py".into()], None, root).unwrap();
+        let bundle = store.build(&["code.py".into()], None, None, root).unwrap();
         assert_eq!(bundle.files.len(), 1);
     }
 }
