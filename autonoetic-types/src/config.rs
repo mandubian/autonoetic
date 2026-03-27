@@ -171,6 +171,16 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub tls: bool,
 
+    /// Node identity for OFP federation and causal chain authorship.
+    /// Overridable by AUTONOETIC_NODE_ID env var.
+    #[serde(default = "default_node_id")]
+    pub node_id: String,
+
+    /// Human-readable node name for OFP federation.
+    /// Overridable by AUTONOETIC_NODE_NAME env var.
+    #[serde(default = "default_node_name")]
+    pub node_name: String,
+
     /// Maximum number of agent runtime executions allowed concurrently.
     #[serde(default = "default_max_concurrent_spawns")]
     pub max_concurrent_spawns: usize,
@@ -248,6 +258,11 @@ pub struct GatewayConfig {
     /// in agent metadata before returning SpawnResult to the caller.
     #[serde(default)]
     pub response_validation: ResponseValidationConfig,
+
+    /// Sandbox (bubblewrap) isolation overrides.
+    /// Overridable by AUTONOETIC_BWRAP_SHARE_NET and AUTONOETIC_BWRAP_DEV_MODE env vars.
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 /// Configuration for evidence storage.
@@ -313,6 +328,33 @@ impl Default for ResponseValidationConfig {
             repair_enabled: false,
         }
     }
+}
+
+/// Sandbox (bubblewrap) isolation overrides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Share host network namespace (adds --share-net to bwrap).
+    /// Overridable by AUTONOETIC_BWRAP_SHARE_NET env var.
+    #[serde(default)]
+    pub share_net: bool,
+
+    /// /dev mount strategy: "legacy", "minimal", or "host-bind".
+    /// Overridable by AUTONOETIC_BWRAP_DEV_MODE env var.
+    #[serde(default = "default_sandbox_dev_mode")]
+    pub dev_mode: String,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            share_net: false,
+            dev_mode: default_sandbox_dev_mode(),
+        }
+    }
+}
+
+fn default_sandbox_dev_mode() -> String {
+    "legacy".to_string()
 }
 
 /// Configuration for pluggable code analysis.
@@ -426,6 +468,14 @@ fn default_lead_agent_id() -> String {
     "planner.default".to_string()
 }
 
+fn default_node_id() -> String {
+    "gateway".to_string()
+}
+
+fn default_node_name() -> String {
+    "gateway".to_string()
+}
+
 fn default_max_concurrent_spawns() -> usize {
     8
 }
@@ -466,6 +516,8 @@ impl Default for GatewayConfig {
             ofp_port: default_ofp_port(),
             default_lead_agent_id: default_lead_agent_id(),
             tls: false,
+            node_id: default_node_id(),
+            node_name: default_node_name(),
             max_concurrent_spawns: default_max_concurrent_spawns(),
             max_pending_spawns_per_agent: default_max_pending_spawns_per_agent(),
             background_scheduler_enabled: default_background_scheduler_enabled(),
@@ -483,6 +535,7 @@ impl Default for GatewayConfig {
             digest_agent: DigestAgentConfig::default(),
             retention: RetentionConfig::default(),
             response_validation: ResponseValidationConfig::default(),
+            sandbox: SandboxConfig::default(),
         }
     }
 }
