@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::layer::ArtifactLayer;
+
 /// The kind of artifact stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +73,9 @@ pub struct ArtifactBundle {
     pub artifact_id: String,
     /// Files included in the artifact
     pub files: Vec<ArtifactFileEntry>,
+    /// Layers (dependency bundles) included in the artifact
+    #[serde(default)]
+    pub layers: Vec<ArtifactLayer>,
     /// Optional entrypoints (e.g., ["src/main.py"])
     #[serde(default)]
     pub entrypoints: Vec<String>,

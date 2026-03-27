@@ -11,6 +11,7 @@ pub mod capsule;
 pub mod causal_chain;
 pub mod config;
 pub mod disclosure;
+pub mod layer;
 pub mod memory;
 pub mod notification;
 pub mod promotion;
