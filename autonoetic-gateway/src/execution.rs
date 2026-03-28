@@ -2730,15 +2730,7 @@ async fn execute_script_in_sandbox(
 
     let driver = crate::sandbox::SandboxDriverKind::parse(sandbox_type)?;
     let overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
-    let entrypoint = format!(
-        "{} {}",
-        script_path.to_string_lossy(),
-        if input_payload.is_empty() {
-            String::new()
-        } else {
-            format!("-- {}", input_payload.replace('"', "\\\""))
-        }
-    );
+    let entrypoint = script_path.to_string_lossy().to_string();
 
     let mut runner = crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies(
         driver,
