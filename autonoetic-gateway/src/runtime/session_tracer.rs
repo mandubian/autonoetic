@@ -8,10 +8,10 @@ use crate::runtime::artifact::Artifact;
 use crate::runtime::live_digest::{
     base_session_id, format_tool_action_line, format_tool_digest_result, LiveDigestWriter,
 };
-use std::sync::{Arc, Mutex};
 use autonoetic_types::causal_chain::EntryStatus;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 const EVIDENCE_MODE_ENV: &str = "AUTONOETIC_EVIDENCE_MODE";
 
@@ -445,11 +445,7 @@ impl SessionTracer {
                 .get("trigger_preview")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if let Err(e) = w
-                .lock()
-                .unwrap()
-                .start_session(&self.agent_id, preview)
-            {
+            if let Err(e) = w.lock().unwrap().start_session(&self.agent_id, preview) {
                 tracing::warn!(
                     target: "live_digest",
                     error = %e,
@@ -633,11 +629,18 @@ impl SessionTracer {
             if let Some(w) = &self.live_digest {
                 let mut guard = w.lock().unwrap();
                 let formatted = format_tool_digest_result(tool_name, result);
-                let ok = serde_json::from_str::<serde_json::Value>(result)
-                    .ok()
+                let parsed = serde_json::from_str::<serde_json::Value>(result).ok();
+                let ok = parsed
+                    .as_ref()
                     .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
                     != Some(false);
-                let r = if ok {
+                let is_approval_suspension = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("approval_required").and_then(|x| x.as_bool()))
+                    == Some(true);
+                let r = if is_approval_suspension {
+                    guard.record_annotation("approval", &formatted)
+                } else if ok {
                     guard.record_result(&formatted)
                 } else {
                     guard.record_error(&formatted)
