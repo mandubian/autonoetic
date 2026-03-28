@@ -267,12 +267,32 @@ impl LiveDigestWriter {
 
     pub fn record_llm_round(
         &mut self,
-        _model_short: &str,
-        _stop_reason: &str,
-        _tool_calls: usize,
-        _in_tok: u64,
-        _out_tok: u64,
+        model_short: &str,
+        stop_reason: &str,
+        tool_calls: usize,
+        in_tok: u64,
+        out_tok: u64,
     ) -> anyhow::Result<()> {
+        // Only record rounds with no tool calls (tool calls already have their own entries)
+        if tool_calls > 0 {
+            return Ok(());
+        }
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let tok_short = if in_tok > 0 || out_tok > 0 {
+            format!(" ({}→{} tok)", in_tok, out_tok)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            buf,
+            "* 🧠 **LLM round:** model={}, stop={}, out={}{})",
+            cell(model_short),
+            cell(stop_reason),
+            out_tok,
+            tok_short
+        );
+        self.buf_write(&buf);
         Ok(())
     }
 
@@ -362,7 +382,11 @@ impl LiveDigestWriter {
         Ok(())
     }
 
-    pub fn record_delegation_start(&mut self, agent_id: &str, task_preview: &str) -> anyhow::Result<()> {
+    pub fn record_delegation_start(
+        &mut self,
+        agent_id: &str,
+        task_preview: &str,
+    ) -> anyhow::Result<()> {
         use std::fmt::Write;
         let mut buf = String::new();
         let _ = writeln!(
@@ -464,10 +488,21 @@ pub fn append_validation_error_best_effort(
     let _ = writeln!(f, "### ⚠️ Response Validation Failed");
     let _ = writeln!(f);
     if repair_attempted {
-        let _ = writeln!(f, "* ❌ **Error:** {}", cell(&truncate_chars(&redact_text_for_logs(error_message), 2000)));
-        let _ = writeln!(f, "* 📝 **Note:** Repair was attempted but the response still failed validation.");
+        let _ = writeln!(
+            f,
+            "* ❌ **Error:** {}",
+            cell(&truncate_chars(&redact_text_for_logs(error_message), 2000))
+        );
+        let _ = writeln!(
+            f,
+            "* 📝 **Note:** Repair was attempted but the response still failed validation."
+        );
     } else {
-        let _ = writeln!(f, "* ❌ **Error:** {}", cell(&truncate_chars(&redact_text_for_logs(error_message), 2000)));
+        let _ = writeln!(
+            f,
+            "* ❌ **Error:** {}",
+            cell(&truncate_chars(&redact_text_for_logs(error_message), 2000))
+        );
     }
     let _ = writeln!(f);
     let _ = writeln!(f, "---");
@@ -666,7 +701,7 @@ mod tests {
         w.record_annotation("lesson", "note").unwrap();
         w.end_turn().unwrap();
         let body = std::fs::read_to_string(w.path()).unwrap();
-assert!(body.contains("# Live session digest"));
+        assert!(body.contains("# Live session digest"));
         assert!(body.contains("### 🤖 agent.a"));
         assert!(body.contains("**Turn 1**"));
         assert!(body.contains("💡 **Lesson:** note"));
@@ -685,7 +720,7 @@ assert!(body.contains("# Live session digest"));
         w2.start_turn().unwrap();
         w2.end_turn().unwrap();
         let body = std::fs::read_to_string(w2.path()).unwrap();
-assert!(body.contains("### 🤖 agent.a"));
+        assert!(body.contains("### 🤖 agent.a"));
         assert!(body.contains("**Turn 1**"));
         assert!(body.contains("**Turn 2**"));
     }
@@ -700,7 +735,8 @@ assert!(body.contains("### 🤖 agent.a"));
         planner.end_turn().unwrap();
 
         {
-            let mut child = LiveDigestWriter::open(&gw, "root/coder.default-1", "coder.default").unwrap();
+            let mut child =
+                LiveDigestWriter::open(&gw, "root/coder.default-1", "coder.default").unwrap();
             child.start_turn().unwrap();
             child.end_turn().unwrap();
             child.start_turn().unwrap();

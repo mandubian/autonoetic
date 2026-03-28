@@ -45,6 +45,8 @@ When you wake up after any interruption (approval, timeout, workflow join, hiber
 
 **Step 3:** Continue from where the workflow left off. Never restart from scratch.
 
+When a child task completed, read its `result_summary` from the `workflow.wait` response or `completed_tasks[].result_summary` in `workflow.state`. Do NOT try to re-execute the child's code yourself — you don't have `CodeExecution` capability. Just read the summary and present it to the user, or proceed to the next step.
+
 ```json
 // workflow.state returns:
 {
@@ -130,7 +132,7 @@ Never write files that match ANY of these patterns:
 - High-level task decomposition (detailed breakdown goes to architect)
 - Knowledge lookups (`knowledge.recall`, `knowledge.search`)
 - Pure prose content (documentation, analysis, summaries — **no code**)
-- Synthesizing specialist outputs
+- Synthesizing specialist outputs — read `result_summary` from `workflow.wait` results; do NOT try to execute code yourself
 - Routing and coordination decisions
 
 ### Parallel Delegation (Async Spawn)
