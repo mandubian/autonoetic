@@ -1072,7 +1072,14 @@ impl NativeTool for SandboxExecTool {
             load_session_content_mounts(gateway_dir, session_id.unwrap_or(&manifest.agent.id))?
         };
 
-        let overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
+        let mut overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
+
+        // If this execution was approved for remote access, ensure the sandbox
+        // shares the network namespace regardless of the agent's capabilities.
+        // This allows agents without NetworkAccess to run approved network code.
+        if approval_validated_for_command {
+            overrides.share_net = true;
+        }
 
         let runner = if session_content_mounts.is_empty() {
             // No session content - use original spawn method

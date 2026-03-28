@@ -238,10 +238,12 @@ async fn check_approval_timeouts(
                     workflow_id = %wf_id,
                     task_id = %task.task_id,
                     timeout_secs = timeout_secs,
-                    "Approval timeout expired; failing task"
+                    "Approval timeout expired; marking task as suspended (not crashed)"
                 );
 
                 let reason = "Approval timed out".to_string();
+                // Mark as Failed but don't crash — the session can still be resumed
+                // if the operator approves later. The continuation file is preserved.
                 let _ = workflow_store::update_task_run_status(
                     &config,
                     store,
@@ -261,8 +263,21 @@ async fn check_approval_timeouts(
                         "timeout_secs": timeout_secs,
                     }),
                 );
-                // Delete the stale continuation file.
-                let _ = crate::runtime::continuation::delete_continuation(&config, &task.task_id);
+                // DO NOT delete the continuation file — it can be resumed if
+                // the operator approves later. Just emit workflow event.
+                let timeout_event = autonoetic_types::workflow::WorkflowEventRecord {
+                    event_id: format!("wevt-approval-t-{}", &task.task_id),
+                    workflow_id: wf_id.clone(),
+                    event_type: "task.approval_timeout".to_string(),
+                    task_id: Some(task.task_id.clone()),
+                    agent_id: None,
+                    payload: serde_json::json!({
+                        "reason": reason,
+                        "timeout_secs": timeout_secs,
+                    }),
+                    occurred_at: chrono::Utc::now().to_rfc3339(),
+                };
+                let _ = workflow_store::append_workflow_event(&config, store, &timeout_event);
                 let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
             }
         }

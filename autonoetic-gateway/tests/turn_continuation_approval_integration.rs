@@ -779,8 +779,8 @@ async fn test_approval_timeout_fails_task_and_satisfies_join() -> anyhow::Result
     run_scheduler_tick(execution.clone()).await?;
 
     assert!(
-        !cont_file.exists(),
-        "continuation file should be deleted after timeout"
+        cont_file.exists(),
+        "continuation file should be PRESERVED after timeout (can resume if approval granted later)"
     );
 
     let timed_out_task =

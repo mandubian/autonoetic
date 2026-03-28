@@ -549,9 +549,32 @@ fn format_workflow_event_card(
             } else {
                 "tool execution".to_string()
             };
+            let apr_id = event
+                .payload
+                .get("approval_request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let reason = event
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let apr_suffix = if apr_id.is_empty() {
+                String::new()
+            } else {
+                let reason_part = if reason.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n   Reason: {}", reason)
+                };
+                format!(
+                    "\n   → Approve: autonoetic gateway approvals approve {}{}",
+                    apr_id, reason_part
+                )
+            };
             Some(format!(
-                "⏸ [{}] Approval required: {} ({})",
-                ts_short, task, kind
+                "⏸ [{}] Approval required: {} ({}){}",
+                ts_short, task, kind, apr_suffix
             ))
         }
         "task.approved" => Some(format!("✅ [{}] Approval approved: {}", ts_short, task)),
@@ -1075,6 +1098,40 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
                     MessageRole::System,
                     format!("✓ Gateway store connected: {}", gateway_dir.display()),
                 );
+
+                // Detect config mismatch: if the store opens but has no workflow for this
+                // session, the TUI may be looking at a different .gateway directory than
+                // the running gateway daemon (e.g. different --config paths).
+                let root = autonoetic_gateway::runtime::content_store::root_session_id(&session_id);
+                match store.resolve_workflow_id(root) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        // No workflow in this store for our session. Check if the gateway
+                        // is reachable at all (it might be a fresh session, which is fine).
+                        // We show a hint only if the store has ANY workflows but none for
+                        // our session — that indicates a likely config mismatch.
+                        match store.list_workflow_index() {
+                            Ok(indexes) if !indexes.is_empty() => {
+                                app.add_message(
+                                    MessageRole::System,
+                                    format!(
+                                        "⚠ Gateway store at {} has workflows but none for session '{}'. \
+                                         The gateway daemon may be using a different --config path. \
+                                         Run: autonoetic --config <gateway-config> chat --session-id {}",
+                                        gateway_dir.display(),
+                                        root,
+                                        session_id,
+                                    ),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(target: "chat", error = %e, "Failed to resolve workflow_id in local store");
+                    }
+                }
+
                 Some(store)
             }
             Err(e) => {
@@ -1577,6 +1634,9 @@ async fn check_signals(
             match autonoetic_gateway::scheduler::load_workflow_events(config, store, &workflow_id) {
                 Ok(events) => {
                     tracing::info!(target: "chat", event_count = events.len(), workflow_id = %workflow_id, "Loaded workflow events");
+                    if events.is_empty() {
+                        tracing::warn!(target: "chat", workflow_id = %workflow_id, "No workflow events found for workflow_id - this may indicate a store path mismatch");
+                    }
                     let current_workflow_count = events.len();
                     let previous_seen_count = app.seen_workflow_event_ids.len();
 
@@ -1589,7 +1649,7 @@ async fn check_signals(
                         if recap_count > 0 {
                             app.add_message(
                                 MessageRole::System,
-                                "── recent events ──".to_string(),
+                                format!("── recent events ({} total) ──", events.len()),
                             );
                             let start_idx = events.len().saturating_sub(recap_count);
                             for event in &events[start_idx..] {
@@ -1632,6 +1692,15 @@ async fn check_signals(
                                         card = %card,
                                         "Formatted workflow event card"
                                     );
+                                    if event.event_type.contains("approval") {
+                                        tracing::info!(
+                                            target: "chat",
+                                            event_id = %event.event_id,
+                                            event_type = %event.event_type,
+                                            task_id = ?event.task_id,
+                                            "APPROVAL EVENT DETECTED - displaying in TUI"
+                                        );
+                                    }
                                     app.session_overview.latest_signal = Some(card.clone());
                                     app.add_message(MessageRole::Signal, card);
                                     processed_any = true;
