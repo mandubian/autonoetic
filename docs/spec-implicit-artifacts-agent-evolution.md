@@ -3,6 +3,7 @@
 **Status:** Draft
 **Author:** Architecture Review
 **Date:** 2026-03-23
+**Updated:** 2026-03-28 — Added `workflow.state` for structured resume; clarified implicit-vs-explicit boundary
 
 ---
 
@@ -44,14 +45,24 @@ Every completed task automatically produces an implicit artifact containing:
 - Key tool outputs (configurable)
 - Metadata (agent_id, task_id, timestamps)
 
-### 2.2 Escalation System
+### 2.2 Structured Workflow State
+
+The `workflow.state` tool exposes compact, structured workflow facts so agents can resume deterministically without re-inferring state from conversation history:
+- Current workflow step
+- Completed tasks with artifact IDs
+- Pending approvals
+- Active tasks
+- Reuse guards (has_coder_artifact, has_evaluator_result, etc.)
+- Resume hint (one-line guidance)
+
+### 2.3 Escalation System
 
 Agents can escalate when stuck:
 - **Level 1**: Reasoning LLM (o1-style, deeper analysis)
 - **Level 2**: Specialist agent (domain expertise)
 - **Level 3**: Human (full authority)
 
-### 2.3 Agent Evolution
+### 2.4 Agent Evolution
 
 Agents can be enhanced through:
 - **Composition**: Combine multiple agents
@@ -61,12 +72,174 @@ Agents can be enhanced through:
 
 ---
 
-## 3. Implicit Artifacts
+## 3. Implicit vs Explicit Artifacts
 
-### 3.1 Definition
+### 3.1 Two Classes of Artifacts
+
+The system distinguishes between two artifact classes with different use cases:
+
+| Aspect | Implicit Artifacts | Explicit Artifacts |
+|--------|-------------------|-------------------|
+| **Created by** | Gateway (automatic, on task completion) | Agent (via `artifact.build`) |
+| **Purpose** | Parent-child output handoff | Specialist boundary / review / install |
+| **When to use** | Ordinary agent collaboration | Evaluation, audit, installation |
+| **Access pattern** | `workflow.wait` output field, `workflow.state` completed_tasks | `artifact.inspect`, `artifact.build` |
+| **Persistence** | TTL-based (default 24h) | Permanent (until deleted) |
+| **Who needs it** | All agents | Evaluators, auditors, specialized_builder |
+
+### 3.2 Design Principle
+
+**Ordinary agents should think in terms of implicit outputs first.** Explicit artifacts are specialist-boundary objects that should not be a universal cognitive burden.
+
+- Planner consuming researcher output → use `workflow.wait` implicit output
+- Evaluator validating coder output → use `artifact.inspect` on explicit artifact
+- Specialized_builder installing → use explicit artifact_id from promotion gate
+
+---
+
+## 4. Implicit Artifacts
+
+### 4.1 Definition
 
 An **implicit artifact** is automatically created by the gateway when a task completes. It captures the task's outputs for cross-session access.
 
+```
+Task completes → Gateway creates impl_{task_id} → Available to parent session
+```
+
+### 4.2 Content Structure
+
+```json
+{
+  "artifact_id": "impl_task-94c19ac6",
+  "artifact_type": "implicit",
+  "task_id": "task-94c19ac6",
+  "agent_id": "researcher.default",
+  "session_id": "demo-session-1/researcher.default-c4545f82",
+  "parent_session": "demo-session-1",
+  "created_at": "2026-03-23T13:41:33Z",
+  "expires_at": "2026-03-24T13:41:33Z",  // 24h TTL by default
+  "summary": "Fetched current weather for Paris using Open-Meteo API...",
+  "content": {
+    "llm_response": "The current weather in Paris is...",
+    "tool_outputs": [
+      {
+        "tool": "web.fetch",
+        "summary": "Open-Meteo API response",
+        "content_ref": "sha256:abc123..."  // Reference, not inline
+      }
+    ]
+  },
+  "metadata": {
+    "tokens_used": 1234,
+    "duration_ms": 45000,
+    "stop_reason": "EndTurn"
+  }
+}
+```
+
+### 4.3 Lifecycle
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Task Spawned                                                │
+│       ↓                                                      │
+│  Agent Executes                                              │
+│       ↓                                                      │
+│  Task Completes (success/failure)                            │
+│       ↓                                                      │
+│  Gateway creates impl_{task_id}                              │
+│       ↓                                                      │
+│  Parent session can access via workflow.wait or workflow.state │
+│       ↓                                                      │
+│  TTL expires (default 24h) → garbage collected               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 4.4 Access Patterns
+
+#### Via workflow.wait Response
+
+```json
+// workflow.wait returns:
+{
+  "task_id": "task-94c19ac6",
+  "status": "completed",
+  "output": {
+    "artifact_id": "impl_task-94c19ac6",
+    "summary": "Fetched current weather for Paris..."
+  }
+}
+```
+
+#### Via workflow.state (Recommended for Resume)
+
+```json
+// workflow.state returns structured facts:
+{
+  "workflow_status": "active",
+  "completed_tasks": [
+    {
+      "task_id": "task-94c19ac6",
+      "agent_id": "researcher.default",
+      "status": "succeeded",
+      "result_summary": "Fetched current weather for Paris..."
+    }
+  ],
+  "reuse_guards": {
+    "has_coder_artifact": false,
+    "has_evaluator_result": false,
+    "pending_approvals": false,
+    "active_tasks_running": false
+  },
+  "resume_hint": "some_tasks_done — check completed_tasks for next step"
+}
+```
+
+#### Via content.read
+
+```json
+content.read({
+  "name_or_handle": "impl_task-94c19ac6"
+})
+```
+
+#### Via artifact.inspect
+
+```json
+artifact.inspect({
+  "artifact_id": "impl_task-94c19ac6"
+})
+```
+
+### 4.5 Configuration
+
+Implicit artifact behavior is configurable at gateway level:
+
+```yaml
+# gateway config
+implicit_artifacts:
+  enabled: true
+  ttl_hours: 24
+  include_tool_outputs: true
+  max_tool_output_size_kb: 64
+  excluded_tools: ["sandbox.exec"]  // Don't capture large/verbose outputs
+```
+
+### 4.6 Enhanced Error Messages
+
+When `content.read` fails for a name that looks like a guessed name:
+
+```json
+{
+  "error_type": "resource",
+  "message": "Content 'weather_result' not found",
+  "hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
+  "available_artifacts": [
+    {"artifact_id": "impl_task-94c19ac6", "from": "researcher.default", "summary": "Fetched weather..."},
+    {"artifact_id": "impl_task-fb261586", "from": "architect.default", "summary": "Design document..."}
+  ]
+}
 ```
 Task completes → Gateway creates impl_{task_id} → Available to parent session
 ```

@@ -838,17 +838,17 @@ impl NativeTool for SandboxExecTool {
                         "exit_code": null,
                         "stdout": "",
                         "stderr": format!(
-                            "Sandbox approval already pending for this session (request_id(s): {}). After approval, retry with approval_ref='{}'. You do not need to reproduce the exact command.{}",
+                            "Sandbox approval already pending for this session (request_id(s): {}). After approval, the persisted command will execute automatically.{}",
                             ids.join(", "),
-                            primary.request_id,
                             dup_note
                         ),
                         "approval_required": true,
                         "approval_already_pending": true,
+                        "suspended": true,
                         "request_id": primary.request_id,
                         "pending_request_ids": ids,
                         "message": format!(
-                            "After approval, retry with approval_ref='{}'. You do not need to reproduce the exact command.",
+                            "Execution suspended. Approval {} is pending. The approved command is already persisted and will be used automatically on resume.",
                             primary.request_id
                         ),
                         "approval": approval,
@@ -949,7 +949,8 @@ impl NativeTool for SandboxExecTool {
                     "request_id": request_id,
                     "remote_access_detected": true,
                     "detected_patterns": remote_analysis.detected_patterns,
-                    "message": format!("To approve: 1) Get approval from operator, 2) Retry sandbox.exec with approval_ref = '{}'. The approved command will be used automatically.", request_id),
+                    "suspended": true,
+                    "message": format!("Execution suspended pending operator approval ({}). The approved command is persisted and will be used automatically on resume.", request_id),
                     "approval": approval
                 }))
                 .map_err(Into::into);
@@ -2348,7 +2349,7 @@ impl NativeTool for ContentReadTool {
                             "error_type": "resource",
                             "error": "content_not_found",
                             "message": format!("Content '{}' not found in session '{}'", args.name_or_handle, sid),
-                            "hint": "Did you mean one of these implicit artifacts from your workflow?",
+                            "hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
                             "available_artifacts": hints
                         }).to_string());
                     }
@@ -2418,7 +2419,7 @@ impl NativeTool for ArtifactBuildTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Build an immutable artifact bundle from session content. Returns an artifact ID for review/install/execution. Only artifacts may cross trust boundaries.".to_string(),
+            description: "Build an immutable artifact bundle from session content. Returns an artifact ID for review/install/closed-boundary execution. Artifacts are specialist-boundary objects: use them for evaluation, installation, and reproducible execution. For ordinary parent-child output handoff, prefer the implicit output from workflow.wait instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2617,7 +2618,7 @@ impl NativeTool for ArtifactInspectTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Inspect an artifact by ID. Returns file list, entrypoints, layers, digests, and metadata. Use this to review artifacts before install/execution.".to_string(),
+            description: "Inspect an artifact by ID. Returns file list, entrypoints, layers, digests, and metadata. Use this for specialist-boundary review (evaluation, audit, installation). For ordinary content sharing between agents, prefer content.read with implicit output handles from workflow.wait.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4946,7 +4947,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires — use this to block until children complete before proceeding.".to_string(),
+            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with a stable implicit artifact_id — use content.read with that ID to consume the child's result. This is the canonical parent-child output handoff mechanism for ordinary agents. With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -5162,6 +5163,218 @@ async fn poll_until_join(
         let remaining = (deadline - now).as_secs().min(poll_interval_secs).max(1);
         waited_secs += remaining;
         tokio::time::sleep(std::time::Duration::from_secs(remaining)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow State Tool
+// ---------------------------------------------------------------------------
+
+/// Exposes compact, structured workflow state to agents for deterministic resume.
+/// Returns the current workflow step, completed tasks, pending approvals, and
+/// valid next actions — replacing prose-based history inference.
+pub struct WorkflowStateTool;
+
+impl NativeTool for WorkflowStateTool {
+    fn name(&self) -> &'static str {
+        "workflow.state"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Returns compact, structured workflow state for deterministic resume. Use this instead of re-inferring state from conversation history. Returns: current step, completed tasks with artifact IDs, pending approvals, active tasks, and reuse guards.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "Optional workflow ID. If omitted, resolved from the current session's root."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default)]
+            workflow_id: Option<String>,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let agents_dir = agent_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Agent directory is missing its agents root parent"))?;
+
+        let fallback_config = GatewayConfig {
+            agents_dir: agents_dir.to_path_buf(),
+            ..GatewayConfig::default()
+        };
+        let gw_config = config.unwrap_or(&fallback_config);
+
+        let workflow_id = match args.workflow_id {
+            Some(id) => id,
+            None => {
+                let sid = session_id.unwrap_or(&manifest.agent.id);
+                let root = crate::runtime::content_store::root_session_id(sid);
+                crate::scheduler::resolve_workflow_id_for_root_session(gw_config, &root)?
+                    .unwrap_or_else(|| "unknown".to_string())
+            }
+        };
+
+        let workflow = crate::scheduler::workflow_store::load_workflow_run(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+        )?;
+
+        let tasks = crate::scheduler::workflow_store::list_task_runs_for_workflow(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+        )?;
+
+        // Load pending approvals for this workflow to enrich pending_approvals entries
+        let pending_approvals_map: HashMap<String, String> = {
+            let root = workflow
+                .as_ref()
+                .map(|w| w.root_session_id.as_str())
+                .unwrap_or("");
+            if let Some(store) = gateway_store.as_deref() {
+                store
+                    .get_pending_approvals_for_root(root)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|a| {
+                        a.task_id.map(|tid| (tid, a.request_id))
+                    })
+                    .collect()
+            } else {
+                HashMap::new()
+            }
+        };
+
+        let mut completed_tasks = Vec::new();
+        let mut pending_approvals = Vec::new();
+        let mut active_tasks = Vec::new();
+        let mut latest_artifact_by_role: HashMap<String, serde_json::Value> = HashMap::new();
+
+        for task in &tasks {
+            let implicit_artifact_id = format!("impl_{}", task.task_id);
+            let entry = serde_json::json!({
+                "task_id": task.task_id,
+                "agent_id": task.agent_id,
+                "status": format!("{:?}", task.status),
+                "result_summary": task.result_summary,
+                "implicit_artifact_id": implicit_artifact_id,
+            });
+
+            match task.status {
+                autonoetic_types::workflow::TaskRunStatus::Succeeded => {
+                    completed_tasks.push(entry.clone());
+                    if let Some(ref summary) = task.result_summary {
+                        let role = task.agent_id.split('.').next().unwrap_or("unknown");
+                        latest_artifact_by_role.insert(
+                            role.to_string(),
+                            serde_json::json!({
+                                "task_id": task.task_id,
+                                "agent_id": task.agent_id,
+                                "implicit_artifact_id": implicit_artifact_id,
+                                "summary": summary,
+                            }),
+                        );
+                    }
+                }
+                autonoetic_types::workflow::TaskRunStatus::AwaitingApproval => {
+                    let mut entry = entry.clone();
+                    if let Some(req_id) = pending_approvals_map.get(&task.task_id) {
+                        entry.as_object_mut().unwrap().insert(
+                            "approval_request_id".to_string(),
+                            serde_json::Value::String(req_id.clone()),
+                        );
+                    }
+                    pending_approvals.push(entry);
+                }
+                autonoetic_types::workflow::TaskRunStatus::Running
+                | autonoetic_types::workflow::TaskRunStatus::Runnable
+                | autonoetic_types::workflow::TaskRunStatus::Pending => {
+                    active_tasks.push(entry);
+                }
+                _ => {}
+            }
+        }
+
+        let wf_status = workflow
+            .as_ref()
+            .map(|w| format!("{:?}", w.status))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let _latest_artifact_id = latest_artifact_by_role
+            .get("coder")
+            .and_then(|v| v.get("task_id").and_then(|t| t.as_str()).map(|t| format!("impl_task-{}", t.strip_prefix("task-").unwrap_or(t))))
+            .or_else(|| {
+                latest_artifact_by_role.get("evaluator").and_then(|v| {
+                    v.get("task_id")
+                        .and_then(|t| t.as_str())
+                        .map(|t| format!("impl_task-{}", t.strip_prefix("task-").unwrap_or(t)))
+                })
+            });
+
+        let reuse_guards = serde_json::json!({
+            "has_coder_artifact": latest_artifact_by_role.contains_key("coder"),
+            "has_evaluator_result": latest_artifact_by_role.contains_key("evaluator"),
+            "has_auditor_result": latest_artifact_by_role.contains_key("auditor"),
+            "pending_approvals": !pending_approvals.is_empty(),
+            "active_tasks_running": !active_tasks.is_empty(),
+        });
+
+        let state = serde_json::json!({
+            "workflow_id": workflow_id,
+            "workflow_status": wf_status,
+            "completed_tasks": completed_tasks,
+            "pending_approvals": pending_approvals,
+            "active_tasks": active_tasks,
+            "latest_artifact_by_role": latest_artifact_by_role,
+            "reuse_guards": reuse_guards,
+            "resume_hint": if !pending_approvals.is_empty() {
+                "approval_pending — do not spawn new tasks, wait for approval"
+            } else if !active_tasks.is_empty() {
+                "tasks_running — wait for completion or proceed with partial results"
+            } else if latest_artifact_by_role.contains_key("evaluator") && latest_artifact_by_role.contains_key("auditor") {
+                "evaluation_complete — proceed to specialized_builder or coder iteration"
+            } else if latest_artifact_by_role.contains_key("coder") && !latest_artifact_by_role.contains_key("evaluator") {
+                "coder_done — proceed to evaluator/auditor"
+            } else if !completed_tasks.is_empty() {
+                "some_tasks_done — check completed_tasks for next step"
+            } else {
+                "fresh_start — no prior work found"
+            },
+        });
+
+        serde_json::to_string(&state).map_err(Into::into)
     }
 }
 
@@ -7073,6 +7286,7 @@ pub fn default_registry() -> NativeToolRegistry {
     // Workflow tools
     registry.register(Box::new(ApprovalStatusTool));
     registry.register(Box::new(WorkflowWaitTool));
+    registry.register(Box::new(WorkflowStateTool));
     registry.register(Box::new(WorkflowCancelTaskTool));
     // Human interaction tools
     registry.register(Box::new(UserAskTool));
@@ -7096,19 +7310,9 @@ fn find_available_artifacts(
 ) -> Vec<serde_json::Value> {
     let mut hints = Vec::new();
 
-    // Common patterns that agents guess:
-    // - "weather_result", "weather_data", "weather_output" → try "impl_task-*"
-    // - "design_doc", "design" → try "impl_task-*"
-    // - "research_result", "research_data" → try "impl_task-*"
-
-    // Since we can't easily enumerate all implicit artifacts without
-    // iterating through all content names, we'll provide a generic hint
-    // for now. A more complete implementation would query the content
-    // store for all names matching "impl_*" in the session.
-
     hints.push(serde_json::json!({
-        "suggestion": "Use workflow.wait to get output.artifact_id from completed tasks, then use content.read with that artifact ID",
-        "example": "If you have a completed task with ID 'task-abc123', try: content.read({name_or_handle: 'impl_task-abc123'})"
+        "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with an implicit artifact_id.",
+        "example": "Call workflow.state first, then use the artifact_id from completed_tasks[].output to read the child's result."
     }));
 
     hints
@@ -7310,8 +7514,9 @@ mod tests {
         // knowledge.store, knowledge.recall, knowledge.search, knowledge.search_by_tags, digest.query (5) +
         // knowledge.share (1) +
         // promotion.query (1) +
-        // always-available (6) = 19
-        assert_eq!(defs_all.len(), 19);
+        // workflow.state (1, now gated by ReadAccess) +
+        // always-available (6) = 20
+        assert_eq!(defs_all.len(), 20);
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);

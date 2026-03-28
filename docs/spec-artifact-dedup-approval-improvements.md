@@ -28,27 +28,42 @@ Agent B calls artifact.build(["design.md", "code.py"]) → art_bbb222  (duplicat
 - Confusion about which artifact to use
 - Evaluator/auditor may review different artifacts than the one being installed
 
-### 1.2 Approval Process Brittleness
+### 1.2 Approval Process
 
-**Current Model: "Dumb Gate / Agent Retry"**
+**Current Model: "Suspend / Auto-Resume"**
 
 ```
-Tool needs approval → Returns approval_required: true → Agent stops
-User approves → Gateway notifies → Agent retries with approval_ref
+Tool needs approval → Turn checkpointed to disk → Gateway suspends
+User approves → Gateway re-executes tool with approval_ref → Agent resumes with real result
 ```
 
-**Observed Issues:**
+**Key property:** The gateway automatically re-executes the approved action. The agent does NOT need to manually retry with `approval_ref` — the turn continuation mechanism handles this transparently. The agent sees the tool result as if there was never an interruption.
 
-| Issue | Description | Impact |
-|-------|-------------|--------|
-| **Manual retry** | Agent must re-run tool with approval_ref | Friction, user error potential |
-| **State fragmentation** | SQLite + filesystem + in-memory stores | Inconsistency risk |
-| **Race conditions** | Multiple approvals in same session | Competing requests |
-| **Agent lifecycle** | Restart loses approval signal | Orphaned approvals |
-| **Limited visibility** | No query tool for approval status | Poor UX |
-| **Blocking behavior** | agent.spawn blocked during pending approval | Workflow stalls |
-| **No cleanup** | Old approvals never removed | Storage growth |
-| **String matching** | Session ID parsing is fragile | Edge case failures |
+**Resolved Issues:**
+
+| Issue | Resolution |
+|-------|------------|
+| **Manual retry** | Gateway auto-executes via `execute_approved_action()` — no agent retry needed |
+| **State fragmentation** | `TurnContinuation` captures full state on disk; single source of truth |
+| **Race conditions** | Duplicate approval detection prevents competing requests in same session |
+| **Agent lifecycle** | Checkpoint persisted to disk; survives restarts |
+| **Limited visibility** | `workflow.state` exposes pending approvals; `approval.status` tool available |
+| **Blocking behavior** | `agent.spawn(async=true)` allows parallel work; `workflow.wait` for join |
+| **No cleanup** | TTL on approval requests; `apr-*` IDs garbage collected |
+| **String matching** | `root_session_id` from task graph used instead of session ID parsing |
+
+**Continuation payload format (canonical):**
+
+```json
+{
+  "approval_resolved": true,
+  "request_id": "apr-abc123",
+  "status": "approved",
+  "action_type": "sandbox_exec"
+}
+```
+
+The signal message uses a compact continuation string: `approval_resumed:sandbox_exec:apr-abc123:approved`
 
 ---
 
