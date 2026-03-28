@@ -743,7 +743,7 @@ enum BwrapDevMode {
     HostBind,
 }
 
-fn append_bwrap_isolation_flags(
+pub fn append_bwrap_isolation_flags(
     argv: &mut Vec<String>,
     overrides: Option<&BwrapIsolationOverrides>,
 ) {
