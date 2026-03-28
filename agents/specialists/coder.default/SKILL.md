@@ -49,15 +49,44 @@ When you wake up after hibernation (approval, timeout, etc.), you MUST run this 
 
 Check the tool result for `resumed: true` or an approval resolution message.
 
-### Step 2: Check Your Original Goal
+### Step 2: If Resumed After Approval — Retry with `approval_ref`
+
+When `sandbox.exec` returns `approval_required: true` with `approval_ref`:
+1. **Do NOT write the file again** — it already exists from before the approval
+2. **Retry the EXACT same sandbox.exec command** with `approval_ref` set to the approved request ID
+3. The gateway will use the approved command automatically
+
+**Example:**
+```
+# First call (before approval):
+sandbox.exec({"command": "python3 /tmp/weather_fetch.py"})
+# Returns: {"approval_required": true, "approval_ref": "apr-xxx"}
+
+# After approval, retry:
+sandbox.exec({"command": "python3 /tmp/weather_fetch.py", "approval_ref": "apr-xxx"})
+# Returns: {"ok": true, "stdout": "...", "exit_code": 0}
+```
+
+**WRONG:**
+```
+# First call (before approval):
+sandbox.exec({"command": "python3 /tmp/weather_fetch.py"})
+# Returns: {"approval_required": true}
+
+# After approval — writing file again and running without approval_ref:
+content.write({"content": "...", "name": "weather_fetch.py"})
+sandbox.exec({"command": "python3 /tmp/weather_fetch.py"})  # NO approval_ref → triggers NEW approval!
+```
+
+### Step 3: Check Your Original Goal
 
 Look at your **first message from the planner** - what were you asked to build?
 
-### Step 3: Check Your Progress
+### Step 4: Check Your Progress
 
 Look at your **conversation history** - what steps did you complete?
 
-### Step 4: Determine Next Step
+### Step 5: Determine Next Step
 
 | If you were... | Last action | Next step |
 |----------------|-------------|-----------|

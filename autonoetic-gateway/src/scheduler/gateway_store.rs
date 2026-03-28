@@ -12,9 +12,9 @@ use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
-struct WorkflowIndexFile {
-    workflow_id: String,
-    root_session_id: String,
+pub struct WorkflowIndexFile {
+    pub workflow_id: String,
+    pub root_session_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2224,6 +2224,23 @@ impl GatewayStore {
             )
             .optional()?;
         Ok(result)
+    }
+
+    pub fn list_workflow_index(&self) -> Result<Vec<WorkflowIndexFile>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT workflow_id, root_session_id, created_at FROM workflow_index")?;
+        let rows = stmt.query_map(params![], |row| {
+            Ok(WorkflowIndexFile {
+                workflow_id: row.get(0)?,
+                root_session_id: row.get(1)?,
+            })
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
     }
 }
 

@@ -401,6 +401,39 @@ fn unblock_task_on_approval(
         "Task unblocked after approval resolution"
     );
 
+    // Save an "approval_resolved" checkpoint so the scheduler can
+    // refresh the queued task message with the approval_ref.
+    let _resume_message = serde_json::json!({
+        "approval_resolved": true,
+        "request_id": decision.request_id,
+        "status": if decision.status == ApprovalStatus::Approved { "approved" } else { "rejected" },
+        "message": format!("Approval {}. Retry sandbox.exec with approval_ref = '{}'.",
+            if decision.status == ApprovalStatus::Approved { "granted" } else { "rejected" },
+            decision.request_id),
+    });
+    if let Err(e) = super::workflow_store::checkpoint_task(
+        config,
+        gateway_store,
+        wf_id,
+        t_id,
+        "approval_resolved".to_string(),
+        serde_json::json!({
+            "approval_resolved": true,
+            "request_id": decision.request_id,
+            "resume_message": format!("Approval {}. Retry sandbox.exec with approval_ref = '{}'.",
+                if decision.status == ApprovalStatus::Approved { "granted" } else { "rejected" },
+                decision.request_id),
+        }),
+    ) {
+        tracing::warn!(
+            target: "approval",
+            workflow_id = %wf_id,
+            task_id = %t_id,
+            error = %e,
+            "Failed to save approval_resolved checkpoint"
+        );
+    }
+
     // Clear BlockedApproval if no tasks remain in AwaitingApproval.
     if let Ok(tasks) =
         super::workflow_store::list_task_runs_for_workflow(config, gateway_store, wf_id)

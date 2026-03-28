@@ -230,6 +230,85 @@ workflow.wait(task_ids=["task-abc123"], timeout_secs=300)
 - `timeout_secs>0`: poll until all tasks finish or timeout (blocking). **Use 300s (5 minutes) for tasks that may require approval** — approval gates can take time for operator review.
 - `poll_interval_secs`: seconds between polls (default 2)
 
+### Handling Approval-Blocked Child Tasks
+
+When `workflow.wait` returns a task with `checkpoint_state.status == "awaiting_approval"`:
+
+1. **First, warn the user** — tell them an approval is pending and show the `approval_request_id`
+2. **Tell them the exact command to approve**: `autonoetic gateway approvals approve apr-xxx`
+3. **Then call `workflow.wait` with `timeout_secs=300`** to block until the operator approves/rejects
+4. **When approval is resolved**, the task will transition to `running` (approved) or `failed` (rejected)
+5. **If the same task hits another approval**, repeat — the evaluator may need multiple approvals for different sandbox.exec calls
+
+**Example:**
+```
+# Step 1: Check status (non-blocking)
+workflow.wait(task_ids=["task-67cafe74"], timeout_secs=0)
+# Returns: {"tasks": [{"task_id": "task-67cafe74", "status": "AwaitingApproval",
+#          "checkpoint_state": {"approval_request_id": "apr-cd0fdd39", "status": "awaiting_approval"}}],
+#          "join_satisfied": false}
+
+# Step 2: Warn the user
+# "⚠️ Task task-67cafe74 (evaluator.default) is blocked on operator approval.
+#  Approval request: apr-cd0fdd39
+#  Run: autonoetic gateway approvals approve apr-cd0fdd39"
+
+# Step 3: Block until approval resolves
+workflow.wait(task_ids=["task-67cafe74"], timeout_secs=300)
+```
+
+### Handling Approval Timeouts
+
+When `workflow.wait` returns a task with `checkpoint_step == "approval_timeout"`:
+
+- The approval was not resolved within the timeout period (default: 600s)
+- The task has FAILED due to the timeout
+- DO NOT keep calling `workflow.wait` with `timeout_secs=0` — this creates a loop
+- Instead, **inform the user** that the approval timed out and they need to approve
+- If the user wants to continue, respawn the child agent (which will create a new approval request)
+
+**Example:**
+```
+# Step 1: Check status (non-blocking)
+workflow.wait(task_ids=["task-67cafe74"], timeout_secs=0)
+# Returns: {"any_failed": true, "join_satisfied": true, "tasks": [{"checkpoint_step": "approval_timeout"}]}
+
+# Step 2: Inform the user
+# "⚠️ The evaluator task timed out waiting for approval.
+#  Approval request: apr-cd0fdd39
+#  Run: autonoetic gateway approvals approve apr-cd0fdd39
+#  Then I can respawn the evaluator to continue."
+
+# Step 3: If user approves, respawn the evaluator
+# agent.spawn("evaluator.default", message="Retry validation...")
+```
+
+### Handling Approval Timeouts (CRITICAL)
+
+When `workflow.wait` returns a task with `checkpoint_step == "approval_timeout"`:
+
+1. **Do NOT loop on `workflow.wait`** — the task has failed, it will not recover
+2. **Warn the user** — tell them the approval timed out and why the task failed
+3. **Ask the user if they want to retry** — you can respawn the child agent, which will create a new approval request
+4. **Do NOT retry automatically** — the user must explicitly approve this time
+
+**Example:**
+```
+# workflow.wait returns:
+# {"tasks": [{"task_id": "task-xxx", "status": "Failed",
+#             "checkpoint_state": {"reason": "Approval timed out", "timeout_secs": 600},
+#             "checkpoint_step": "approval_timeout"}],
+#  "any_failed": true, "join_satisfied": true}
+
+# RIGHT: Inform the user and ask
+# "The evaluator task failed because the approval timed out.
+#  You can retry by approving the new approval request.
+#  Should I respawn the evaluator?"
+
+# WRONG: Keep calling workflow.wait (loops forever)
+workflow.wait(task_ids=["task-xxx"], timeout_secs=0)  # same result every time
+```
+
 ### coder.default vs specialized_builder.default:
 
 | Use `coder.default` when... | Use `specialized_builder.default` when... |
@@ -274,6 +353,8 @@ If the coder finishes but fails to provide a valid `artifact_id` (e.g., due to a
 ```
 agent.spawn("evaluator.default", message="Validate artifact [artifact_id] with artifact.inspect and artifact-closed sandbox execution when applicable. Return evaluator_pass, tests_run/tests_passed/tests_failed, findings, and recommendation. IMPORTANT: call promotion.record for this validation outcome (pass or fail) using artifact_id [artifact_id]. Include artifact_id in summary/findings. A failed gate must still be recorded — do not skip promotion.record on failure.", metadata={"delegated_role":"evaluator","promotion_role":"evaluator","promotion_artifact_id":"[artifact_id]","require_promotion_record":true,"parent_goal":"Promote artifact [artifact_id]"})
 ```
+
+**Note:** The evaluator may trigger approval gates (e.g., `sandbox.exec` with network access). If `workflow.wait` shows the evaluator task as `awaiting_approval`, use `workflow.wait(task_ids=[...], timeout_secs=300)` to block until the operator resolves the approval. Do NOT poll with `timeout_secs=0`.
 
 **Step 4: auditor reviews risk and capability coverage for the same artifact**
 ```
