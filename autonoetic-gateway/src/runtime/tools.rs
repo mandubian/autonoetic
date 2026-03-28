@@ -1072,6 +1072,8 @@ impl NativeTool for SandboxExecTool {
             load_session_content_mounts(gateway_dir, session_id.unwrap_or(&manifest.agent.id))?
         };
 
+        let overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
+
         let runner = if session_content_mounts.is_empty() {
             // No session content - use original spawn method
             SandboxRunner::spawn_with_driver_and_dependencies(
@@ -1079,6 +1081,7 @@ impl NativeTool for SandboxExecTool {
                 agent_dir_str,
                 &effective_command,
                 dep_plan.as_ref(),
+                Some(&overrides),
             )?
         } else {
             // Has session content - mount files into sandbox at their original paths
@@ -1093,6 +1096,7 @@ impl NativeTool for SandboxExecTool {
                 &effective_command,
                 dep_plan.as_ref(),
                 session_content_mounts,
+                Some(&overrides),
             )?
         };
 

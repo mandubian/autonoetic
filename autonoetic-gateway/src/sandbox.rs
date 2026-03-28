@@ -1,5 +1,6 @@
 //! Sandbox runner supporting bubblewrap, docker, and firecracker.
 
+use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::SandboxConfig;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -25,6 +26,25 @@ const BWRAP_SHARE_NET_ENV: &str = "AUTONOETIC_BWRAP_SHARE_NET";
 const BWRAP_DEV_MODE_ENV: &str = "AUTONOETIC_BWRAP_DEV_MODE";
 
 static SANDBOX_CONFIG: OnceLock<SandboxConfig> = OnceLock::new();
+
+/// Per-execution overrides for bubblewrap isolation flags.
+/// Derived from the executing agent's capabilities.
+#[derive(Debug, Clone, Default)]
+pub struct BwrapIsolationOverrides {
+    /// Share host network namespace (adds --share-net to bwrap).
+    pub share_net: bool,
+}
+
+impl BwrapIsolationOverrides {
+    /// Derive overrides from agent capabilities.
+    /// Returns `share_net: true` if any `NetworkAccess` capability is present.
+    pub fn from_capabilities(caps: &[Capability]) -> Self {
+        let share_net = caps
+            .iter()
+            .any(|cap| matches!(cap, Capability::NetworkAccess { hosts } if !hosts.is_empty()));
+        Self { share_net }
+    }
+}
 
 /// Initialize sandbox config from gateway config. Call once at startup.
 /// Env vars always override config values.
@@ -109,7 +129,7 @@ impl SandboxRunner {
         agent_dir: &str,
         entrypoint: &str,
     ) -> anyhow::Result<Self> {
-        Self::spawn_with_driver_and_dependencies(driver, agent_dir, entrypoint, None)
+        Self::spawn_with_driver_and_dependencies(driver, agent_dir, entrypoint, None, None)
     }
 
     /// Spawn with optional dependency management.
@@ -120,6 +140,7 @@ impl SandboxRunner {
         agent_dir: &str,
         entrypoint: &str,
         dependencies: Option<&DependencyPlan>,
+        overrides: Option<&BwrapIsolationOverrides>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
@@ -132,9 +153,9 @@ impl SandboxRunner {
         let (program, args) = match driver {
             SandboxDriverKind::Bubblewrap => {
                 if dependencies.is_some() {
-                    bubblewrap_shell_command(agent_dir, &composed_entrypoint, &[])?
+                    bubblewrap_shell_command(agent_dir, &composed_entrypoint, &[], overrides)?
                 } else {
-                    bubblewrap_command(agent_dir, entrypoint)?
+                    bubblewrap_command(agent_dir, entrypoint, overrides)?
                 }
             }
             SandboxDriverKind::Docker => docker_command(agent_dir, &composed_entrypoint)?,
@@ -177,6 +198,7 @@ impl SandboxRunner {
         entrypoint: &str,
         dependencies: Option<&DependencyPlan>,
         session_content_mounts: Vec<SandboxMount>,
+        overrides: Option<&BwrapIsolationOverrides>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
@@ -187,9 +209,12 @@ impl SandboxRunner {
         }
         let composed_entrypoint = compose_entrypoint(entrypoint, dependencies)?;
         let (program, args) = match driver {
-            SandboxDriverKind::Bubblewrap => {
-                bubblewrap_shell_command(agent_dir, &composed_entrypoint, &session_content_mounts)?
-            }
+            SandboxDriverKind::Bubblewrap => bubblewrap_shell_command(
+                agent_dir,
+                &composed_entrypoint,
+                &session_content_mounts,
+                overrides,
+            )?,
             SandboxDriverKind::Docker => docker_command(agent_dir, &composed_entrypoint)?,
             SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
         };
@@ -628,7 +653,11 @@ fn split_entrypoint(entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
     Ok((program, args))
 }
 
-fn bubblewrap_command(agent_dir: &str, entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
+fn bubblewrap_command(
+    agent_dir: &str,
+    entrypoint: &str,
+    overrides: Option<&BwrapIsolationOverrides>,
+) -> anyhow::Result<(String, Vec<String>)> {
     let (program, args) = split_entrypoint(entrypoint)?;
     let mut argv = vec![
         "--ro-bind".to_string(),
@@ -640,7 +669,7 @@ fn bubblewrap_command(agent_dir: &str, entrypoint: &str) -> anyhow::Result<(Stri
         "--chdir".to_string(),
         BWRAP_WORKSPACE_DIR.to_string(),
     ];
-    append_bwrap_isolation_flags(&mut argv);
+    append_bwrap_isolation_flags(&mut argv, overrides);
     argv.push("--".to_string());
     argv.push(program);
     argv.extend(args);
@@ -658,6 +687,7 @@ fn bubblewrap_shell_command(
     agent_dir: &str,
     shell_command: &str,
     extra_mounts: &[SandboxMount],
+    overrides: Option<&BwrapIsolationOverrides>,
 ) -> anyhow::Result<(String, Vec<String>)> {
     anyhow::ensure!(
         !shell_command.trim().is_empty(),
@@ -673,7 +703,7 @@ fn bubblewrap_shell_command(
         "--chdir".to_string(),
         BWRAP_WORKSPACE_DIR.to_string(),
     ];
-    append_bwrap_isolation_flags(&mut argv);
+    append_bwrap_isolation_flags(&mut argv, overrides);
 
     // Add extra bind mounts for session content
     for mount in extra_mounts {
@@ -713,9 +743,17 @@ enum BwrapDevMode {
     HostBind,
 }
 
-fn append_bwrap_isolation_flags(argv: &mut Vec<String>) {
+fn append_bwrap_isolation_flags(
+    argv: &mut Vec<String>,
+    overrides: Option<&BwrapIsolationOverrides>,
+) {
     argv.push("--unshare-all".to_string());
-    if bwrap_share_net_enabled() {
+
+    let share_net = overrides
+        .map(|o| o.share_net)
+        .unwrap_or_else(bwrap_share_net_enabled);
+
+    if share_net {
         argv.push("--share-net".to_string());
     }
 
@@ -903,7 +941,7 @@ mod tests {
 
     #[test]
     fn test_bubblewrap_command_shape() {
-        let (_bin, argv) = bubblewrap_command("/tmp/agent", "python main.py")
+        let (_bin, argv) = bubblewrap_command("/tmp/agent", "python main.py", None)
             .expect("bubblewrap command should build");
         assert_eq!(argv[0], "--ro-bind");
         assert_eq!(argv[3], "--bind");
@@ -1009,7 +1047,7 @@ mod tests {
 
     #[test]
     fn test_bubblewrap_shell_command_shape() {
-        let (_bin, argv) = bubblewrap_shell_command("/tmp/agent", "echo hi", &[])
+        let (_bin, argv) = bubblewrap_shell_command("/tmp/agent", "echo hi", &[], None)
             .expect("shell command should build");
         assert_eq!(argv[0], "--ro-bind");
         assert_eq!(argv[3], "--bind");
