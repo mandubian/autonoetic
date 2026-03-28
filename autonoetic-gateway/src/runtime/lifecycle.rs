@@ -1323,6 +1323,7 @@ impl AgentExecutor {
             agent_dir_str,
             command,
             None,
+            None,
         )?;
 
         if let Some(mut stdin) = runner.process.stdin.take() {
