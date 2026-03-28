@@ -568,16 +568,16 @@ fn format_workflow_event_card(
                     format!("\n   Reason: {}", reason)
                 };
                 format!(
-                    "\n   → Approve: autonoetic gateway approvals approve {}{}",
+                    "\n   → Approve: autonoetic gateway approvals approve {}{}\n   → After approval, execution resumes automatically — no retry needed.",
                     apr_id, reason_part
                 )
             };
             Some(format!(
-                "⏸ [{}] Approval required: {} ({}){}",
+                "⏸ [{}] Suspended for approval: {} ({}){}",
                 ts_short, task, kind, apr_suffix
             ))
         }
-        "task.approved" => Some(format!("✅ [{}] Approval approved: {}", ts_short, task)),
+        "task.approved" => Some(format!("✅ [{}] Approval granted — resuming: {}", ts_short, task)),
         "task.rejected" => Some(format!("❌ [{}] Approval rejected: {}", ts_short, task)),
         "task.started" => Some(format!("▶ [{}] Task started: {}", ts_short, task)),
         "task.completed" => Some(format!("✅ [{}] Task completed: {}", ts_short, task)),
@@ -590,7 +590,7 @@ fn format_workflow_event_card(
             Some(format!("💾 [{}] Task checkpoint saved: {}", ts_short, task))
         }
         "task.updated" if status == "runnable" => {
-            Some(format!("🔁 [{}] Task resumed: {}", ts_short, task))
+            Some(format!("🔁 [{}] Resumed after approval: {}", ts_short, task))
         }
         "task.updated" => Some(format!(
             "🔄 [{}] Task updated: {} ({})",
