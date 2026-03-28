@@ -21,7 +21,6 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use super::agent::format_llm_usage_for_cli;
 use super::common::{
     default_terminal_channel_id, default_terminal_sender_id, terminal_channel_envelope,
 };
@@ -29,7 +28,6 @@ use autonoetic_gateway::router::{
     JsonRpcRequest as GatewayJsonRpcRequest, JsonRpcResponse as GatewayJsonRpcResponse,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::LlmExchangeUsage;
 use autonoetic_types::background::UserInteraction;
 
 // ============================================================================
@@ -1052,31 +1050,16 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         }
     }
 
-    // Show session info and workflow hint
+    // Show compact session info
     let root_session = autonoetic_gateway::runtime::content_store::root_session_id(&session_id);
+    let wf_hint = autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(&config, root_session)
+        .ok()
+        .flatten()
+        .map(|wf_id| format!(" · wf:{}", &wf_id[..8.min(wf_id.len())]))
+        .unwrap_or_default();
     app.add_message(
         MessageRole::System,
-        format!("Session: {} (root: {})", session_id, root_session),
-    );
-
-    // Check if workflow exists for this session
-    if let Ok(Some(wf_id)) =
-        autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(&config, root_session)
-    {
-        app.add_message(
-            MessageRole::System,
-            format!("🔗 Connected to workflow: {}", wf_id),
-        );
-    } else {
-        app.add_message(
-            MessageRole::System,
-            format!("ℹ No workflow found for root session '{}'. Use --session-id to connect to an existing workflow.", root_session),
-        );
-    }
-
-    app.add_message(
-        MessageRole::System,
-        format!("Connecting to {}...", gateway_addr),
+        format!("{}{}", &session_id[..20.min(session_id.len())], wf_hint),
     );
 
     // Channel for sending messages from TUI to gateway
@@ -1093,55 +1076,9 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config.as_ref());
     let gateway_store =
         match autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir) {
-            Ok(store) => {
-                app.add_message(
-                    MessageRole::System,
-                    format!("✓ Gateway store connected: {}", gateway_dir.display()),
-                );
-
-                // Detect config mismatch: if the store opens but has no workflow for this
-                // session, the TUI may be looking at a different .gateway directory than
-                // the running gateway daemon (e.g. different --config paths).
-                let root = autonoetic_gateway::runtime::content_store::root_session_id(&session_id);
-                match store.resolve_workflow_id(root) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        // No workflow in this store for our session. Check if the gateway
-                        // is reachable at all (it might be a fresh session, which is fine).
-                        // We show a hint only if the store has ANY workflows but none for
-                        // our session — that indicates a likely config mismatch.
-                        match store.list_workflow_index() {
-                            Ok(indexes) if !indexes.is_empty() => {
-                                app.add_message(
-                                    MessageRole::System,
-                                    format!(
-                                        "⚠ Gateway store at {} has workflows but none for session '{}'. \
-                                         The gateway daemon may be using a different --config path. \
-                                         Run: autonoetic --config <gateway-config> chat --session-id {}",
-                                        gateway_dir.display(),
-                                        root,
-                                        session_id,
-                                    ),
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(target: "chat", error = %e, "Failed to resolve workflow_id in local store");
-                    }
-                }
-
-                Some(store)
-            }
+            Ok(store) => Some(store),
             Err(e) => {
-                app.add_message(
-                    MessageRole::System,
-                    format!(
-                        "⚠ Gateway store unavailable: {} (approvals may not be visible)",
-                        e
-                    ),
-                );
+                tracing::debug!(target: "chat", error = %e, "Gateway store unavailable, continuing without workflow events");
                 None
             }
         };
@@ -1159,10 +1096,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         let stream = match TcpStream::connect(&gateway_addr).await {
             Ok(s) => s,
             Err(e) => {
-                app.add_message(
-                    MessageRole::System,
-                    format!("Gateway connection failed (reconnecting in 3s): {}", e),
-                );
+                tracing::debug!(target: "chat", error = %e, "Gateway connection failed, reconnecting");
                 terminal.draw(|f| draw(f, &app))?;
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
@@ -1352,19 +1286,6 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         app.add_message(MessageRole::Assistant, reply);
                                     }
 
-                                    if let Some(arr) =
-                                        result_json.and_then(|v| v.get("llm_usage"))
-                                    {
-                                        if let Ok(usages) =
-                                            serde_json::from_value::<Vec<LlmExchangeUsage>>(arr.clone())
-                                        {
-                                            if let Some(text) = format_llm_usage_for_cli(&usages) {
-                                                app.add_message(MessageRole::System, text);
-                                            }
-                                        }
-                                    }
-
-
                                 }
                                 needs_redraw = true;
                             }
@@ -1373,8 +1294,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                     Ok(None) => {
                         return Ok(true); // Disconnected
                     }
-                    Err(e) => {
-                        app.add_message(MessageRole::System, format!("Gateway error: {}", e));
+                    Err(_e) => {
                         return Ok(true); // Disconnected
                     }
                 }
@@ -1647,10 +1567,6 @@ async fn check_signals(
                     if should_bootstrap {
                         let recap_count = events.len().min(20);
                         if recap_count > 0 {
-                            app.add_message(
-                                MessageRole::System,
-                                format!("── recent events ({} total) ──", events.len()),
-                            );
                             let start_idx = events.len().saturating_sub(recap_count);
                             for event in &events[start_idx..] {
                                 if let Some(card) = format_workflow_event_card(event) {
@@ -1658,7 +1574,6 @@ async fn check_signals(
                                     app.add_message(MessageRole::Signal, card);
                                 }
                             }
-                            app.add_message(MessageRole::System, "── upcoming ──".to_string());
                         }
                         // Mark ALL fetched events as seen, not just the recap window,
                         // so events outside the recap don't re-appear as "new" on next poll.
@@ -1875,15 +1790,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_approval_request_id_uuid_fallback() {
-        let text = "Approval required for request id: c19a8a50-d6c8-4c5f-aa3c-6ba119751b11";
-        assert_eq!(
-            extract_approval_request_id(text).as_deref(),
-            Some("c19a8a50-d6c8-4c5f-aa3c-6ba119751b11")
-        );
-    }
-
-    #[test]
     fn test_extract_structured_approval_sandbox_exec() {
         let payload = serde_json::json!({
             "ok": false,
@@ -1946,12 +1852,14 @@ mod tests {
             Some("task-42"),
             serde_json::json!({
                 "status": "awaiting_approval",
-                "approval": "sandbox_exec"
+                "approval": "sandbox_exec",
+                "approval_request_id": "apr-test123"
             }),
         );
         let line = format_workflow_event_card(&event).expect("event should render");
-        assert!(line.contains("Approval required: task-42"));
+        assert!(line.contains("Suspended for approval: task-42"));
         assert!(line.contains("sandbox.exec"));
+        assert!(line.contains("resumes automatically"));
     }
 
     #[test]
@@ -1962,7 +1870,8 @@ mod tests {
             serde_json::json!({ "status": "runnable" }),
         );
         let line = format_workflow_event_card(&event).expect("event should render");
-        assert!(line.contains("Approval approved: task-42"));
+        assert!(line.contains("Approval granted"));
+        assert!(line.contains("resuming: task-42"));
     }
 
     #[test]
