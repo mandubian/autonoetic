@@ -91,7 +91,7 @@ Phase 1 (sandbox overrides)    ← core mechanism, no agent changes
   ├── 1.1 BwrapIsolationOverrides type
   ├── 1.2 Thread through spawn
   ├── 1.3 sandbox.exec integration
-  └── 1.4 Script agent integration
+  └── 1.4 Script agent integration (deferred)
 
 Phase 2 (planner fix)          ← Phase 1 not required, can parallel
   └── 2.1 Add Step 2a
@@ -105,4 +105,6 @@ Phase 4 (tests)                ← after Phase 1
 ```
 
 **Estimated tasks:** 12
-**Critical path:** 1.1 → 1.2 → 1.3 → 4.2
+**Completed:** 7 (Phase 1: 4, Phase 2: 1, Phase 3: 1, Phase 1.4 deferred: 1)
+**Remaining:** 5 (Phase 4: 2 test tasks + 4 test cases)
+**Critical path:** 1.1 → 1.2 → 1.3 ✅ done — 4.1, 4.2 remaining
