@@ -37,7 +37,7 @@
 
 **File:** `autonoetic-gateway/src/execution.rs`
 
-- [ ] **Deferred**: The `execute_script_in_sandbox` function uses a local `bubblewrap_command` that doesn't actually invoke bwrap (runs script directly with python3). This is a pre-existing issue that should be fixed separately. Script agents spawned via `agent.spawn` currently bypass bwrap entirely.
+- [x] **Deferred**: The `execute_script_in_sandbox` function uses a local `bubblewrap_command` that doesn't actually invoke bwrap (runs script directly with python3). This is a pre-existing issue that should be fixed separately. Script agents spawned via `agent.spawn` currently bypass bwrap entirely.
 
 ---
 
@@ -47,13 +47,12 @@
 
 **File:** `agents/lead/planner.default/SKILL.md`
 
-- [ ] Add explicit **Step 2a** between Step 2 (coder) and Step 3 (evaluator):
+- [x] Add explicit **Step 2a** between Step 2 (coder) and Step 2b (artifact fallback):
   ```
   Step 2a: If the artifact contains dependency files (requirements.txt, package.json, etc.),
            delegate to builder.default to install deps and create a layered artifact.
            Use the new layered artifact_id for all subsequent steps.
   ```
-- [ ] Add builder.default to the agent creation flow diagram
 
 ---
 
@@ -61,7 +60,7 @@
 
 ### Task 3.1: Remove dead sandbox.conf
 
-- [ ] Delete `agents/specialists/builder.default/sandbox.conf` (not read by any code)
+- [x] Delete `agents/specialists/builder.default/sandbox.conf` (not read by any code)
 
 ---
 

@@ -260,6 +260,13 @@ agent.spawn("architect.default", message="Design a weather-fetcher agent: purpos
 agent.spawn("coder.default", message="Implement the weather agent files based on architect's design. Write them with content.write, then build an artifact with artifact.build. Do NOT run it. Return the artifact_id, entrypoints, and the key file names.")
 ```
 
+**Step 2a: Builder installs dependencies and creates layered artifact**
+If the coder's artifact includes dependency files (requirements.txt, package.json, Cargo.toml, Gemfile, etc.), delegate to `builder.default` before evaluation:
+```
+agent.spawn("builder.default", message="Install dependencies for artifact [artifact_id] from [dependency_file] and create a layered artifact. Return the new layered artifact_id.")
+```
+Use the returned layered artifact_id for all subsequent steps (evaluator, auditor, install).
+
 **Step 2b: Artifact Fallback (If Coder Fails to Bundle)**
 If the coder finishes but fails to provide a valid `artifact_id` (e.g., due to an interruption), DO NOT hallucinate an ID. Inspect the `files` array in the coder's `SpawnResult`. If files were written, call `artifact.build` yourself using those file names/handles to create the bundle, and use that new `artifact_id`. NEVER pass task IDs (e.g., `task-xyz`) to downstream tools.
 
