@@ -37,7 +37,9 @@
 
 **File:** `autonoetic-gateway/src/execution.rs`
 
-- [x] **Deferred**: The `execute_script_in_sandbox` function uses a local `bubblewrap_command` that doesn't actually invoke bwrap (runs script directly with python3). This is a pre-existing issue that should be fixed separately. Script agents spawned via `agent.spawn` currently bypass bwrap entirely.
+- [x] **Deferred**: The `execute_script_in_sandbox` function (line 2709) uses a local `bubblewrap_command` (line 2808) that **does not actually invoke bwrap** — it runs the script directly with python3/node/ruby. The `_agent_dir` parameter is unused. This is a pre-existing issue documented at line 2805-2807.
+- [x] **Root cause**: Script agents spawned via `agent.spawn` go through `execution.rs::execute_script_in_sandbox`, which uses `tokio::process::Command` and its own local `bubblewrap_command`/`docker_command`/`microvm_command` functions, completely separate from `sandbox.rs::SandboxRunner`.
+- [x] **Fix required**: Refactor `execute_script_in_sandbox` to use `SandboxRunner` from `sandbox.rs` instead of its own local sandbox commands. This requires bridging sync (`SandboxRunner`) and async (`tokio::process`) execution.
 
 ---
 
