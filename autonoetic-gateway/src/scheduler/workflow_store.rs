@@ -541,7 +541,7 @@ pub fn update_task_run_status(
         }
     }
 
-        let event_type = match &status {
+    let event_type = match &status {
         TaskRunStatus::Succeeded => "task.completed",
         TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Aborted => "task.failed",
         TaskRunStatus::AwaitingApproval => "task.awaiting_approval",
@@ -825,8 +825,8 @@ pub fn queued_task_exists(config: &GatewayConfig, workflow_id: &str, task_id: &s
     queued_task_path(config, workflow_id, task_id).exists()
 }
 
-/// When a queue file already exists but the task checkpoint has a newer `resume_message`
-/// (e.g. after `approval_resolved`), update the queued task payload in place.
+/// When a queue file already exists but the task checkpoint has a newer
+/// approval_resolved payload, update the queued task message in place.
 pub fn refresh_queued_task_message_from_task_checkpoint(
     config: &GatewayConfig,
     store: Option<&GatewayStore>,
@@ -842,9 +842,21 @@ pub fn refresh_queued_task_message_from_task_checkpoint(
     if cp.step != "approval_resolved" {
         return Ok(());
     }
-    let resume_raw = cp.state.get("resume_message");
+    let resume_raw = cp.state.get("request_id");
     let rm = match resume_raw {
-        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::String(s)) => {
+            let action = cp
+                .state
+                .get("action_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let status = cp
+                .state
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            format!("approval_resumed:{}:{}:{}", action, s, status)
+        }
         Some(v) => serde_json::to_string(v)?,
         None => return Ok(()),
     };
@@ -1241,7 +1253,9 @@ pub fn compact_workflow_summary(
         match t.status {
             TaskRunStatus::Running | TaskRunStatus::Runnable => running += 1,
             TaskRunStatus::Succeeded => succeeded += 1,
-            TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Aborted => failed += 1,
+            TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Aborted => {
+                failed += 1
+            }
             _ => other += 1,
         }
     }

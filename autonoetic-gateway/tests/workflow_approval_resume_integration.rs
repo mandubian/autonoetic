@@ -60,14 +60,6 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &task_run)?;
 
-    let resume_message = serde_json::json!({
-        "type": "approval_resolved",
-        "request_id": "apr-resume1234",
-        "status": "approved",
-        "message": "Sandbox execution completed successfully.",
-    })
-    .to_string();
-
     workflow_store::checkpoint_task(
         &config,
         Some(store.as_ref()),
@@ -75,9 +67,10 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
         &task_id,
         "approval_resolved".to_string(),
         serde_json::json!({
+            "approval_resolved": true,
             "request_id": "apr-resume1234",
             "status": "approved",
-            "resume_message": resume_message,
+            "action_type": "sandbox_exec",
         }),
     )?;
 
@@ -109,14 +102,11 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
     assert_eq!(queued_after.len(), 1);
     assert_eq!(queued_after[0].task_id, task_id);
 
-    let queued_payload: serde_json::Value = serde_json::from_str(&queued_after[0].message)?;
-    assert_eq!(
-        queued_payload.get("type").and_then(|v| v.as_str()),
-        Some("approval_resolved")
-    );
-    assert_eq!(
-        queued_payload.get("request_id").and_then(|v| v.as_str()),
-        Some("apr-resume1234")
+    // The refreshed message should be a canonical continuation string
+    assert!(
+        queued_after[0].message.starts_with("approval_resumed:sandbox_exec:apr-resume1234:approved"),
+        "Queued message should be canonical continuation format, got: {}",
+        queued_after[0].message
     );
 
     Ok(())

@@ -199,39 +199,34 @@ fn resume_session_after_approval(
         autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, .. } => {
             let msg = if decision.status == ApprovalStatus::Approved {
                 format!(
-                    "Approval {} granted for installing agent '{}'. You must now RE-RUN agent.install with install_approval_ref='{}'.",
-                    decision.request_id, agent_id, decision.request_id
+                    "approval_resumed:install:{}:{}",
+                    decision.request_id, agent_id
                 )
             } else {
                 format!(
-                    "The approval for installing agent '{}' was {}.",
-                    agent_id, status_str
+                    "approval_rejected:install:{}:{}",
+                    decision.request_id, agent_id
                 )
             };
             (agent_id.clone(), msg)
         }
-        autonoetic_types::background::ScheduledAction::SandboxExec { command, .. } => {
+        autonoetic_types::background::ScheduledAction::SandboxExec { .. } => {
             let msg = if decision.status == ApprovalStatus::Approved {
                 format!(
-                    "Approval {} granted for your pending sandbox.exec. You must now RE-RUN your sandbox.exec command exactly as before, adding 'approval_ref': '{}' to the arguments.\nCommand: {}",
-                    decision.request_id, decision.request_id, command
+                    "approval_resumed:sandbox_exec:{}:approved",
+                    decision.request_id
                 )
             } else {
                 format!(
-                    "Sandbox execution was rejected. Request: {}",
+                    "approval_rejected:sandbox_exec:{}:rejected",
                     decision.request_id
                 )
             };
-            // Use the decision-level requester id to avoid brittle parsing of
-            // nested session names.
             (decision.agent_id.clone(), msg)
         }
         _ => (
             "unknown".to_string(),
-            format!(
-                "Approval {} for request {}",
-                status_str, decision.request_id
-            ),
+            format!("approval_{}:unknown:{}", status_str, decision.request_id),
         ),
     };
 
@@ -401,15 +396,16 @@ fn unblock_task_on_approval(
         "Task unblocked after approval resolution"
     );
 
-    // Save an "approval_resolved" checkpoint so the scheduler can
-    // refresh the queued task message with the approval_ref.
-    let _resume_message = serde_json::json!({
+    // Save an "approval_resolved" checkpoint with a structured continuation payload.
+    let continuation_payload = serde_json::json!({
         "approval_resolved": true,
         "request_id": decision.request_id,
         "status": if decision.status == ApprovalStatus::Approved { "approved" } else { "rejected" },
-        "message": format!("Approval {}. Retry sandbox.exec with approval_ref = '{}'.",
-            if decision.status == ApprovalStatus::Approved { "granted" } else { "rejected" },
-            decision.request_id),
+        "action_type": match &decision.action {
+            autonoetic_types::background::ScheduledAction::SandboxExec { .. } => "sandbox_exec",
+            autonoetic_types::background::ScheduledAction::AgentInstall { .. } => "agent_install",
+            _ => "unknown",
+        },
     });
     if let Err(e) = super::workflow_store::checkpoint_task(
         config,
@@ -417,13 +413,7 @@ fn unblock_task_on_approval(
         wf_id,
         t_id,
         "approval_resolved".to_string(),
-        serde_json::json!({
-            "approval_resolved": true,
-            "request_id": decision.request_id,
-            "resume_message": format!("Approval {}. Retry sandbox.exec with approval_ref = '{}'.",
-                if decision.status == ApprovalStatus::Approved { "granted" } else { "rejected" },
-                decision.request_id),
-        }),
+        continuation_payload,
     ) {
         tracing::warn!(
             target: "approval",
