@@ -730,6 +730,7 @@ impl GatewayExecutionService {
                     &loaded.manifest.runtime.sandbox,
                     self.config.as_ref(),
                     script_kill_scope,
+                    &loaded.manifest.capabilities,
                 )
                 .await;
 
@@ -2716,9 +2717,9 @@ async fn execute_script_in_sandbox(
         std::sync::Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>,
         String,
     )>,
+    capabilities: &[autonoetic_types::capability::Capability],
 ) -> anyhow::Result<String> {
-    use std::process::Stdio;
-    use tokio::process::Command;
+    use std::io::Write;
 
     tracing::info!(
         agent_dir = %agent_dir.display(),
@@ -2727,60 +2728,43 @@ async fn execute_script_in_sandbox(
         "Executing script agent"
     );
 
-    // Build the command based on sandbox type
-    let (program, args) = match sandbox_type {
-        "bubblewrap" | "bwrap" => bubblewrap_command(agent_dir, script_path)?,
-        "docker" => docker_command(agent_dir, script_path)?,
-        "microvm" => microvm_command(script_path)?,
-        _ => bubblewrap_command(agent_dir, script_path)?,
-    };
-
-    // Create command with environment variables and pass input via stdin
-    tracing::info!(
-        program = %program,
-        args = ?&args,
-        input_len = input_payload.len(),
-        input_preview = %input_payload.chars().take(100).collect::<String>(),
-        "Spawning script process"
+    let driver = crate::sandbox::SandboxDriverKind::parse(sandbox_type)?;
+    let overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
+    let entrypoint = format!(
+        "{} {}",
+        script_path.to_string_lossy(),
+        if input_payload.is_empty() {
+            String::new()
+        } else {
+            format!("-- {}", input_payload.replace('"', "\\\""))
+        }
     );
 
-    let mut cmd = Command::new(&program);
-    cmd.args(&args)
-        .env_clear()
-        .env("SCRIPT_INPUT", input_payload)
-        .env("AGENT_DIR", agent_dir.to_string_lossy().as_ref())
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-        .env("PYTHONUNBUFFERED", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    // Start the process and write input to stdin
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn script: {}", e))?;
+    let mut runner = crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies(
+        driver,
+        &agent_dir.to_string_lossy(),
+        &entrypoint,
+        None,
+        Some(&overrides),
+    )?;
 
     let _script_sandbox_guard = sandbox_kill.as_ref().and_then(|(reg, root)| {
-        child
-            .id()
-            .and_then(|pid| (pid > 0).then(|| reg.register_sandbox_child_pid(root, pid)))
+        let pid = runner.process.id();
+        (pid > 0).then(|| reg.register_sandbox_child_pid(root, pid))
     });
 
-    // Write input to stdin and close it
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
+    if let Some(mut stdin) = runner.process.stdin.take() {
         stdin
             .write_all(input_payload.as_bytes())
-            .await
             .map_err(|e| anyhow::anyhow!("Failed to write to script stdin: {}", e))?;
-        // stdin is dropped here, closing the pipe
     }
 
-    // Wait for output
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to execute script: {}", e))?;
+    let output = tokio::task::spawn_blocking(move || {
+        runner.process.wait_with_output()
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    .map_err(|e| anyhow::anyhow!("Failed to execute script: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2798,65 +2782,6 @@ async fn execute_script_in_sandbox(
     tracing::info!(stdout_len = stdout.len(), "Script execution completed");
 
     Ok(stdout)
-}
-
-/// Build bubblewrap command for executing a script.
-///
-/// NOTE: Full sandbox isolation requires bind-mounting Python's standard library.
-/// For now, we use a simplified sandbox that shares the host filesystem.
-/// TODO: Implement proper sandbox with minimal bind mounts.
-fn bubblewrap_command(
-    _agent_dir: &PathBuf,
-    script_path: &PathBuf,
-) -> anyhow::Result<(String, Vec<String>)> {
-    // Determine interpreter based on script extension
-    let interpreter = match script_path.extension().and_then(|e| e.to_str()) {
-        Some("py") => "python3",
-        Some("js") | Some("mjs") => "node",
-        Some("rb") => "ruby",
-        Some("sh") => "sh",
-        Some("bash") => "bash",
-        _ => "python3", // Default to python3
-    };
-
-    // For now, just run the script directly without sandbox isolation
-    // This allows the demo to work while we implement proper sandboxing
-    let args = vec![script_path.to_string_lossy().to_string()];
-
-    Ok((interpreter.to_string(), args))
-}
-
-/// Build docker command for executing a script.
-fn docker_command(
-    agent_dir: &PathBuf,
-    script_path: &PathBuf,
-) -> anyhow::Result<(String, Vec<String>)> {
-    let image =
-        std::env::var("AUTONOETIC_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.11".to_string());
-    Ok((
-        "docker".to_string(),
-        vec![
-            "run".to_string(),
-            "--rm".to_string(),
-            "-i".to_string(),
-            "--network".to_string(),
-            "none".to_string(),
-            "-v".to_string(),
-            format!("{}:/workspace", agent_dir.to_string_lossy()),
-            image,
-            script_path.to_string_lossy().to_string(),
-        ],
-    ))
-}
-
-/// Build microvm command for executing a script.
-fn microvm_command(_script_path: &PathBuf) -> anyhow::Result<(String, Vec<String>)> {
-    let config = std::env::var("AUTONOETIC_FIRECRACKER_CONFIG")
-        .map_err(|_| anyhow::anyhow!("MicroVM requires AUTONOETIC_FIRECRACKER_CONFIG to be set"))?;
-    Ok((
-        "firecracker".to_string(),
-        vec!["--config-file".to_string(), config],
-    ))
 }
 
 #[cfg(test)]
