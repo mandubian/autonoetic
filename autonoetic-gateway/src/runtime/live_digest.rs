@@ -629,19 +629,29 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
                 .and_then(|x| x.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0);
-            if files > 0 {
+            let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+            if !ok {
+                let msg = as_str(&v, "message").unwrap_or("");
+                format!(
+                    "`{}` — {}",
+                    cell(tool_name),
+                    cell(&truncate_chars(&redact_text_for_logs(msg), 280))
+                )
+            } else if files > 0 {
                 format!(
                     "`{}` id=`{}` files≈{}",
                     cell(tool_name),
                     cell(&truncate_chars(id, 40)),
                     files
                 )
-            } else {
+            } else if !id.is_empty() {
                 format!(
                     "`{}` id=`{}`",
                     cell(tool_name),
                     cell(&truncate_chars(id, 40))
                 )
+            } else {
+                format!("`{}` — (empty result)", cell(tool_name))
             }
         }
         _ => {
