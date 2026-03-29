@@ -761,32 +761,257 @@ impl NativeTool for SandboxExecTool {
         // Static analysis for remote access detection
         // Analyzes both the command AND the script content (if running a script file)
         // For /tmp/ paths, reads from content store (session content mounting)
-        let mut code_to_analyze =
+        let code_to_analyze =
             extract_code_for_analysis(&effective_command, agent_dir, gateway_dir, session_id);
 
-        // When artifact_id is provided, also analyze the artifact's entrypoint files
-        // for remote access patterns. Without this, artifact-executed code that makes
-        // network calls would fail silently (DNS error) without triggering approval.
-        if let Some(ref aid) = args.artifact_id {
+        // When artifact_id is provided, check cached analysis first.
+        // Artifacts are immutable, so analysis is done once per artifact.
+        let artifact_id_for_approval = args.artifact_id.clone();
+        let artifact_remote_needs_approval = if let Some(ref aid) = args.artifact_id {
             if let Some(gw_dir) = &gateway_dir {
-                if let Ok(store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
-                    if let Ok(bundle) = store.inspect(aid) {
-                        let content_store = crate::runtime::content_store::ContentStore::new(gw_dir).ok();
-                        for entry in &bundle.entrypoints {
-                            if let Some(file) = bundle.files.iter().find(|f| f.name == *entry) {
-                                if let Some(cs) = &content_store {
-                                    if let Ok(content) = cs.read(&file.handle) {
-                                        if let Ok(text) = String::from_utf8(content) {
-                                            code_to_analyze.push_str("\n");
-                                            code_to_analyze.push_str(&text);
+                let cache_path = std::path::Path::new(gw_dir)
+                    .join("artifacts")
+                    .join(aid)
+                    .join("remote_access_analysis.json");
+                if cache_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&cache_path) {
+                        if let Ok(analysis) = serde_json::from_str::<crate::runtime::remote_access::RemoteAccessAnalysis>(&content) {
+                            Some(analysis.requires_approval)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    // Not cached — analyze artifact entrypoint files
+                    let mut artifact_code = String::new();
+                    let mut needs_analysis = false;
+                    if let Ok(store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
+                        if let Ok(bundle) = store.inspect(aid) {
+                            let content_store = crate::runtime::content_store::ContentStore::new(gw_dir).ok();
+                            for entry in &bundle.entrypoints {
+                                if let Some(file) = bundle.files.iter().find(|f| f.name == *entry) {
+                                    if let Some(cs) = &content_store {
+                                        if let Ok(content) = cs.read(&file.handle) {
+                                            if let Ok(text) = String::from_utf8(content) {
+                                                artifact_code.push_str("\n");
+                                                artifact_code.push_str(&text);
+                                                needs_analysis = true;
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                    if needs_analysis && !artifact_code.is_empty() {
+                        let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&artifact_code);
+                        // Cache the result (best effort — don't fail if write fails)
+                        let _ = std::fs::create_dir_all(cache_path.parent().unwrap());
+                        let _ = std::fs::write(&cache_path, serde_json::to_string(&analysis).unwrap_or_default());
+                        Some(analysis.requires_approval)
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // If artifact analysis says approval is needed and no approval_ref was provided, block
+        if artifact_remote_needs_approval == Some(true) && !approval_validated_for_command {
+            // Extract domains from the artifact's cached analysis for approval matching
+            let artifact_domains: Vec<String> = if let Some(gw_dir) = gateway_dir {
+                if let Some(ref aid) = artifact_id_for_approval {
+                    let cache_path = gw_dir.join("artifacts").join(aid).join("remote_access_analysis.json");
+                    if cache_path.exists() {
+                        if let Ok(content) = std::fs::read_to_string(&cache_path) {
+                            if let Ok(analysis) = serde_json::from_str::<crate::runtime::remote_access::RemoteAccessAnalysis>(&content) {
+                                analysis.detected_patterns.iter()
+                                    .filter(|p| p.category == "url_literal")
+                                    .filter_map(|p| {
+                                        let url = &p.pattern;
+                                        url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))
+                                            .and_then(|rest| rest.split('/').next())
+                                            .map(|d| d.to_string())
+                                    })
+                                    .collect()
+                            } else { vec![] }
+                        } else { vec![] }
+                    } else { vec![] }
+                } else { vec![] }
+            } else { vec![] };
+
+            // Check if this artifact's network destinations have already been approved
+            // at the root workflow level.
+            let artifact_already_approved = if let (Some(gw_store), Some(_aid)) = (&gateway_store, &artifact_id_for_approval) {
+                if artifact_domains.is_empty() {
+                    false
+                } else {
+                    let sid = session_id.unwrap_or("");
+                    let root_sid = crate::runtime::content_store::root_session_id(sid);
+                    let approved = gw_store.get_approved_approvals_for_root(root_sid).unwrap_or_default();
+                    approved.iter().any(|r| {
+                        matches!(&r.action, autonoetic_types::background::ScheduledAction::SandboxExec { .. })
+                            && artifact_domains.iter().any(|d| r.reason.as_ref().map(|s| s.contains(d)).unwrap_or(false))
+                    })
+                }
+            } else {
+                false
+            };
+
+            if artifact_already_approved {
+                approval_validated_for_command = true;
+            } else {
+            // Check for existing pending approval for this artifact
+            if let Some(cfg) = config {
+                let sid = session_id.unwrap_or("");
+                let root_sid = crate::runtime::content_store::root_session_id(sid);
+                // First check root-level pending approvals (covers cross-session reuse)
+                let existing_root = crate::scheduler::approval::pending_approval_requests_for_root(cfg, gateway_store.as_deref(), root_sid)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| matches!(r.action, autonoetic_types::background::ScheduledAction::SandboxExec { .. }))
+                    .collect::<Vec<_>>();
+                // Also check exact session-level pending approvals
+                let existing_session = crate::scheduler::approval::pending_sandbox_exec_requests_for_session(
+                    cfg,
+                    gateway_store.as_deref(),
+                    sid,
+                )
+                .unwrap_or_default();
+                let mut existing = existing_root;
+                for e in existing_session {
+                    if !existing.iter().any(|r| r.request_id == e.request_id) {
+                        existing.push(e);
+                    }
+                }
+                if !existing.is_empty() {
+                    let ids: Vec<String> = existing.iter().map(|a| a.request_id.clone()).collect();
+                    let primary = &existing[0];
+                    let summary = format!("Artifact {}: remote access detected", artifact_id_for_approval.as_deref().unwrap_or(""));
+                    let approval = build_approval_details(
+                        primary,
+                        "sandbox_exec",
+                        summary.clone(),
+                        "approval_ref",
+                        serde_json::json!({
+                            "artifact_id": artifact_id_for_approval.as_deref().unwrap_or(""),
+                            "approval_already_pending": true,
+                            "note": "A sandbox approval is already pending for this artifact. After operator approval, the approved command will execute automatically.",
+                        }),
+                    );
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "exit_code": null,
+                        "stdout": "",
+                        "stderr": format!("Remote access detected in artifact {}. Operator approval required.", artifact_id_for_approval.as_deref().unwrap_or("")),
+                        "approval_required": true,
+                        "approval_already_pending": true,
+                        "suspended": true,
+                        "request_id": primary.request_id,
+                        "pending_request_ids": ids,
+                        "message": format!("Execution suspended. Approval {} is pending for artifact. The approved command is already persisted and will be used automatically on resume.", primary.request_id),
+                        "approval": approval,
+                    }).to_string());
                 }
             }
+            // Mint new approval request for the artifact and persist it
+            if let Some(cfg) = config {
+                let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                let summary = format!(
+                    "Artifact {}: remote access detected",
+                    artifact_id_for_approval.as_deref().unwrap_or("")
+                );
+                let action = autonoetic_types::background::ScheduledAction::SandboxExec {
+                    command: effective_command.clone(),
+                    dependencies: args.dependencies.as_ref().map(|d| {
+                        autonoetic_types::background::ScheduledActionDependencies {
+                            runtime: d.runtime.clone(),
+                            packages: d.packages.clone(),
+                        }
+                    }),
+                    requires_approval: true,
+                    evidence_ref: None,
+                };
+                let approval_workflow_id = {
+                    let sid = session_id.unwrap_or("");
+                    let root = crate::runtime::content_store::root_session_id(sid);
+                    crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+                        .ok()
+                        .flatten()
+                };
+                let sid = session_id.unwrap_or("");
+                let root_session_id = crate::runtime::content_store::root_session_id(sid);
+                let reason_text = if artifact_domains.is_empty() {
+                    format!("Remote access detected in artifact {}", artifact_id_for_approval.as_deref().unwrap_or(""))
+                } else {
+                    format!(
+                        "Remote access detected in artifact {}. Domains: {}",
+                        artifact_id_for_approval.as_deref().unwrap_or(""),
+                        artifact_domains.join(", ")
+                    )
+                };
+                let request = autonoetic_types::background::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    agent_id: manifest.agent.id.clone(),
+                    session_id: sid.to_string(),
+                    root_session_id: Some(root_session_id.to_string()),
+                    action,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    status: None,
+                    decided_at: None,
+                    decided_by: None,
+                    reason: Some(reason_text),
+                    evidence_ref: None,
+                    workflow_id: approval_workflow_id.clone(),
+                    task_id: match (&approval_workflow_id, session_id) {
+                        (Some(wf_id), Some(sid)) => {
+                            crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
+                                .ok()
+                                .flatten()
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some(store) = &gateway_store {
+                    let _ = store.create_approval(&request);
+                }
+                let approval = build_approval_details(
+                    &request,
+                    "sandbox_exec",
+                    summary.clone(),
+                    "approval_ref",
+                    serde_json::json!({
+                        "artifact_id": artifact_id_for_approval.as_deref().unwrap_or(""),
+                    }),
+                );
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "exit_code": null,
+                    "stdout": "",
+                    "stderr": format!("Remote access detected in artifact {}. Operator approval required.", artifact_id_for_approval.as_deref().unwrap_or("")),
+                    "approval_required": true,
+                    "request_id": request_id,
+                    "suspended": true,
+                    "message": format!("Execution suspended pending operator approval ({}). The approved command is persisted and will be used automatically on resume.", request_id),
+                    "approval": approval,
+                }).to_string());
+            } else {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "exit_code": null,
+                    "stdout": "",
+                    "stderr": format!("Remote access detected in artifact {}. Operator approval required (no config available to persist approval).", artifact_id_for_approval.as_deref().unwrap_or("")),
+                    "approval_required": true,
+                    "suspended": true,
+                }).to_string());
+            }
+        }
         }
 
         let remote_analysis =
@@ -5788,6 +6013,29 @@ impl NativeTool for AgentInstallTool {
                         let bundle = store.inspect(&args.artifact_id).ok()?;
                         Some(bundle.digest)
                     });
+
+                    // Extract detected network hosts from artifact for the approval card.
+                    // This gives the operator visibility into which domains the agent will access.
+                    let mut detected_hosts: Vec<String> = Vec::new();
+                    if let Some(gw_dir) = gateway_dir {
+                        if let Ok(store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
+                            if let Ok(files) = store.resolve_files(&args.artifact_id) {
+                                for (_path, content) in &files {
+                                    let content_str = String::from_utf8_lossy(content);
+                                    let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&content_str);
+                                    if analysis.requires_approval {
+                                        let hosts = crate::runtime::approved_exec_cache::normalize_targets(&analysis.detected_patterns);
+                                        for h in hosts {
+                                            if !detected_hosts.contains(&h) {
+                                                detected_hosts.push(h);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    detected_hosts.sort();
                     // Resolve workflow_id from session
                     let approval_workflow_id = {
                         let sid = session_id.unwrap_or("");
@@ -5860,14 +6108,21 @@ impl NativeTool for AgentInstallTool {
                             "script_entry": args.script_entry,
                             "risk_factors": risk_factors,
                             "artifact_digest": artifact_digest,
+                            "detected_network_hosts": detected_hosts,
                         }),
                     );
+
+                    let hosts_note = if detected_hosts.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Detected network hosts: {}. Use these specific hosts in your NetworkAccess capability instead of [\"*\"].", detected_hosts.join(", "))
+                    };
 
                     return Ok(serde_json::json!({
                         "ok": false,
                         "approval_required": true,
                         "request_id": request_id,
-                        "message": format!("Install requires approval. To proceed: 1) Get the request approved by an operator, 2) Retry agent.install with the EXACT same payload PLUS add promotion_gate.install_approval_ref = '{}' to your JSON.", request_id),
+                        "message": format!("Install requires approval. To proceed: 1) Get the request approved by an operator, 2) Retry agent.install with the EXACT same payload PLUS add promotion_gate.install_approval_ref = '{}' to your JSON.{}", request_id, hosts_note),
                         "retry_instruction": format!("Add this to your promotion_gate: \"install_approval_ref\": \"{}\"", request_id),
                         "approval": approval
                     })
@@ -6063,6 +6318,31 @@ impl NativeTool for AgentInstallTool {
         );
 
         // ─────────────────────────────────────────────────────────────────
+        // Remote access analysis: extract concrete domains from URL literals
+        // in the artifact code. These will be used to auto-suggest
+        // NetworkAccess hosts instead of relying on the LLM to use ["*"].
+        // ─────────────────────────────────────────────────────────────────
+        let mut detected_hosts: Vec<String> = Vec::new();
+        for file in &resolved_files {
+            let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&file.content);
+            if analysis.requires_approval {
+                let hosts = crate::runtime::approved_exec_cache::normalize_targets(&analysis.detected_patterns);
+                for h in hosts {
+                    if !detected_hosts.contains(&h) {
+                        detected_hosts.push(h);
+                    }
+                }
+            }
+        }
+        detected_hosts.sort();
+        tracing::info!(
+            target: "agent.install",
+            host_count = detected_hosts.len(),
+            hosts = ?detected_hosts,
+            "Detected network hosts from artifact URL literals"
+        );
+
+        // ─────────────────────────────────────────────────────────────────
         // Promotion Gate validation (for evolution roles)
         // ─────────────────────────────────────────────────────────────────
         if requires_promotion_gate(&manifest.agent.id) {
@@ -6179,12 +6459,20 @@ impl NativeTool for AgentInstallTool {
 
         // Validate script mode requirements
         if matches!(execution_mode, ExecutionMode::Script) {
+            let script_entry_path = args.script_entry
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
             anyhow::ensure!(
-                args.script_entry
-                    .as_ref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false),
+                script_entry_path.is_some(),
                 "script execution mode requires a non-empty script_entry path"
+            );
+            let script_entry_path = script_entry_path.unwrap();
+            // Verify the entry script exists in the artifact
+            anyhow::ensure!(
+                resolved_files.iter().any(|f| f.path == script_entry_path),
+                "script_entry '{}' not found in artifact '{}'. The entry script must be included in the artifact files.",
+                script_entry_path, args.artifact_id
             );
         }
 
