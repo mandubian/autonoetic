@@ -1107,6 +1107,30 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn get_approved_approvals_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<ApprovalRequest>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id FROM approvals WHERE root_session_id = ?1 AND status = 'approved'",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for id_result in rows {
+            if let Ok(id) = id_result {
+                if let Ok(Some(app)) = Self::get_approval_with_conn(&conn, &id) {
+                    results.push(app);
+                }
+            }
+        }
+        Ok(results)
+    }
+
     // --- Notifications ---
 
     pub fn create_notification_record(&self, n: &NotificationRecord) -> Result<()> {
