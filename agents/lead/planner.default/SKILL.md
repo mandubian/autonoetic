@@ -229,31 +229,22 @@ The gateway uses this only to verify that the delegated promotion session actual
 
 ### Handling Approval Responses (CRITICAL)
 
-When `agent.spawn`, `sandbox.exec`, or another tool returns `approval_required: true`, a `request_id` (or equivalent approval id field) in the JSON, or text that says approval is pending:
+When `agent.spawn` returns a response with `status: "awaiting_approval"` or `approval_required: true`:
 
-1. **DO NOT** try to bypass or work around the approval
-2. **DO** copy the **exact** approval identifier from the tool/SDK JSON (e.g. `request_id`, `approval_id`) into your user-facing message. **Never** use placeholder text like `[request_id]` or guessed values — if the id is missing, say so and paste the raw tool result snippet instead of inventing one.
-3. **Synchronous spawn blocked:** The gateway blocks `agent.spawn` (without `async=true`) while approvals are pending. You **can** use `agent.spawn(..., async=true)` to queue independent tasks that don't depend on the approval outcome. Use `workflow.wait` to check when all tasks (including the approved one) complete.
-4. **DO** clearly inform the user:
+1. **The child is suspended, not failed.** The gateway will auto-resume the child after operator approval. You do NOT need to re-spawn the child.
+2. **Call `workflow.wait(task_ids=[...], timeout_secs=300)`** to block until the child completes. This is the ONLY correct way to wait for approval resolution.
+3. **DO NOT call `user.ask`** — the approval is handled by the operator via the gateway CLI, not through chat interaction.
+4. **Inform the user** about the pending approval and the exact command to approve:
 
 ```
-Agent Installation Requires Approval
+Script execution requires operator approval (network access).
+Request ID: <paste exact apr-* id from agent.spawn response>
 
-The specialized_builder has prepared the agent but needs operator approval.
-Request ID: <paste exact id from tool response>
-Status: Pending Approval
-
-To approve, the operator must run:
-  autonoetic gateway approvals approve <same exact id> --config [config_path]
-
-Once approved, the agent will be automatically installed.
+To approve: autonoetic gateway approvals approve <id> --config [config_path]
+After approval, the script will execute automatically.
 ```
 
-(Same pattern for **sandbox** approvals: list `apr-*`, operator runs `approvals approve`, then user says "continue".)
-
-5. **DO** explain what the agent or script will do while waiting
-6. **DO NOT** call other tools to bypass the waiting — the user/operator must approve for security reasons
-7. **DO NOT** retry the same operation with a fabricated `approval_ref` or id; wait for operator approval or explicit gateway resolution
+5. Then immediately call `workflow.wait` — do NOT wait for user input first. The `workflow.wait` will block (your session is suspended server-side) and resume when the child completes.
 
 ### Handling approval_resolved Messages (CRITICAL)
 
@@ -275,23 +266,6 @@ After operator approval, you may receive a message like:
 **If `install_completed: false`:**
 - Inform the user the install needs manual retry
 - Tell them to run: `autonoetic gateway approvals approve [request_id] --retry --config [config_path]`
-
-### When Informed of Pending Approval
-
-When you tell the user about a pending approval request, also tell them:
-- "After approving, return to this chat and type 'continue' or 'done'"
-- "I'll check the approval status and proceed with the workflow"
-
-This ensures the user knows to interact with the chat after approving.
-
-### When User Says "Continue" After Approval (CRITICAL)
-
-When the user types "continue" or "done" after you reported a pending approval:
-
-1. **DO NOT** restart the workflow from scratch (e.g. re-spawn architect, coder, evaluator with fresh tasks).
-2. **DO** call `workflow.state` to get the current structured state.
-3. **If `approval_resolved` message is present:** Incorporate the result and proceed to the next step (e.g. if evaluator passed, continue to specialized_builder; if it failed, report findings to user).
-4. **If you do NOT have the resolved state yet:** Remind the user to run `autonoetic gateway approvals approve <request_id>` if they haven't, and ask them to type "continue" again after approving. Do not re-spawn the same child agent with a duplicate task.
 
 ### Handling Child Agent Clarification Requests (CRITICAL)
 
