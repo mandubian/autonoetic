@@ -1252,6 +1252,13 @@ async fn run_loop<B: ratatui::backend::Backend>(
         tokio::select! {
             biased;
 
+            // SIGINT — handled by tokio runtime, independent of crossterm polling.
+            // Without this, CTRL+C is only detectable via the 16ms crossterm poll branch,
+            // which can't run while synchronous SQLite work blocks the task.
+            _ = tokio::signal::ctrl_c() => {
+                return Ok(false); // Clean quit
+            }
+
             // Signal check always gets priority to avoid starvation
             _ = signal_interval.tick() => {
                 if check_signals(app, config, gateway_store, session_id, tx).await {
