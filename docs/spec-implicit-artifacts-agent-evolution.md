@@ -988,5 +988,5 @@ planner finds output immediately
 ### 📋 Related Documentation
 
 - **Workflow Events**: `docs/workflow-orchestration.md` → "Workflow Event Types"
-- **Approval Flow**: `docs/spec-artifact-dedup-approval-improvements.md`
+- **Approval Flow**: `docs/approval-system.md`
 - **Chat CLI**: Real-time workflow event polling with approval visibility
