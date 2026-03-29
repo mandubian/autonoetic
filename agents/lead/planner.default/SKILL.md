@@ -148,6 +148,8 @@ agent.spawn("coder.default", message="Write utility module for Y", async=true)
 workflow.wait(task_ids=[...], timeout_secs=300)
 ```
 
+**CRITICAL: Always call `workflow.wait` after spawning tasks.** Without it, you won't get the results.
+
 **When to use async spawn:**
 - Tasks that can run independently (no data dependency between them)
 - Research + coding in parallel
