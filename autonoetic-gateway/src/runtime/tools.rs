@@ -4629,7 +4629,7 @@ impl NativeTool for AgentSpawnTool {
                     // The planner should call workflow.wait to get the result.
                     // Do NOT expose awaiting_approval status — the planner doesn't need to know.
                     let summary = format!(
-                        "Task queued: {} will execute after approval ({})",
+                        "Task queued: {} will execute after approval ({}). Call workflow.wait to get the result.",
                         result.agent_id, request_id
                     );
                     return Ok(serde_json::json!({
