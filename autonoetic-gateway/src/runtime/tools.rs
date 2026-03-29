@@ -4535,21 +4535,26 @@ impl NativeTool for AgentSpawnTool {
             }),
         );
 
-        if let Ok(agents_dir) = agent_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Agent directory missing parent"))
-        {
-            if let Ok(store) =
-                crate::runtime::content_store::ContentStore::new(&agents_dir.join(".gateway"))
-            {
-                // Set root session relationship so child's session-visible content is visible to parent
-                let _ = store.set_root_session(&child_delegation_path, root);
-                tracing::info!(
-                    target: "content_store",
-                    parent_session = %resolved_session_id,
-                    child_delegation = %child_delegation_path,
-                    "Set up hierarchical content namespace for child agent"
-                );
+        // Set root session relationship so child's session-visible content is visible to parent
+        // Must use the same gateway_dir as the execution engine, NOT agent_dir.parent()
+        if let Some(gw_dir) = _gateway_dir {
+            if let Ok(store) = crate::runtime::content_store::ContentStore::new(gw_dir) {
+                if let Err(e) = store.set_root_session(&child_delegation_path, root) {
+                    tracing::warn!(
+                        target: "content_store",
+                        error = %e,
+                        parent_session = %resolved_session_id,
+                        child_delegation = %child_delegation_path,
+                        "Failed to set root session for child agent"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "content_store",
+                        parent_session = %resolved_session_id,
+                        child_delegation = %child_delegation_path,
+                        "Set up hierarchical content namespace for child agent"
+                    );
+                }
             }
         }
 
