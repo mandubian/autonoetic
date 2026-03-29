@@ -533,11 +533,29 @@ fn format_workflow_event_card(
         .get("approval")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let agent_id = event
+        .payload
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| event.agent_id.as_deref())
+        .unwrap_or("");
+    let agent_suffix = if agent_id.is_empty() {
+        String::new()
+    } else {
+        format!(" → {}", agent_id)
+    };
 
     let text = match event.event_type.as_str() {
         "workflow.started" => Some(format!("📋 [{}] Workflow started", ts_short)),
-        "task.spawned" => Some(format!("🚀 [{}] Task spawned: {}", ts_short, task)),
-        "task.queued" => Some(format!("📥 [{}] Task queued: {}", ts_short, task)),
+        "task.spawned" => {
+            let target = event
+                .payload
+                .get("target_agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(agent_id);
+            Some(format!("🚀 [{}] Task spawned: {} → {}", ts_short, task, target))
+        }
+        "task.queued" => Some(format!("📥 [{}] Task queued: {}{}", ts_short, task, agent_suffix)),
         "task.awaiting_approval" => {
             // Show what kind of approval is needed
             let kind = if approval.contains("sandbox") {
@@ -577,22 +595,65 @@ fn format_workflow_event_card(
         }
         "task.approved" => Some(format!("✅ [{}] Approval granted — resuming: {}", ts_short, task)),
         "task.rejected" => Some(format!("❌ [{}] Approval rejected: {}", ts_short, task)),
-        "task.started" => Some(format!("▶ [{}] Task started: {}", ts_short, task)),
-        "task.completed" => Some(format!("✅ [{}] Task completed: {}", ts_short, task)),
-        "task.failed" => Some(format!("❌ [{}] Task failed: {}", ts_short, task)),
-        "task.cancelled" => Some(format!("🚫 [{}] Task cancelled: {}", ts_short, task)),
-        "task.paused" => Some(format!("⏸ [{}] Task paused: {}", ts_short, task)),
+        "task.approval_timeout" => {
+            let reason = event
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Approval timed out");
+            let timeout_secs = event
+                .payload
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Some(format!(
+                "⏰ [{}] Approval timed out: {} (after {}s)",
+                ts_short, reason, timeout_secs
+            ))
+        }
+        "workflow.failure_threshold_reached" => {
+            let count = event
+                .payload
+                .get("failed_task_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Some(format!(
+                "🆘 [{}] Failure threshold reached: {} tasks failed",
+                ts_short, count
+            ))
+        }
+        "workflow.escalated" => {
+            let target = event
+                .payload
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let urgency = event
+                .payload
+                .get("urgency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("medium");
+            Some(format!(
+                "🆘 [{}] Escalated to {} (urgency: {})",
+                ts_short, target, urgency
+            ))
+        }
+        "task.started" => Some(format!("▶ [{}] Task started: {}{}", ts_short, task, agent_suffix)),
+        "task.completed" => Some(format!("✅ [{}] Task completed: {}{}", ts_short, task, agent_suffix)),
+        "task.failed" => Some(format!("❌ [{}] Task failed: {}{}", ts_short, task, agent_suffix)),
+        "task.cancelled" => Some(format!("🚫 [{}] Task cancelled: {}{}", ts_short, task, agent_suffix)),
+        "task.paused" => Some(format!("⏸ [{}] Task paused: {}{}", ts_short, task, agent_suffix)),
         "workflow.join.satisfied" => Some(format!("✅ [{}] Workflow join satisfied", ts_short)),
         "workflow.checkpoint.saved" => Some(format!("💾 [{}] Workflow checkpoint saved", ts_short)),
         "task.checkpoint.saved" => {
-            Some(format!("💾 [{}] Task checkpoint saved: {}", ts_short, task))
+            Some(format!("💾 [{}] Task checkpoint saved: {}{}", ts_short, task, agent_suffix))
         }
         "task.updated" if status == "runnable" => {
-            Some(format!("🔁 [{}] Resumed after approval: {}", ts_short, task))
+            Some(format!("🔁 [{}] Resumed after approval: {}{}", ts_short, task, agent_suffix))
         }
         "task.updated" => Some(format!(
-            "🔄 [{}] Task updated: {} ({})",
-            ts_short, task, status
+            "🔄 [{}] Task updated: {}{} ({})",
+            ts_short, task, agent_suffix, status
         )),
         other => {
             // Catch-all: show unknown event types instead of silently dropping them
