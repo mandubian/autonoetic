@@ -343,6 +343,7 @@ impl LiveDigestWriter {
             "decision" => ("🧠", "Decision"),
             "observation" => ("👀", "Observation"),
             "lesson" => ("💡", "Lesson"),
+            "approval" => ("⏸", "Approval pending"),
             other => ("📝", other),
         };
         use std::fmt::Write;
@@ -354,6 +355,86 @@ impl LiveDigestWriter {
             label,
             cell(&truncate_chars(&redact_text_for_logs(content.trim()), 2000))
         );
+        self.buf_write(&buf);
+        Ok(())
+    }
+
+    pub fn record_approval_pending(
+        &mut self,
+        request_id: &str,
+        kind: &str,
+        summary: &str,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = writeln!(
+            buf,
+            "* ⏸ **Approval pending** (`{}`): {}",
+            cell(request_id),
+            cell(&truncate_chars(&redact_text_for_logs(summary), 400))
+        );
+        let _ = writeln!(
+            buf,
+            "  * Kind: `{}`, Reason: {}",
+            cell(kind),
+            cell(&truncate_chars(&redact_text_for_logs(reason), 300))
+        );
+        self.buf_write(&buf);
+        Ok(())
+    }
+
+    pub fn record_approval_resolved(
+        &mut self,
+        request_id: &str,
+        approved: bool,
+        result_summary: &str,
+    ) -> anyhow::Result<()> {
+        use std::fmt::Write;
+        let (emoji, label) = if approved {
+            ("✅", "Approved")
+        } else {
+            ("❌", "Rejected")
+        };
+        let mut buf = String::new();
+        let _ = writeln!(
+            buf,
+            "* {} **{}** (`{}`): {}",
+            emoji,
+            label,
+            cell(request_id),
+            cell(&truncate_chars(&redact_text_for_logs(result_summary), 600))
+        );
+        self.buf_write(&buf);
+        Ok(())
+    }
+
+    pub fn record_repair_attempt(
+        &mut self,
+        attempt: usize,
+        max_rounds: usize,
+        violation_summary: &str,
+    ) -> anyhow::Result<()> {
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = writeln!(
+            buf,
+            "* 🔧 **Repair attempt {}/{}**: {}",
+            attempt,
+            max_rounds,
+            cell(&truncate_chars(
+                &redact_text_for_logs(violation_summary),
+                600
+            ))
+        );
+        self.buf_write(&buf);
+        Ok(())
+    }
+
+    pub fn record_repair_passed(&mut self, attempt: usize) -> anyhow::Result<()> {
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = writeln!(buf, "* ✅ **Repair passed** on attempt {}", attempt,);
         self.buf_write(&buf);
         Ok(())
     }
@@ -464,6 +545,51 @@ pub fn append_user_ask_answer_best_effort(
         cell(interaction_id),
         cell(&truncate_chars(&redact_text_for_logs(answer_summary), 1200))
     );
+}
+
+/// Best-effort: append a repair attempt during response validation (no writer handle).
+pub fn append_repair_attempt_best_effort(
+    gateway_dir: &Path,
+    base_session_id: &str,
+    attempt: usize,
+    max_rounds: usize,
+    violation_summary: &str,
+) {
+    let path = gateway_dir
+        .join("sessions")
+        .join(base_session_id)
+        .join("digest.md");
+    if !path.exists() {
+        return;
+    }
+    let Ok(mut f) = OpenOptions::new().append(true).open(&path) else {
+        return;
+    };
+    let _ = writeln!(
+        f,
+        "* 🔧 **Repair attempt {}/{}**: {}",
+        attempt,
+        max_rounds,
+        cell(&truncate_chars(
+            &redact_text_for_logs(violation_summary),
+            600
+        ))
+    );
+}
+
+/// Best-effort: append repair success notice (no writer handle).
+pub fn append_repair_passed_best_effort(gateway_dir: &Path, base_session_id: &str, attempt: usize) {
+    let path = gateway_dir
+        .join("sessions")
+        .join(base_session_id)
+        .join("digest.md");
+    if !path.exists() {
+        return;
+    }
+    let Ok(mut f) = OpenOptions::new().append(true).open(&path) else {
+        return;
+    };
+    let _ = writeln!(f, "* ✅ **Repair passed** on attempt {}", attempt,);
 }
 
 /// Best-effort: append response validation errors when validation fails after session ends.

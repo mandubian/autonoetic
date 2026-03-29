@@ -14,6 +14,7 @@ use autonoetic_types::causal_chain::ExecutionTraceRecord;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::disclosure::DisclosureClass;
 use autonoetic_types::tool_error::{ToolError, ToolErrorType};
+use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -95,19 +96,18 @@ impl<'a> ToolCallProcessor<'a> {
         for tc in tool_calls {
             tracer.log_tool_requested(&tc.name, &tc.arguments)?;
             let started_at = Instant::now();
+            let approval_ref = extract_approval_ref_from_args(&tc.arguments);
 
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
                 Ok(res) => {
                     self.record_execution_trace(tc, &res, started_at.elapsed(), None)?;
-                    // Success - log and continue
                     self.log_memory_tool_event(tracer, &tc.name, &res);
-                    tracer.log_tool_completed(&tc.name, &res)?;
+                    tracer.log_tool_completed_with_approval(&tc.name, &res, approval_ref.as_deref())?;
                     had_any_success = true;
                     res
                 }
                 Err(e) => {
-                    // Convert to structured error
                     let tool_error: ToolError = e.into();
                     let error_json = tool_error.to_json_string();
                     self.record_execution_trace(
@@ -116,12 +116,7 @@ impl<'a> ToolCallProcessor<'a> {
                         started_at.elapsed(),
                         Some(&tool_error),
                     )?;
-
-                    // Log the failure to causal chain - this must succeed
-                    // as audit trail integrity is critical for governance
                     self.log_tool_failure(tracer, tc, &tool_error)?;
-
-                    // Fatal errors abort the session
                     if !tool_error.is_recoverable() {
                         return Err(anyhow::anyhow!(
                             "Fatal tool error in {}: {}",
@@ -129,9 +124,7 @@ impl<'a> ToolCallProcessor<'a> {
                             tool_error.message
                         ));
                     }
-
-                    // Recoverable errors are returned as structured JSON
-                    tracer.log_tool_completed(&tc.name, &error_json)?;
+                    tracer.log_tool_completed_with_approval(&tc.name, &error_json, approval_ref.as_deref())?;
                     error_json
                 }
             };
@@ -1132,4 +1125,19 @@ mod tests {
         assert_eq!(tool_error.error_type, ToolErrorType::Execution);
         assert!(tool_error.is_recoverable());
     }
+}
+
+fn extract_approval_ref_from_args(arguments_json: &str) -> Option<String> {
+    let Ok(v) = serde_json::from_str::<Value>(arguments_json) else {
+        return None;
+    };
+    v.get("approval_ref")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            v.get("promotion_gate")
+                .and_then(|g| g.get("install_approval_ref"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
 }
