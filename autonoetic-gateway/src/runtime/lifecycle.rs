@@ -61,6 +61,14 @@ pub enum TurnOutcome {
         /// `workflow_id` / `task_id` and persist it with `save_continuation`.
         continuation: Box<crate::runtime::continuation::TurnContinuation>,
     },
+
+    /// The turn was suspended because a user interaction is pending.
+    /// The checkpoint has already been saved by `execute_with_history`;
+    /// the caller should record this outcome so the session is visible
+    /// as blocked on user input (not "completed empty").
+    SuspendedUserInput {
+        interaction_id: String,
+    },
 }
 
 /// Build the system prompt given agent instructions and (optionally) raw agent
@@ -407,6 +415,12 @@ impl AgentExecutor {
                 // Suspension is expected in scheduler context; continuation already saved.
                 // In standalone execute_loop context, just end the session.
                 let _ = self.close_session("execute_loop_suspended");
+                Ok(())
+            }
+            Ok(TurnOutcome::SuspendedUserInput { .. }) => {
+                // User interaction checkpoint already saved. End the session;
+                // resume happens via the interaction answer path.
+                let _ = self.close_session("execute_loop_suspended_user_input");
                 Ok(())
             }
             Err(e) => {
@@ -1019,11 +1033,15 @@ impl AgentExecutor {
                             "Turn suspended at user interaction boundary"
                         );
 
-                        // Return Completed (not Suspended) — user interaction suspension
-                        // doesn't use the TurnContinuation path. The resume happens via
-                        // checkpoint loading + answer injection.
+                        // Return SuspendedUserInput — the checkpoint has been saved
+                        // with YieldReason::UserInputRequired. The resume happens via
+                        // checkpoint loading + answer injection. Unlike Completed(None),
+                        // this outcome signals to the caller that the session is blocked
+                        // on user input (not "done").
                         let _ = tracer.end_digest_turn();
-                        return Ok(TurnOutcome::Completed(None));
+                        return Ok(TurnOutcome::SuspendedUserInput {
+                            interaction_id: interaction_id.clone(),
+                        });
                     }
 
                     // No approval or interaction required — commit assistant message + tool results to history.
