@@ -587,6 +587,15 @@ impl SessionTracer {
     }
 
     pub fn log_tool_completed(&mut self, tool_name: &str, result: &str) -> anyhow::Result<()> {
+        self.log_tool_completed_with_approval(tool_name, result, None)
+    }
+
+    pub fn log_tool_completed_with_approval(
+        &mut self,
+        tool_name: &str,
+        result: &str,
+        approval_ref: Option<&str>,
+    ) -> anyhow::Result<()> {
         let mut completed_payload = serde_json::json!({
             "tool_name": tool_name,
             "result_len": result.len(),
@@ -639,7 +648,34 @@ impl SessionTracer {
                     .and_then(|v| v.get("approval_required").and_then(|x| x.as_bool()))
                     == Some(true);
                 let r = if is_approval_suspension {
-                    guard.record_annotation("approval", &formatted)
+                    let request_id = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("request_id").and_then(|x| x.as_str()))
+                        .unwrap_or("unknown");
+                    let kind = parsed
+                        .as_ref()
+                        .and_then(|v| {
+                            v.get("approval")
+                                .and_then(|a| a.get("kind").and_then(|k| k.as_str()))
+                        })
+                        .unwrap_or("unknown");
+                    let summary = parsed
+                        .as_ref()
+                        .and_then(|v| {
+                            v.get("approval")
+                                .and_then(|a| a.get("summary").and_then(|s| s.as_str()))
+                        })
+                        .unwrap_or("Approval required");
+                    let reason = parsed
+                        .as_ref()
+                        .and_then(|v| {
+                            v.get("approval")
+                                .and_then(|a| a.get("reason").and_then(|r| r.as_str()))
+                        })
+                        .unwrap_or("Operator approval required");
+                    guard.record_approval_pending(request_id, kind, summary, reason)
+                } else if let Some(apr_ref) = approval_ref {
+                    guard.record_approval_resolved(apr_ref, true, &formatted)
                 } else if ok {
                     guard.record_result(&formatted)
                 } else {
