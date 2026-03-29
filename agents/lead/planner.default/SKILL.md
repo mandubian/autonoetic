@@ -227,24 +227,13 @@ For promotion-gate delegations, extend this metadata with:
 
 The gateway uses this only to verify that the delegated promotion session actually wrote the required `promotion.record` entry.
 
-### Handling Approval Responses (CRITICAL)
+### Handling Approval Responses
 
-When `agent.spawn` returns a response with `status: "awaiting_approval"` or `approval_required: true`:
+When `agent.spawn` returns `status: "queued"` with a message about pending approval:
 
-1. **The child is suspended, not failed.** The gateway will auto-resume the child after operator approval. You do NOT need to re-spawn the child.
-2. **Call `workflow.wait(task_ids=[...], timeout_secs=300)`** to block until the child completes. This is the ONLY correct way to wait for approval resolution.
-3. **DO NOT call `user.ask`** — the approval is handled by the operator via the gateway CLI, not through chat interaction.
-4. **Inform the user** about the pending approval and the exact command to approve:
-
-```
-Script execution requires operator approval (network access).
-Request ID: <paste exact apr-* id from agent.spawn response>
-
-To approve: autonoetic gateway approvals approve <id> --config [config_path]
-After approval, the script will execute automatically.
-```
-
-5. Then immediately call `workflow.wait` — do NOT wait for user input first. The `workflow.wait` will block (your session is suspended server-side) and resume when the child completes.
+- The child task is queued and will execute automatically after operator approval.
+- **Call `workflow.wait(task_ids=[...], timeout_secs=300)`** to block until the child completes.
+- You do NOT need to call `user.ask` or take any other action. The gateway handles approval transparently.
 
 ### Handling approval_resolved Messages (CRITICAL)
 
