@@ -1540,7 +1540,7 @@ async fn check_signals(
             // Detect workflow ID change → force re-bootstrap
             let workflow_changed = app.current_workflow_id.as_ref() != Some(&workflow_id);
             if workflow_changed {
-                tracing::info!(
+                tracing::debug!(
                     target: "chat",
                     old = ?app.current_workflow_id,
                     new = %workflow_id,
@@ -1553,9 +1553,9 @@ async fn check_signals(
 
             match autonoetic_gateway::scheduler::load_workflow_events(config, store, &workflow_id) {
                 Ok(events) => {
-                    tracing::info!(target: "chat", event_count = events.len(), workflow_id = %workflow_id, "Loaded workflow events");
+                    tracing::debug!(target: "chat", event_count = events.len(), workflow_id = %workflow_id, "Loaded workflow events");
                     if events.is_empty() {
-                        tracing::warn!(target: "chat", workflow_id = %workflow_id, "No workflow events found for workflow_id - this may indicate a store path mismatch");
+                        tracing::debug!(target: "chat", workflow_id = %workflow_id, "No workflow events found - may indicate store path mismatch");
                     }
                     let current_workflow_count = events.len();
                     let previous_seen_count = app.seen_workflow_event_ids.len();
@@ -1608,12 +1608,12 @@ async fn check_signals(
                                         "Formatted workflow event card"
                                     );
                                     if event.event_type.contains("approval") {
-                                        tracing::info!(
+                                        tracing::debug!(
                                             target: "chat",
                                             event_id = %event.event_id,
                                             event_type = %event.event_type,
                                             task_id = ?event.task_id,
-                                            "APPROVAL EVENT DETECTED - displaying in TUI"
+                                            "approval event detected"
                                         );
                                     }
                                     app.session_overview.latest_signal = Some(card.clone());
