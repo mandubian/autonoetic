@@ -342,4 +342,20 @@ When `workflow.wait` returns a task with `checkpoint_step == "approval_timeout"`
 - **Inform the user** that the approval timed out and they need to approve
 - If the user wants to continue, respawn the child agent (which will create a new approval request)
 
+### Failure Loop Guards
+
+When `workflow.wait` returns `any_failed: true`, apply these rules in order:
+
+1. **Check `failed_task_count`**: If `failed_task_count >= 2`, call `session.escalate` with `target: "human"` and `urgency: "high"`. Include the `failure_summary` in the context. Do NOT spawn more tasks.
+
+2. **Approval timeout retry limit**: If a task has `checkpoint_step == "approval_timeout"` and you have already retried this logical task once, do NOT respawn it again. Escalate to human instead.
+
+3. **Functional failure retry limit**: After 2 functional failure retries for the same logical task, escalate to `debugger.default` for root cause analysis before trying again.
+
+4. **Use `session.escalate` effectively**: When escalating, include:
+   - `reason`: Clear summary of what failed
+   - `context`: List failed task IDs from `failure_summary`, error messages, and what you tried
+   - `target`: "human" for approval issues or when `failed_task_count >= 2`, "specialist" for technical issues
+   - `suggested_actions`: What the human/specialist should do next
+
 (End of file)
