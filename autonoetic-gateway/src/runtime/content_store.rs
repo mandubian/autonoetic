@@ -327,11 +327,20 @@ impl ContentStore {
             return Ok(handle);
         }
 
-        // 2. Try the root session (for session-visible content)
+        // 2. Try the root session (for root-level content)
         let manifest = self.load_manifest(session_id)?;
         if let Some(root_id) = manifest.root_session_id {
             if root_id != session_id {
                 if let Ok(handle) = self.resolve_name(&root_id, name) {
+                    return Ok(handle);
+                }
+
+                // 2b. Try sibling sessions under the same root
+                // Content written by sibling agents (e.g., architect) should be
+                // visible to other agents in the same workflow by name.
+                if let Ok(handle) =
+                    self.resolve_name_in_sibling_sessions(&root_id, name, session_id)
+                {
                     return Ok(handle);
                 }
             }
@@ -345,9 +354,45 @@ impl ContentStore {
         }
 
         Err(anyhow::anyhow!(
-            "Content name '{}' not found in session '{}', root session, or global",
+            "Content name '{}' not found in session '{}', root session, or siblings",
             name,
             session_id
+        ))
+    }
+
+    /// Search for a content name across sibling sessions under the same root.
+    fn resolve_name_in_sibling_sessions(
+        &self,
+        root_id: &str,
+        name: &str,
+        caller_id: &str,
+    ) -> anyhow::Result<ContentHandle> {
+        let root_dir = self.sessions_dir.join(root_id);
+        if !root_dir.is_dir() {
+            return Err(anyhow::anyhow!("no sibling sessions"));
+        }
+
+        // Scan subdirectories of the root session directory
+        if let Ok(entries) = std::fs::read_dir(&root_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let child_id = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if child_id.is_empty() || child_id == root_id || child_id == caller_id {
+                    continue;
+                }
+                // Check if this sibling has the named content
+                if let Ok(handle) = self.resolve_name(child_id, name) {
+                    return Ok(handle);
+                }
+            }
+        }
+        Err(anyhow::anyhow!(
+            "name '{}' not found in any sibling session under '{}'",
+            name,
+            root_id
         ))
     }
 
