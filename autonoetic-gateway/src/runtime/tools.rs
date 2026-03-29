@@ -2917,7 +2917,6 @@ impl NativeTool for ArtifactInspectTool {
             "digest": bundle.digest,
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
-                "handle": f.handle,
                 "alias": f.alias,
             })).collect::<Vec<_>>(),
             "layers": bundle.layers.iter().map(|l| serde_json::json!({
@@ -4427,15 +4426,15 @@ impl NativeTool for SessionEscalateTool {
 
     fn execute(
         &self,
-        _manifest: &AgentManifest,
+        manifest: &AgentManifest,
         _policy: &PolicyEngine,
-        _agent_dir: &Path,
+        agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
@@ -4461,10 +4460,25 @@ impl NativeTool for SessionEscalateTool {
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        let response = match args.target.as_str() {
+        // Resolve workflow_id for event emission
+        let workflow_id = session_id.map(|sid| {
+            let root = crate::runtime::content_store::root_session_id(sid);
+            let agents_dir = agent_dir.parent().unwrap_or(agent_dir);
+            let fallback_config = GatewayConfig {
+                agents_dir: agents_dir.to_path_buf(),
+                ..GatewayConfig::default()
+            };
+            let gw_config = config.unwrap_or(&fallback_config);
+            crate::scheduler::resolve_workflow_id_for_root_session(gw_config, &root)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "unknown".to_string())
+        }).unwrap_or_else(|| "unknown".to_string());
+
+        let suggested_actions = args.suggested_actions.clone().unwrap_or_default();
+
+        let mut response = match args.target.as_str() {
             "reasoning_llm" => {
-                // For now, provide a structured response
-                // In production, this would call a reasoning LLM
                 serde_json::json!({
                     "escalation_type": "reasoning_llm",
                     "analysis": format!(
@@ -4472,11 +4486,10 @@ impl NativeTool for SessionEscalateTool {
                         args.reason, args.context
                     ),
                     "confidence": "medium",
-                    "next_steps": args.suggested_actions.unwrap_or_default()
+                    "next_steps": suggested_actions.clone()
                 })
             }
             "specialist" => {
-                // For specialist escalation, return guidance on how to proceed
                 serde_json::json!({
                     "escalation_type": "specialist",
                     "message": "To escalate to a specialist agent, use agent.spawn() with the appropriate specialist (e.g., 'researcher.default', 'architect.default', 'debugger.default')",
@@ -4492,14 +4505,13 @@ impl NativeTool for SessionEscalateTool {
                 })
             }
             "human" => {
-                // For human escalation, return a structured request
                 serde_json::json!({
                     "escalation_type": "human",
                     "message": "This escalation has been logged. A human operator will review your request.",
                     "urgency": args.urgency,
                     "reason": args.reason,
                     "context": args.context,
-                    "suggested_actions": args.suggested_actions.unwrap_or_default(),
+                    "suggested_actions": suggested_actions.clone(),
                     "note": "You should EndTurn after escalating to human to allow them to review and respond."
                 })
             }
@@ -4510,6 +4522,32 @@ impl NativeTool for SessionEscalateTool {
                 })
             }
         };
+
+        // Emit workflow.escalated event for visibility in chat TUI and digest
+        let event = autonoetic_types::workflow::WorkflowEventRecord {
+            event_id: format!("esc-{}", uuid::Uuid::new_v4()),
+            workflow_id: workflow_id.clone(),
+            task_id: None,
+            event_type: "workflow.escalated".to_string(),
+            agent_id: Some(manifest.agent.id.clone()),
+            payload: serde_json::json!({
+                "target": args.target,
+                "urgency": args.urgency,
+                "reason": args.reason,
+                "context": args.context,
+                "suggested_actions": suggested_actions,
+            }),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let _ = crate::scheduler::workflow_store::append_workflow_event(
+            config.unwrap_or(&GatewayConfig::default()),
+            gateway_store.as_deref(),
+            &event,
+        );
+
+        // Add escalation metadata to response
+        response["escalation_id"] = serde_json::json!(event.event_id);
+        response["workflow_id"] = serde_json::json!(workflow_id);
 
         serde_json::to_string(&response).map_err(Into::into)
     }
@@ -5101,11 +5139,13 @@ fn check_task_statuses(
     task_ids: &[String],
     gateway_dir: Option<&Path>,
     session_id: Option<&str>,
-) -> (Vec<serde_json::Value>, bool, bool, bool) {
+) -> (Vec<serde_json::Value>, bool, bool, bool, usize, Vec<serde_json::Value>) {
     let mut tasks_status = Vec::new();
     let mut all_done = true;
     let mut any_failed = false;
     let mut any_not_found = false;
+    let mut failed_task_count = 0;
+    let mut failure_summary: Vec<serde_json::Value> = Vec::new();
 
     for task_id in task_ids {
         let task = crate::scheduler::load_task_run(config, store, workflow_id, task_id)
@@ -5125,6 +5165,23 @@ fn check_task_statuses(
                 }
                 if t.status == autonoetic_types::workflow::TaskRunStatus::Failed {
                     any_failed = true;
+                    failed_task_count += 1;
+                    let mut fentry = serde_json::json!({
+                        "task_id": t.task_id,
+                        "agent_id": t.agent_id,
+                        "result_summary": t.result_summary,
+                    });
+                    if let Ok(Some(cp)) =
+                        crate::scheduler::load_task_checkpoint(config, store, workflow_id, &t.task_id)
+                    {
+                        fentry["checkpoint_step"] = serde_json::Value::String(cp.step);
+                        if cp.state != serde_json::Value::Null {
+                            fentry["checkpoint_state"] = cp.state;
+                        }
+                    }
+                    if failure_summary.len() < 5 {
+                        failure_summary.push(fentry);
+                    }
                 }
                 let mut entry = serde_json::json!({
                     "task_id": t.task_id,
@@ -5188,7 +5245,7 @@ fn check_task_statuses(
             }
         }
     }
-    (tasks_status, all_done, any_failed, any_not_found)
+    (tasks_status, all_done, any_failed, any_not_found, failed_task_count, failure_summary)
 }
 
 impl NativeTool for WorkflowWaitTool {
@@ -5206,7 +5263,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with a stable implicit artifact_id — use content.read with that ID to consume the child's result. This is the canonical parent-child output handoff mechanism for ordinary agents. With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires.".to_string(),
+            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with a stable implicit artifact_id (e.g., 'impl_task-abc123') — use content.read with that ID to consume the child's result. This is the canonical parent-child output handoff mechanism for ordinary agents. With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -5292,7 +5349,7 @@ impl NativeTool for WorkflowWaitTool {
 
         // Non-blocking mode: check once and return
         if timeout_secs == 0 {
-            let (tasks_status, all_done, any_failed, any_not_found) = check_task_statuses(
+            let (tasks_status, all_done, any_failed, any_not_found, failed_task_count, failure_summary) = check_task_statuses(
                 gw_config,
                 gateway_store.as_deref(),
                 &workflow_id,
@@ -5307,6 +5364,8 @@ impl NativeTool for WorkflowWaitTool {
                 "join_satisfied": all_done,
                 "any_failed": any_failed,
                 "any_not_found": any_not_found,
+                "failed_task_count": failed_task_count,
+                "failure_summary": failure_summary,
                 "waited_secs": 0,
                 "message": if all_done {
                     if any_failed {
@@ -5328,7 +5387,7 @@ impl NativeTool for WorkflowWaitTool {
         let wf_id = workflow_id.clone();
         let gw_config_arc = std::sync::Arc::new(gw_config.clone());
 
-        let (tasks_status, all_done, any_failed, any_not_found, waited_secs) =
+        let (tasks_status, all_done, any_failed, any_not_found, waited_secs, failed_task_count, failure_summary) =
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
@@ -5368,6 +5427,8 @@ impl NativeTool for WorkflowWaitTool {
             "join_satisfied": all_done,
             "any_failed": any_failed,
             "any_not_found": any_not_found,
+            "failed_task_count": failed_task_count,
+            "failure_summary": failure_summary,
             "waited_secs": waited_secs,
             "message": if all_done {
                 if any_failed {
@@ -5394,12 +5455,12 @@ async fn poll_until_join(
     poll_interval_secs: u64,
     gateway_dir: Option<&Path>,
     session_id: Option<&str>,
-) -> (Vec<serde_json::Value>, bool, bool, bool, u64) {
+) -> (Vec<serde_json::Value>, bool, bool, bool, u64, usize, Vec<serde_json::Value>) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut waited_secs = 0u64;
 
     loop {
-        let (tasks_status, all_done, any_failed, any_not_found) = check_task_statuses(
+        let (tasks_status, all_done, any_failed, any_not_found, failed_task_count, failure_summary) = check_task_statuses(
             config,
             store,
             workflow_id,
@@ -5408,15 +5469,15 @@ async fn poll_until_join(
             session_id,
         );
         if all_done {
-            return (tasks_status, true, any_failed, any_not_found, waited_secs);
+            return (tasks_status, true, any_failed, any_not_found, waited_secs, failed_task_count, failure_summary);
         }
         if any_not_found {
-            return (tasks_status, false, any_failed, true, waited_secs);
+            return (tasks_status, false, any_failed, true, waited_secs, failed_task_count, failure_summary);
         }
 
         let now = std::time::Instant::now();
         if now >= deadline {
-            return (tasks_status, false, any_failed, any_not_found, waited_secs);
+            return (tasks_status, false, any_failed, any_not_found, waited_secs, failed_task_count, failure_summary);
         }
 
         let remaining = (deadline - now).as_secs().min(poll_interval_secs).max(1);
@@ -5540,6 +5601,8 @@ impl NativeTool for WorkflowStateTool {
         let mut pending_approvals = Vec::new();
         let mut active_tasks = Vec::new();
         let mut latest_artifact_by_role: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut failed_task_count = 0usize;
+        let mut failure_summary: Vec<serde_json::Value> = Vec::new();
 
         for task in &tasks {
             let implicit_artifact_id = format!("impl_{}", task.task_id);
@@ -5582,6 +5645,29 @@ impl NativeTool for WorkflowStateTool {
                 | autonoetic_types::workflow::TaskRunStatus::Pending => {
                     active_tasks.push(entry);
                 }
+                autonoetic_types::workflow::TaskRunStatus::Failed
+                | autonoetic_types::workflow::TaskRunStatus::Cancelled
+                | autonoetic_types::workflow::TaskRunStatus::Aborted => {
+                    failed_task_count += 1;
+                    let mut fentry = entry.clone();
+                    if let Ok(Some(cp)) =
+                        crate::scheduler::load_task_checkpoint(gw_config, gateway_store.as_deref(), &workflow_id, &task.task_id)
+                    {
+                        fentry.as_object_mut().unwrap().insert(
+                            "checkpoint_step".to_string(),
+                            serde_json::Value::String(cp.step),
+                        );
+                        if cp.state != serde_json::Value::Null {
+                            fentry.as_object_mut().unwrap().insert(
+                                "checkpoint_state".to_string(),
+                                cp.state,
+                            );
+                        }
+                    }
+                    if failure_summary.len() < 5 {
+                        failure_summary.push(fentry);
+                    }
+                }
                 _ => {}
             }
         }
@@ -5618,6 +5704,8 @@ impl NativeTool for WorkflowStateTool {
             "active_tasks": active_tasks,
             "latest_artifact_by_role": latest_artifact_by_role,
             "reuse_guards": reuse_guards,
+            "failed_task_count": failed_task_count,
+            "failure_summary": failure_summary,
             "resume_hint": if !pending_approvals.is_empty() {
                 "approval_pending — do not spawn new tasks, wait for approval"
             } else if !active_tasks.is_empty() {
