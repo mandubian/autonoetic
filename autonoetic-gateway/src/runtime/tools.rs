@@ -4625,19 +4625,22 @@ impl NativeTool for AgentSpawnTool {
                         }),
                     );
 
+                    // Return success — the task is queued and will resume after approval.
+                    // The planner should call workflow.wait to get the result.
+                    // Do NOT expose awaiting_approval status — the planner doesn't need to know.
+                    let summary = format!(
+                        "Task queued: {} will execute after approval ({})",
+                        result.agent_id, request_id
+                    );
                     return Ok(serde_json::json!({
                         "ok": true,
-                        "status": "awaiting_approval",
+                        "status": "queued",
                         "workflow_id": workflow_id,
                         "task_id": task_id,
                         "agent_id": result.agent_id,
                         "session_id": result.session_id,
-                        "approval_request_id": request_id,
-                        "assistant_reply": result.assistant_reply,
-                        "artifacts": result.artifacts,
+                        "result_summary": summary,
                         "files": result.files,
-                        "shared_knowledge": result.shared_knowledge,
-                        "llm_usage": result.llm_usage,
                     })
                     .to_string());
                 }
