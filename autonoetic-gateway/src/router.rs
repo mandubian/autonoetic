@@ -665,6 +665,17 @@ impl JsonRpcRouter {
         ingest_event_type: Option<&str>,
         metadata: Option<&serde_json::Value>,
     ) -> anyhow::Result<SpawnResult> {
+        // Extract workflow_id and task_id from metadata when this is an approval
+        // signal delivery. This enables turn continuation resume after approval.
+        let (workflow_id, task_id) = metadata
+            .and_then(|m| {
+                let approval_id = m.get("approval_request_id")?.as_str()?;
+                let store = self.execution.gateway_store()?;
+                let approval = store.get_approval(approval_id).ok()??;
+                Some((approval.workflow_id, approval.task_id))
+            })
+            .unwrap_or((None, None));
+
         self.execution
             .spawn_agent_once(
                 agent_id,
@@ -674,8 +685,8 @@ impl JsonRpcRouter {
                 is_message,
                 ingest_event_type,
                 metadata,
-                None,
-                None,
+                workflow_id.as_deref(),
+                task_id.as_deref(),
             )
             .await
     }
