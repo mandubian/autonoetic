@@ -761,8 +761,34 @@ impl NativeTool for SandboxExecTool {
         // Static analysis for remote access detection
         // Analyzes both the command AND the script content (if running a script file)
         // For /tmp/ paths, reads from content store (session content mounting)
-        let code_to_analyze =
+        let mut code_to_analyze =
             extract_code_for_analysis(&effective_command, agent_dir, gateway_dir, session_id);
+
+        // When artifact_id is provided, also analyze the artifact's entrypoint files
+        // for remote access patterns. Without this, artifact-executed code that makes
+        // network calls would fail silently (DNS error) without triggering approval.
+        if let Some(ref aid) = args.artifact_id {
+            if let Some(gw_dir) = &gateway_dir {
+                if let Ok(store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
+                    if let Ok(bundle) = store.inspect(aid) {
+                        let content_store = crate::runtime::content_store::ContentStore::new(gw_dir).ok();
+                        for entry in &bundle.entrypoints {
+                            if let Some(file) = bundle.files.iter().find(|f| f.name == *entry) {
+                                if let Some(cs) = &content_store {
+                                    if let Ok(content) = cs.read(&file.handle) {
+                                        if let Ok(text) = String::from_utf8(content) {
+                                            code_to_analyze.push_str("\n");
+                                            code_to_analyze.push_str(&text);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let remote_analysis =
             crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&code_to_analyze);
         // Always log so operators can see why a run proceeds vs blocks (static analysis only;
