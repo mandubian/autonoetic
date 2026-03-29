@@ -1,0 +1,78 @@
+# Autonoetic Documentation Index
+
+This index links to all documentation under `docs/` and marks what is stable reference material versus design/draft content.
+
+## Core Architecture
+
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) - Full system architecture and runtime model.
+- [`architecture-summary.md`](./architecture-summary.md) - Short architecture overview.
+- [`gateway-architecture-principles.md`](./gateway-architecture-principles.md) - Gateway design principles and constraints.
+- [`MODULES.md`](./MODULES.md) - Module-level map of the codebase.
+- [`AGENTS.md`](./AGENTS.md) - Agent model, SKILL format, lifecycle, and capabilities.
+- [`separation-of-powers.md`](./separation-of-powers.md) - Authority boundary between agents and gateway.
+- [`agent-features.md`](./agent-features.md) - Agent capability overview and platform features.
+- [`agent_routing_and_roles.md`](./agent_routing_and_roles.md) - Routing rules and role definitions.
+- [`agent-adapter-specialist.md`](./agent-adapter-specialist.md) - Adapter specialist behavior and contract.
+
+## Workflow and Interaction Semantics
+
+- [`workflow-orchestration.md`](./workflow-orchestration.md) - Durable workflow/task lifecycle and join semantics.
+- [`approval-system.md`](./approval-system.md) - Approval flow and interaction mechanism semantics.
+- [`approval-notification-delivery.md`](./approval-notification-delivery.md) - Delivery path for workflow vs non-workflow approvals.
+- [`architecture-interaction-mechanisms.md`](./architecture-interaction-mechanisms.md) - Approval vs `user.ask` vs `clarification_needed`.
+- [`agent-clarification-protocol.md`](./agent-clarification-protocol.md) - Clarification signal format and parent/child handling.
+- [`quickstart-planner-specialist-chat.md`](./quickstart-planner-specialist-chat.md) - End-to-end planner/specialist chat walkthrough.
+
+## Runtime, Storage, and Budgets
+
+- [`content-store.md`](./content-store.md) - Content addressing and visibility model.
+- [`agent-learning.md`](./agent-learning.md) - Learning and memory retrieval patterns.
+- [`session-budget.md`](./session-budget.md) - Session budget controls and behavior.
+- [`budget-management.md`](./budget-management.md) - Broader budget policies and controls.
+- [`approved-resources-caching.md`](./approved-resources-caching.md) - Caching strategy for approved resources.
+- [`response-validation-gate.md`](./response-validation-gate.md) - Response contract validation and repair loop.
+
+## Security, Analysis, and Governance
+
+- [`remote-access-approval.md`](./remote-access-approval.md) - Remote access detection and approval gating.
+- [`code-analysis.md`](./code-analysis.md) - Static analysis model and providers.
+- [`schema-enforcement-hook.md`](./schema-enforcement-hook.md) - Schema enforcement behavior for structured payloads.
+- [`agent-capabilities.md`](./agent-capabilities.md) - Capability catalog and policy implications.
+- [`iteration-repair-validation-runbook.md`](./iteration-repair-validation-runbook.md) - Operational runbook for repair/validation loops.
+
+## CLI and External Interfaces
+
+- [`CLI.md`](./CLI.md) - Main CLI reference.
+- [`cli-reference.md`](./cli-reference.md) - Command reference and examples.
+- [`remote-agents-http-api.md`](./remote-agents-http-api.md) - HTTP API for remote agents and transports.
+
+## Design Notes and Draft Specs
+
+- [`plan-build-layers-dependency-resolution.md`](./plan-build-layers-dependency-resolution.md) - Build-layer dependency plan.
+- [`spec-build-layers-dependency-resolution.md`](./spec-build-layers-dependency-resolution.md) - Build-layer dependency spec.
+- [`plan-capability-driven-sandbox-isolation.md`](./plan-capability-driven-sandbox-isolation.md) - Capability-driven sandbox plan.
+- [`spec-capability-driven-sandbox-isolation.md`](./spec-capability-driven-sandbox-isolation.md) - Capability-driven sandbox spec.
+- [`spec-implicit-artifacts-agent-evolution.md`](./spec-implicit-artifacts-agent-evolution.md) - Implicit artifact and evolution design.
+- [`tool-skill-repository-design.md`](./tool-skill-repository-design.md) - Tool/skill repository design.
+- [`comparison-hermes-agent.md`](./comparison-hermes-agent.md) - Comparative notes against Hermes-style agents.
+
+## Design Subdirectory
+
+- [`design/architecture_modules.md`](./design/architecture_modules.md) - Architecture decomposition by module.
+- [`design/concepts.md`](./design/concepts.md) - Core conceptual model and terminology.
+- [`design/data_models.md`](./design/data_models.md) - Data model design details.
+- [`design/protocols.md`](./design/protocols.md) - Protocol contracts and interactions.
+- [`design/cli_interface.md`](./design/cli_interface.md) - CLI interface design.
+- [`design/sandbox_sdk.md`](./design/sandbox_sdk.md) - Sandbox SDK design notes.
+
+## Archived Documents
+
+These are preserved for history and should not be treated as current source-of-truth:
+
+- [`archived/agent-install-approval-retry.md`](./archived/agent-install-approval-retry.md) - Archived install approval/retry model.
+- [`archived/spec-artifact-dedup-approval-improvements.md`](./archived/spec-artifact-dedup-approval-improvements.md) - Archived mixed draft spec.
+- [`archived/plan_workflow_update.md`](./archived/plan_workflow_update.md) - Archived workflow update plan.
+- [`archived/plan_signal.md`](./archived/plan_signal.md) - Archived signal delivery plan.
+- [`archived/plan_approval_response_details.md`](./archived/plan_approval_response_details.md) - Archived approval response details.
+- [`archived/plan_adapt.md`](./archived/plan_adapt.md) - Archived adaptation planning notes.
+- [`archived/promotion-strategy.md`](./archived/promotion-strategy.md) - Archived promotion strategy.

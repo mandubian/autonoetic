@@ -229,6 +229,13 @@ The workflow system emits structured events for all state transitions. These eve
 | `task.updated` | Generic task status update (catch-all) | `{ status: ... }` |
 | `task.awaiting_approval` | Task requires approval before proceeding | `{ status: "AwaitingApproval" }` |
 
+### Escalation Events (New)
+
+| Event Type | Description | Payload |
+|-----------|-------------|---------|
+| `workflow.escalated` | Agent requested help via `session.escalate` | `{ target: "human\|specialist\|reasoning_llm", urgency, reason, context }` |
+| `workflow.failure_threshold_reached` | Multiple tasks failed — loop guard triggered | `{ failed_task_count }` |
+
 ### Approval Events (New)
 
 | Event Type | Description | Payload |
@@ -313,4 +320,41 @@ Important: Every significant workflow transition emits a causal chain entry (`wo
 - `autonoetic-gateway/src/scheduler/workflow_store.rs` — Durable store, task/workflow updates, join conditions
 - `autonoetic-types/src/workflow.rs` — Core types (`WorkflowRun`, `TaskRun`, `QueuedTaskRun`, etc.)
 - `autonoetic-gateway/src/scheduler/workflow_causal.rs` — Causal chain mirroring
+
+## Loop Guards
+
+The system has two layers of protection against runaway execution loops:
+
+### Hard Gateway Guard
+
+**`max_session_turns`** (default: 12) in `GatewayConfig` acts as a circuit breaker. When an agent session reaches this turn count, the gateway:
+1. Saves a checkpoint with `YieldReason::MaxTurnsReached`
+2. Returns `TurnOutcome::Completed(None)` to suspend the session
+3. Allows the session to be inspected and manually resumed
+
+This catches runaway loops from any cause (LLM confusion, tool errors, etc.).
+
+### Soft LLM Guard (Planner)
+
+The planner's SKILL.md includes failure loop guard rules that trigger **before** the hard limit:
+
+1. **`failed_task_count >= 2`**: Calls `session.escalate(target="human", urgency="high")` instead of spawning more tasks
+2. **Approval timeout retry limit**: After 1 timeout on the same logical task, escalates to human instead of respawning
+3. **Functional failure retry limit**: After 2 retries, escalates to `debugger.default` for root cause analysis
+
+### Workflow State Fields
+
+`workflow.wait` and `workflow.state` expose failure data for the planner:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `failed_task_count` | integer | Number of tasks with Failed/Cancelled/Aborted status |
+| `failure_summary` | array | Up to 5 most recent failed task entries with `checkpoint_step` and `checkpoint_state` |
+
+### Escalation Persistence
+
+When `session.escalate` is called, the gateway:
+1. Emits a `workflow.escalated` event (visible in chat CLI with `🆘` icon)
+2. Includes `escalation_id` and `workflow_id` in the response
+3. Persists the escalation in the workflow events table for audit
 - `autonoetic-gateway/src/runtime/content_store.rs` — Content addressing, visibility, alias/handle resolution
