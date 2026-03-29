@@ -263,6 +263,11 @@ pub struct GatewayConfig {
     /// Overridable by AUTONOETIC_BWRAP_SHARE_NET and AUTONOETIC_BWRAP_DEV_MODE env vars.
     #[serde(default)]
     pub sandbox: SandboxConfig,
+
+    /// Maximum number of turns allowed per agent session before forced suspension.
+    /// Acts as a circuit breaker for runaway loops. Default: 12.
+    #[serde(default = "default_max_session_turns")]
+    pub max_session_turns: u32,
 }
 
 /// Configuration for evidence storage.
@@ -504,6 +509,10 @@ fn default_approval_timeout_secs() -> u64 {
     600
 }
 
+fn default_max_session_turns() -> u32 {
+    12
+}
+
 fn default_evidence_mode() -> String {
     "full".to_string()
 }
@@ -536,6 +545,7 @@ impl Default for GatewayConfig {
             retention: RetentionConfig::default(),
             response_validation: ResponseValidationConfig::default(),
             sandbox: SandboxConfig::default(),
+            max_session_turns: default_max_session_turns(),
         }
     }
 }

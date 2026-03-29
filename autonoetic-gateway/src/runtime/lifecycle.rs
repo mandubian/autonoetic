@@ -441,6 +441,26 @@ impl AgentExecutor {
         let session_id = self.ensure_session_id();
         let turn_id = self.next_turn_id();
 
+        // Hard session-level turn limit — circuit breaker for runaway loops
+        if let Some(cfg) = &self.config {
+            if self.turn_counter >= cfg.max_session_turns as u64 {
+                tracing::warn!(
+                    agent_id = %self.manifest.agent.id,
+                    turn_counter = self.turn_counter,
+                    max_turns = cfg.max_session_turns,
+                    "Session reached max turns limit"
+                );
+                let cp = self.build_checkpoint(
+                    history,
+                    &turn_id,
+                    YieldReason::MaxTurnsReached,
+                    None,
+                );
+                self.save_checkpoint_if_possible(&cp);
+                return Ok(TurnOutcome::Completed(None));
+            }
+        }
+
         if let Some(gw) = self.gateway_dir.as_ref() {
             if self.live_digest.is_none() {
                 let agent_id = &self.manifest.agent.id;
