@@ -888,6 +888,10 @@ pub async fn run_agent_with_runtime_with_driver(
             println!("[Turn suspended pending approval: {}]", approval_request_id);
             runtime.close_session("headless_suspended")?;
         }
+        Ok(TurnOutcome::SuspendedUserInput { interaction_id }) => {
+            println!("[Turn suspended pending user interaction: {}]", interaction_id);
+            runtime.close_session("headless_suspended_user_input")?;
+        }
         Err(e) => {
             let _ = runtime.close_session("headless_error");
             return Err(e);
@@ -941,6 +945,15 @@ pub async fn run_interactive_session(
                     .await?;
                 stdout.flush().await?;
             }
+            Ok(TurnOutcome::SuspendedUserInput { interaction_id }) => {
+                stdout
+                    .write_all(
+                        format!("[Turn suspended pending user interaction: {}]\n", interaction_id)
+                            .as_bytes(),
+                    )
+                    .await?;
+                stdout.flush().await?;
+            }
             Err(e) => {
                 let _ = runtime.close_session("interactive_error");
                 return Err(e);
@@ -989,6 +1002,15 @@ pub async fn run_interactive_session(
                             approval_request_id
                         )
                         .as_bytes(),
+                    )
+                    .await?;
+                stdout.flush().await?;
+            }
+            Ok(TurnOutcome::SuspendedUserInput { interaction_id }) => {
+                stdout
+                    .write_all(
+                        format!("[Turn suspended pending user interaction: {}]\n", interaction_id)
+                            .as_bytes(),
                     )
                     .await?;
                 stdout.flush().await?;

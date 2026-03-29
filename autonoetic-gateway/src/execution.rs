@@ -1220,11 +1220,17 @@ impl GatewayExecutionService {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("runtime session_id missing after execution"))?;
 
-            let (assistant_reply, suspended_for_approval) = match outcome {
-                TurnOutcome::Completed(reply) => (reply, None),
+            let (assistant_reply, suspended_for_approval, suspended_for_user_input) = match outcome {
+                TurnOutcome::Completed(reply) => (reply, None, false),
                 TurnOutcome::Suspended { approval_request_id, .. } => {
                     // Continuation already saved by execute_with_history.
-                    (None, Some(approval_request_id))
+                    (None, Some(approval_request_id), false)
+                }
+                TurnOutcome::SuspendedUserInput { interaction_id: _ } => {
+                    // Checkpoint already saved by execute_with_history with
+                    // YieldReason::UserInputRequired. Signal that the session
+                    // is blocked on user input (not "completed empty").
+                    (None, None, true)
                 }
             };
 
@@ -1252,6 +1258,8 @@ impl GatewayExecutionService {
             );
             let close_reason = if suspended_for_approval.is_some() {
                 "jsonrpc_spawn_suspended_approval"
+            } else if suspended_for_user_input {
+                "jsonrpc_spawn_suspended_user_input"
             } else if assistant_reply.is_some() {
                 "jsonrpc_spawn_complete"
             } else {
@@ -1267,7 +1275,7 @@ impl GatewayExecutionService {
                 &resolved_session_id,
                 agent_id,
                 digest_turn_count,
-                suspended_for_approval.is_some(),
+                suspended_for_approval.is_some() || suspended_for_user_input,
             )
             .await;
             let llm_usage = runtime.take_llm_usage_last_run();
@@ -1865,12 +1873,15 @@ impl GatewayExecutionService {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("runtime session_id missing after execution"))?;
 
-        let (assistant_reply, suspended_for_approval) = match outcome {
-            TurnOutcome::Completed(reply) => (reply, None),
+        let (assistant_reply, suspended_for_approval, suspended_for_user_input) = match outcome {
+            TurnOutcome::Completed(reply) => (reply, None, false),
             TurnOutcome::Suspended {
                 approval_request_id,
                 ..
-            } => (None, Some(approval_request_id)),
+            } => (None, Some(approval_request_id), false),
+            TurnOutcome::SuspendedUserInput { interaction_id: _ } => {
+                (None, None, true)
+            }
         };
 
         let initial_msg = history
@@ -1887,6 +1898,8 @@ impl GatewayExecutionService {
         );
         let close_reason = if suspended_for_approval.is_some() {
             "checkpoint_respawn_suspended"
+        } else if suspended_for_user_input {
+            "checkpoint_respawn_suspended_user_input"
         } else if assistant_reply.is_some() {
             "checkpoint_respawn_complete"
         } else {
@@ -1902,7 +1915,7 @@ impl GatewayExecutionService {
             &resolved_session_id,
             agent_id,
             digest_turn_count,
-            suspended_for_approval.is_some(),
+            suspended_for_approval.is_some() || suspended_for_user_input,
         )
         .await;
         let llm_usage = runtime.take_llm_usage_last_run();
