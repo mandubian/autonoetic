@@ -470,6 +470,20 @@ fn decide_request(
         anyhow::bail!("GatewayStore is required to decide approvals");
     };
 
+    // Idempotency guard: reject duplicate decisions
+    if let Some(ref current_status) = request.status {
+        let status_str = match current_status {
+            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Rejected => "rejected",
+        };
+        anyhow::bail!(
+            "Approval {} already decided as '{}' (by {})",
+            request_id,
+            status_str,
+            request.decided_by.as_deref().unwrap_or("unknown")
+        );
+    }
+
     let decision = ApprovalDecision {
         request_id: request.request_id,
         agent_id: request.agent_id,
@@ -971,5 +985,56 @@ mod tests {
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(!pending.is_empty(), "should have created a notification");
+    }
+
+    #[test]
+    fn double_approve_is_rejected() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+        let request = ApprovalRequest {
+            request_id: "apr-double".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder-abc".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "echo hi".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+            },
+            created_at: "2020-01-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+        };
+        store.create_approval(&request).unwrap();
+
+        // First approve succeeds
+        let result =
+            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None);
+        assert!(result.is_ok(), "first approve should succeed");
+
+        // Second approve fails with idempotency error
+        let result =
+            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None);
+        assert!(result.is_err(), "second approve should be rejected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already decided"),
+            "error should mention already decided: {}",
+            err_msg
+        );
     }
 }

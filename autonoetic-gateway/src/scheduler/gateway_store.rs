@@ -1057,10 +1057,16 @@ impl GatewayStore {
         decided_at: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3 WHERE request_id = ?4",
+        let rows = conn.execute(
+            "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3 WHERE request_id = ?4 AND status = 'pending'",
             params![status, decided_by, decided_at, request_id],
         )?;
+        if rows == 0 {
+            anyhow::bail!(
+                "Approval {} is no longer pending (already decided or not found)",
+                request_id
+            );
+        }
         Ok(())
     }
 
