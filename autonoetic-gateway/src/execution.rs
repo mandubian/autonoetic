@@ -9,7 +9,7 @@ use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
-use crate::runtime::live_digest::base_session_id;
+use crate::runtime::live_digest::{base_session_id, append_repair_attempt_best_effort, append_repair_passed_best_effort};
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
 use autonoetic_types::background::{ScheduledAction, UserInteraction, UserInteractionStatus};
 use autonoetic_types::causal_chain::EntryStatus;
@@ -1603,6 +1603,20 @@ impl GatewayExecutionService {
                 "response.repair.start"
             );
 
+            let base = base_session_id(&result.session_id);
+            let violation_summary = violations
+                .iter()
+                .map(|v| v.rule.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            append_repair_attempt_best_effort(
+                &gateway_dir,
+                base,
+                attempt,
+                max_repair_rounds,
+                &format!("{} ({})", violation_summary, violations.len()),
+            );
+
             let repaired = match self
                 .respawn_from_checkpoint(
                     agent_id,
@@ -1689,6 +1703,11 @@ impl GatewayExecutionService {
                     session_id = %result.session_id,
                     attempt = attempt,
                     "response.repair.pass"
+                );
+                append_repair_passed_best_effort(
+                    &gateway_dir,
+                    base_session_id(&result.session_id),
+                    attempt,
                 );
                 return Ok(result);
             }
@@ -2743,7 +2762,17 @@ async fn execute_script_in_sandbox(
 
     let driver = crate::sandbox::SandboxDriverKind::parse(sandbox_type)?;
     let overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
-    let entrypoint = script_path.to_string_lossy().to_string();
+    // The sandbox mounts agent_dir at BWRAP_WORKSPACE_DIR ("/tmp") and sets cwd there.
+    // script_path = agent_dir/script_entry, so strip the agent_dir prefix
+    // and prepend the workspace dir to get the correct in-sandbox path.
+    let entrypoint = match script_path.strip_prefix(agent_dir) {
+        Ok(relative) => format!(
+            "{}{}",
+            crate::sandbox::BWRAP_WORKSPACE_DIR,
+            relative.to_string_lossy()
+        ),
+        Err(_) => script_path.to_string_lossy().to_string(),
+    };
 
     let mut runner = crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies(
         driver,
