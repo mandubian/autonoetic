@@ -6965,9 +6965,51 @@ impl NativeTool for UserAskTool {
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let sid = session_id.unwrap_or("unknown");
         let root_session_id = crate::runtime::content_store::root_session_id(sid).to_string();
+
+        // Runtime guard: user.ask is not allowed while orchestrating workflow tasks.
+        // This prevents the planner from using user.ask as a substitute for workflow.wait,
+        // which would strand the session (user.ask creates a UserInputRequired checkpoint
+        // that blocks workflow join signals from resuming the session).
+        if let (Some(cfg), Some(store)) = (_config, &gateway_store) {
+            // Check for active child tasks in this root session's workflow
+            let workflow_id = crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root_session_id)
+                .ok()
+                .flatten();
+            if let Some(wf_id) = &workflow_id {
+                let task_runs = crate::scheduler::workflow_store::list_task_runs_for_workflow(cfg, Some(store.as_ref()), wf_id)
+                    .unwrap_or_default();
+                let has_active_children = task_runs.iter().any(|t| {
+                    matches!(
+                        t.status,
+                        autonoetic_types::workflow::TaskRunStatus::Pending
+                            | autonoetic_types::workflow::TaskRunStatus::Runnable
+                            | autonoetic_types::workflow::TaskRunStatus::Running
+                            | autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
+                            | autonoetic_types::workflow::TaskRunStatus::Paused
+                    )
+                });
+                if has_active_children {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error": "user.ask is not available while workflow tasks are active. Use workflow.wait to handle pending child tasks, or respond in prose for clarifications."
+                    }).to_string());
+                }
+            }
+
+            // Check for pending approvals for this root session
+            let pending_approvals = store.get_pending_approvals_for_root(&root_session_id)
+                .unwrap_or_default();
+            if !pending_approvals.is_empty() {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error": "user.ask is not available while approvals are pending. Use workflow.wait to handle pending approvals."
+                }).to_string());
+            }
+        }
+
+        let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
         let kind = match args.kind.as_str() {
             "decision" => UserInteractionKind::Decision,
