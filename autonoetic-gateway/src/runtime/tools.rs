@@ -6718,6 +6718,7 @@ impl NativeTool for AgentInstallTool {
                 },
                 dependencies: args.runtime_lock_dependencies.clone(),
                 artifacts: Vec::new(),
+                layers: Vec::new(),
             };
             std::fs::write(
                 install_tmp_dir.join(&child_manifest.runtime.runtime_lock),

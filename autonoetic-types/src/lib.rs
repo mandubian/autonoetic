@@ -4,6 +4,7 @@
 //! documented in `data_models.md`.
 
 pub mod agent;
+pub mod agent_revision;
 pub mod artifact;
 pub mod background;
 pub mod capability;
@@ -11,6 +12,7 @@ pub mod capsule;
 pub mod causal_chain;
 pub mod config;
 pub mod disclosure;
+pub mod evaluation;
 pub mod layer;
 pub mod memory;
 pub mod notification;

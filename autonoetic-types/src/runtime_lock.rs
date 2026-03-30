@@ -39,6 +39,17 @@ pub struct LockedDependencySet {
     pub packages: Vec<String>,
 }
 
+/// A pinned layer mount inside the runtime closure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedLayerMount {
+    /// Layer ID.
+    pub layer_id: String,
+    /// Layer digest for integrity verification.
+    pub digest: String,
+    /// Mount path inside the sandbox.
+    pub mount_path: String,
+}
+
 /// The complete `runtime.lock` file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeLock {
@@ -49,4 +60,7 @@ pub struct RuntimeLock {
     pub dependencies: Vec<LockedDependencySet>,
     #[serde(default)]
     pub artifacts: Vec<LockedArtifact>,
+    /// Pinned layer mounts forming the execution closure.
+    #[serde(default)]
+    pub layers: Vec<LockedLayerMount>,
 }

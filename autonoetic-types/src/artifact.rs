@@ -10,6 +10,7 @@ use super::layer::ArtifactLayer;
 pub enum ArtifactKind {
     Binary,
     SkillBundle,
+    AgentBundle,
     Dataset,
     GatewayRuntime,
     Report,
