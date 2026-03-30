@@ -94,6 +94,7 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         fallback_model: None,
         chat_only: true,
         context_window_tokens: None,
+        base_url: None,
     })
 }
 
@@ -106,6 +107,7 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
         fallback_model: p.fallback_model.clone(),
         chat_only: p.chat_only.unwrap_or(false),
         context_window_tokens: p.context_window_tokens,
+        base_url: p.base_url.clone(),
     }
 }
 

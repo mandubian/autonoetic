@@ -4,7 +4,7 @@ This document is archived.
 
 It describes an older content-handle-based promotion model that has been superseded by the artifact-first promotion and install boundary described in:
 
-- `autonoetic/plan_content_storage.md`
+- `docs/archived/plan_content_storage.md`
 - `autonoetic/autonoetic-types/src/promotion.rs`
 - `autonoetic/autonoetic-gateway/src/runtime/tools_promotion.rs`
 

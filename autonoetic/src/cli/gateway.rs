@@ -5,7 +5,6 @@ use super::common::{
     activate_registered_mcp_servers, load_mcp_servers, mcp_registry_path, McpClient, McpTool,
     McpTransportConfig,
 };
-
 pub async fn handle_gateway_start(
     config_path: &Path,
     daemon: bool,
@@ -166,7 +165,7 @@ pub async fn handle_gateway_status(config_path: &Path, json_output: bool) -> any
     Ok(())
 }
 
-pub fn handle_gateway_approvals(
+pub async fn handle_gateway_approvals(
     config_path: &Path,
     command: &super::common::GatewayApprovalCommands,
 ) -> anyhow::Result<()> {
@@ -189,16 +188,30 @@ pub fn handle_gateway_approvals(
                 return Ok(());
             }
             println!(
-                "{:<38} {:<20} {:<24} ACTION",
-                "REQUEST ID", "AGENT", "CREATED AT"
+                "{:<38} {:<20} {:<14} {}",
+                "REQUEST ID", "AGENT", "KIND", "DETAILS"
             );
             for approval in approvals {
+                let details = match &approval.action {
+                    autonoetic_types::background::ScheduledAction::SandboxExec { command, .. } => {
+                        let truncated = if command.len() > 50 {
+                            format!("{}...", &command[..50])
+                        } else {
+                            command.clone()
+                        };
+                        format!("exec: {}", truncated)
+                    }
+                    autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, summary, .. } => {
+                        format!("install: {} ({})", agent_id, summary)
+                    }
+                    other => format!("{}", other.kind()),
+                };
                 println!(
-                    "{:<38} {:<20} {:<24} {}",
+                    "{:<38} {:<20} {:<14} {}",
                     approval.request_id,
                     approval.agent_id,
-                    approval.created_at,
-                    approval.action.kind()
+                    approval.action.kind(),
+                    details
                 );
             }
         }
@@ -239,8 +252,371 @@ pub fn handle_gateway_approvals(
                 decision.action.kind()
             );
         }
+        super::common::GatewayApprovalCommands::Interactive => {
+            run_interactive_approvals(&config, &gateway_store).await?;
+        }
     }
     Ok(())
+}
+
+async fn run_interactive_approvals(
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<()> {
+    use autonoetic_types::background::ApprovalRequest;
+    use crossterm::{
+        event::{self, Event, KeyCode, KeyEventKind},
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    };
+    use ratatui::{
+        backend::CrosstermBackend,
+        layout::{Constraint, Direction, Layout},
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+        Terminal,
+    };
+    use std::io;
+
+    let approvals = autonoetic_gateway::scheduler::load_approval_requests(
+        config,
+        Some(gateway_store),
+    )?;
+
+    if approvals.is_empty() {
+        println!("No pending approval requests.");
+        return Ok(());
+    }
+
+    let mut items: Vec<ApprovalRequest> = approvals;
+    let mut state = ListState::default();
+    state.select(Some(0));
+    let mut status_msg = String::new();
+    let mut done = false;
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    while !done {
+        terminal.draw(|f| {
+            let area = f.area();
+            if area.height < 10 || area.width < 40 {
+                let p = Paragraph::new("Terminal too small");
+                f.render_widget(p, area);
+                return;
+            }
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(5),
+                    Constraint::Length(8),
+                    Constraint::Length(2),
+                ])
+                .split(area);
+
+            let title = format!(
+                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  q: quit ",
+                items.len()
+            );
+            let title_bar = Paragraph::new(Line::from(Span::styled(
+                &title,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            f.render_widget(title_bar, chunks[0]);
+
+            let list_items: Vec<ListItem> = items
+                .iter()
+                .enumerate()
+                .map(|(_i, req)| {
+                    let (kind_label, detail) = match &req.action {
+                        autonoetic_types::background::ScheduledAction::SandboxExec { command, .. } => {
+                            let truncated: String = if command.len() > 60 {
+                                format!("{}...", &command[..60])
+                            } else {
+                                command.clone()
+                            };
+                            ("sandbox_exec", truncated)
+                        }
+                        autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, summary, .. } => {
+                            ("agent_install", format!("{} ({})", agent_id, summary))
+                        }
+                        other => ("other", other.kind().to_string()),
+                    };
+                    let reason_str = req.reason.as_deref().unwrap_or("");
+
+                    let line1 = Line::from(vec![
+                        Span::styled(
+                            format!(" {:<12} ", req.request_id),
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{:<20} ", req.agent_id),
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::styled(
+                            format!("{:<14} ", kind_label),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                    ]);
+                    let line2 = Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(detail.clone(), Style::default().fg(Color::Gray)),
+                    ]);
+                    let line3 = Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(
+                            truncate_str(reason_str, (chunks[1].width as usize).saturating_sub(3)),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]);
+
+                    ListItem::new(vec![line1, line2, line3])
+                })
+                .collect();
+
+            let list = List::new(list_items)
+                .block(Block::default().borders(Borders::NONE))
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                );
+            f.render_stateful_widget(list, chunks[1], &mut state);
+
+            let selected = state.selected();
+            let detail_lines = if let Some(idx) = selected {
+                let req = &items[idx];
+                let mut lines = Vec::new();
+                lines.push(Line::from(vec![
+                    Span::styled("Request: ", Style::default().fg(Color::Gray)),
+                    Span::styled(&req.request_id, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("Agent:   ", Style::default().fg(Color::Gray)),
+                    Span::styled(&req.agent_id, Style::default().fg(Color::White)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("Session: ", Style::default().fg(Color::Gray)),
+                    Span::styled(&req.session_id, Style::default().fg(Color::White)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("Created: ", Style::default().fg(Color::Gray)),
+                    Span::styled(&req.created_at, Style::default().fg(Color::White)),
+                ]));
+                if let Some(ref reason) = req.reason {
+                    lines.push(Line::from(vec![
+                        Span::styled("Reason:  ", Style::default().fg(Color::Gray)),
+                        Span::styled(reason, Style::default().fg(Color::Magenta)),
+                    ]));
+                }
+                match &req.action {
+                    autonoetic_types::background::ScheduledAction::SandboxExec { command, dependencies, .. } => {
+                        lines.push(Line::from(vec![
+                            Span::styled("Command: ", Style::default().fg(Color::Gray)),
+                            Span::styled(command, Style::default().fg(Color::Green)),
+                        ]));
+                        if let Some(deps) = dependencies {
+                            let pkgs = deps.packages.join(", ");
+                            lines.push(Line::from(vec![
+                                Span::styled("Deps:    ", Style::default().fg(Color::Gray)),
+                                Span::styled(format!("{} ({})", deps.runtime, pkgs), Style::default().fg(Color::Green)),
+                            ]));
+                        }
+                    }
+                    autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, summary, payload, .. } => {
+                        lines.push(Line::from(vec![
+                            Span::styled("Install: ", Style::default().fg(Color::Gray)),
+                            Span::styled(format!("{} ({})", agent_id, summary), Style::default().fg(Color::Green)),
+                        ]));
+                        if let Some(payload) = payload {
+                            if let Some(caps) = payload.get("capabilities") {
+                                lines.push(Line::from(vec![
+                                    Span::styled("Caps:    ", Style::default().fg(Color::Gray)),
+                                    Span::styled(caps.to_string(), Style::default().fg(Color::Green)),
+                                ]));
+                            }
+                            if let Some(hosts) = payload.get("detected_network_hosts") {
+                                if !hosts.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                                    lines.push(Line::from(vec![
+                                        Span::styled("Hosts:   ", Style::default().fg(Color::Gray)),
+                                        Span::styled(hosts.to_string(), Style::default().fg(Color::Red)),
+                                    ]));
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        lines.push(Line::from(vec![
+                            Span::styled("Action:  ", Style::default().fg(Color::Gray)),
+                            Span::styled(other.kind(), Style::default().fg(Color::White)),
+                        ]));
+                    }
+                }
+                lines
+            } else {
+                vec![Line::from(Span::styled(
+                    "No selection",
+                    Style::default().fg(Color::DarkGray),
+                ))]
+            };
+
+            let detail = Paragraph::new(detail_lines)
+                .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray)))
+                .wrap(Wrap { trim: false });
+            f.render_widget(detail, chunks[2]);
+
+            let status = if status_msg.is_empty() {
+                Line::from(Span::styled(
+                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  q: quit",
+                    Style::default().fg(Color::DarkGray),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format!(" {}", status_msg),
+                    Style::default().fg(Color::Green),
+                ))
+            };
+            let status_bar = Paragraph::new(status);
+            f.render_widget(status_bar, chunks[3]);
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        done = true;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        let selected = state.selected().unwrap_or(0);
+                        if selected > 0 {
+                            state.select(Some(selected - 1));
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let selected = state.selected().unwrap_or(0);
+                        if selected < items.len() - 1 {
+                            state.select(Some(selected + 1));
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        if let Some(idx) = state.selected() {
+                            let req = &items[idx];
+                            match autonoetic_gateway::scheduler::approve_request(
+                                config,
+                                Some(gateway_store),
+                                &req.request_id,
+                                "cli-interactive",
+                                None,
+                            ) {
+                                Ok(decision) => {
+                                    status_msg = format!(
+                                        "\u{2705} Approved {} ({})",
+                                        decision.request_id,
+                                        decision.action.kind()
+                                    );
+                                    items.remove(idx);
+                                    if items.is_empty() {
+                                        done = true;
+                                        status_msg.push_str("  \u{2014} All approvals resolved!");
+                                    } else if idx >= items.len() {
+                                        state.select(Some(items.len() - 1));
+                                    } else {
+                                        state.select(Some(idx));
+                                    }
+                                }
+                                Err(e) => {
+                                    status_msg = format!("\u{274c} Error: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        if let Some(idx) = state.selected() {
+                            let req = &items[idx];
+                            match autonoetic_gateway::scheduler::reject_request(
+                                config,
+                                Some(gateway_store),
+                                &req.request_id,
+                                "cli-interactive",
+                                None,
+                            ) {
+                                Ok(decision) => {
+                                    status_msg = format!(
+                                        "\u{274c} Rejected {} ({})",
+                                        decision.request_id,
+                                        decision.action.kind()
+                                    );
+                                    items.remove(idx);
+                                    if items.is_empty() {
+                                        done = true;
+                                        status_msg.push_str("  \u{2014} All approvals resolved!");
+                                    } else if idx >= items.len() {
+                                        state.select(Some(items.len() - 1));
+                                    } else {
+                                        state.select(Some(idx));
+                                    }
+                                }
+                                Err(e) => {
+                                    status_msg = format!("\u{274c} Error: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        match autonoetic_gateway::scheduler::load_approval_requests(
+                            config,
+                            Some(gateway_store),
+                        ) {
+                            Ok(refreshed) => {
+                                items = refreshed;
+                                if items.is_empty() {
+                                    done = true;
+                                    status_msg = "No more pending approvals.".to_string();
+                                } else {
+                                    state.select(Some(0));
+                                    status_msg = format!("Refreshed: {} pending approval(s)", items.len());
+                                }
+                            }
+                            Err(e) => {
+                                status_msg = format!("Refresh error: {}", e);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()?;
+
+    if !status_msg.is_empty() {
+        println!("{}", status_msg);
+    }
+    Ok(())
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
 }
 
 pub fn handle_gateway_interactions(

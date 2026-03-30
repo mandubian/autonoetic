@@ -1234,7 +1234,20 @@ The agent doesn't need to be told to use these — the system prompts document t
 
 ---
 
+
 ## Backlog: Workspace Output Capture for Foreign Agents
+
+---
+**2026-03-30: Relevance summary after revision/eval/federation MVP**
+
+- **Workspace Output Capture for Foreign Agents**: Still relevant, but not part of the new revision/eval MVP. This is now tracked under implicit artifact/output capture work (see `docs/spec-implicit-artifacts-agent-evolution.md`).
+- **Remote Agent Spawn (Gateway-Orchestrated)**: Still relevant, but explicitly deferred to post-MVP federation work. See "Out of Scope" and "Future Extensions" in `docs/spec-agent-revision-evaluation-federation-mvp.md` and `docs/plan-agent-revision-evaluation-federation-mvp.md`.
+- **Post-Session Digest Full E2E**: Still relevant for QA, but not central to the new revision/eval architecture. Digest agent and pipeline are implemented; remaining work is full-path integration testing (see `autonoetic-gateway/tests/post_session_digest_integration.rs`).
+- **Response Validation Gate**: No longer backlog; this is implemented and documented (see `docs/response-validation-gate.md` and integration tests). The new plan covers output quality at eval/promotion time, not at every spawn.
+
+For current priorities, see `docs/plan-agent-revision-evaluation-federation-mvp.md` and `docs/spec-agent-revision-evaluation-federation-mvp.md`. For artifact/output capture, see `docs/spec-implicit-artifacts-agent-evolution.md`.
+
+---
 
 Current state: native Autonoetic agents can share outputs by calling `content.write` and package them via `artifact.build`, but foreign agents that only write files inside the sandbox workspace have no automatic export path into the content store. Implicit artifacts exist, but they currently capture only task metadata/summary, not file outputs.
 

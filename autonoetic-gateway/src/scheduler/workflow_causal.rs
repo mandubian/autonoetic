@@ -1,6 +1,6 @@
 //! Best-effort mirror of orchestration transitions into the gateway causal chain.
 //!
-//! See `plan_workflow_orchestration.md` § "Relationship To Causal Chain": workflow JSONL is
+//! See `docs/archived/plan_workflow_orchestration.md` § "Relationship To Causal Chain": workflow JSONL is
 //! mutable coordination state; the causal chain remains the append-only audit log. These entries
 //! link the two (`workflow_id`, `task_id` in payload) without replacing causal semantics.
 

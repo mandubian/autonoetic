@@ -282,7 +282,8 @@ pub fn build_driver(
     config: LlmConfig,
     client: reqwest::Client,
 ) -> anyhow::Result<Arc<dyn LlmDriver>> {
-    let base_url_override = std::env::var(LLM_BASE_URL_OVERRIDE_ENV).ok();
+    let base_url_override = std::env::var(LLM_BASE_URL_OVERRIDE_ENV).ok()
+        .or(config.base_url.clone());
     let api_key_override = std::env::var(LLM_API_KEY_OVERRIDE_ENV).ok();
     let resolved = provider::resolve(
         &config.provider,

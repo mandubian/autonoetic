@@ -33,8 +33,9 @@ The system has three distinct human-interaction mechanisms that serve different 
 **Key properties:**
 - **Durable**: Approval requests persist to SQLite
 - **Auto-resume**: Gateway automatically resumes the session when approval is resolved
-- **Domain-level reuse**: For `sandbox.exec`, once a domain (e.g., `api.open-meteo.com`) is approved at the root workflow level, other sessions under the same root can reuse the approval without re-asking
+- **Domain-level reuse**: For `sandbox.exec` with artifact-based analysis, once a domain (e.g., `api.open-meteo.com`) is approved at the root workflow level, other sessions under the same root can reuse the approval without re-asking
 - **Payload preservation**: For `agent.install`, the full install args are stored in the approval request and replayed on retry, preventing payload drift
+- **Deduplication**: Both `sandbox.exec` and `agent.install` prevent duplicate approval requests — if an approval is already pending (or recently approved) for the same operation, the existing request ID is returned instead of creating a new one
 
 ### user.ask
 
@@ -195,6 +196,58 @@ When an `agent.install` approval is resolved:
 5. This ensures the install uses the EXACT same capabilities, instructions, etc.
 6. No payload drift between attempts
 
+## Approval Deduplication
+
+The approval system prevents **approval flooding** — when an agent retries the same operation, it creates a single `apr-*` request rather than one per retry.
+
+### sandbox.exec Deduplication
+
+Session-Level)
+
+For `sandbox.exec`, deduplication is **session-scoped**:
+- Before creating a new approval, the gateway checks if thesession` already has a pending `SandboxExec` approval
+- If found, returns the existing `request_id` with `approval_already_pending: true`
+- Each child session in a workflow gets its own independent approval (no cross-session dedup)
+
+**Why session-scoped?** Two child sessions under the same root workflow may both need `sandbox.exec` approvals for different commands. If they shared one approval, only one session would get the resume signal.
+
+ Session-scoped dedup ensures each session can be independently approved and resumed.
+
+### agent.install Deduplication (Root + Session Level)
+
+For `agent.install`, deduplication is more aggressive:
+1. **Pending check** (root + session): Before creating a new approval, checks both the root-level and session-level pending approvals for an `AgentInstall` with the same `agent_id`. If found, returns the existing pending request.
+ Root-level check catches cases where the planner respawns the builder with a new sub-session ID.
+ Session-level check catches retries within the same session.
+
+2. **Approved check** (session-level): Even after approval is granted, if the builder retries without `install_approval_ref`, the gateway checks session-level for recently-approved `AgentInstall` approvals for the same `agent_id`. If found, returns the approved request ID with `already_approved: true` instead of creating a duplicate.
+
+This two-layer approach prevents the bug where the builder's retry loop creates 4+ duplicate approvals (one per turn) after the operator already approved the first one.
+
+### Approval Reason Field (Enhanced)
+
+The `reason` field on approval requests now includes extracted host information when available:
+
+```
+# Before
+"reason": "Remote access detected: Detected 1 remote access pattern(s) in categories: import"
+
+# After (when URL literals are found)
+"reason": "Remote access detected: Detected 3 patterns in categories: import, url_literal → hosts: api.open-meteo.com, geocoding-api.open-meteo.com"
+```
+
+This gives operators immediate visibility into **what domains** the code will access, without needing to inspect the full command.
+
+### CLI: Enhanced Approval List
+
+The `gateway approvals list` command now shows actionable details:
+
+```
+REQUEST ID                            AGENT                KIND           DETAILS
+apr-3458926a                          specialized_bui…     agent_install  install: weather.default (weather.default with NetworkAccess)
+apr-9e6420c1                          evaluator.defau…     sandbox_exec  exec: cd /tmp && python3 -c "import requests; print(…
+```
+
 ## Common Pitfalls
 
 ### 1. Using user.ask for Approval Handling
@@ -264,9 +317,9 @@ autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
 
 | File | Role |
 |---|---|
-| `autonoetic-gateway/src/scheduler/approval.rs` | Approval lifecycle, resume logic, signal delivery |
-| `autonoetic-gateway/src/scheduler/gateway_store.rs` | Approval persistence (SQLite), queries |
-| `autonoetic-gateway/src/runtime/tools.rs` | Approval checks in `SandboxExecTool` and `AgentInstallTool` |
-| `autonoetic-gateway/src/runtime/remote_access.rs` | URL/domain extraction from code |
-| `autonoetic-gateway/src/runtime/approved_exec_cache.rs` | Domain normalization, fingerprinting |
+| `autonoetic-gateway/src/scheduler/approval.rs` | Approval lifecycle, resume logic, signal delivery, pending approval queries (`pending_approval_requests_for_root`, `pending_approval_requests_for_session`, `pending_sandbox_exec_requests_for_session`) |
+| `autonoetic-gateway/src/scheduler/gateway_store.rs` | Approval persistence (SQLite), queries (`get_approved_approvals_for_root`, `get_approved_approvals_for_session`) |
+| `autonoetic-gateway/src/runtime/tools.rs` | Approval checks in `SandboxExecTool` and `AgentInstallTool`; deduplication logic for both tools |
+| `autonoetic-gateway/src/runtime/remote_access.rs` | URL/domain extraction from code (`RemoteAccessAnalyzer`) |
+| `autonoetic-gateway/src/runtime/approved_exec_cache.rs` | Domain normalization (`normalize_targets`), fingerprinting |
 | `autonoetic-types/src/background.rs` | `ApprovalRequest`, `ScheduledAction`, `ApprovalStatus` types |

@@ -151,6 +151,8 @@ pub enum GatewayApprovalCommands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Interactive TUI to review, approve, or reject pending requests.
+    Interactive,
 }
 
 #[derive(Subcommand)]

@@ -740,11 +740,38 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
             let name = as_str(&v, "name")
                 .or_else(|| as_str(&v, "handle"))
                 .unwrap_or("");
-            format!(
-                "`{}` — `{}`",
-                cell(tool_name),
-                cell(&truncate_chars(name, 120))
-            )
+            if !name.is_empty() {
+                format!(
+                    "`{}` — `{}`",
+                    cell(tool_name),
+                    cell(&truncate_chars(name, 120))
+                )
+            } else {
+                let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                let content_len = as_str(&v, "content")
+                    .map(|s| s.len())
+                    .or_else(|| {
+                        v.get("content")
+                            .and_then(|c| c.as_i64())
+                            .map(|n| n as usize)
+                    })
+                    .unwrap_or(0);
+                if ok {
+                    format!(
+                        "`{}` — ok ({} bytes)",
+                        cell(tool_name),
+                        cell(&truncate_chars(&content_len.to_string(), 20))
+                    )
+                } else if let Some(err) = as_str(&v, "error") {
+                    format!(
+                        "`{}` — error: {}",
+                        cell(tool_name),
+                        cell(&truncate_chars(err, 120))
+                    )
+                } else {
+                    format!("`{}` — (no result)", cell(tool_name),)
+                }
+            }
         }
         "artifact.build" | "artifact.inspect" => {
             let id = as_str(&v, "artifact_id")

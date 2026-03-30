@@ -158,22 +158,6 @@ fn default_true() -> bool {
     true
 }
 
-fn requires_promotion_gate(agent_id: &str) -> bool {
-    matches!(
-        agent_id,
-        "specialized_builder.default" | "evolution-steward.default"
-    )
-}
-
-/// Returns true if the agent is an evolution role that can install other agents.
-/// Only evolution roles should have access to agent.install to prevent unauthorized agent creation.
-fn is_evolution_role(agent_id: &str) -> bool {
-    matches!(
-        agent_id,
-        "specialized_builder.default" | "evolution-steward.default"
-    )
-}
-
 fn execution_mode_label(mode: Option<ExecutionMode>) -> &'static str {
     match mode.unwrap_or_default() {
         ExecutionMode::Script => "script",
@@ -5769,14 +5753,16 @@ impl NativeTool for AgentInstallTool {
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
-        // Only evolution roles can install agents - prevents planner from bypassing specialized_builder
-        is_evolution_role(&manifest.agent.id)
+        // Any agent with AgentSpawn capability can install agents
+        manifest.capabilities.iter().any(|cap| {
+            matches!(cap, Capability::AgentSpawn { .. })
+        })
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Install a specialized child agent. Writes the agent's SKILL.md and files to disk. Only available to evolution roles (specialized_builder, evolution-steward).".to_string(),
+            description: "Install a specialized child agent. Writes the agent's SKILL.md and files to disk. Requires AgentSpawn capability.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -6510,9 +6496,9 @@ impl NativeTool for AgentInstallTool {
         );
 
         // ─────────────────────────────────────────────────────────────────
-        // Promotion Gate validation (for evolution roles)
+        // Promotion Gate validation (optional, when explicitly provided)
         // ─────────────────────────────────────────────────────────────────
-        if requires_promotion_gate(&manifest.agent.id) {
+        if let Some(_gate) = args.promotion_gate.as_ref() {
             let gate = args.promotion_gate.as_ref().ok_or_else(|| {
                 tagged::Tagged::validation(anyhow::anyhow!(
                     "agent.install from '{}' requires promotion_gate evidence",
@@ -8052,24 +8038,24 @@ mod tests {
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
-        // agent.spawn, agent.exists, agent.discover, workflow.wait, workflow.cancel_task (5) + always-available (6) = 11
-        assert_eq!(defs_spawn.len(), 11);
+        // agent.spawn, agent.exists, agent.discover, agent.install, workflow.wait, workflow.cancel_task (6) + always-available (6) = 12
+        assert_eq!(defs_spawn.len(), 12);
         assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
         assert!(
-            !defs_spawn.iter().any(|d| d.name == "agent.install"),
-            "agent.install should NOT be available to non-evolution roles"
+            defs_spawn.iter().any(|d| d.name == "agent.install"),
+            "agent.install should be available to agents with AgentSpawn capability"
         );
         assert!(defs_spawn.iter().any(|d| d.name == "agent.exists"));
         assert!(defs_spawn.iter().any(|d| d.name == "agent.discover"));
         assert!(defs_spawn.iter().any(|d| d.name == "workflow.wait"));
 
-        // agent.install should be available to evolution roles
+        // agent.install should also be available to any agent with AgentSpawn
         let manifest_evolution =
             test_evolution_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_evolution = registry.available_definitions(&manifest_evolution);
         assert!(
             defs_evolution.iter().any(|d| d.name == "agent.install"),
-            "agent.install should be available to evolution roles"
+            "agent.install should be available to agents with AgentSpawn capability"
         );
 
         let manifest_net = test_manifest(vec![Capability::NetworkAccess {
@@ -8753,7 +8739,9 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_install_requires_promotion_gate_for_evolution_roles() {
+    fn test_agent_install_without_promotion_gate_succeeds() {
+        // After removing role-specific promotion gates, any agent with AgentSpawn can install
+        // without providing promotion_gate evidence.
         let manifest = test_manifest_with_id(
             "specialized_builder.default",
             vec![Capability::AgentSpawn { max_children: 4 }],
@@ -8774,7 +8762,7 @@ mod tests {
         });
 
         let registry = default_registry();
-        let err = registry
+        let result = registry
             .execute(
                 "agent.install",
                 &manifest,
@@ -8788,8 +8776,9 @@ mod tests {
                 None,
                 None,
             )
-            .expect_err("install should require promotion gate");
-        assert!(err.to_string().contains("promotion_gate"));
+            .expect("install should succeed without promotion gate");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
     }
 
     #[test]

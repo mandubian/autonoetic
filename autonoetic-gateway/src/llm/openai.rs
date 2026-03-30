@@ -330,13 +330,20 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
         .map(|arr| {
             arr.iter()
                 .filter_map(|tc| {
+                    let id = tc["id"].as_str()?.to_string();
+                    let name = tc["function"]["name"].as_str()?.to_string();
+                    let args_val = &tc["function"]["arguments"];
+                    let arguments = if args_val.is_string() {
+                        args_val.as_str().unwrap_or("{}").to_string()
+                    } else if args_val.is_object() {
+                        serde_json::to_string(args_val).unwrap_or_else(|_| "{}".to_string())
+                    } else {
+                        "{}".to_string()
+                    };
                     Some(ToolCall {
-                        id: tc["id"].as_str()?.to_string(),
-                        name: tc["function"]["name"].as_str()?.to_string(),
-                        arguments: tc["function"]["arguments"]
-                            .as_str()
-                            .unwrap_or("{}")
-                            .to_string(),
+                        id,
+                        name,
+                        arguments,
                     })
                 })
                 .collect()
@@ -432,5 +439,30 @@ mod tests {
         });
         let resp = parse_response(&j);
         assert_eq!(resp.text, "hello world");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_with_object_arguments() {
+        let j = json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "content.write",
+                            "arguments": {"name": "test.py", "content": "hello"}
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2}
+        });
+        let resp = parse_response(&j);
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "content.write");
+        assert_eq!(resp.tool_calls[0].arguments, r#"{"content":"hello","name":"test.py"}"#);
     }
 }

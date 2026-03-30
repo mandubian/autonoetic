@@ -597,6 +597,11 @@ impl ContentStore {
         Ok(removed)
     }
 
+    /// Returns the sessions directory path.
+    pub fn sessions_dir(&self) -> &Path {
+        &self.sessions_dir
+    }
+
     /// Returns statistics about the content store.
     pub fn stats(&self) -> anyhow::Result<ContentStoreStats> {
         let mut total_size = 0u64;

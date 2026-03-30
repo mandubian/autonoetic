@@ -53,7 +53,7 @@ impl DisclosureState {
     pub fn register_result(&mut self, source: &str, path: Option<&str>, result: &str) {
         let class = self.evaluate_class(source, path);
         let trimmed = result.trim();
-        if class == DisclosureClass::Public || trimmed.is_empty() {
+        if !class.is_restricted() || trimmed.is_empty() {
             return;
         }
 
@@ -64,7 +64,7 @@ impl DisclosureState {
 
     /// Extends the state with a forcefully defined taint (e.g., from SecretStore)
     pub fn register_explicit_taint(&mut self, result: &str, class: DisclosureClass) {
-        if class != DisclosureClass::Public && !result.trim().is_empty() {
+        if class.is_restricted() && !result.trim().is_empty() {
             self.taints.push(Taint {
                 content: result.to_string(),
             });
