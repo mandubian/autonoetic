@@ -13,6 +13,14 @@ It assumes:
 - one mutable alias per logical agent in MVP;
 - explicit `agent_ref` can target candidate revisions without an alias.
 
+## Progress Snapshot
+
+Landed work so far covers a subset of Phase 0 plus Phase 1a type and model scaffolding.
+
+- Phase 0 simplification landed for explicit ingress targeting, config cleanup, role-gate removal, and binary disclosure classes.
+- Phase 1a landed for revision and eval Rust types, `SessionAgentBinding` shape, `LockedLayerMount`, and `ArtifactKind::AgentBundle`.
+- `agent.install` still exists in the current codebase as a transitional path, so the plan assumptions remain the target architecture rather than the fully completed current state.
+
 ## Global Invariants
 
 These invariants must hold after every phase:
@@ -38,21 +46,21 @@ Goal: remove gateway semantics that conflict with immutable revisions and generi
 
 ### P0-T01 Ingress strict targeting
 
-- [ ] Remove default target selection from ingress handling.
-- [ ] Reject missing `target` in all runtime entrypoints that launch or message an agent.
+- [x] Remove default target selection from ingress handling.
+- [x] Reject missing `target` in all runtime entrypoints that launch or message an agent.
 - [ ] Standardize target parsing so `agent_id` and `agent_ref` use one validation path.
 - [ ] Reject malformed targets containing `@` instead of falling back to alias lookup.
 
 ### P0-T02 Config cleanup
 
-- [ ] Delete config fields that encode gateway-side default agent routing.
-- [ ] Delete config fields that encode install-specific approval policy.
-- [ ] Fail fast at startup if obsolete config keys are still present.
+- [x] Delete config fields that encode gateway-side default agent routing.
+- [x] Delete config fields that encode install-specific approval policy.
+- [x] Fail fast at startup if obsolete config keys are still present.
 
 ### P0-T03 Wake model collapse
 
 - [ ] Reduce background wake reasons to timer and named signal.
-- [ ] Remove semantic wake heuristics such as stale-goal or retryable-failure inference.
+- [x] Remove semantic wake heuristics such as stale-goal or retryable-failure inference.
 - [ ] Remove scheduler branches that directly interpret prior tool output as a wake reason.
 
 ### P0-T04 Generic approval queue
@@ -63,23 +71,23 @@ Goal: remove gateway semantics that conflict with immutable revisions and generi
 
 ### P0-T05 Role-specific gate removal
 
-- [ ] Remove role or agent-name checks from install, promotion, or evolution flows.
-- [ ] Remove any specialized-builder or evolution-steward fast paths.
-- [ ] Move any remaining policy branching to capability checks plus approval queue.
+- [x] Remove role or agent-name checks from install, promotion, or evolution flows.
+- [x] Remove any specialized-builder or evolution-steward fast paths.
+- [x] Move any remaining policy branching to capability checks plus approval queue.
 
 ### P0-T06 Disclosure collapse
 
-- [ ] Reduce disclosure handling to restricted vs non-restricted output policy.
+- [x] Reduce disclosure handling to restricted vs non-restricted output policy.
 - [ ] Stop classifying disclosure by source path taxonomy.
 - [ ] Ensure tool metadata drives output filtering decisions.
-- [ ] Map legacy manifest disclosure classes to the binary restricted flag during migration.
-- [ ] Keep reply filtering deterministic with one restricted-output redaction marker.
+- [x] Map legacy manifest disclosure classes to the binary restricted flag during migration.
+- [x] Keep reply filtering deterministic with one restricted-output redaction marker.
 
 ### Phase 0 exit checklist
 
-- [ ] `event.ingest` without `target` fails validation.
+- [x] `event.ingest` without `target` fails validation.
 - [ ] Malformed targets containing `@` fail validation before alias lookup.
-- [ ] No gateway behavior depends on specific built-in agent ids.
+- [x] No gateway behavior depends on specific built-in agent ids.
 - [ ] Scheduler wake logic only uses timer and named signal.
 - [ ] Disclosure filtering no longer depends on multi-class path taxonomy.
 - [ ] Approval continuation still works after the simplification.
@@ -90,10 +98,10 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 ### P1-T01 Revision and eval IDs
 
-- [ ] Add types for `AgentRef`, revision status, alias record, session binding, and promotion record.
-- [ ] Ensure `SessionAgentBinding` stores `requested_target` and nullable `alias_id`.
+- [x] Add types for `AgentRef`, revision status, alias record, session binding, and promotion record.
+- [x] Ensure `SessionAgentBinding` stores `requested_target` and nullable `alias_id`.
 - [ ] Reserve stable ID formats exactly as defined in the spec.
-- [ ] Document and enforce MVP revision status semantics for `candidate`, `ready`, `rejected`, and `archived`.
+- [x] Document and enforce MVP revision status semantics for `candidate`, `ready`, `rejected`, and `archived`.
 
 ### P1-T02 Gateway schema migration
 
@@ -105,14 +113,14 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 ### P1-T03 Runtime closure model
 
-- [ ] Extend `runtime.lock` with pinned layer mounts.
+- [x] Extend `runtime.lock` with pinned layer mounts.
 - [ ] Define lock hashing over the normalized serialized runtime closure.
 - [ ] Reject revision creation if artifact layers and lock layers do not agree.
 - [ ] Write the normalized `runtime.lock` form into revision materialization.
 
 ### P1-T04 Agent bundle artifact kind
 
-- [ ] Add an explicit `AgentBundle` artifact kind.
+- [x] Add an explicit `AgentBundle` artifact kind.
 - [ ] Validate that revision creation only accepts `AgentBundle` artifacts.
 - [ ] Validate `SKILL.md`, manifest identity, and runtime lock presence before materialization.
 
