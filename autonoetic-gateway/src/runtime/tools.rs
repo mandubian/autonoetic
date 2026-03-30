@@ -10804,9 +10804,8 @@ Research agent instructions.
     }
 
     #[test]
-    fn test_agent_install_no_approval_needed_for_low_risk() {
-        // This test verifies that low-risk agents (no NetworkAccess, no background)
-        // can be installed without approval when using RiskBased policy.
+    fn test_agent_install_always_requires_approval() {
+        // After removing AgentInstallApprovalPolicy, all installs require approval.
 
         let manifest = test_evolution_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let policy = PolicyEngine::new(manifest.clone());
@@ -10860,19 +10859,20 @@ Research agent instructions.
                 None,
                 None,
             )
-            .expect("low-risk install should succeed without approval");
+            .expect("install should return structured approval request");
 
-        // Verify successful install
+        // Verify approval is required (always required after policy removal)
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
-        assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(false));
         assert_eq!(
-            parsed.get("status").and_then(|v| v.as_str()),
-            Some("agent_installed")
+            parsed.get("approval_required").and_then(|v| v.as_bool()),
+            Some(true)
         );
+        assert!(parsed.get("request_id").is_some());
 
-        // Verify agent was installed
+        // Verify agent was NOT installed (approval pending)
         let child_dir = agents_dir.join("simple.worker");
-        assert!(child_dir.exists(), "agent should be installed");
+        assert!(!child_dir.exists(), "agent should not be installed while approval is pending");
     }
 
     #[test]

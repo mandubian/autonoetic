@@ -236,7 +236,7 @@ background:
   mode: deterministic
   wake_predicates:
     timer: true
-    stale_goals: true
+    approval_resolved: true
 ---
 # Background Agent
 "#;
@@ -245,7 +245,7 @@ background:
         assert!(background.enabled);
         assert_eq!(background.interval_secs, 45);
         assert!(background.wake_predicates.timer);
-        assert!(background.wake_predicates.stale_goals);
+        assert!(background.wake_predicates.approval_resolved);
     }
 
     #[test]
