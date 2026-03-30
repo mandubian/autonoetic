@@ -7662,9 +7662,10 @@ impl NativeTool for AgentRevisionRollbackTool {
             rev_id.clone()
         } else {
             // Default: find immediately previous revision from promotion history
+            // This is the previous_revision_id from the most recent promotion/rollback entry
             let history = gateway_store.list_promotion_history(&args.agent_id)?;
             let prev = history.into_iter()
-                .find(|p| p.kind == autonoetic_types::agent_revision::PromotionKind::Promote)
+                .next()
                 .and_then(|p| p.previous_revision_id);
             anyhow::ensure!(
                 prev.is_some(),
