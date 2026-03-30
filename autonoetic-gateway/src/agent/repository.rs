@@ -636,6 +636,7 @@ Test instructions.
             trust_domain: "local".to_string(),
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
             metadata_json: serde_json::Value::Null,
+            short_id: "abcd1234".to_string(),
         };
         store.insert_agent_revision(&rev).expect("should insert revision");
 

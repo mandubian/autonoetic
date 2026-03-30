@@ -9,7 +9,6 @@
 
 use serde::{Deserialize, Serialize};
 
-
 /// A fully qualified immutable agent reference.
 ///
 /// Format: `<agent_id>@rev_sha256:<64 hex chars>`
@@ -140,6 +139,9 @@ pub struct AgentRevisionRecord {
     pub status: AgentRevisionStatus,
     /// Arbitrary metadata (JSON).
     pub metadata_json: serde_json::Value,
+    /// Collision-safe short ID for LLM-friendly references (e.g., `abc12345`).
+    #[serde(default)]
+    pub short_id: String,
 }
 
 /// Mutable alias binding from a stable name to a revision.

@@ -529,7 +529,8 @@ impl GatewayStore {
                 origin_node_id TEXT NOT NULL,
                 trust_domain TEXT NOT NULL,
                 status TEXT NOT NULL,
-                metadata_json TEXT
+                metadata_json TEXT,
+                short_id TEXT
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_revisions_agent_content
@@ -2434,14 +2435,26 @@ impl GatewayStore {
 
     pub fn insert_agent_revision(&self, rev: &AgentRevisionRecord) -> Result<()> {
         let metadata_json = serde_json::to_string(&rev.metadata_json)?;
+        // Compute collision-safe short ID BEFORE inserting (exclude current revision)
+        let existing: Vec<String> = self
+            .list_all_agent_revisions()?
+            .into_iter()
+            .filter(|r| r.revision_id != rev.revision_id)
+            .map(|r| r.revision_id)
+            .collect();
+        let short = autonoetic_types::agent_revision::short_id_unique(
+            &rev.revision_id,
+            existing.iter().map(|s| s.as_str()),
+            None,
+        );
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO agent_revisions (
                     revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     &rev.revision_id,
                     &rev.agent_id,
@@ -2459,20 +2472,11 @@ impl GatewayStore {
                     &rev.trust_domain,
                     &format!("{:?}", rev.status),
                     metadata_json,
+                    &rev.short_id,
                 ],
             )?;
-        } // Release lock here
-          // Auto-register collision-safe short ID for LLM-friendly references
-        let existing: Vec<String> = self
-            .list_all_agent_revisions()?
-            .into_iter()
-            .map(|r| r.revision_id)
-            .collect();
-        let short = autonoetic_types::agent_revision::short_id_unique(
-            &rev.revision_id,
-            existing.iter().map(|s| s.as_str()),
-            None,
-        );
+        }
+        // Register short ID in the index
         self.register_short_id(&rev.revision_id, &short)?;
         Ok(())
     }
@@ -2482,7 +2486,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
              FROM agent_revisions WHERE revision_id = ?1",
         )?;
         let rows = stmt.query_map(params![revision_id], |row| {
@@ -2497,6 +2501,7 @@ impl GatewayStore {
             let metadata_json: String = row.get(15)?;
             let metadata_json =
                 serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
+            let short_id: Option<String> = row.get(16).ok();
             Ok(AgentRevisionRecord {
                 revision_id: row.get(0)?,
                 agent_id: row.get(1)?,
@@ -2514,6 +2519,7 @@ impl GatewayStore {
                 trust_domain: row.get(13)?,
                 status,
                 metadata_json,
+                short_id: short_id.unwrap_or_default(),
             })
         })?;
         let mut results = Vec::new();
@@ -2528,7 +2534,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
              FROM agent_revisions WHERE agent_id = ?1 ORDER BY created_at DESC",
         )?;
         let mut rows = stmt.query_map(params![agent_id], |row| {
@@ -2541,6 +2547,7 @@ impl GatewayStore {
                 _ => AgentRevisionStatus::Candidate,
             };
             let metadata_json: String = row.get(15)?;
+            let short_id: Option<String> = row.get(16).ok();
             let metadata_json =
                 serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
             Ok(AgentRevisionRecord {
@@ -2560,6 +2567,7 @@ impl GatewayStore {
                 trust_domain: row.get(13)?,
                 status,
                 metadata_json,
+                short_id: short_id.unwrap_or_default(),
             })
         })?;
         let mut results = Vec::new();
@@ -2575,7 +2583,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
              FROM agent_revisions ORDER BY created_at DESC",
         )?;
         let mut rows = stmt.query_map(params![], |row| {
@@ -2588,6 +2596,7 @@ impl GatewayStore {
                 _ => AgentRevisionStatus::Candidate,
             };
             let metadata_json: String = row.get(15)?;
+            let short_id: Option<String> = row.get(16).ok();
             let metadata_json =
                 serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
             Ok(AgentRevisionRecord {
@@ -2607,6 +2616,7 @@ impl GatewayStore {
                 trust_domain: row.get(13)?,
                 status,
                 metadata_json,
+                short_id: short_id.unwrap_or_default(),
             })
         })?;
         let mut results = Vec::new();
