@@ -8,6 +8,7 @@
 //! does not affect already-running sessions.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// A fully qualified immutable agent reference.
 ///
@@ -220,6 +221,166 @@ pub struct PromotionRecord {
     pub created_by_id: String,
     /// Origin node for provenance.
     pub origin_node_id: String,
+}
+
+/// Crockford Base32 alphabet for human-friendly short IDs.
+/// Excludes I, L, O, U to avoid ambiguity; 0O and 1Il confusion.
+const CROCKFORD: &[char] = &[
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'j',
+    'k', 'm', 'n', 'p', 'q', 'r', 's', 't', 'v', 'w', 'x', 'y', 'z',
+];
+
+/// Generate a short, human-friendly ID from a revision ID or content digest.
+///
+/// Uses the first N bytes of the hex digest to produce a Crockford Base32
+/// encoded short ID. Default length is 8 characters (40 bits of entropy from
+/// the first 5 bytes of the digest), which gives ~1 in 10^12 collision
+/// probability for up to ~1M revisions.
+///
+/// The short ID is deterministic and reproducible — the same revision ID
+/// always produces the same short ID.
+pub fn short_id(digest: &str, len: Option<usize>) -> String {
+    let len = len.unwrap_or(8);
+    // Strip common prefixes (rev_sha256:, sha256:, etc.)
+    let hex = digest
+        .strip_prefix("rev_sha256:")
+        .or_else(|| digest.strip_prefix("sha256:"))
+        .or_else(|| digest.strip_prefix("sha384:"))
+        .or_else(|| digest.strip_prefix("sha512:"))
+        .unwrap_or(digest);
+
+    // Each base32 char = 5 bits. Each hex char = 4 bits.
+    // We need ceil(len * 5 / 4) hex chars.
+    let hex_chars_needed = (len * 5 + 3) / 4;
+    let hex_bytes = &hex[..std::cmp::min(hex_chars_needed, hex.len())];
+
+    // Convert hex to a big number, then extract 5-bit chunks
+    let mut bits = Vec::new();
+    for ch in hex_bytes.chars() {
+        let val = ch.to_digit(16).unwrap_or(0);
+        for i in (0..4).rev() {
+            bits.push(((val >> i) & 1) as u8);
+        }
+    }
+
+    // Take exactly len * 5 bits (pad with zeros if needed)
+    let needed = len * 5;
+    while bits.len() < needed {
+        bits.push(0);
+    }
+    let bits = &bits[..needed];
+
+    let mut result = String::with_capacity(len);
+    for chunk in bits.chunks(5) {
+        let mut idx = 0u8;
+        for &bit in chunk {
+            idx = (idx << 1) | bit;
+        }
+        result.push(CROCKFORD[idx as usize]);
+    }
+
+    result
+}
+
+/// Generate a short ID with collision detection.
+///
+/// Given a set of existing revision IDs, generates a short ID for `digest`
+/// that is unique within the set. If the default length produces a collision,
+/// the length is incremented until unique.
+pub fn short_id_unique<'a>(
+    digest: &str,
+    existing: impl IntoIterator<Item = &'a str>,
+    min_len: Option<usize>,
+) -> String {
+    let existing_set: HashSet<String> =
+        existing.into_iter().map(|d| short_id(d, min_len)).collect();
+
+    let mut len = min_len.unwrap_or(8);
+    loop {
+        let candidate = short_id(digest, Some(len));
+        if !existing_set.contains(&candidate) {
+            return candidate;
+        }
+        len += 1;
+        if len > 16 {
+            // Safety valve: if we've gone past 16 chars, just use the full hex prefix
+            return short_id(digest, Some(len));
+        }
+    }
+}
+
+/// Format an agent reference with a short revision ID for LLM consumption.
+///
+/// Returns e.g. "planner.default@rev_abc12345" instead of the full 80+ char ref.
+pub fn format_short_ref(agent_id: &str, revision_id: &str) -> String {
+    let short = short_id(revision_id, None);
+    format!("{}@rev_{}", agent_id, short)
+}
+
+#[cfg(test)]
+mod short_id_tests {
+    use super::*;
+
+    #[test]
+    fn test_short_id_deterministic() {
+        let digest = "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let id1 = short_id(digest, None);
+        let id2 = short_id(digest, None);
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 8);
+    }
+
+    #[test]
+    fn test_short_id_strips_prefix() {
+        let with_prefix = "rev_sha256:abcd1234";
+        let without_prefix = "abcd1234";
+        // Both should produce the same short ID (same hex content)
+        assert_eq!(
+            short_id(with_prefix, Some(4)),
+            short_id(without_prefix, Some(4))
+        );
+    }
+
+    #[test]
+    fn test_short_id_custom_length() {
+        let digest = "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        assert_eq!(short_id(digest, Some(4)).len(), 4);
+        assert_eq!(short_id(digest, Some(12)).len(), 12);
+    }
+
+    #[test]
+    fn test_short_id_no_ambiguous_chars() {
+        let digest = "rev_sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let id = short_id(digest, None);
+        for ch in id.chars() {
+            assert!(
+                !matches!(ch, 'i' | 'l' | 'o' | 'u' | 'I' | 'L' | 'O' | 'U'),
+                "Short ID contains ambiguous char '{}': {}",
+                ch,
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_short_id_unique_avoids_collision() {
+        let digest = "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let existing =
+            vec!["rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"];
+        // With the same digest in existing, length 8 would collide
+        let unique = short_id_unique(digest, existing, Some(8));
+        assert_ne!(unique, short_id(digest, Some(8)));
+    }
+
+    #[test]
+    fn test_format_short_ref() {
+        let ref_str = format_short_ref(
+            "planner.default",
+            "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        );
+        assert!(ref_str.starts_with("planner.default@rev_"));
+        assert_eq!(ref_str.len(), "planner.default@rev_".len() + 8);
+    }
 }
 
 #[cfg(test)]
