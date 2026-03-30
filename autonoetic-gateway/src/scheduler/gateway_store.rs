@@ -2459,7 +2459,7 @@ impl GatewayStore {
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
              FROM agent_revisions WHERE revision_id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![revision_id], |row| {
+        let rows = stmt.query_map(params![revision_id], |row| {
             let status_str: String = row.get(14)?;
             let status = match status_str.as_str() {
                 "Candidate" => AgentRevisionStatus::Candidate,
@@ -2505,7 +2505,7 @@ impl GatewayStore {
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
              FROM agent_revisions WHERE agent_id = ?1 ORDER BY created_at DESC",
         )?;
-        let mut rows = stmt.query_map(params![agent_id], |row| {
+        let rows = stmt.query_map(params![agent_id], |row| {
             let status_str: String = row.get(14)?;
             let status = match status_str.as_str() {
                 "Candidate" => AgentRevisionStatus::Candidate,
@@ -2587,7 +2587,7 @@ impl GatewayStore {
             "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
              FROM agent_aliases WHERE alias_id = ?1 AND agent_id = ?2",
         )?;
-        let mut rows = stmt.query_map(params![alias_id, agent_id], |row| {
+        let rows = stmt.query_map(params![alias_id, agent_id], |row| {
             Ok(AgentAliasRecord {
                 alias_id: row.get(0)?,
                 agent_id: row.get(1)?,
@@ -2611,7 +2611,7 @@ impl GatewayStore {
             "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
              FROM agent_aliases WHERE alias_id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![alias_id], |row| {
+        let rows = stmt.query_map(params![alias_id], |row| {
             Ok(AgentAliasRecord {
                 alias_id: row.get(0)?,
                 agent_id: row.get(1)?,
@@ -2663,7 +2663,7 @@ impl GatewayStore {
                     runtime_lock_hash, home_node_id, created_at, requested_target
              FROM session_agent_bindings WHERE session_id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![session_id], |row| {
+        let rows = stmt.query_map(params![session_id], |row| {
             Ok(SessionAgentBinding {
                 session_id: row.get(0)?,
                 root_session_id: row.get(1)?,
@@ -2719,7 +2719,7 @@ impl GatewayStore {
                     created_by_type, created_by_id, origin_node_id
              FROM promotion_history WHERE agent_id = ?1 ORDER BY created_at DESC",
         )?;
-        let mut rows = stmt.query_map(params![agent_id], |row| {
+        let rows = stmt.query_map(params![agent_id], |row| {
             let kind_str: String = row.get(1)?;
             let kind = match kind_str.as_str() {
                 "Promote" => autonoetic_types::agent_revision::PromotionKind::Promote,
@@ -2779,7 +2779,7 @@ impl GatewayStore {
                     created_by_type, created_by_id, origin_node_id
              FROM eval_suites WHERE suite_id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![suite_id], |row| {
+        let rows = stmt.query_map(params![suite_id], |row| {
             let spec_json: String = row.get(3)?;
             let spec_json = serde_json::from_str(&spec_json).unwrap_or(serde_json::Value::Null);
             Ok(EvalSuiteRecord {

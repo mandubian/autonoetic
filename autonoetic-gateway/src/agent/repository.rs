@@ -1,7 +1,9 @@
 //! Agent Repository - unified agent loading and identity management.
 
 use crate::runtime::parser::SkillParser;
+use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentManifest, AgentMeta};
+use autonoetic_types::agent_revision::{AgentRef, AgentRevisionRecord, SessionAgentBinding};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -191,6 +193,94 @@ impl AgentRepository {
     /// Get the agents directory path.
     pub fn agents_dir(&self) -> &Path {
         &self.agents_dir
+    }
+
+    /// Resolve an agent target string to a concrete revision.
+    ///
+    /// The target can be:
+    /// - A plain agent_id (e.g., "planner.default") → resolved via alias lookup
+    /// - An agent_ref (e.g., "planner.default@rev_sha256:...") → parsed and used directly
+    ///
+    /// Returns the resolved `AgentRef` and the `AgentRevisionRecord`.
+    pub fn resolve_agent(
+        &self,
+        target: &str,
+        gateway_store: Option<&GatewayStore>,
+    ) -> anyhow::Result<(AgentRef, AgentRevisionRecord)> {
+        // Try to parse as agent_ref first
+        if let Some(agent_ref) = AgentRef::parse(target) {
+            // Direct revision reference
+            let rev = gateway_store
+                .and_then(|gs| gs.get_agent_revision(&agent_ref.revision_id).ok().flatten())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Revision '{}' not found in store", agent_ref.revision_id)
+                })?;
+            return Ok((agent_ref, rev));
+        }
+
+        // Plain agent_id — resolve via alias
+        let alias_id = target; // MVP: alias_id defaults to agent_id
+        let alias = gateway_store
+            .and_then(|gs| gs.resolve_alias(alias_id).ok().flatten())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No alias '{}' found. Create a revision and promote it first.",
+                    alias_id
+                )
+            })?;
+
+        let rev = gateway_store
+            .and_then(|gs| gs.get_agent_revision(&alias.revision_id).ok().flatten())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Revision '{}' referenced by alias '{}' not found",
+                    alias.revision_id,
+                    alias_id
+                )
+            })?;
+
+        let agent_ref = AgentRef::new(alias.agent_id.clone(), alias.revision_id.clone());
+        Ok((agent_ref, rev))
+    }
+
+    /// Resolve and pin a session to an agent revision.
+    ///
+    /// This is the entry point for session start: it resolves the target,
+    /// validates the revision, creates a `SessionAgentBinding`, and persists it.
+    pub fn resolve_and_pin_session(
+        &self,
+        session_id: &str,
+        root_session_id: &str,
+        target: &str,
+        gateway_store: Option<&GatewayStore>,
+        home_node_id: &str,
+    ) -> anyhow::Result<(AgentRef, AgentRevisionRecord, SessionAgentBinding)> {
+        let (agent_ref, rev) = self.resolve_agent(target, gateway_store)?;
+
+        // Determine alias_id: if target was a plain agent_id, that's the alias
+        let alias_id = if AgentRef::parse(target).is_some() {
+            None // explicit ref, no alias involved
+        } else {
+            Some(target.to_string())
+        };
+
+        let binding = SessionAgentBinding {
+            session_id: session_id.to_string(),
+            root_session_id: root_session_id.to_string(),
+            alias_id,
+            agent_id: agent_ref.agent_id.clone(),
+            revision_id: agent_ref.revision_id.clone(),
+            runtime_lock_hash: rev.runtime_lock_hash.clone(),
+            home_node_id: home_node_id.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            requested_target: target.to_string(),
+        };
+
+        if let Some(gs) = gateway_store {
+            gs.upsert_session_agent_binding(&binding)?;
+        }
+
+        Ok((agent_ref, rev, binding))
     }
 }
 
