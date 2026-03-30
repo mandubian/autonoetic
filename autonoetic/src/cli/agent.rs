@@ -14,6 +14,7 @@ pub struct LlmTemplateConfig {
     pub model: String,
     pub temperature: f64,
     pub chat_only: bool,
+    pub base_url: Option<String>,
 }
 
 /// Resolve LLM config from CLI flags, presets, or defaults
@@ -31,6 +32,7 @@ pub fn resolve_llm_config(
             model: model.unwrap_or("gpt-4o").to_string(),
             temperature: 0.2,
             chat_only: false,
+            base_url: None,
         };
     }
 
@@ -41,6 +43,7 @@ pub fn resolve_llm_config(
             model: preset.model.clone(),
             temperature: preset.temperature.unwrap_or(0.2),
             chat_only: preset.chat_only.unwrap_or(false),
+            base_url: preset.base_url.clone(),
         }
     }
 
@@ -67,30 +70,35 @@ pub fn resolve_llm_config(
             model: "claude-sonnet-4-20250514".to_string(),
             temperature: 0.2,
             chat_only: false,
+            base_url: None,
         },
         "coder" => LlmTemplateConfig {
             provider: "anthropic".to_string(),
             model: "claude-sonnet-4-20250514".to_string(),
             temperature: 0.1,
             chat_only: false,
+            base_url: None,
         },
         "researcher" => LlmTemplateConfig {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
             temperature: 0.3,
             chat_only: false,
+            base_url: None,
         },
         "evaluator" | "auditor" => LlmTemplateConfig {
             provider: "openrouter".to_string(),
             model: "google/gemini-3-flash-preview".to_string(),
             temperature: 0.1,
             chat_only: false,
+            base_url: None,
         },
         _ => LlmTemplateConfig {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
             temperature: 0.2,
             chat_only: false,
+            base_url: None,
         },
     }
 }
@@ -176,6 +184,11 @@ pub fn render_skill_template(
     } else {
         ""
     };
+    let base_url_line = llm_config
+        .base_url
+        .as_ref()
+        .map(|u| format!("\n      base_url: \"{u}\""))
+        .unwrap_or_default();
 
     format!(
         r#"---
@@ -198,7 +211,7 @@ metadata:
     llm_config:
       provider: "{provider}"
       model: "{model}"
-      temperature: {temperature}{chat_only}
+      temperature: {temperature}{chat_only}{base_url}
 ---
 # {agent_id}
 
@@ -208,6 +221,7 @@ metadata:
         model = llm_config.model,
         temperature = llm_config.temperature,
         chat_only = chat_only_line,
+        base_url = base_url_line,
     )
 }
 
@@ -283,7 +297,6 @@ const DEFAULT_CONFIG_TEMPLATE: &str = r#"# Autonoetic Gateway Configuration
 port: 4000
 ofp_port: 4200
 tls: false
-default_lead_agent_id: "planner.default"
 max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4
 
@@ -372,6 +385,14 @@ retention:
 # ── LLM Presets ───────────────────────────────────────────────────────
 # Named presets for role-specific model selection.
 # Referenced by name in templates and agent init commands.
+#
+# For local OpenAI-compatible servers (LM Studio, Ollama, etc.), set base_url:
+#
+#   local:
+#     provider: "lmstudio"
+#     model: "unsloth/qwen3.5-35b-a3bi@q4_k_xl"
+#     base_url: "http://192.168.1.20:1234/v1"
+#
 llm_presets:
   agentic:
     provider: "openrouter"
@@ -577,8 +598,11 @@ fn apply_llm_preset_to_skill(
     if content.contains(&format!("model: \"{}\"", llm.model))
         && content.contains(&format!("provider: \"{}\"", llm.provider))
     {
-        // Even if model/provider match, check chat_only
-        if !llm.chat_only || content.contains("chat_only") {
+        // Even if model/provider match, check chat_only and base_url
+        let chat_only_match = !llm.chat_only || content.contains("chat_only");
+        let base_url_match = llm.base_url.is_none()
+            || llm.base_url.as_ref().map_or(true, |u| content.contains(u));
+        if chat_only_match && base_url_match {
             return None; // Already correct
         }
     }
@@ -601,17 +625,36 @@ fn apply_llm_preset_to_skill(
 
     // Handle chat_only
     if llm.chat_only {
-        // Check if chat_only already exists
         if !updated.contains("chat_only") {
-            // Add chat_only after temperature line
             let re_after_temp = regex::Regex::new(r#"(temperature:\s*[0-9.]+\s*\n)"#).ok()?;
             updated = re_after_temp
                 .replace(&updated, format!("${{1}}      chat_only: true\n"))
                 .to_string();
         } else {
-            // Update existing chat_only
             let re_co = regex::Regex::new(r#"(chat_only:\s*)(true|false)"#).ok()?;
             updated = re_co.replace(&updated, "${1}true").to_string();
+        }
+    }
+
+    // Handle base_url
+    if let Some(ref url) = llm.base_url {
+        let re_base_url = regex::Regex::new(r#"(base_url:\s*)"[^"]*""#).ok();
+        if let Some(re) = re_base_url {
+            if updated.contains("base_url:") {
+                updated = re.replace(&updated, format!("${{1}}\"{}\"", url)).to_string();
+            } else {
+                // Add base_url after chat_only or temperature line
+                let insert_after = if updated.contains("chat_only") {
+                    regex::Regex::new(r#"(chat_only:\s*(?:true|false)\s*\n)"#).ok()
+                } else {
+                    regex::Regex::new(r#"(temperature:\s*[0-9.]+\s*\n)"#).ok()
+                };
+                if let Some(re_after) = insert_after {
+                    updated = re_after
+                        .replace(&updated, format!("${{1}}      base_url: \"{}\"\n", url))
+                        .to_string();
+                }
+            }
         }
     }
 
@@ -1196,6 +1239,7 @@ Use tools when needed.
                 fallback_model: None,
                 chat_only: None,
                 context_window_tokens: None,
+                base_url: None,
             },
         );
         config

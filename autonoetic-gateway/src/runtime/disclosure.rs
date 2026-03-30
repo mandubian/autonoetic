@@ -12,7 +12,6 @@ pub struct DisclosureState {
 #[derive(Debug)]
 struct Taint {
     content: String,
-    class: DisclosureClass,
 }
 
 impl DisclosureState {
@@ -58,19 +57,9 @@ impl DisclosureState {
             return;
         }
 
-        // Secret/confidential values are always tainted even when short.
-        // Internal remains conservative to avoid noisy over-redaction of tiny common tokens.
-        let should_record = match class {
-            DisclosureClass::Secret | DisclosureClass::Confidential => true,
-            DisclosureClass::Internal => trimmed.len() > 5,
-            DisclosureClass::Public => false,
-        };
-        if should_record {
-            self.taints.push(Taint {
-                content: result.to_string(),
-                class,
-            });
-        }
+        self.taints.push(Taint {
+            content: result.to_string(),
+        });
     }
 
     /// Extends the state with a forcefully defined taint (e.g., from SecretStore)
@@ -78,7 +67,6 @@ impl DisclosureState {
         if class != DisclosureClass::Public && !result.trim().is_empty() {
             self.taints.push(Taint {
                 content: result.to_string(),
-                class,
             });
         }
     }
@@ -98,17 +86,9 @@ impl DisclosureState {
         let mut sorted_taints = self.taints.iter().collect::<Vec<_>>();
         sorted_taints.sort_by(|a, b| b.content.len().cmp(&a.content.len()));
 
-        // Keep track of replaced substrings to avoid overlapping replacements?
-        // string.replace handles non-overlapping matches natively.
         for taint in sorted_taints {
             if filtered.contains(&taint.content) {
-                let marker = match taint.class {
-                    DisclosureClass::Secret => "[REDACTED: Secret content]",
-                    DisclosureClass::Confidential => "[REDACTED: Confidential content]",
-                    DisclosureClass::Internal => "[REDACTED: Internal content]",
-                    DisclosureClass::Public => continue,
-                };
-                filtered = filtered.replace(&taint.content, marker);
+                filtered = filtered.replace(&taint.content, "[REDACTED]");
             }
         }
 
@@ -128,12 +108,12 @@ mod tests {
                 DisclosureRule {
                     source: "memory.read".to_string(),
                     path_pattern: Some("state/secrets/*".to_string()),
-                    class: DisclosureClass::Secret,
+                    class: DisclosureClass::Restricted,
                 },
                 DisclosureRule {
                     source: "memory.read".to_string(),
                     path_pattern: None,
-                    class: DisclosureClass::Internal,
+                    class: DisclosureClass::Public,
                 },
             ],
             default_class: DisclosureClass::Public,
@@ -143,11 +123,11 @@ mod tests {
 
         assert_eq!(
             state.evaluate_class("memory.read", Some("state/secrets/keys.json")),
-            DisclosureClass::Secret
+            DisclosureClass::Restricted
         );
         assert_eq!(
             state.evaluate_class("memory.read", Some("state/public/data.json")),
-            DisclosureClass::Internal
+            DisclosureClass::Public
         );
         assert_eq!(
             state.evaluate_class("sandbox.exec", None),
@@ -160,29 +140,24 @@ mod tests {
         let policy = DisclosurePolicy::default();
         let mut state = DisclosureState::new(policy);
 
-        state.register_explicit_taint("super_secret_password_123", DisclosureClass::Secret);
-        state.register_explicit_taint("internal_api_key_456", DisclosureClass::Confidential);
-        state.register_explicit_taint("short", DisclosureClass::Secret); // Now it should record short secrets
+        state.register_explicit_taint("super_secret_password_123", DisclosureClass::Restricted);
+        state.register_explicit_taint("internal_api_key_456", DisclosureClass::Restricted);
 
-        let input = "Here are the credentials. Password is super_secret_password_123 and the API key is internal_api_key_456. Have a good day. It's short.";
+        let input = "Here are the credentials. Password is super_secret_password_123 and the API key is internal_api_key_456.";
         let filtered = state.filter_reply(input);
 
-        assert!(filtered.contains("[REDACTED: Secret content]"));
+        assert!(filtered.contains("[REDACTED]"));
         assert!(!filtered.contains("super_secret_password_123"));
-
-        assert!(filtered.contains("[REDACTED: Confidential content]"));
         assert!(!filtered.contains("internal_api_key_456"));
-
-        assert!(!filtered.contains("short")); // Should be redacted now
     }
 
     #[test]
-    fn test_register_result_taints_short_secret_values() {
+    fn test_register_result_taints_restricted_values() {
         let policy = DisclosurePolicy {
             rules: vec![DisclosureRule {
                 source: "memory.read".to_string(),
                 path_pattern: Some("state/secrets/*".to_string()),
-                class: DisclosureClass::Secret,
+                class: DisclosureClass::Restricted,
             }],
             default_class: DisclosureClass::Public,
         };
@@ -191,7 +166,7 @@ mod tests {
         state.register_result("memory.read", Some("state/secrets/pin.txt"), "1234");
         let filtered = state.filter_reply("The PIN is 1234.");
 
-        assert!(filtered.contains("[REDACTED: Secret content]"));
+        assert!(filtered.contains("[REDACTED]"));
         assert!(!filtered.contains("1234"));
     }
 
@@ -199,12 +174,11 @@ mod tests {
     fn test_filter_reply_does_not_redact_transformed_secret_variant() {
         let policy = DisclosurePolicy::default();
         let mut state = DisclosureState::new(policy);
-        state.register_explicit_taint("super_secret_wahoo", DisclosureClass::Secret);
+        state.register_explicit_taint("super_secret_wahoo", DisclosureClass::Restricted);
 
-        // Verbatim protection does not attempt fuzzy/semantic matching.
         let filtered = state.filter_reply("I can only say: super secret wahoo");
 
         assert_eq!(filtered, "I can only say: super secret wahoo");
-        assert!(!filtered.contains("[REDACTED:"));
+        assert!(!filtered.contains("[REDACTED]"));
     }
 }

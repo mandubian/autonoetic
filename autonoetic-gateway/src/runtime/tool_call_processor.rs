@@ -260,7 +260,7 @@ impl<'a> ToolCallProcessor<'a> {
             result = new_result;
             for s in extracted_secrets {
                 self.disclosure_state
-                    .register_explicit_taint(&s, DisclosureClass::Secret);
+                    .register_explicit_taint(&s, DisclosureClass::Restricted);
             }
         }
 

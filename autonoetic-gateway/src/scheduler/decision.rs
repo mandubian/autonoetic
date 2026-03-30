@@ -181,9 +181,7 @@ pub fn mark_reason_processed(state: &mut BackgroundState, reason: &WakeReason) {
                 .processed_approval_request_ids
                 .push(request_id.clone());
         }
-        WakeReason::Timer { .. }
-        | WakeReason::StaleGoal { .. }
-        | WakeReason::RetryableFailure { .. } => {}
+        WakeReason::Timer { .. } => {}
     }
 }
 
@@ -197,8 +195,6 @@ pub fn wake_fingerprint(agent_id: &str, session_id: &str, reason: &WakeReason) -
         | WakeReason::QueuedWork { task_id, status } => {
             format!("task:{task_id}:{status}")
         }
-        WakeReason::RetryableFailure { marker_id } => format!("retry:{marker_id}"),
-        WakeReason::StaleGoal { marker_id } => format!("stale:{marker_id}"),
         WakeReason::ApprovalResolved { request_id } => format!("approval:{request_id}"),
     }
 }

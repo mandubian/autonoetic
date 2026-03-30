@@ -26,10 +26,6 @@ pub struct WakePredicates {
     #[serde(default)]
     pub queued_work: bool,
     #[serde(default)]
-    pub stale_goals: bool,
-    #[serde(default)]
-    pub retryable_failures: bool,
-    #[serde(default)]
     pub approval_resolved: bool,
 }
 
@@ -40,8 +36,6 @@ impl Default for WakePredicates {
             new_messages: false,
             task_completions: false,
             queued_work: false,
-            stale_goals: false,
-            retryable_failures: false,
             approval_resolved: false,
         }
     }
@@ -181,8 +175,6 @@ pub enum WakeReason {
     NewMessage { event_id: String, message: String },
     TaskCompletion { task_id: String, status: String },
     QueuedWork { task_id: String, status: String },
-    StaleGoal { marker_id: String },
-    RetryableFailure { marker_id: String },
     ApprovalResolved { request_id: String },
 }
 

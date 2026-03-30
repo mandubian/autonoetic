@@ -1,19 +1,16 @@
 //! Internal JSON-RPC 2.0 Router.
 
 use crate::execution::{
-    gateway_actor_id, gateway_root_dir, init_gateway_causal_logger, sha256_hex,
+    gateway_actor_id, init_gateway_causal_logger, sha256_hex,
     GatewayExecutionService, SpawnResult,
 };
 use crate::scheduler::append_task_board_entry;
 use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::task_board::{TaskBoardEntry, TaskStatus};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -315,21 +312,6 @@ impl JsonRpcRouter {
                     .await
                 {
                     Ok((result, _trace_session)) => {
-                        // Persist binding on successful spawn so future
-                        // event.ingest to this session routes to the spawned
-                        // agent (instead of default lead fallback).
-                        if let Err(e) = persist_session_lead_agent_binding(
-                            self.config.as_ref(),
-                            &result.session_id,
-                            &result.agent_id,
-                        ) {
-                            tracing::warn!(
-                                error = %e,
-                                session_id = %result.session_id,
-                                agent_id = %result.agent_id,
-                                "Failed to persist session lead binding after spawn"
-                            );
-                        }
                         if let Some(source_agent_id) = params.source_agent_id.as_deref() {
                             let _ = append_delegation_task_entry(
                                 self.config.as_ref(),
@@ -693,7 +675,7 @@ impl JsonRpcRouter {
 
     fn resolve_ingest_target_agent_id(
         &self,
-        session_id: &str,
+        _session_id: &str,
         requested_target_agent_id: Option<&str>,
     ) -> anyhow::Result<String> {
         if let Some(explicit_target) = requested_target_agent_id.map(str::trim) {
@@ -701,23 +683,12 @@ impl JsonRpcRouter {
                 !explicit_target.is_empty(),
                 "target_agent_id must not be empty when provided"
             );
-            persist_session_lead_agent_binding(self.config.as_ref(), session_id, explicit_target)?;
             return Ok(explicit_target.to_string());
         }
 
-        if let Some(bound_agent_id) =
-            load_session_lead_agent_binding(self.config.as_ref(), session_id)?
-        {
-            return Ok(bound_agent_id);
-        }
-
-        let default_lead = self.config.default_lead_agent_id.trim();
-        anyhow::ensure!(
-            !default_lead.is_empty(),
-            "default_lead_agent_id is empty; configure a lead agent or provide target_agent_id"
+        anyhow::bail!(
+            "event.ingest requires an explicit target_agent_id; no default routing is available"
         );
-        persist_session_lead_agent_binding(self.config.as_ref(), session_id, default_lead)?;
-        Ok(default_lead.to_string())
     }
 
     #[cfg(test)]
@@ -770,85 +741,6 @@ struct EventIngestParams {
     session_id: Option<String>,
     #[serde(default)]
     source_agent_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SessionLeadBinding {
-    session_id: String,
-    lead_agent_id: String,
-    updated_at: String,
-}
-
-fn session_lead_bindings_dir(config: &GatewayConfig) -> PathBuf {
-    gateway_root_dir(config)
-        .join("sessions")
-        .join("lead_bindings")
-}
-
-fn session_lead_binding_path(config: &GatewayConfig, session_id: &str) -> PathBuf {
-    session_lead_bindings_dir(config).join(format!("{}.json", session_filename_token(session_id)))
-}
-
-fn session_filename_token(session_id: &str) -> String {
-    let sanitized = session_id
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let prefix = if sanitized.is_empty() {
-        "session".to_string()
-    } else {
-        sanitized.chars().take(48).collect::<String>()
-    };
-    let mut hasher = Sha256::new();
-    hasher.update(session_id.as_bytes());
-    let digest = format!("{:x}", hasher.finalize());
-    format!("{}-{}", prefix, &digest[..12])
-}
-
-fn load_session_lead_agent_binding(
-    config: &GatewayConfig,
-    session_id: &str,
-) -> anyhow::Result<Option<String>> {
-    let path = session_lead_binding_path(config, session_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let body = std::fs::read_to_string(path)?;
-    let binding: SessionLeadBinding = serde_json::from_str(&body)?;
-    anyhow::ensure!(
-        !binding.lead_agent_id.trim().is_empty(),
-        "Session lead binding for '{}' contains an empty lead_agent_id",
-        session_id
-    );
-    Ok(Some(binding.lead_agent_id))
-}
-
-fn persist_session_lead_agent_binding(
-    config: &GatewayConfig,
-    session_id: &str,
-    lead_agent_id: &str,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !lead_agent_id.trim().is_empty(),
-        "lead_agent_id must not be empty"
-    );
-    let path = session_lead_binding_path(config, session_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let binding = SessionLeadBinding {
-        session_id: session_id.to_string(),
-        lead_agent_id: lead_agent_id.to_string(),
-        updated_at: Utc::now().to_rfc3339(),
-    };
-    std::fs::write(path, serde_json::to_string_pretty(&binding)?)?;
-    Ok(())
 }
 
 pub(crate) fn ingress_wake_signal_internal(event_type: &str, session_id: &str) -> String {
@@ -958,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_event_ingest_without_target_routes_to_default_lead_agent() {
+    async fn test_dispatch_event_ingest_without_target_fails_validation() {
         let (_temp, router) = test_router();
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -973,50 +865,9 @@ mod tests {
         let resp = router.dispatch(req).await;
         let err = resp
             .error
-            .expect("event.ingest should fail on missing agent");
+            .expect("event.ingest should fail on missing target");
         assert_eq!(err.code, -32000);
-        assert!(err.message.contains("planner.default"));
-        assert!(err.message.contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_event_ingest_uses_existing_session_lead_binding() {
-        let (_temp, router) = test_router();
-        let first = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: "2c-1".to_string(),
-            method: "event.ingest".to_string(),
-            params: serde_json::json!({
-                "event_type": "chat",
-                "target_agent_id": "researcher.default",
-                "message": "hello researcher",
-                "session_id": "sess-bound-route"
-            }),
-        };
-        let first_resp = router.dispatch(first).await;
-        let first_err = first_resp
-            .error
-            .expect("first event.ingest should fail on missing agent");
-        assert_eq!(first_err.code, -32000);
-        assert!(first_err.message.contains("researcher.default"));
-
-        let second = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: "2c-2".to_string(),
-            method: "event.ingest".to_string(),
-            params: serde_json::json!({
-                "event_type": "chat",
-                "message": "follow-up without explicit target",
-                "session_id": "sess-bound-route"
-            }),
-        };
-        let second_resp = router.dispatch(second).await;
-        let second_err = second_resp
-            .error
-            .expect("second event.ingest should also fail on missing agent");
-        assert_eq!(second_err.code, -32000);
-        assert!(second_err.message.contains("researcher.default"));
-        assert!(!second_err.message.contains("planner.default"));
+        assert!(err.message.contains("explicit target_agent_id"));
     }
 
     #[tokio::test]

@@ -13,7 +13,6 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
-use autonoetic_types::config::{AgentInstallApprovalPolicy, GatewayConfig};
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
@@ -147,7 +146,6 @@ async fn test_agent_install_full_approval_flow() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
         ..Default::default()
     };
 
@@ -348,7 +346,6 @@ async fn test_agent_install_rejects_retry_when_payload_missing() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
         ..Default::default()
     };
 
@@ -498,7 +495,6 @@ async fn test_agent_install_rejects_invalid_approval_ref() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
         ..Default::default()
     };
 
@@ -570,7 +566,6 @@ async fn test_agent_install_approval_policies() {
     std::fs::create_dir_all(&builder_dir_always).unwrap();
     let config_always = GatewayConfig {
         agents_dir: agents_dir_always.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
         ..Default::default()
     };
     let result_always = registry
@@ -601,7 +596,6 @@ async fn test_agent_install_approval_policies() {
     std::fs::create_dir_all(&builder_dir_never).unwrap();
     let config_never = GatewayConfig {
         agents_dir: agents_dir_never.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Never,
         ..Default::default()
     };
     let result_never = registry

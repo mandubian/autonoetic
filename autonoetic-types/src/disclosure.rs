@@ -1,6 +1,7 @@
 //! Disclosure Policy Types
 //!
 //! Defines how sensitive information should be handled in assistant replies.
+//! Simplified to a binary model: content is either public or restricted.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,12 +11,8 @@ use serde::{Deserialize, Serialize};
 pub enum DisclosureClass {
     /// Information that can be safely disclosed to the user verbatim.
     Public,
-    /// Information that is for internal context only.
-    Internal,
-    /// Information that should be summarized or paraphrased, not repeated verbatim.
-    Confidential,
-    /// Highly sensitive information that should never be echoed verbatim.
-    Secret,
+    /// Information that must be redacted from the assistant reply.
+    Restricted,
 }
 
 impl Default for DisclosureClass {
