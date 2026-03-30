@@ -7444,6 +7444,278 @@ impl NativeTool for AgentRevisionInspectTool {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Agent Revision Promotion / Rollback Tools
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct RevisionPromoteArgs {
+    agent_id: String,
+    revision_id: String,
+    reason: Option<String>,
+}
+
+pub struct AgentRevisionPromoteTool;
+
+impl NativeTool for AgentRevisionPromoteTool {
+    fn name(&self) -> &'static str {
+        "agent.revision.promote"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Promote a candidate revision to become the active alias target. New sessions will resolve to this revision.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Logical agent ID whose alias should be updated" },
+                    "revision_id": { "type": "string", "description": "Revision ID to promote (must be in candidate or ready status)" },
+                    "reason": { "type": "string", "description": "Optional: human-readable reason for promotion" }
+                },
+                "required": ["agent_id", "revision_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: RevisionPromoteArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        validate_agent_id(&args.agent_id)?;
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required"));
+        };
+
+        // Verify revision exists and is in candidate or ready status
+        let rev = gateway_store.get_agent_revision(&args.revision_id)?
+            .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", args.revision_id))?;
+
+        anyhow::ensure!(
+            rev.agent_id == args.agent_id,
+            "Revision '{}' belongs to agent '{}', not '{}'",
+            args.revision_id, rev.agent_id, args.agent_id
+        );
+
+        anyhow::ensure!(
+            matches!(rev.status, autonoetic_types::agent_revision::AgentRevisionStatus::Candidate | autonoetic_types::agent_revision::AgentRevisionStatus::Ready),
+            "Revision '{}' is in status '{:?}', must be Candidate or Ready for promotion",
+            args.revision_id, rev.status
+        );
+
+        // Get current alias (if any)
+        let previous_alias = gateway_store.resolve_alias(&args.agent_id)?;
+        let previous_revision_id = previous_alias.as_ref().map(|a| a.revision_id.clone());
+
+        // Atomically update alias
+        let now = chrono::Utc::now().to_rfc3339();
+        let alias = autonoetic_types::agent_revision::AgentAliasRecord {
+            alias_id: args.agent_id.clone(),
+            agent_id: args.agent_id.clone(),
+            revision_id: args.revision_id.clone(),
+            updated_at: now.clone(),
+            updated_by_type: "agent".to_string(),
+            updated_by_id: manifest.agent.id.clone(),
+            reason: args.reason.clone(),
+        };
+        gateway_store.upsert_agent_alias(&alias)?;
+
+        // Update revision status to Ready
+        gateway_store.update_agent_revision_status(
+            &args.revision_id,
+            autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
+        )?;
+
+        // Archive previous revision if different
+        if let Some(prev_rev_id) = &previous_revision_id {
+            if prev_rev_id != &args.revision_id {
+                gateway_store.update_agent_revision_status(
+                    prev_rev_id,
+                    autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
+                )?;
+            }
+        }
+
+        // Record promotion in history
+        let promotion_id = format!("prom-{}", &hex::encode(Sha256::digest(format!("{}-{}-{}", args.agent_id, args.revision_id, now)))[..8]);
+        let record = autonoetic_types::agent_revision::PromotionRecord {
+            promotion_id,
+            kind: autonoetic_types::agent_revision::PromotionKind::Promote,
+            alias_id: args.agent_id.clone(),
+            agent_id: args.agent_id.clone(),
+            previous_revision_id,
+            new_revision_id: args.revision_id.clone(),
+            source_eval_run_id: None,
+            reason: args.reason,
+            created_at: now,
+            created_by_type: "agent".to_string(),
+            created_by_id: manifest.agent.id.clone(),
+            origin_node_id: "gateway".to_string(),
+        };
+        gateway_store.insert_promotion_record(&record)?;
+
+        let short_ref = format!("{}@rev_{}", args.agent_id, rev.short_id);
+        Ok(serde_json::json!({
+            "ok": true,
+            "status": "promoted",
+            "agent_id": args.agent_id,
+            "revision_id": args.revision_id,
+            "short_ref": short_ref,
+            "previous_revision_id": record.previous_revision_id,
+            "promotion_id": record.promotion_id,
+        }).to_string())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RevisionRollbackArgs {
+    agent_id: String,
+    revision_id: String,
+    reason: Option<String>,
+}
+
+pub struct AgentRevisionRollbackTool;
+
+impl NativeTool for AgentRevisionRollbackTool {
+    fn name(&self) -> &'static str {
+        "agent.revision.rollback"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Rollback an agent alias to a previous revision. Use when a promotion caused issues.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Logical agent ID whose alias should be rolled back" },
+                    "revision_id": { "type": "string", "description": "Previous revision ID to roll back to" },
+                    "reason": { "type": "string", "description": "Optional: human-readable reason for rollback" }
+                },
+                "required": ["agent_id", "revision_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: RevisionRollbackArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        validate_agent_id(&args.agent_id)?;
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required"));
+        };
+
+        // Verify target revision exists
+        let rev = gateway_store.get_agent_revision(&args.revision_id)?
+            .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", args.revision_id))?;
+
+        anyhow::ensure!(
+            rev.agent_id == args.agent_id,
+            "Revision '{}' belongs to agent '{}', not '{}'",
+            args.revision_id, rev.agent_id, args.agent_id
+        );
+
+        // Get current alias
+        let current_alias = gateway_store.resolve_alias(&args.agent_id)?;
+        let current_revision_id = current_alias.as_ref().map(|a| a.revision_id.clone());
+
+        // Atomically update alias
+        let now = chrono::Utc::now().to_rfc3339();
+        let alias = autonoetic_types::agent_revision::AgentAliasRecord {
+            alias_id: args.agent_id.clone(),
+            agent_id: args.agent_id.clone(),
+            revision_id: args.revision_id.clone(),
+            updated_at: now.clone(),
+            updated_by_type: "agent".to_string(),
+            updated_by_id: manifest.agent.id.clone(),
+            reason: args.reason.clone(),
+        };
+        gateway_store.upsert_agent_alias(&alias)?;
+
+        // Archive the previously active revision
+        if let Some(prev_rev_id) = &current_revision_id {
+            if prev_rev_id != &args.revision_id {
+                gateway_store.update_agent_revision_status(
+                    prev_rev_id,
+                    autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
+                )?;
+            }
+        }
+
+        // Record rollback in history
+        let promotion_id = format!("roll-{}", &hex::encode(Sha256::digest(format!("{}-{}-{}", args.agent_id, args.revision_id, now)))[..8]);
+        let record = autonoetic_types::agent_revision::PromotionRecord {
+            promotion_id,
+            kind: autonoetic_types::agent_revision::PromotionKind::Rollback,
+            alias_id: args.agent_id.clone(),
+            agent_id: args.agent_id.clone(),
+            previous_revision_id: current_revision_id,
+            new_revision_id: args.revision_id.clone(),
+            source_eval_run_id: None,
+            reason: args.reason,
+            created_at: now,
+            created_by_type: "agent".to_string(),
+            created_by_id: manifest.agent.id.clone(),
+            origin_node_id: "gateway".to_string(),
+        };
+        gateway_store.insert_promotion_record(&record)?;
+
+        let short_ref = format!("{}@rev_{}", args.agent_id, rev.short_id);
+        Ok(serde_json::json!({
+            "ok": true,
+            "status": "rolled_back",
+            "agent_id": args.agent_id,
+            "revision_id": args.revision_id,
+            "short_ref": short_ref,
+            "previous_revision_id": record.previous_revision_id,
+            "promotion_id": record.promotion_id,
+        }).to_string())
+    }
+}
+
 fn capability_type_name(cap: &Capability) -> String {
     match cap {
         Capability::SandboxFunctions { .. } => "SandboxFunctions".to_string(),
@@ -8141,6 +8413,8 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(AgentRevisionCreateTool));
     registry.register(Box::new(AgentRevisionListTool));
     registry.register(Box::new(AgentRevisionInspectTool));
+    registry.register(Box::new(AgentRevisionPromoteTool));
+    registry.register(Box::new(AgentRevisionRollbackTool));
     // Workflow tools
     registry.register(Box::new(ApprovalStatusTool));
     registry.register(Box::new(WorkflowWaitTool));
@@ -8378,8 +8652,8 @@ mod tests {
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
-        // agent.spawn, agent.exists, agent.discover, agent.install, agent.revision.create, agent.revision.list, agent.revision.inspect, workflow.wait, workflow.cancel_task (9) + always-available (6) = 15
-        assert_eq!(defs_spawn.len(), 15);
+        // agent.spawn, agent.exists, agent.discover, agent.install, agent.revision.create, agent.revision.list, agent.revision.inspect, agent.revision.promote, agent.revision.rollback, workflow.wait, workflow.cancel_task (11) + always-available (6) = 17
+        assert_eq!(defs_spawn.len(), 17);
         assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
         assert!(
             defs_spawn.iter().any(|d| d.name == "agent.install"),
