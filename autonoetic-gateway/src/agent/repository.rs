@@ -201,7 +201,8 @@ impl AgentRepository {
     /// - A plain agent_id (e.g., "planner.default") → resolved via alias lookup
     /// - An agent_ref (e.g., "planner.default@rev_sha256:...") → parsed and used directly
     ///
-    /// Returns the resolved `AgentRef` and the `AgentRevisionRecord`.
+    /// Targets containing '@' that don't parse as valid agent_ref are rejected
+    /// (not reinterpreted as alias lookups), per the spec resolution contract.
     pub fn resolve_agent(
         &self,
         target: &str,
@@ -211,8 +212,14 @@ impl AgentRepository {
             anyhow::bail!("GatewayStore is required for revision-based resolution");
         };
 
-        // Try to parse as agent_ref first
-        if let Some(agent_ref) = AgentRef::parse(target) {
+        if target.contains('@') {
+            // Must be a valid agent_ref — reject if parsing fails
+            let agent_ref = AgentRef::parse(target).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid agent_ref '{}': must be in format 'agent_id@rev_sha256:<64 hex chars>'",
+                    target
+                )
+            })?;
             // Direct revision reference — validate agent_id matches
             let rev = match gateway_store.get_agent_revision(&agent_ref.revision_id)? {
                 Some(r) => r,
@@ -556,14 +563,13 @@ Test instructions.
         std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
         let store = GatewayStore::open(&gateway_dir).expect("should open store");
 
-        // Invalid revision format (not rev_sha256:) — AgentRef::parse rejects it
+        // Invalid revision format (contains @ but not a valid agent_ref) — must be rejected, not fall back to alias lookup
         let result = repo.resolve_agent("planner.default@not-a-revision", Some(&store));
         assert!(result.is_err());
-        // Since parse fails, it falls through to alias lookup which also fails
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("not found") || err.to_string().contains("Create a revision"),
-            "Error: {}", err
+            err.to_string().contains("Invalid agent_ref"),
+            "Should reject invalid @ targets, got: {}", err
         );
     }
 

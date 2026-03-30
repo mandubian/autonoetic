@@ -1,4 +1,5 @@
 //! Integration tests for loopback channels and memory execution loops.
+use autonoetic_types::config::GatewayConfig;
 
 mod support;
 
