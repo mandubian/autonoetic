@@ -8,7 +8,7 @@
 //! does not affect already-running sessions.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+
 
 /// A fully qualified immutable agent reference.
 ///
@@ -286,19 +286,20 @@ pub fn short_id(digest: &str, len: Option<usize>) -> String {
 ///
 /// Given a set of existing revision IDs, generates a short ID for `digest`
 /// that is unique within the set. If the default length produces a collision,
-/// the length is incremented until unique.
+/// the length is incremented until unique (re-checking at each length).
 pub fn short_id_unique<'a>(
     digest: &str,
     existing: impl IntoIterator<Item = &'a str>,
     min_len: Option<usize>,
 ) -> String {
-    let existing_set: HashSet<String> =
-        existing.into_iter().map(|d| short_id(d, min_len)).collect();
-
+    let existing_vec: Vec<&str> = existing.into_iter().collect();
     let mut len = min_len.unwrap_or(8);
     loop {
         let candidate = short_id(digest, Some(len));
-        if !existing_set.contains(&candidate) {
+        let collision = existing_vec
+            .iter()
+            .any(|d| short_id(d, Some(len)) == candidate);
+        if !collision {
             return candidate;
         }
         len += 1;
@@ -311,7 +312,10 @@ pub fn short_id_unique<'a>(
 
 /// Format an agent reference with a short revision ID for LLM consumption.
 ///
-/// Returns e.g. "planner.default@rev_abc12345" instead of the full 80+ char ref.
+/// Returns e.g. `"planner.default@rev_abc12345"` — a compact, human-friendly
+/// reference that can be resolved by `AgentRepository::resolve_agent()` via
+/// the short ID index. Note: this format is NOT parseable by `AgentRef::parse()`
+/// (which requires full hex), but IS resolvable through the repository layer.
 pub fn format_short_ref(agent_id: &str, revision_id: &str) -> String {
     let short = short_id(revision_id, None);
     format!("{}@rev_{}", agent_id, short)

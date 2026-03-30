@@ -199,10 +199,12 @@ impl AgentRepository {
     ///
     /// The target can be:
     /// - A plain agent_id (e.g., "planner.default") → resolved via alias lookup
-    /// - An agent_ref (e.g., "planner.default@rev_sha256:...") → parsed and used directly
+    /// - A full agent_ref (e.g., "planner.default@rev_sha256:...") → parsed and used directly
+    /// - A short agent_ref (e.g., "planner.default@rev_abc12345") → resolved via short ID index
     ///
-    /// Targets containing '@' that don't parse as valid agent_ref are rejected
-    /// (not reinterpreted as alias lookups), per the spec resolution contract.
+    /// Targets containing '@' that don't parse as valid agent_ref and don't match
+    /// a short ID in the index are rejected (not reinterpreted as alias lookups),
+    /// per the spec resolution contract.
     pub fn resolve_agent(
         &self,
         target: &str,
@@ -213,27 +215,59 @@ impl AgentRepository {
         };
 
         if target.contains('@') {
-            // Must be a valid agent_ref — reject if parsing fails
-            let agent_ref = AgentRef::parse(target).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Invalid agent_ref '{}': must be in format 'agent_id@rev_sha256:<64 hex chars>'",
-                    target
-                )
+            // Try strict agent_ref parsing first (full hex format)
+            if let Some(agent_ref) = AgentRef::parse(target) {
+                let rev = match gateway_store.get_agent_revision(&agent_ref.revision_id)? {
+                    Some(r) => r,
+                    None => anyhow::bail!("Revision '{}' not found in store", agent_ref.revision_id),
+                };
+                anyhow::ensure!(
+                    rev.agent_id == agent_ref.agent_id,
+                    "Revision '{}' belongs to agent '{}', not '{}'",
+                    agent_ref.revision_id,
+                    rev.agent_id,
+                    agent_ref.agent_id
+                );
+                return Ok((agent_ref, rev));
+            }
+
+            // Try short ID resolution: target is like "agent_id@rev_abc12345"
+            let at_pos = target.find('@').ok_or_else(|| {
+                anyhow::anyhow!("Invalid target '{}': must contain '@'", target)
             })?;
-            // Direct revision reference — validate agent_id matches
-            let rev = match gateway_store.get_agent_revision(&agent_ref.revision_id)? {
-                Some(r) => r,
-                None => anyhow::bail!("Revision '{}' not found in store", agent_ref.revision_id),
-            };
-            // Validate: the revision must belong to the agent_id in the ref
-            anyhow::ensure!(
-                rev.agent_id == agent_ref.agent_id,
-                "Revision '{}' belongs to agent '{}', not '{}'",
-                agent_ref.revision_id,
-                rev.agent_id,
-                agent_ref.agent_id
+            let agent_id_part = &target[..at_pos];
+            let rev_part = &target[at_pos + 1..];
+
+            // Check if rev_part looks like a short ID (rev_<alphanumeric>)
+            if rev_part.starts_with("rev_") && rev_part.len() > 4 {
+                let short_id = &rev_part[4..]; // strip "rev_" prefix
+                if let Some(full_revision_id) = gateway_store.lookup_short_id(short_id)? {
+                    let rev = match gateway_store.get_agent_revision(&full_revision_id)? {
+                        Some(r) => r,
+                        None => anyhow::bail!(
+                            "Short ID '{}' resolved to revision '{}' which was not found",
+                            rev_part,
+                            full_revision_id
+                        ),
+                    };
+                    // Validate agent_id matches
+                    anyhow::ensure!(
+                        rev.agent_id == agent_id_part,
+                        "Short ref '{}' resolves to revision belonging to agent '{}', not '{}'",
+                        target,
+                        rev.agent_id,
+                        agent_id_part
+                    );
+                    let agent_ref = AgentRef::new(rev.agent_id.clone(), rev.revision_id.clone());
+                    return Ok((agent_ref, rev));
+                }
+            }
+
+            // Neither full nor short ref worked
+            anyhow::bail!(
+                "Invalid agent_ref '{}': must be in format 'agent_id@rev_sha256:<64 hex chars>' or 'agent_id@rev_<short_id>' with a registered short ID",
+                target
             );
-            return Ok((agent_ref, rev));
         }
 
         // Plain agent_id — resolve via alias
