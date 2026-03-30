@@ -1,4 +1,5 @@
 //! End-to-end integration test for live JSON-RPC ingress.
+use autonoetic_types::config::GatewayConfig;
 
 mod support;
 

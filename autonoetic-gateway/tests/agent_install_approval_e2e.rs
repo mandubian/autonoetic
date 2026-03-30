@@ -13,6 +13,7 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
+use autonoetic_types::config::GatewayConfig;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
