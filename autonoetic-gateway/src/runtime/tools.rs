@@ -7108,6 +7108,317 @@ impl NativeTool for AgentDiscoverTool {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Agent Revision Tools
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct RevisionCreateArgs {
+    agent_id: String,
+    artifact_id: String,
+    base_revision_id: Option<String>,
+    summary: Option<String>,
+}
+
+pub struct AgentRevisionCreateTool;
+
+impl NativeTool for AgentRevisionCreateTool {
+    fn name(&self) -> &'static str {
+        "agent.revision.create"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Create a new immutable agent revision from an artifact bundle. The revision is stored but not activated until promoted.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Logical agent ID for this revision" },
+                    "artifact_id": { "type": "string", "description": "Artifact ID containing the agent bundle (SKILL.md + files)" },
+                    "base_revision_id": { "type": "string", "description": "Optional: base revision this is derived from" },
+                    "summary": { "type": "string", "description": "Optional: human-readable summary of changes" }
+                },
+                "required": ["agent_id", "artifact_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: RevisionCreateArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        validate_agent_id(&args.agent_id)?;
+        anyhow::ensure!(!args.artifact_id.trim().is_empty(), "artifact_id must not be empty");
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required for revision creation"));
+        };
+
+        let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
+        let artifact = crate::ArtifactStore::new(gateway_dir)?;
+
+        // Verify artifact exists and get its bundle
+        let bundle = artifact.inspect(&args.artifact_id)
+            .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", args.artifact_id, e))?;
+
+        let revision_id = format!("rev_{}", bundle.digest);
+        let content_digest = bundle.digest.clone();
+
+        // Check for duplicate
+        if gateway_store.get_agent_revision(&revision_id)?.is_some() {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "status": "already_exists",
+                "revision_id": revision_id,
+                "agent_id": args.agent_id,
+            }).to_string());
+        }
+
+        // Compute manifest hash from artifact files
+        let files = artifact.resolve_files(&args.artifact_id)?;
+        let skill_content = files.iter()
+            .find(|(name, _)| name == "SKILL.md")
+            .map(|(_, content)| content.as_slice())
+            .unwrap_or(&[]);
+        let manifest_hash = format!("sha256:{}", hex::encode(Sha256::digest(skill_content)));
+
+        // Compute runtime lock hash
+        let lock_content = files.iter()
+            .find(|(name, _)| name == "runtime.lock")
+            .map(|(_, content)| content.as_slice())
+            .unwrap_or(&[]);
+        let runtime_lock_hash = if lock_content.is_empty() {
+            "none".to_string()
+        } else {
+            format!("sha256:{}", hex::encode(Sha256::digest(lock_content)))
+        };
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
+            revision_id: revision_id.clone(),
+            agent_id: args.agent_id.clone(),
+            base_revision_id: args.base_revision_id,
+            artifact_id: Some(args.artifact_id.clone()),
+            content_digest,
+            runtime_lock_hash,
+            manifest_hash,
+            created_at: now,
+            created_by_type: "agent".to_string(),
+            created_by_id: manifest.agent.id.clone(),
+            source_kind: "artifact".to_string(),
+            source_ref: Some(args.artifact_id.clone()),
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+            metadata_json: serde_json::json!({
+                "summary": args.summary,
+            }),
+        };
+
+        gateway_store.insert_agent_revision(&rev)?;
+
+        let short_ref = autonoetic_types::agent_revision::format_short_ref(&args.agent_id, &revision_id);
+        Ok(serde_json::json!({
+            "ok": true,
+            "status": "created",
+            "revision_id": revision_id,
+            "short_ref": short_ref,
+            "agent_id": args.agent_id,
+            "artifact_id": args.artifact_id,
+            "next_step": "Use agent.revision.promote to activate this revision"
+        }).to_string())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RevisionListArgs {
+    agent_id: Option<String>,
+}
+
+pub struct AgentRevisionListTool;
+
+impl NativeTool for AgentRevisionListTool {
+    fn name(&self) -> &'static str {
+        "agent.revision.list"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "List agent revisions. Optionally filter by agent_id.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Optional: filter by agent ID" }
+                },
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: RevisionListArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required"));
+        };
+
+        let revisions = if let Some(agent_id) = &args.agent_id {
+            gateway_store.list_agent_revisions(agent_id)?
+        } else {
+            // List all revisions - iterate all known agents
+            // For MVP, list all without filter
+            Vec::new()
+        };
+
+        let items: Vec<serde_json::Value> = revisions
+            .into_iter()
+            .map(|r| {
+                let short_ref = autonoetic_types::agent_revision::format_short_ref(&r.agent_id, &r.revision_id);
+                serde_json::json!({
+                    "revision_id": r.revision_id,
+                    "short_ref": short_ref,
+                    "agent_id": r.agent_id,
+                    "status": format!("{:?}", r.status),
+                    "created_at": r.created_at,
+                    "artifact_id": r.artifact_id,
+                    "base_revision_id": r.base_revision_id,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "revisions": items,
+            "count": items.len(),
+        }).to_string())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RevisionInspectArgs {
+    revision_id: String,
+}
+
+pub struct AgentRevisionInspectTool;
+
+impl NativeTool for AgentRevisionInspectTool {
+    fn name(&self) -> &'static str {
+        "agent.revision.inspect"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Inspect a specific agent revision's metadata and execution closure.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "revision_id": { "type": "string", "description": "Full revision ID (rev_sha256:...)" }
+                },
+                "required": ["revision_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: RevisionInspectArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required"));
+        };
+
+        let rev = gateway_store.get_agent_revision(&args.revision_id)?
+            .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", args.revision_id))?;
+
+        let short_ref = autonoetic_types::agent_revision::format_short_ref(&rev.agent_id, &rev.revision_id);
+        Ok(serde_json::json!({
+            "ok": true,
+            "revision": {
+                "revision_id": rev.revision_id,
+                "short_ref": short_ref,
+                "agent_id": rev.agent_id,
+                "status": format!("{:?}", rev.status),
+                "created_at": rev.created_at,
+                "created_by_type": rev.created_by_type,
+                "created_by_id": rev.created_by_id,
+                "artifact_id": rev.artifact_id,
+                "base_revision_id": rev.base_revision_id,
+                "content_digest": rev.content_digest,
+                "runtime_lock_hash": rev.runtime_lock_hash,
+                "manifest_hash": rev.manifest_hash,
+                "source_kind": rev.source_kind,
+                "source_ref": rev.source_ref,
+                "origin_node_id": rev.origin_node_id,
+                "trust_domain": rev.trust_domain,
+                "metadata": rev.metadata_json,
+            }
+        }).to_string())
+    }
+}
+
 fn capability_type_name(cap: &Capability) -> String {
     match cap {
         Capability::SandboxFunctions { .. } => "SandboxFunctions".to_string(),
@@ -7801,6 +8112,10 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(AgentInstallTool));
     registry.register(Box::new(AgentExistsTool));
     registry.register(Box::new(AgentDiscoverTool));
+    // Agent revision tools
+    registry.register(Box::new(AgentRevisionCreateTool));
+    registry.register(Box::new(AgentRevisionListTool));
+    registry.register(Box::new(AgentRevisionInspectTool));
     // Workflow tools
     registry.register(Box::new(ApprovalStatusTool));
     registry.register(Box::new(WorkflowWaitTool));
@@ -8038,8 +8353,8 @@ mod tests {
 
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
-        // agent.spawn, agent.exists, agent.discover, agent.install, workflow.wait, workflow.cancel_task (6) + always-available (6) = 12
-        assert_eq!(defs_spawn.len(), 12);
+        // agent.spawn, agent.exists, agent.discover, agent.install, agent.revision.create, agent.revision.list, agent.revision.inspect, workflow.wait, workflow.cancel_task (9) + always-available (6) = 15
+        assert_eq!(defs_spawn.len(), 15);
         assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
         assert!(
             defs_spawn.iter().any(|d| d.name == "agent.install"),
