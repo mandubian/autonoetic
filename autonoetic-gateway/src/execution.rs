@@ -10,6 +10,7 @@ use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
 use crate::runtime::live_digest::{base_session_id, append_repair_attempt_best_effort, append_repair_passed_best_effort};
+use crate::scheduler::gateway_store::default_gateway_host_id;
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
 use autonoetic_types::background::{ScheduledAction, UserInteraction, UserInteractionStatus};
 use autonoetic_types::causal_chain::EntryStatus;
@@ -639,7 +640,46 @@ impl GatewayExecutionService {
                 }
             }
 
-            let loaded = repo.get_sync(agent_id)?;
+            // ─────────────────────────────────────────────────────────────
+            // Revision-based resolution (Phase 1d): try revision path first,
+            // fall back to directory loading for dev/testing compatibility.
+            // ─────────────────────────────────────────────────────────────
+            let loaded = if let Some(ref gs) = self.gateway_store {
+                match repo.resolve_and_pin_session(
+                    session_id,
+                    session_id, // root_session_id = session_id for single sessions
+                    agent_id,
+                    Some(gs.as_ref()),
+                    &default_gateway_host_id(),
+                ) {
+                    Ok((_agent_ref, _rev, _binding)) => {
+                        tracing::info!(
+                            agent_id = agent_id,
+                            session_id = session_id,
+                            "Resolved session to revision"
+                        );
+                        // Load from directory for now (revision materialization is Phase 4)
+                        repo.get_sync(agent_id)?
+                    }
+                    Err(e) => {
+                        // Check if it's a "not found" error → fall back to directory
+                        let err_str = e.to_string();
+                        if err_str.contains("No alias") || err_str.contains("not found") || err_str.contains("GatewayStore") {
+                            tracing::debug!(
+                                agent_id = agent_id,
+                                session_id = session_id,
+                                error = %e,
+                                "Revision resolution failed, falling back to directory loading"
+                            );
+                            repo.get_sync(agent_id)?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            } else {
+                repo.get_sync(agent_id)?
+            };
 
             // Validate spawn input against target agent's accepts schema (informational only)
             if let Some(ref io_schema) = loaded.manifest.io {
