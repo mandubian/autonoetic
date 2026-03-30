@@ -338,6 +338,7 @@ Use the following mapping when triaging older follow-on work:
 - Keep autonomous agent export as a post-MVP federation track. The future export unit should package revision bytes, canonical runtime closure, included layers, and provenance for remote execution, and it must remain distinct from `AgentBundle`, which stays the revision-creation input.
 - Keep post-session digest full end-to-end coverage only as separate QA debt if digest remains a strategic runtime feature. Digest behavior is not part of alias movement, revision pinning, or eval-gated promotion in this MVP.
 - Do not carry response validation gate as open backlog in this plan. That capability already exists as a runtime feature; the relevant MVP work here is eval-time assertion and promotion evidence, not spawn-boundary response repair.
+- Keep gateway tooling modularization as a post-MVP maintenance task. Split `autonoetic-gateway/src/runtime/tools.rs` into smaller topic-focused modules once the MVP tool surface stabilizes, so revision, eval, promotion, artifact, and workflow tools are easier to evolve and review independently.
 
 This section is intentionally classification, not delivery scope. Only work that directly supports immutable revisions, alias-based activation, eval evidence, or federation-ready provenance belongs in the phases above.
 

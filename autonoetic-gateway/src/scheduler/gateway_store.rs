@@ -713,7 +713,7 @@ impl GatewayStore {
         let allowed_agents_json = serde_json::to_string(&memory.allowed_agents)?;
 
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let mut tx = conn.transaction()?;
         tx.execute(
             "INSERT OR REPLACE INTO memories (
                 memory_id, scope, owner_agent_id, writer_agent_id, source_type, source_ref,
@@ -2773,6 +2773,207 @@ impl GatewayStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// Atomically promote a revision: update alias, set statuses, record history.
+    /// All operations happen in a single SQLite transaction.
+    pub fn atomic_promote(
+        &self,
+        agent_id: &str,
+        revision_id: &str,
+        promotion_id: &str,
+        created_by_type: &str,
+        created_by_id: &str,
+        reason: Option<&str>,
+        source_eval_run_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let mut tx = conn.transaction()?;
+
+        // Get current alias
+        let previous_revision_id: Option<String> = tx
+            .query_row(
+                "SELECT revision_id FROM agent_aliases WHERE alias_id = ?1 AND agent_id = ?2",
+                params![agent_id, agent_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        // Verify revision exists and belongs to agent
+        let (rev_agent_id, rev_status): (String, String) = tx.query_row(
+            "SELECT agent_id, status FROM agent_revisions WHERE revision_id = ?1",
+            params![revision_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        anyhow::ensure!(
+            rev_agent_id == agent_id,
+            "Revision '{}' belongs to '{}', not '{}'",
+            revision_id,
+            rev_agent_id,
+            agent_id
+        );
+        anyhow::ensure!(
+            rev_status == "Candidate" || rev_status == "Ready",
+            "Revision '{}' is in status '{}', must be Candidate or Ready",
+            revision_id,
+            rev_status
+        );
+
+        // Update alias
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT OR REPLACE INTO agent_aliases (
+                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                agent_id,
+                agent_id,
+                revision_id,
+                now,
+                created_by_type,
+                created_by_id,
+                reason
+            ],
+        )?;
+
+        // Set promoted revision to Ready
+        tx.execute(
+            "UPDATE agent_revisions SET status = 'Ready' WHERE revision_id = ?1",
+            params![revision_id],
+        )?;
+
+        // Archive previous revision if different
+        if let Some(ref prev) = previous_revision_id {
+            if prev != revision_id {
+                tx.execute(
+                    "UPDATE agent_revisions SET status = 'Archived' WHERE revision_id = ?1",
+                    params![prev],
+                )?;
+            }
+        }
+
+        // Record promotion history
+        tx.execute(
+            "INSERT INTO promotion_history (
+                promotion_id, kind, alias_id, agent_id, previous_revision_id,
+                new_revision_id, source_eval_run_id, reason, created_at,
+                created_by_type, created_by_id, origin_node_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                promotion_id,
+                "Promote",
+                agent_id,
+                agent_id,
+                previous_revision_id,
+                revision_id,
+                source_eval_run_id,
+                reason,
+                chrono::Utc::now().to_rfc3339(),
+                created_by_type,
+                created_by_id,
+                "gateway",
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(previous_revision_id)
+    }
+
+    /// Atomically rollback: move alias to previous revision, archive current, record history.
+    /// All operations happen in a single SQLite transaction.
+    pub fn atomic_rollback(
+        &self,
+        agent_id: &str,
+        revision_id: &str,
+        promotion_id: &str,
+        created_by_type: &str,
+        created_by_id: &str,
+        reason: Option<&str>,
+    ) -> Result<Option<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let mut tx = conn.transaction()?;
+
+        // Get current alias
+        let current_revision_id: Option<String> = tx
+            .query_row(
+                "SELECT revision_id FROM agent_aliases WHERE alias_id = ?1 AND agent_id = ?2",
+                params![agent_id, agent_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        // Verify target revision exists and belongs to agent
+        let (rev_agent_id, _rev_status): (String, String) = tx.query_row(
+            "SELECT agent_id, status FROM agent_revisions WHERE revision_id = ?1",
+            params![revision_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        anyhow::ensure!(
+            rev_agent_id == agent_id,
+            "Revision '{}' belongs to '{}', not '{}'",
+            revision_id,
+            rev_agent_id,
+            agent_id
+        );
+
+        // Update alias
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT OR REPLACE INTO agent_aliases (
+                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                agent_id,
+                agent_id,
+                revision_id,
+                now,
+                created_by_type,
+                created_by_id,
+                reason
+            ],
+        )?;
+
+        // Set target revision to Ready
+        tx.execute(
+            "UPDATE agent_revisions SET status = 'Ready' WHERE revision_id = ?1",
+            params![revision_id],
+        )?;
+
+        // Archive the previously active revision
+        if let Some(ref curr) = current_revision_id {
+            if curr != revision_id {
+                tx.execute(
+                    "UPDATE agent_revisions SET status = 'Archived' WHERE revision_id = ?1",
+                    params![curr],
+                )?;
+            }
+        }
+
+        // Record rollback history
+        tx.execute(
+            "INSERT INTO promotion_history (
+                promotion_id, kind, alias_id, agent_id, previous_revision_id,
+                new_revision_id, source_eval_run_id, reason, created_at,
+                created_by_type, created_by_id, origin_node_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                promotion_id,
+                "Rollback",
+                agent_id,
+                agent_id,
+                current_revision_id,
+                revision_id,
+                None as Option<&str>,
+                reason,
+                chrono::Utc::now().to_rfc3339(),
+                created_by_type,
+                created_by_id,
+                "gateway",
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(current_revision_id)
     }
 
     pub fn list_promotion_history(&self, agent_id: &str) -> Result<Vec<PromotionRecord>> {
