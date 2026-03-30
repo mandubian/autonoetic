@@ -195,6 +195,28 @@ impl AgentRepository {
         &self.agents_dir
     }
 
+    pub fn load_from_revision_dir(
+        &self,
+        gateway_dir: &Path,
+        agent_id: &str,
+        revision_id: &str,
+    ) -> anyhow::Result<LoadedAgent> {
+        let rev_dir = gateway_dir
+            .join("revisions")
+            .join("agents")
+            .join(agent_id)
+            .join(revision_id);
+        let skill_path = rev_dir.join("SKILL.md");
+        let skill_content = std::fs::read_to_string(&skill_path)?;
+        let (manifest, instructions) = SkillParser::parse(&skill_content)?;
+
+        Ok(LoadedAgent {
+            dir: rev_dir,
+            manifest,
+            instructions,
+        })
+    }
+
     /// Resolve an agent target string to a concrete revision.
     ///
     /// The target can be:

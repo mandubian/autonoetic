@@ -3214,6 +3214,59 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn list_queued_eval_runs(&self) -> Result<Vec<EvalRunRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT eval_run_id, suite_id, subject_agent_id, subject_revision_id,
+                    baseline_revision_id, status, queued_at, started_at, completed_at,
+                    summary_json, report_handle, origin_node_id
+             FROM eval_runs WHERE status = 'Queued' ORDER BY queued_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let status_str: String = row.get(5)?;
+            let status = match status_str.as_str() {
+                "Queued" => EvalRunStatus::Queued,
+                "Running" => EvalRunStatus::Running,
+                "Passed" => EvalRunStatus::Passed,
+                "Failed" => EvalRunStatus::Failed,
+                "Cancelled" => EvalRunStatus::Cancelled,
+                _ => EvalRunStatus::Queued,
+            };
+            let summary_json: String = row.get(9)?;
+            let summary_json =
+                serde_json::from_str(&summary_json).unwrap_or(serde_json::Value::Null);
+            Ok(EvalRunRecord {
+                eval_run_id: row.get(0)?,
+                suite_id: row.get(1)?,
+                subject_agent_id: row.get(2)?,
+                subject_revision_id: row.get(3)?,
+                baseline_revision_id: row.get(4)?,
+                status,
+                queued_at: row.get(6)?,
+                started_at: row.get(7)?,
+                completed_at: row.get(8)?,
+                summary_json,
+                report_handle: row.get(10)?,
+                origin_node_id: row.get(11)?,
+            })
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    pub fn start_eval_run(&self, eval_run_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE eval_runs SET status = 'Running', started_at = ?1 WHERE eval_run_id = ?2",
+            params![now, eval_run_id],
+        )?;
+        Ok(())
+    }
+
     // --- Short ID Index ---
 
     /// Register a short ID for a revision. Called automatically on revision insert.

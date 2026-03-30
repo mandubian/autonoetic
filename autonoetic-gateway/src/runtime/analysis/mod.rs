@@ -130,6 +130,10 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::SandboxFunctions { .. } => "SandboxFunctions",
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation",
         Capability::EmergencyStop => "EmergencyStop",
+        Capability::AgentRevision { .. } => "AgentRevision",
+        Capability::Evaluation { .. } => "Evaluation",
+        Capability::ApprovalQueue { .. } => "ApprovalQueue",
+        Capability::SchedulerSignal { .. } => "SchedulerSignal",
     }
 }
 

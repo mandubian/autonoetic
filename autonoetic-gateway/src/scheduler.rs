@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 pub mod approval;
 pub mod decision;
+pub mod eval_runner;
 pub mod gateway_store;
 pub mod runner;
 pub mod signal;

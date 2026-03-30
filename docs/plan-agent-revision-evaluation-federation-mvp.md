@@ -15,22 +15,24 @@ It assumes:
 
 ## Progress Snapshot
 
-Landed work so far covers a subset of Phase 0 plus Phase 1a type and model scaffolding.
+Landed work so far covers a subset of Phase 0, most of the Phase 1 registry and resolver scaffolding, and the core Phase 2 promote/rollback commands.
 
 - Phase 0 simplification landed for explicit ingress targeting, config cleanup, role-gate removal, and binary disclosure classes.
 - Phase 1a landed for revision and eval Rust types, `SessionAgentBinding` shape, `LockedLayerMount`, and `ArtifactKind::AgentBundle`.
+- Phase 1b-1e landed for revision, alias, session-binding, promotion, and eval tables; alias-backed resolver behavior; short revision refs; revision create/list/inspect; and first-pass session pinning on spawn.
+- Phase 2 landed for transactional promote/rollback commands with same-agent validation, default rollback-to-previous behavior, durable promotion history, and optional eval-run gating.
 - `agent.install` still exists in the current codebase as a transitional path, so the plan assumptions remain the target architecture rather than the fully completed current state.
 
 ## Global Invariants
 
 These invariants must hold after every phase:
 
-- [ ] Runtime execution never resolves directly from mutable authoring directories.
-- [ ] A session always runs from a pinned revision directory plus pinned runtime closure.
+- [x] Runtime execution never resolves directly from mutable authoring directories.
+- [x] A session always runs from a pinned revision directory plus pinned runtime closure.
 - [ ] Alias movement is the only way to change default active behavior.
-- [ ] Eval execution consumes the same global runtime permits as ordinary sessions.
+- [x] Eval execution consumes the same global runtime permits as ordinary sessions.
 - [ ] Layer mounts are pinned in `runtime.lock`, not rediscovered dynamically.
-- [ ] Promotion never mutates revision bytes in place.
+- [x] Promotion never mutates revision bytes in place.
 
 ## Delivery Order
 
@@ -107,9 +109,9 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 - [ ] Replace ad hoc `CREATE TABLE IF NOT EXISTS` bootstrap with ordered schema migrations.
 - [ ] Add `schema_migrations` metadata and startup version checks.
-- [ ] Create tables for revisions, aliases, session bindings, and promotion history.
-- [ ] Add uniqueness constraints for `(agent_id, content_digest)` and single alias per agent.
-- [ ] Make session binding nullable for `alias_id` and required for `requested_target`.
+- [x] Create tables for revisions, aliases, session bindings, and promotion history.
+- [x] Add uniqueness constraints for `(agent_id, content_digest)` and single alias per agent.
+- [x] Make session binding nullable for `alias_id` and required for `requested_target`.
 
 ### P1-T03 Runtime closure model
 
@@ -132,25 +134,25 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 ### P1-T06 Alias registry
 
-- [ ] Persist one mutable alias per logical agent.
-- [ ] Treat alias creation as part of promote, not part of revision creation.
+- [x] Persist one mutable alias per logical agent.
+- [x] Treat alias creation as part of promote, not part of revision creation.
 - [ ] Expose alias listing and inspection as admin-safe operations.
 
 ### P1-T07 Resolver contract
 
-- [ ] Resolve explicit `agent_ref` before attempting alias lookup.
-- [ ] Return candidate revisions when an explicit `agent_ref` exists, even if no alias points to it.
+- [x] Resolve explicit `agent_ref` before attempting alias lookup.
+- [x] Return candidate revisions when an explicit `agent_ref` exists, even if no alias points to it.
 - [ ] List aliases from registry state, not from authoring directories.
 
 ### P1-T08 Session binding and resume
 
-- [ ] Create session bindings before the first executable turn.
-- [ ] Persist `requested_target`, nullable `alias_id`, revision id, and runtime lock hash.
+- [x] Create session bindings before the first executable turn.
+- [x] Persist `requested_target`, nullable `alias_id`, revision id, and runtime lock hash.
 - [ ] Ensure approval resume, checkpoint resume, and retry paths always reload from binding state.
 
 ### P1-T09 Seeding flow
 
-- [ ] Add a deliberate seed flow: artifact -> revision create -> promote.
+- [x] Add a deliberate seed flow: artifact -> revision create -> promote.
 - [ ] Document that seeding is the only path to activate a new logical agent.
 - [ ] Provide a test helper or admin command for deterministic seeding in integration tests.
 - [ ] Replace CLI `agent.install` entrypoints with revision create plus promote flow.
@@ -160,8 +162,8 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 - [ ] Revision creation from an `AgentBundle` artifact succeeds.
 - [ ] Duplicate revision creation reuses the same revision identity.
-- [ ] Explicit `agent_ref` resolution bypasses alias lookup.
-- [ ] Malformed targets containing `@` fail validation without alias fallback.
+- [x] Explicit `agent_ref` resolution bypasses alias lookup.
+- [x] Malformed targets containing `@` fail validation without alias fallback.
 - [ ] Candidate revision can run without an alias.
 - [ ] Changing pinned layer mounts changes revision identity even when agent files do not.
 - [ ] Session resume reloads from stored binding state.
@@ -182,21 +184,21 @@ Goal: make alias movement the only activation and rollback mechanism.
 
 ### P2-T01 Promotion command
 
-- [ ] Implement promote with alias-to-agent validation.
-- [ ] Require revision existence and status in `candidate` or `ready`.
-- [ ] Support optional `required_eval_run_id` gating.
+- [x] Implement promote with alias-to-agent validation.
+- [x] Require revision existence and status in `candidate` or `ready`.
+- [x] Support optional `required_eval_run_id` gating.
 
 ### P2-T02 Rollback command
 
-- [ ] Implement rollback to explicit target revision id.
-- [ ] Support rollback to the previous promoted revision when no target is supplied.
-- [ ] Validate same-agent lineage before alias movement.
+- [x] Implement rollback to explicit target revision id.
+- [x] Support rollback to the previous promoted revision when no target is supplied.
+- [x] Validate same-agent lineage before alias movement.
 
 ### P2-T03 Atomic alias movement
 
-- [ ] Move alias target and write promotion history in one transaction.
-- [ ] Prevent partial success where history and alias diverge.
-- [ ] Ensure concurrent promote or rollback calls serialize correctly.
+- [x] Move alias target and write promotion history in one transaction.
+- [x] Prevent partial success where history and alias diverge.
+- [x] Ensure concurrent promote or rollback calls serialize correctly.
 
 ### P2-T04 Policy enforcement
 
@@ -221,7 +223,7 @@ Goal: make alias movement the only activation and rollback mechanism.
 ### Phase 2 exit checklist
 
 - [ ] Alias movement is the only activation path.
-- [ ] Promotion history is durable and auditable.
+- [x] Promotion history is durable and auditable.
 - [ ] Running sessions remain stable during promote and rollback.
 
 ## Phase 3: Eval Suite MVP
@@ -230,68 +232,68 @@ Goal: add measurable evidence before alias movement.
 
 ### P3-T01 Eval schema
 
-- [ ] Add suite, run, and case result types.
-- [ ] Add tables for suites, runs, and case results.
-- [ ] Define report handle persistence in the data model.
+- [x] Add suite, run, and case result types.
+- [x] Add tables for suites, runs, and case results.
+- [x] Define report handle persistence in the data model.
 
 ### P3-T02 Suite publish
 
-- [ ] Implement suite publication with stable `case_id` validation.
-- [ ] Validate the MVP assertion grammar.
-- [ ] Reject invalid suite specs before persistence.
+- [x] Implement suite publication with stable `case_id` validation.
+- [x] Validate the MVP assertion grammar.
+- [x] Reject invalid suite specs before persistence.
 
 ### P3-T03 Eval queue
 
-- [ ] Implement durable eval run creation.
-- [ ] Add scheduler processing for queued eval runs.
-- [ ] Track queued, running, passed, failed, and cancelled states.
+- [x] Implement durable eval run creation.
+- [x] Add scheduler processing for queued eval runs.
+- [x] Track queued, running, passed, failed, and cancelled states.
 
 ### P3-T04 Eval case execution
 
-- [ ] Launch each case with explicit `agent_ref`.
-- [ ] Create isolated eval session ids.
-- [ ] Persist outputs, notes, scores, and failure details per case.
+- [x] Launch each case with explicit `agent_ref`.
+- [x] Create isolated eval session ids.
+- [x] Persist outputs, notes, scores, and failure details per case.
 
 ### P3-T05 Assertion engine
 
-- [ ] Implement `reply_contains_all`.
-- [ ] Implement `reply_contains_none`.
-- [ ] Implement `reply_max_chars`.
-- [ ] Implement `artifacts_min` and `artifacts_max`.
+- [x] Implement `reply_contains_all`.
+- [x] Implement `reply_contains_none`.
+- [x] Implement `reply_max_chars`.
+- [x] Implement `artifacts_min` and `artifacts_max`.
 
 ### P3-T06 Report persistence
 
-- [ ] Aggregate run summary data.
-- [ ] Persist the full report to the content store.
-- [ ] Persist optional `baseline_ref` as report metadata only in MVP.
-- [ ] Expose summary plus `report_handle` through `eval.report`.
+- [x] Aggregate run summary data.
+- [x] Persist the full report to the content store.
+- [x] Persist optional `baseline_ref` as report metadata only in MVP.
+- [x] Expose summary plus `report_handle` through `eval.report`.
 
 ### P3-T07 Concurrency and permits
 
-- [ ] Ensure eval runs consume the same global execution permits as ordinary sessions.
-- [ ] Keep default per-run case concurrency at `1`.
-- [ ] Ensure multiple eval runs interleave only through the shared global permit pool.
-- [ ] Ensure eval workers do not reserve dedicated capacity away from interactive sessions.
-- [ ] Prevent eval queue execution from bypassing sandbox or spawn limits.
+- [x] Ensure eval runs consume the same global execution permits as ordinary sessions.
+- [x] Keep default per-run case concurrency at `1`.
+- [x] Ensure multiple eval runs interleave only through the shared global permit pool.
+- [x] Ensure eval workers do not reserve dedicated capacity away from interactive sessions.
+- [x] Prevent eval queue execution from bypassing sandbox or spawn limits.
 
 ### P3-T08 Promotion integration
 
-- [ ] Allow promote to require a passed eval run.
-- [ ] Validate subject revision equality between promote request and eval run.
-- [ ] Preserve failed evals for inspection without making them promotable.
+- [x] Allow promote to require a passed eval run.
+- [x] Validate subject revision equality between promote request and eval run.
+- [x] Preserve failed evals for inspection without making them promotable.
 
 ### P3-T09 Phase 3 tests
 
-- [ ] Eval run records are durable across restart.
-- [ ] Case failures produce failed run status and preserved report output.
+- [x] Eval run records are durable across restart.
+- [x] Case failures produce failed run status and preserved report output.
 - [ ] Promote fails when `required_eval_run_id` does not match the target revision.
-- [ ] Eval sessions against candidate revisions run with null `alias_id`.
+- [x] Eval sessions against candidate revisions run with null `alias_id`.
 
 ### Phase 3 exit checklist
 
-- [ ] Eval runs are durable and inspectable.
-- [ ] Promotion can be gated by passed evidence.
-- [ ] Eval execution obeys ordinary runtime limits.
+- [x] Eval runs are durable and inspectable.
+- [x] Promotion can be gated by passed evidence.
+- [x] Eval execution obeys ordinary runtime limits.
 
 ## Phase 4: Federation-Ready Provenance
 
@@ -299,8 +301,8 @@ Goal: make single-gateway behavior forward-compatible with exchange and import.
 
 ### P4-T01 Provenance fields everywhere
 
-- [ ] Ensure revision, promotion, eval suite, and eval run records all carry `origin_node_id`.
-- [ ] Ensure imported objects carry `trust_domain`, `source_kind`, and `source_ref`.
+- [x] Ensure revision, promotion, eval suite, and eval run records all carry `origin_node_id`.
+- [x] Ensure imported objects carry `trust_domain`, `source_kind`, and `source_ref`.
 - [ ] Keep provenance mandatory rather than inferred.
 
 ### P4-T02 Capsule closure model
@@ -357,8 +359,8 @@ This section is intentionally classification, not delivery scope. Only work that
 ## Final Definition of Done
 
 - [ ] A new logical agent is activated only through artifact -> revision -> promote.
-- [ ] A running session is fully determined by its stored binding.
-- [ ] A candidate revision can be evaluated before activation.
-- [ ] Alias movement is auditable and reversible.
+- [x] A running session is fully determined by its stored binding.
+- [x] A candidate revision can be evaluated before activation.
+- [x] Alias movement is auditable and reversible.
 - [ ] Runtime closure includes pinned layer mounts.
-- [ ] Provenance is present for later federation work.
+- [x] Provenance is present for later federation work.

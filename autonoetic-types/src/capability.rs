@@ -54,4 +54,16 @@ pub enum Capability {
 
     /// Request a gateway-level emergency stop for a root session (dedicated responders only).
     EmergencyStop,
+
+    /// Access to agent revision operations (create, promote, rollback).
+    AgentRevision { patterns: Vec<String> },
+
+    /// Access to evaluation operations (suite publish, run, report).
+    Evaluation { patterns: Vec<String> },
+
+    /// Access to approval queue operations.
+    ApprovalQueue { patterns: Vec<String> },
+
+    /// Access to scheduler signal operations.
+    SchedulerSignal { patterns: Vec<String> },
 }

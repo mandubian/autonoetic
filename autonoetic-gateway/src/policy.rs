@@ -523,6 +523,37 @@ impl PolicyEngine {
         false
     }
 
+    pub fn can_evaluate_suite(&self, suite_id: &str, subject_agent_id: &str) -> bool {
+        for cap in &self.manifest.capabilities {
+            if let Capability::Evaluation { patterns } = cap {
+                for pattern in patterns {
+                    let prefix = pattern.trim_end_matches('*');
+                    if suite_id.starts_with(prefix) {
+                        return true;
+                    }
+                    if !subject_agent_id.is_empty() && subject_agent_id.starts_with(prefix) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub fn can_evaluate_suite_publish(&self, suite_name: &str) -> bool {
+        for cap in &self.manifest.capabilities {
+            if let Capability::Evaluation { patterns } = cap {
+                for pattern in patterns {
+                    let prefix = pattern.trim_end_matches('*');
+                    if suite_name.starts_with(prefix) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Return background reevaluation limits, if configured.
     pub fn background_reevaluation_limits(&self) -> Option<(u64, bool)> {
         self.manifest.capabilities.iter().find_map(|cap| {
