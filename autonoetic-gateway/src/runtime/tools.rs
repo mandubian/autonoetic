@@ -7230,6 +7230,17 @@ impl NativeTool for AgentRevisionCreateTool {
         };
 
         let now = chrono::Utc::now().to_rfc3339();
+        // Compute collision-safe short ID
+        let existing: Vec<String> = gateway_store.list_all_agent_revisions()?
+            .into_iter()
+            .map(|r| r.revision_id)
+            .collect();
+        let short_id = autonoetic_types::agent_revision::short_id_unique(
+            &revision_id,
+            existing.iter().map(|s| s.as_str()),
+            None,
+        );
+
         let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
             revision_id: revision_id.clone(),
             agent_id: args.agent_id.clone(),
@@ -7249,11 +7260,12 @@ impl NativeTool for AgentRevisionCreateTool {
             metadata_json: serde_json::json!({
                 "summary": args.summary,
             }),
+            short_id: short_id.clone(),
         };
 
         gateway_store.insert_agent_revision(&rev)?;
 
-        let short_ref = autonoetic_types::agent_revision::format_short_ref(&args.agent_id, &revision_id);
+        let short_ref = format!("{}@rev_{}", args.agent_id, short_id);
         Ok(serde_json::json!({
             "ok": true,
             "status": "created",
@@ -7328,7 +7340,7 @@ impl NativeTool for AgentRevisionListTool {
         let items: Vec<serde_json::Value> = revisions
             .into_iter()
             .map(|r| {
-                let short_ref = autonoetic_types::agent_revision::format_short_ref(&r.agent_id, &r.revision_id);
+                let short_ref = format!("{}@rev_{}", r.agent_id, r.short_id);
                 serde_json::json!({
                     "revision_id": r.revision_id,
                     "short_ref": short_ref,
@@ -7406,7 +7418,7 @@ impl NativeTool for AgentRevisionInspectTool {
         let rev = gateway_store.get_agent_revision(&args.revision_id)?
             .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", args.revision_id))?;
 
-        let short_ref = autonoetic_types::agent_revision::format_short_ref(&rev.agent_id, &rev.revision_id);
+        let short_ref = format!("{}@rev_{}", rev.agent_id, rev.short_id);
         Ok(serde_json::json!({
             "ok": true,
             "revision": {
