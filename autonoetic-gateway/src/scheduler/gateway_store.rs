@@ -538,14 +538,13 @@ impl GatewayStore {
             CREATE INDEX IF NOT EXISTS idx_agent_revisions_status ON agent_revisions(status);
 
             CREATE TABLE IF NOT EXISTS agent_aliases (
-                alias_id TEXT NOT NULL,
+                alias_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
                 revision_id TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 updated_by_type TEXT NOT NULL,
                 updated_by_id TEXT NOT NULL,
-                reason TEXT,
-                PRIMARY KEY (alias_id, agent_id)
+                reason TEXT
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_aliases_agent ON agent_aliases(agent_id);
@@ -2580,29 +2579,10 @@ impl GatewayStore {
     pub fn get_agent_alias(
         &self,
         alias_id: &str,
-        agent_id: &str,
+        _agent_id: &str,
     ) -> Result<Option<AgentAliasRecord>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
-             FROM agent_aliases WHERE alias_id = ?1 AND agent_id = ?2",
-        )?;
-        let rows = stmt.query_map(params![alias_id, agent_id], |row| {
-            Ok(AgentAliasRecord {
-                alias_id: row.get(0)?,
-                agent_id: row.get(1)?,
-                revision_id: row.get(2)?,
-                updated_at: row.get(3)?,
-                updated_by_type: row.get(4)?,
-                updated_by_id: row.get(5)?,
-                reason: row.get(6)?,
-            })
-        })?;
-        let mut results = Vec::new();
-        for r in rows {
-            results.push(r?);
-        }
-        Ok(results.pop())
+        // alias_id is the sole primary key; agent_id parameter is ignored but kept for API compatibility
+        self.resolve_alias(alias_id)
     }
 
     pub fn resolve_alias(&self, alias_id: &str) -> Result<Option<AgentAliasRecord>> {

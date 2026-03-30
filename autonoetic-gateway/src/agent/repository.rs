@@ -207,37 +207,46 @@ impl AgentRepository {
         target: &str,
         gateway_store: Option<&GatewayStore>,
     ) -> anyhow::Result<(AgentRef, AgentRevisionRecord)> {
+        let Some(gateway_store) = gateway_store else {
+            anyhow::bail!("GatewayStore is required for revision-based resolution");
+        };
+
         // Try to parse as agent_ref first
         if let Some(agent_ref) = AgentRef::parse(target) {
-            // Direct revision reference
-            let rev = gateway_store
-                .and_then(|gs| gs.get_agent_revision(&agent_ref.revision_id).ok().flatten())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Revision '{}' not found in store", agent_ref.revision_id)
-                })?;
+            // Direct revision reference — validate agent_id matches
+            let rev = match gateway_store.get_agent_revision(&agent_ref.revision_id)? {
+                Some(r) => r,
+                None => anyhow::bail!("Revision '{}' not found in store", agent_ref.revision_id),
+            };
+            // Validate: the revision must belong to the agent_id in the ref
+            anyhow::ensure!(
+                rev.agent_id == agent_ref.agent_id,
+                "Revision '{}' belongs to agent '{}', not '{}'",
+                agent_ref.revision_id,
+                rev.agent_id,
+                agent_ref.agent_id
+            );
             return Ok((agent_ref, rev));
         }
 
         // Plain agent_id — resolve via alias
         let alias_id = target; // MVP: alias_id defaults to agent_id
-        let alias = gateway_store
-            .and_then(|gs| gs.resolve_alias(alias_id).ok().flatten())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No alias '{}' found. Create a revision and promote it first.",
-                    alias_id
-                )
-            })?;
+        let alias = match gateway_store.resolve_alias(alias_id)? {
+            Some(a) => a,
+            None => anyhow::bail!(
+                "No alias '{}' found. Create a revision and promote it first.",
+                alias_id
+            ),
+        };
 
-        let rev = gateway_store
-            .and_then(|gs| gs.get_agent_revision(&alias.revision_id).ok().flatten())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Revision '{}' referenced by alias '{}' not found",
-                    alias.revision_id,
-                    alias_id
-                )
-            })?;
+        let rev = match gateway_store.get_agent_revision(&alias.revision_id)? {
+            Some(r) => r,
+            None => anyhow::bail!(
+                "Revision '{}' referenced by alias '{}' not found",
+                alias.revision_id,
+                alias_id
+            ),
+        };
 
         let agent_ref = AgentRef::new(alias.agent_id.clone(), alias.revision_id.clone());
         Ok((agent_ref, rev))
@@ -522,5 +531,98 @@ Test instructions.
             "Error should mention identity mismatch: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_resolve_agent_requires_gateway_store() {
+        let temp = tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+
+        let repo = AgentRepository::new(agents_dir);
+        let result = repo.resolve_agent("planner.default", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("GatewayStore is required"));
+    }
+
+    #[test]
+    fn test_resolve_agent_rejects_invalid_ref_format() {
+        let temp = tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+
+        let repo = AgentRepository::new(agents_dir);
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = GatewayStore::open(&gateway_dir).expect("should open store");
+
+        // Invalid revision format (not rev_sha256:) — AgentRef::parse rejects it
+        let result = repo.resolve_agent("planner.default@not-a-revision", Some(&store));
+        assert!(result.is_err());
+        // Since parse fails, it falls through to alias lookup which also fails
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("not found") || err.to_string().contains("Create a revision"),
+            "Error: {}", err
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_rejects_mismatched_agent_id() {
+        let temp = tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+
+        let repo = AgentRepository::new(agents_dir);
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = GatewayStore::open(&gateway_dir).expect("should open store");
+
+        // Insert a revision for "other-agent"
+        let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
+            revision_id: "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
+            agent_id: "other-agent".to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: "sha256:test".to_string(),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            manifest_hash: "sha256:manifest".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            created_by_type: "user".to_string(),
+            created_by_id: "admin".to_string(),
+            source_kind: "artifact".to_string(),
+            source_ref: None,
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status: autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
+            metadata_json: serde_json::Value::Null,
+        };
+        store.insert_agent_revision(&rev).expect("should insert revision");
+
+        // Try to resolve with wrong agent_id prefix
+        let result = repo.resolve_agent(
+            "planner.default@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+            Some(&store),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("belongs to agent"));
+    }
+
+    #[test]
+    fn test_resolve_agent_no_alias_returns_helpful_error() {
+        let temp = tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+
+        let repo = AgentRepository::new(agents_dir);
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = GatewayStore::open(&gateway_dir).expect("should open store");
+
+        let result = repo.resolve_agent("planner.default", Some(&store));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Create a revision and promote it first"));
     }
 }
