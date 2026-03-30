@@ -221,3 +221,120 @@ pub struct PromotionRecord {
     /// Origin node for provenance.
     pub origin_node_id: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_ref_parse_valid() {
+        let r = AgentRef::parse("planner.default@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")
+            .expect("should parse");
+        assert_eq!(r.agent_id, "planner.default");
+        assert_eq!(
+            r.revision_id,
+            "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+        );
+        assert_eq!(
+            r.to_string(),
+            "planner.default@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+        );
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_no_at() {
+        assert!(AgentRef::parse("planner.default").is_none());
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_multiple_at() {
+        assert!(AgentRef::parse("planner@default@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").is_none());
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_empty_agent_id() {
+        assert!(AgentRef::parse(
+            "@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_empty_revision() {
+        assert!(AgentRef::parse("planner.default@").is_none());
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_invalid_revision_format() {
+        assert!(AgentRef::parse("planner.default@not-a-revision").is_none());
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_wrong_hex_length() {
+        assert!(AgentRef::parse("planner.default@rev_sha256:abcd").is_none());
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_uppercase_hex() {
+        assert!(AgentRef::parse("planner.default@rev_sha256:ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234").is_none());
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_invalid_agent_id_start() {
+        assert!(AgentRef::parse(
+            "-planner@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_agent_ref_parse_rejects_at_in_agent_id() {
+        assert!(AgentRef::parse("planner@builder@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").is_none());
+    }
+
+    #[test]
+    fn test_agent_alias_record_serialization() {
+        let record = AgentAliasRecord {
+            alias_id: "planner.default".to_string(),
+            agent_id: "planner.default".to_string(),
+            revision_id:
+                "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+                    .to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_by_type: "user".to_string(),
+            updated_by_id: "admin".to_string(),
+            reason: Some("initial promotion".to_string()),
+        };
+        let json = serde_json::to_string(&record).expect("should serialize");
+        let parsed: AgentAliasRecord = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(parsed.alias_id, "planner.default");
+        assert_eq!(parsed.reason, Some("initial promotion".to_string()));
+    }
+
+    #[test]
+    fn test_session_agent_binding_with_explicit_ref() {
+        let binding = SessionAgentBinding {
+            session_id: "sess-123".to_string(),
+            root_session_id: "root-123".to_string(),
+            alias_id: None,
+            agent_id: "planner.default".to_string(),
+            revision_id: "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
+            runtime_lock_hash: "sha256:lock123".to_string(),
+            home_node_id: "gateway-1".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            requested_target: "planner.default@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
+        };
+        assert!(binding.alias_id.is_none());
+        assert_eq!(binding.requested_target, "planner.default@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234");
+    }
+
+    #[test]
+    fn test_promotion_kind_roundtrip() {
+        let promote = PromotionKind::Promote;
+        let json = serde_json::to_string(&promote).expect("serialize");
+        assert_eq!(json, "\"promote\"");
+        let rollback = PromotionKind::Rollback;
+        let json = serde_json::to_string(&rollback).expect("serialize");
+        assert_eq!(json, "\"rollback\"");
+    }
+}
