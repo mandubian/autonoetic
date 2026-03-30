@@ -2462,8 +2462,17 @@ impl GatewayStore {
                 ],
             )?;
         } // Release lock here
-          // Auto-register short ID for LLM-friendly references
-        let short = autonoetic_types::agent_revision::short_id(&rev.revision_id, None);
+          // Auto-register collision-safe short ID for LLM-friendly references
+        let existing: Vec<String> = self
+            .list_all_agent_revisions()?
+            .into_iter()
+            .map(|r| r.revision_id)
+            .collect();
+        let short = autonoetic_types::agent_revision::short_id_unique(
+            &rev.revision_id,
+            existing.iter().map(|s| s.as_str()),
+            None,
+        );
         self.register_short_id(&rev.revision_id, &short)?;
         Ok(())
     }
@@ -2522,7 +2531,54 @@ impl GatewayStore {
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
              FROM agent_revisions WHERE agent_id = ?1 ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map(params![agent_id], |row| {
+        let mut rows = stmt.query_map(params![agent_id], |row| {
+            let status_str: String = row.get(14)?;
+            let status = match status_str.as_str() {
+                "Candidate" => AgentRevisionStatus::Candidate,
+                "Ready" => AgentRevisionStatus::Ready,
+                "Archived" => AgentRevisionStatus::Archived,
+                "Rejected" => AgentRevisionStatus::Rejected,
+                _ => AgentRevisionStatus::Candidate,
+            };
+            let metadata_json: String = row.get(15)?;
+            let metadata_json =
+                serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
+            Ok(AgentRevisionRecord {
+                revision_id: row.get(0)?,
+                agent_id: row.get(1)?,
+                base_revision_id: row.get(2)?,
+                artifact_id: row.get(3)?,
+                content_digest: row.get(4)?,
+                runtime_lock_hash: row.get(5)?,
+                manifest_hash: row.get(6)?,
+                created_at: row.get(7)?,
+                created_by_type: row.get(8)?,
+                created_by_id: row.get(9)?,
+                source_kind: row.get(10)?,
+                source_ref: row.get(11)?,
+                origin_node_id: row.get(12)?,
+                trust_domain: row.get(13)?,
+                status,
+                metadata_json,
+            })
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    /// List all agent revisions across all agents, ordered by creation time descending.
+    pub fn list_all_agent_revisions(&self) -> Result<Vec<AgentRevisionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
+                    runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
+             FROM agent_revisions ORDER BY created_at DESC",
+        )?;
+        let mut rows = stmt.query_map(params![], |row| {
             let status_str: String = row.get(14)?;
             let status = match status_str.as_str() {
                 "Candidate" => AgentRevisionStatus::Candidate,
@@ -2961,13 +3017,15 @@ impl GatewayStore {
         Ok(())
     }
 
-    /// Look up a short ID to get the full revision_id.
+    /// Look up a short ID to get the full revision_id. Returns None if not found.
     pub fn lookup_short_id(&self, short_id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
             conn.prepare("SELECT revision_id FROM short_id_index WHERE short_id = ?1")?;
-        let result = stmt.query_row(params![short_id], |row| row.get(0))?;
-        Ok(Some(result))
+        let result = stmt
+            .query_row(params![short_id], |row| row.get(0))
+            .optional()?;
+        Ok(result)
     }
 
     /// List all short IDs for an agent.
