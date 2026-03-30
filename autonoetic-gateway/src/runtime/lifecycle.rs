@@ -157,10 +157,6 @@ pub(crate) fn compose_system_instructions_with_metadata(
     }
 }
 
-pub(crate) fn compose_system_instructions(agent_instructions: &str) -> String {
-    compose_system_instructions_with_metadata(agent_instructions, None)
-}
-
 fn max_other_empty_retries() -> usize {
     std::env::var(LLM_OTHER_EMPTY_RETRY_ENV)
         .ok()
@@ -589,21 +585,17 @@ impl AgentExecutor {
                 digest_turn_active = true;
             }
 
-            // Update system message
+            // Update system message — ensure exactly one system message at position 0
             let system_instructions = compose_system_instructions_with_metadata(
                 &self.instructions,
                 self.manifest.response_contract.as_ref(),
             );
 
-            if let Some(first) = history.get_mut(0) {
-                if matches!(first.role, crate::llm::Role::System) {
-                    first.content = system_instructions;
-                } else {
-                    history.insert(0, Message::system(system_instructions));
-                }
-            } else {
-                history.push(Message::system(system_instructions));
-            }
+            // Remove any existing system messages (could be stale from previous turns)
+            history.retain(|m| !matches!(m.role, crate::llm::Role::System));
+
+            // Insert fresh system message at the front
+            history.insert(0, Message::system(system_instructions));
 
             let tools: Vec<ToolDefinition> = {
                 let mut t: Vec<ToolDefinition> = mcp_runtime
@@ -1100,7 +1092,16 @@ impl AgentExecutor {
                         if let Ok(Some(summary)) =
                             crate::scheduler::compact_workflow_summary(cfg, None, &session_id)
                         {
-                            history.push(Message::system(format!("[workflow status] {}", summary)));
+                            // Append to the first system message rather than creating a second one
+                            // (some Jinja templates like Qwen reject multiple system messages)
+                            if let Some(first) = history.get_mut(0) {
+                                if matches!(first.role, crate::llm::Role::System) {
+                                    first.content.push_str("\n\n[workflow status] ");
+                                    first.content.push_str(&summary);
+                                } else {
+                                    history.insert(0, Message::system(format!("[workflow status] {}", summary)));
+                                }
+                            }
                             tracing::info!(
                                 target: "workflow",
                                 session_id = %session_id,

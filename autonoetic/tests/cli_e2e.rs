@@ -971,11 +971,8 @@ fn test_terminal_chat_implicit_routing_to_planner_and_specialist_spawn() {
 
     // Force explicit default lead to avoid ambiguity in this regression.
     let config_body = std::fs::read_to_string(&config_path).expect("config should read");
-    std::fs::write(
-        &config_path,
-        format!("{config_body}default_lead_agent_id: \"planner.default\"\n"),
-    )
-    .expect("config should update");
+    std::fs::write(&config_path, format!("{config_body}port: 4000\n"))
+        .expect("config should update");
 
     write_planner_agent(&agents_dir.join("planner.default"), "planner.default");
     write_researcher_agent(&agents_dir.join("researcher.default"), "researcher.default");

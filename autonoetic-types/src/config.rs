@@ -21,19 +21,9 @@ pub struct LlmPreset {
     /// Optional context window for CLI "% of context" when preset is applied to SKILL.
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
-}
-
-/// When `agent.install` requires human approval before proceeding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentInstallApprovalPolicy {
-    /// Always require approval for every install (strictest).
-    Always,
-    /// Require approval only when the install is classified as high-risk (e.g. broad capabilities, ShellExec, background).
-    #[default]
-    RiskBased,
-    /// Never require approval for install; promotion gate only (dev/convenience).
-    Never,
+    /// Optional base URL override for OpenAI-compatible providers (e.g., LM Studio, Ollama).
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 /// Schema enforcement mode for agent.spawn payloads.
@@ -163,10 +153,6 @@ pub struct GatewayConfig {
     #[serde(default = "default_ofp_port")]
     pub ofp_port: u16,
 
-    /// Default lead agent used for ambiguous ingress when target_agent_id is omitted.
-    #[serde(default = "default_lead_agent_id")]
-    pub default_lead_agent_id: String,
-
     /// Enable TLS on the OFP port.
     #[serde(default)]
     pub tls: bool,
@@ -205,10 +191,6 @@ pub struct GatewayConfig {
     /// Max number of due background agents admitted per scheduler tick.
     #[serde(default = "default_max_background_due_per_tick")]
     pub max_background_due_per_tick: usize,
-
-    /// When `agent.install` requires human approval. `risk_based` (default) requires approval only for high-risk installs; `always` for every install; `never` to rely on promotion gate only.
-    #[serde(default)]
-    pub agent_install_approval_policy: AgentInstallApprovalPolicy,
 
     /// Schema enforcement configuration for agent.spawn payloads.
     #[serde(default)]
@@ -469,10 +451,6 @@ fn default_ofp_port() -> u16 {
     4200
 }
 
-fn default_lead_agent_id() -> String {
-    "planner.default".to_string()
-}
-
 fn default_node_id() -> String {
     "gateway".to_string()
 }
@@ -523,7 +501,6 @@ impl Default for GatewayConfig {
             agents_dir: default_agents_dir(),
             port: default_port(),
             ofp_port: default_ofp_port(),
-            default_lead_agent_id: default_lead_agent_id(),
             tls: false,
             node_id: default_node_id(),
             node_name: default_node_name(),
@@ -533,7 +510,6 @@ impl Default for GatewayConfig {
             background_tick_secs: default_background_tick_secs(),
             background_min_interval_secs: default_background_min_interval_secs(),
             max_background_due_per_tick: default_max_background_due_per_tick(),
-            agent_install_approval_policy: AgentInstallApprovalPolicy::default(),
             schema_enforcement: SchemaEnforcementConfig::default(),
             llm_presets: HashMap::new(),
             llm_preset_mapping: HashMap::new(),
@@ -561,7 +537,6 @@ mod tests {
         assert_eq!(config.background_tick_secs, 5);
         assert_eq!(config.background_min_interval_secs, 60);
         assert_eq!(config.max_background_due_per_tick, 32);
-        assert_eq!(config.default_lead_agent_id, "planner.default");
     }
 
     #[test]

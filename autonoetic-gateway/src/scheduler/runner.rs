@@ -38,18 +38,14 @@ pub fn clear_reevaluation_after_success(
                     .retain(|existing| existing != request_id);
                 state.pending_scheduled_action = None;
             }
-            WakeReason::StaleGoal { .. } => {
-                state.stale_goal_at = None;
-                state.pending_scheduled_action = None;
+            WakeReason::Timer { .. } => {
+                // Keep timer actions armed so deterministic scheduled workers remain recurring.
             }
-            WakeReason::RetryableFailure { .. }
-            | WakeReason::NewMessage { .. }
+            WakeReason::NewMessage { .. }
             | WakeReason::TaskCompletion { .. }
             | WakeReason::QueuedWork { .. } => {
                 state.pending_scheduled_action = None;
             }
-            // Keep timer actions armed so deterministic scheduled workers remain recurring.
-            WakeReason::Timer { .. } => {}
         }
     })?;
     Ok(())

@@ -217,12 +217,12 @@ disclosure:
             DisclosureRule {
                 source: "content.read".to_string(),
                 path_pattern: Some("secret*".to_string()),
-                class: DisclosureClass::Secret,
+                class: DisclosureClass::Restricted,
             },
             DisclosureRule {
                 source: "content.read".to_string(),
                 path_pattern: Some("confidential*".to_string()),
-                class: DisclosureClass::Confidential,
+                class: DisclosureClass::Restricted,
             },
         ],
         default_class: DisclosureClass::Public,

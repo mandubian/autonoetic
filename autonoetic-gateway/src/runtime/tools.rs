@@ -12,9 +12,7 @@ use autonoetic_types::background::{
 };
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::EntryStatus;
-use autonoetic_types::config::{
-    AgentInstallApprovalPolicy, GatewayConfig, SchemaEnforcementConfig, SchemaEnforcementMode,
-};
+use autonoetic_types::config::{GatewayConfig, SchemaEnforcementConfig, SchemaEnforcementMode};
 use autonoetic_types::runtime_lock::{
     LockedDependencySet, LockedGateway, LockedSandbox, LockedSdk, RuntimeLock,
 };
@@ -78,55 +76,68 @@ fn load_session_content_mounts(
     };
 
     let mut mounts = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Get all content names in this session
-    let names_with_handles = match store.list_names_with_handles(session_id) {
-        Ok(n) => n,
-        Err(_) => return Ok(Vec::new()),
-    };
-
-    for (name, handle) in names_with_handles {
-        // Read the content from the store
-        let content = match store.read(&handle) {
-            Ok(c) => c,
-            Err(_) => continue,
+    let collect_mounts = |sid: &str, mounts: &mut Vec<SandboxMount>, seen: &mut std::collections::HashSet<String>| -> anyhow::Result<()> {
+        let names_with_handles = match store.list_names_with_handles(sid) {
+            Ok(n) => n,
+            Err(_) => return Ok(()),
         };
 
-        // Create a temporary file with the content
-        // The temp file path: /tmp/autonoetic_content/{session_id}/{name}
-        let temp_base = std::env::temp_dir()
-            .join("autonoetic_content")
-            .join(session_id.replace('/', "_"));
-
-        if let Err(_) = std::fs::create_dir_all(&temp_base) {
-            continue;
-        }
-
-        let temp_file = temp_base.join(&name);
-        if let Some(parent) = temp_file.parent() {
-            if let Err(_) = std::fs::create_dir_all(parent) {
+        for (name, handle) in names_with_handles {
+            if !seen.insert(name.clone()) {
                 continue;
             }
+
+            let content = match store.read(&handle) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let temp_base = std::env::temp_dir()
+                .join("autonoetic_content")
+                .join(session_id.replace('/', "_"));
+
+            if let Err(_) = std::fs::create_dir_all(&temp_base) {
+                continue;
+            }
+
+            let temp_file = temp_base.join(&name);
+            if let Some(parent) = temp_file.parent() {
+                if let Err(_) = std::fs::create_dir_all(parent) {
+                    continue;
+                }
+            }
+
+            if let Err(_) = std::fs::write(&temp_file, &content) {
+                continue;
+            }
+
+            let dest_path = format!("/tmp/{}", name);
+
+            mounts.push(SandboxMount {
+                source: temp_file,
+                dest: dest_path,
+            });
+
+            tracing::debug!(
+                target: "sandbox",
+                name = %name,
+                handle = %handle,
+                session = %sid,
+                "Mounted session content file into sandbox"
+            );
         }
+        Ok(())
+    };
 
-        if let Err(_) = std::fs::write(&temp_file, &content) {
-            continue;
+    collect_mounts(session_id, &mut mounts, &mut seen_names)?;
+
+    let manifest = store.load_manifest(session_id)?;
+    if let Some(root_id) = &manifest.root_session_id {
+        if root_id != session_id {
+            collect_mounts(root_id, &mut mounts, &mut seen_names)?;
         }
-
-        // Mount at the original path inside sandbox (/tmp/{name})
-        let dest_path = format!("/tmp/{}", name);
-
-        mounts.push(SandboxMount {
-            source: temp_file,
-            dest: dest_path,
-        });
-
-        tracing::debug!(
-            target: "sandbox",
-            name = %name,
-            handle = %handle,
-            "Mounted session content file into sandbox"
-        );
     }
 
     Ok(mounts)
@@ -161,39 +172,6 @@ fn is_evolution_role(agent_id: &str) -> bool {
         agent_id,
         "specialized_builder.default" | "evolution-steward.default"
     )
-}
-
-/// Classifies an install as high-risk for approval policy. When true, risk_based policy requires human approval.
-fn is_install_high_risk(
-    args: &InstallAgentArgs,
-    scheduled_action: &Option<ScheduledAction>,
-    background: &Option<BackgroundPolicy>,
-) -> bool {
-    // Broad or powerful capabilities
-    for cap in &args.capabilities {
-        match cap {
-            Capability::CodeExecution { .. } => return true,
-            Capability::WriteAccess { scopes }
-                if scopes.len() > 2 || scopes.iter().any(|s| s == "*" || s.ends_with("/*")) =>
-            {
-                return true
-            }
-            Capability::NetworkAccess { hosts } if !hosts.is_empty() => return true,
-            _ => {}
-        }
-    }
-    // Background-enabled installs are higher risk
-    if background.as_ref().map(|b| b.enabled).unwrap_or(false) {
-        return true;
-    }
-    // Scheduled action that runs shell or writes files
-    if matches!(
-        scheduled_action,
-        Some(ScheduledAction::SandboxExec { .. }) | Some(ScheduledAction::WriteFile { .. })
-    ) {
-        return true;
-    }
-    false
 }
 
 fn execution_mode_label(mode: Option<ExecutionMode>) -> &'static str {
@@ -1108,48 +1086,55 @@ impl NativeTool for SandboxExecTool {
                 }
             }
 
-            // Create an actual approval request so operator can approve
-            if let Some(cfg) = config {
-                let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                let summary = format!(
-                    "Sandbox exec: {}",
-                    &effective_command[..effective_command.len().min(60)]
-                );
-                let action = autonoetic_types::background::ScheduledAction::SandboxExec {
-                    command: effective_command.clone(),
-                    dependencies: args.dependencies.as_ref().map(|d| {
-                        autonoetic_types::background::ScheduledActionDependencies {
-                            runtime: d.runtime.clone(),
-                            packages: d.packages.clone(),
-                        }
-                    }),
-                    requires_approval: true,
-                    evidence_ref: None,
-                };
-                // Resolve workflow_id from session
-                let approval_workflow_id = {
+                let detected_patterns = remote_analysis.detected_patterns.clone();
+                let normalized_targets =
+                    crate::runtime::approved_exec_cache::normalize_targets(&detected_patterns);
+
+                // Create an actual approval request so operator can approve
+                if let Some(cfg) = config {
+                    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                    let summary = format!(
+                        "Sandbox exec: {}",
+                        &effective_command[..effective_command.len().min(60)]
+                    );
+                    let action = autonoetic_types::background::ScheduledAction::SandboxExec {
+                        command: effective_command.clone(),
+                        dependencies: args.dependencies.as_ref().map(|d| {
+                            autonoetic_types::background::ScheduledActionDependencies {
+                                runtime: d.runtime.clone(),
+                                packages: d.packages.clone(),
+                            }
+                        }),
+                        requires_approval: true,
+                        evidence_ref: None,
+                    };
+                    // Resolve workflow_id from session
+                    let approval_workflow_id = {
+                        let sid = session_id.unwrap_or("");
+                        let root = crate::runtime::content_store::root_session_id(sid);
+                        crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+                            .ok()
+                            .flatten()
+                    };
                     let sid = session_id.unwrap_or("");
-                    let root = crate::runtime::content_store::root_session_id(sid);
-                    crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
-                        .ok()
-                        .flatten()
-                };
-                let sid = session_id.unwrap_or("");
-                let root_session_id = crate::runtime::content_store::root_session_id(sid);
-                let request = autonoetic_types::background::ApprovalRequest {
-                    request_id: request_id.clone(),
-                    agent_id: manifest.agent.id.clone(),
-                    session_id: sid.to_string(),
-                    root_session_id: Some(root_session_id.to_string()),
-                    action,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    status: None,
-                    decided_at: None,
-                    decided_by: None,
-                    reason: Some(format!(
-                        "Remote access detected: {}",
-                        remote_analysis.summary
-                    )),
+                    let root_session_id = crate::runtime::content_store::root_session_id(sid);
+                    let request = autonoetic_types::background::ApprovalRequest {
+                        request_id: request_id.clone(),
+                        agent_id: manifest.agent.id.clone(),
+                        session_id: sid.to_string(),
+                        root_session_id: Some(root_session_id.to_string()),
+                        action,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        status: None,
+                        decided_at: None,
+                        decided_by: None,
+                        reason: Some({
+                            let mut r = format!("Remote access detected: {}", remote_analysis.summary);
+                            if !normalized_targets.is_empty() {
+                                r.push_str(&format!(" → hosts: {}", normalized_targets.join(", ")));
+                            }
+                            r
+                        }),
                     evidence_ref: None,
                     // Bind to workflow + task if available
                     workflow_id: approval_workflow_id.clone(),
@@ -1170,9 +1155,6 @@ impl NativeTool for SandboxExecTool {
                     tracing::error!(target: "sandbox", "GatewayStore missing; cannot create sandbox approval");
                 }
 
-                let detected_patterns = remote_analysis.detected_patterns.clone();
-                let normalized_targets =
-                    crate::runtime::approved_exec_cache::normalize_targets(&detected_patterns);
                 let approval = build_approval_details(
                     &request,
                     "sandbox_exec",
@@ -5944,7 +5926,7 @@ impl NativeTool for AgentInstallTool {
         session_id: Option<&str>, // used when creating approval request
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let mut args: InstallAgentArgs = serde_json::from_str(arguments_json).map_err(|e| {
@@ -5968,10 +5950,7 @@ impl NativeTool for AgentInstallTool {
         // or code analysis happens.
         // ─────────────────────────────────────────────────────────────────
         if let Some(cfg) = config {
-            let policy = cfg.agent_install_approval_policy;
-            let high_risk = is_install_high_risk(&args, &scheduled_action, &background);
-            let need_approval = matches!(policy, AgentInstallApprovalPolicy::Always)
-                || (matches!(policy, AgentInstallApprovalPolicy::RiskBased) && high_risk);
+            let need_approval = true;
             let install_fingerprint =
                 install_request_fingerprint(&args, &scheduled_action, &background)?;
 
@@ -5984,7 +5963,7 @@ impl NativeTool for AgentInstallTool {
                     .filter(|s| !s.is_empty());
 
                 if let Some(request_id) = install_approval_ref {
-                    let decision = if let Some(store) = &_gateway_store {
+                    let decision = if let Some(store) = &gateway_store {
                         store
                             .get_approval(request_id)?
                             .ok_or_else(|| {
@@ -6082,10 +6061,110 @@ impl NativeTool for AgentInstallTool {
                     }
                     // Proceed with install using (possibly replaced) args.
                 } else {
-                    // Create pending approval request and return structured response.
-                    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
                     let capability_names: Vec<String> =
                         args.capabilities.iter().map(capability_type_name).collect();
+
+                    // Check for existing pending approval for this install (stops
+                    // LLM retry loops from flooding pending/).
+                    if let Some(cfg) = config {
+                        let sid = session_id.unwrap_or("");
+                        let root_sid = crate::runtime::content_store::root_session_id(sid);
+                        let existing_root =
+                            crate::scheduler::approval::pending_approval_requests_for_root(
+                                cfg,
+                                gateway_store.as_deref(),
+                                root_sid,
+                            )?
+                            .into_iter()
+                            .filter(|r| matches!(r.action, autonoetic_types::background::ScheduledAction::AgentInstall { .. }))
+                            .collect::<Vec<_>>();
+                        let existing_session =
+                            crate::scheduler::approval::pending_approval_requests_for_session(
+                                cfg,
+                                gateway_store.as_deref(),
+                                sid,
+                            )?
+                            .into_iter()
+                            .filter(|r| matches!(r.action, autonoetic_types::background::ScheduledAction::AgentInstall { .. }))
+                            .collect::<Vec<_>>();
+                        let mut existing = existing_root;
+                        for e in existing_session {
+                            if !existing.iter().any(|r| r.request_id == e.request_id) {
+                                existing.push(e);
+                            }
+                        }
+                        // Also check for same agent_id already pending
+                        if let Some(pending) = existing.iter().find(|r| {
+                            matches!(&r.action, ScheduledAction::AgentInstall { agent_id, .. } if agent_id == &args.agent_id)
+                        }) {
+                            let ids: Vec<String> = existing.iter().map(|r| r.request_id.clone()).collect();
+                            let approval = build_approval_details(
+                                pending,
+                                "agent_install",
+                                format!("{} with {}", pending.agent_id, capability_names.join(", ")),
+                                "promotion_gate.install_approval_ref",
+                                serde_json::json!({
+                                    "agent_id": args.agent_id,
+                                    "artifact_id": args.artifact_id,
+                                    "capabilities": capability_names.clone(),
+                                    "approval_already_pending": true,
+                                    "note": "An install approval is already pending for this agent. After operator approval, retry with install_approval_ref.",
+                                }),
+                            );
+                            return Ok(serde_json::json!({
+                                "ok": false,
+                                "approval_required": true,
+                                "approval_already_pending": true,
+                                "suspended": true,
+                                "request_id": pending.request_id,
+                                "pending_request_ids": ids,
+                                "message": format!("Install approval {} is already pending for {}. After operator approval, retry agent.install with promotion_gate.install_approval_ref = '{}'.", pending.request_id, args.agent_id, pending.request_id),
+                                "retry_instruction": format!("Add this to your promotion_gate: \"install_approval_ref\": \"{}\"", pending.request_id),
+                                "approval": approval,
+                            })
+                            .to_string());
+                        }
+
+                        // Also check recently-approved approvals (prevents retry loops after
+                        // approval was granted but the continuation resume path was missed).
+                        if let Some(gs) = &gateway_store {
+                            let approved = gs.get_approved_approvals_for_session(sid)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|r| matches!(r.action, ScheduledAction::AgentInstall { .. }))
+                                .collect::<Vec<_>>();
+                            if let Some(approved_install) = approved.iter().find(|r| {
+                                matches!(&r.action, ScheduledAction::AgentInstall { agent_id, .. } if agent_id == &args.agent_id)
+                            }) {
+                                let approval = build_approval_details(
+                                    approved_install,
+                                    "agent_install",
+                                    format!("{} with {}", approved_install.agent_id, capability_names.join(", ")),
+                                    "promotion_gate.install_approval_ref",
+                                    serde_json::json!({
+                                        "agent_id": args.agent_id,
+                                        "artifact_id": args.artifact_id,
+                                        "capabilities": capability_names.clone(),
+                                        "approval_already_granted": true,
+                                        "note": "This install was already approved. Retry with install_approval_ref to complete the install.",
+                                    }),
+                                );
+                                return Ok(serde_json::json!({
+                                    "ok": false,
+                                    "approval_required": true,
+                                    "already_approved": true,
+                                    "request_id": approved_install.request_id,
+                                    "message": format!("Install approval {} was already granted for {}. Retry agent.install with promotion_gate.install_approval_ref = '{}' to complete installation.", approved_install.request_id, args.agent_id, approved_install.request_id),
+                                    "retry_instruction": format!("Add this to your promotion_gate: \"install_approval_ref\": \"{}\"", approved_install.request_id),
+                                    "approval": approval,
+                                })
+                                .to_string());
+                            }
+                        }
+                    }
+
+                    // Create pending approval request and return structured response.
+                    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
                     let summary = if capability_names.is_empty() {
                         args.agent_id.clone()
                     } else {
@@ -6168,7 +6247,7 @@ impl NativeTool for AgentInstallTool {
                         decided_at: None,
                         decided_by: None,
                     };
-                    if let Some(store) = &_gateway_store {
+                    if let Some(store) = &gateway_store {
                         if let Err(e) = store.create_approval(&request) {
                             tracing::error!(
                                 target: "agent.install",
@@ -6675,7 +6754,7 @@ impl NativeTool for AgentInstallTool {
                         &action,
                         &registry,
                         config,
-                        _gateway_store,
+                        gateway_store,
                     ) {
                         Ok(_) => {
                             persist_reevaluation_state(&install_tmp_dir, |state| {
@@ -8750,7 +8829,6 @@ mod tests {
 
         let config = GatewayConfig {
             agents_dir: agents_dir.clone(),
-            agent_install_approval_policy: AgentInstallApprovalPolicy::RiskBased,
             ..Default::default()
         };
 
@@ -10574,7 +10652,6 @@ Research agent instructions.
 
         let config = GatewayConfig {
             agents_dir: agents_dir.clone(),
-            agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
             ..Default::default()
         };
 
@@ -10685,7 +10762,6 @@ Research agent instructions.
 
         let config = GatewayConfig {
             agents_dir: agents_dir.clone(),
-            agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
             ..Default::default()
         };
 
@@ -10765,7 +10841,6 @@ Research agent instructions.
 
         let config = GatewayConfig {
             agents_dir: agents_dir.clone(),
-            agent_install_approval_policy: AgentInstallApprovalPolicy::RiskBased,
             ..Default::default()
         };
 
@@ -10845,7 +10920,6 @@ Research agent instructions.
 
         let config = GatewayConfig {
             agents_dir: agents_dir.clone(),
-            agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
             ..Default::default()
         };
 
@@ -10944,7 +11018,6 @@ Research agent instructions.
 
         let config = GatewayConfig {
             agents_dir: agents_dir.clone(),
-            agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
             ..Default::default()
         };
 
@@ -11088,7 +11161,6 @@ Research agent instructions.
 
         let config = GatewayConfig {
             agents_dir: agents_dir.clone(),
-            agent_install_approval_policy: AgentInstallApprovalPolicy::Always,
             ..Default::default()
         };
 

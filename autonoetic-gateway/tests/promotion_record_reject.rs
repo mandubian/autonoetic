@@ -13,7 +13,6 @@ use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
-use autonoetic_types::config::{AgentInstallApprovalPolicy, GatewayConfig};
 use autonoetic_types::promotion::PromotionRole;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -117,7 +116,6 @@ async fn test_promotion_reject_no_records() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Never,
         ..Default::default()
     };
 
@@ -201,7 +199,6 @@ async fn test_promotion_reject_evaluator_failed() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Never,
         ..Default::default()
     };
 
@@ -269,7 +266,6 @@ async fn test_promotion_reject_auditor_failed() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Never,
         ..Default::default()
     };
 
@@ -357,7 +353,6 @@ async fn test_promotion_reject_invalid_handle() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
-        agent_install_approval_policy: AgentInstallApprovalPolicy::Never,
         ..Default::default()
     };
 
