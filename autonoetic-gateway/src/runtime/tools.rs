@@ -7479,7 +7479,8 @@ impl NativeTool for AgentRevisionPromoteTool {
                 "properties": {
                     "agent_id": { "type": "string", "description": "Logical agent ID whose alias should be updated" },
                     "revision_id": { "type": "string", "description": "Revision ID to promote (must be in candidate or ready status)" },
-                    "reason": { "type": "string", "description": "Optional: human-readable reason for promotion" }
+                    "reason": { "type": "string", "description": "Optional: human-readable reason for promotion" },
+                    "required_eval_run_id": { "type": "string", "description": "Optional: if provided, promotion requires this eval run to have passed for the target revision" }
                 },
                 "required": ["agent_id", "revision_id"],
                 "additionalProperties": false
@@ -7643,6 +7644,21 @@ impl NativeTool for AgentRevisionRollbackTool {
                 "Revision '{}' belongs to '{}', not '{}'",
                 rev_id, rev.agent_id, args.agent_id
             );
+
+            // Validate lineage: the target revision must appear in this agent's promotion history
+            // (either as a previously promoted revision or as a previous_revision_id in a promote/rollback)
+            let history = gateway_store.list_promotion_history(&args.agent_id)?;
+            let in_lineage = history.iter().any(|p|
+                p.new_revision_id == *rev_id ||
+                p.previous_revision_id.as_ref().map_or(false, |r| r == rev_id)
+            );
+            anyhow::ensure!(
+                in_lineage,
+                "Revision '{}' is not in the promotion lineage for agent '{}'. \
+                 Rollback can only target revisions that were previously active for this agent.",
+                rev_id, args.agent_id
+            );
+
             rev_id.clone()
         } else {
             // Default: find immediately previous revision from promotion history
