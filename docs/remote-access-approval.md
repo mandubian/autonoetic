@@ -99,6 +99,49 @@ The tool returns a structured response instead of executing:
       "category": "import",
       "pattern": "import requests",
       "line_number": 1,
+      "reason": "Makes HTTP requests"
+    },
+    {
+      "category": "url_literal",
+      "pattern": "https://api.open-meteo.com/v1/forecast",
+      "line_number": 5,
+      "reason": "External resource"
+    }
+  ],
+  "request_id": "apr-a1b2c3d4",
+  "suspended": true,
+  "message": "Execution suspended pending operator approval (apr-a1b2c3d4). The approved command is persisted and will be used automatically on resume.",
+  "approval": {
+    "kind": "sandbox_exec",
+    "reason": "Remote access detected: 2 patterns → hosts: api.open-meteo.com",
+    "summary": "Sandbox exec: python3 weather_client.py",
+    "requested_by_agent_id": "coder.default",
+    "session_id": "demo-session-1/coder.default-abc123",
+    "retry_field": "approval_ref",
+    "subject": {
+      "command": "python3 weather_client.py",
+      "remote_access_detected": true,
+      "detected_patterns": [...],
+      "normalized_targets": ["api.open-meteo.com"],
+      "hosts": ["api.open-meteo.com"]
+    }
+  }
+}
+```
+
+The `reason` field now includes extracted hostnames when URL literals are detected in the code, giving operators immediate visibility into what domains will be accessed.```json
+{
+  "ok": false,
+  "exit_code": null,
+  "stdout": "",
+  "stderr": "Remote access detected: Detected 2 remote access pattern(s) in categories: import, url_literal. Operator approval required to execute code with network access.",
+  "approval_required": true,
+  "remote_access_detected": true,
+  "detected_patterns": [
+    {
+      "category": "import",
+      "pattern": "import requests",
+      "line_number": 1,
       "reason": "HTTP client library"
     },
     {

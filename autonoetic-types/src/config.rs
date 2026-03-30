@@ -140,6 +140,7 @@ impl Default for DigestAgentConfig {
 
 /// Top-level Gateway daemon configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     /// Directory containing agent subdirectories, each with a SKILL.md.
     #[serde(default = "default_agents_dir")]

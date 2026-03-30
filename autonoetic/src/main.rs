@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
                 cli::gateway::handle_gateway_status(&config_path, *json).await?;
             }
             cli::common::GatewayCommands::Approvals { command } => {
-                cli::gateway::handle_gateway_approvals(&config_path, command)?;
+                cli::gateway::handle_gateway_approvals(&config_path, command).await?;
             }
             cli::common::GatewayCommands::Interactions { command } => {
                 cli::gateway::handle_gateway_interactions(&config_path, command)?;

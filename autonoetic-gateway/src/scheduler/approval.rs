@@ -66,6 +66,24 @@ pub fn pending_sandbox_exec_requests_for_session(
     Ok(v)
 }
 
+/// Pending approvals of any kind for an exact `session_id`, oldest first.
+/// Used to stop repeated calls from minting many `apr-*` rows while an approval is still open.
+pub fn pending_approval_requests_for_session(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
+) -> anyhow::Result<Vec<ApprovalRequest>> {
+    if session_id.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut v: Vec<ApprovalRequest> = load_approval_requests(config, gateway_store)?
+        .into_iter()
+        .filter(|r| r.session_id == session_id)
+        .collect();
+    v.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(v)
+}
+
 pub fn approve_request(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -1022,13 +1040,11 @@ mod tests {
         store.create_approval(&request).unwrap();
 
         // First approve succeeds
-        let result =
-            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None);
+        let result = super::approve_request(&cfg, Some(&store), "apr-double", "operator", None);
         assert!(result.is_ok(), "first approve should succeed");
 
         // Second approve fails with idempotency error
-        let result =
-            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None);
+        let result = super::approve_request(&cfg, Some(&store), "apr-double", "operator", None);
         assert!(result.is_err(), "second approve should be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(

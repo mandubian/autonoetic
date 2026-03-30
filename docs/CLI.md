@@ -59,7 +59,59 @@ autonoetic gateway status [--json]
 
 ### `autonoetic gateway approvals`
 
-Manage pending approval requests for `agent.install` and scheduled actions.
+Manage pending approval requests for `agent.install` and `sandbox.exec` actions.
+
+```bash
+autonoetic gateway approvals list [--json]
+autonoetic gateway approvals approve <request_id> [--reason TEXT]
+autonoetic gateway approvals reject <request_id> [--reason TEXT]
+```
+
+**Approval ID format:** Short IDs like `apr-db51b7ad` (12 chars). LLMs won't truncate these.
+
+**List output** shows each approval with its kind and details:
+
+| Column | Description |
+|--------|-------------|
+| REQUEST ID | Short approval ID (`apr-xxxxxxxx`) |
+| AGENT | Agent that requested the approval |
+| KIND | Action type (`sandbox_exec` or `agent_install`) |
+| DETAILS | Command being executed (sandbox_exec) or agent being installed (agent_install) |
+
+Example:
+```
+REQUEST ID                            AGENT                KIND           DETAILS
+apr-3458926a                          specialized_bui…   agent_install  install: weather.default (weather.default with NetworkAccess)
+apr-9e6420c1                          evaluator.defau…   sandbox_exec  exec: python3 -c "import requests; print(…
+```
+
+**Auto-execute:** After approval, the gateway automatically resumes the suspended session - no agent retry needed.
+
+**Deduplication:** The gateway prevents duplicate approval requests. If an approval is already pending (or already approved) for the same operation, the existing request ID is returned instead of creating a new one.
+
+### `autonoetic gateway approvals interactive`
+
+Interactive TUI for reviewing, approving, and rejecting pending approval requests.
+
+```bash
+autonoetic gateway approvals interactive
+```
+
+**Keyboard controls:**
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move selection up |
+| `↓` / `j` | Move selection down |
+| `a` | Approve selected request |
+| `r` | Reject selected request |
+| `R` | Refresh approval list |
+| `q` / `Esc` | Quit |
+
+The TUI displays:
+- **Top**: List of pending approvals with request ID, agent, kind, and details (command for sandbox_exec, agent_id for agent_install)
+- **Middle**: Detail panel showing the selected approval's full information (session, reason, command, dependencies, capabilities, detected hosts)
+- **Bottom**: Status bar showing the result of the last action
 
 ```bash
 autonoetic gateway approvals list [--json]

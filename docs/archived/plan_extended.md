@@ -1226,7 +1226,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 
 **15.3 Update `plan.md`**
 
-- **File**: `autonoetic/plan.md`
+- **File**: `docs/archived/plan.md`
 - **Action**: Add this plan as Phase 10 (or appropriate phase number). Mark completed tasks.
 
 **15.4 End-to-end integration test**

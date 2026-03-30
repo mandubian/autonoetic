@@ -1371,6 +1371,35 @@ async fn run_loop<B: ratatui::backend::Backend>(
             // User message to send
             msg = rx.recv() => {
                 if let Some((id, message)) = msg {
+                    // Check if there's a pending user interaction waiting for an answer.
+                    // If so, answer it directly and store, then send event.ingest to trigger resume.
+                    if let Some(ref store) = gateway_store {
+                        if let Ok(pending) = list_pending_user_interactions_for_terminal_session(store, session_id) {
+                            if let Some(interaction) = pending.into_iter().next() {
+                                let answer = autonoetic_types::background::UserInteractionAnswer {
+                                    interaction_id: interaction.interaction_id.clone(),
+                                    answer_text: Some(message.clone()),
+                                    answer_option_id: None,
+                                    answered_by: "chat-tui".to_string(),
+                                };
+                                match store.answer_user_interaction(&answer) {
+                                    Ok(()) => {
+                                        app.add_message(
+                                            MessageRole::System,
+                                            format!("Answered interaction {} (text: {})", interaction.interaction_id, message),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        app.add_message(
+                                            MessageRole::System,
+                                            format!("Failed to answer interaction: {}", e),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let req_id = format!("tui-{}", id);
                     pending_map.insert(req_id.clone(), id);
 

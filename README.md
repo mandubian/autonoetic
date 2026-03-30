@@ -61,7 +61,7 @@ Autonoetic now accepts AgentSkills-compliant top-level `SKILL.md` frontmatter (`
 
 ### Planning
 
-- [`plan.md`](plan.md): Implementation roadmap
+- [`docs/archived/plan.md`](docs/archived/plan.md): Archived implementation roadmap
 
 ## Reference Agent Bundles
 
@@ -146,7 +146,7 @@ We are also actively trying to reuse the Openfang Protocol (OFP) as much as poss
 
 ## Status
 
-Phases 1 through 6 are implemented, including OFP networking/federation, MCP integration foundations, SDK package scaffolding, and multi-driver sandbox support. Phase 7 now focuses on polish, end-to-end coverage, and release readiness as tracked in [`plan.md`](plan.md).
+Phases 1 through 6 are implemented, including OFP networking/federation, MCP integration foundations, SDK package scaffolding, and multi-driver sandbox support. The prior Phase 7 roadmap is preserved in [`docs/archived/plan.md`](docs/archived/plan.md).
 
 ## Quickstart Example
 

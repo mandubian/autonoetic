@@ -27,20 +27,61 @@ impl AgentRef {
     }
 
     /// Parse an agent_ref string in the format `agent_id@revision_id`.
+    ///
+    /// Validation rules:
+    /// - Exactly one `@` separator
+    /// - agent_id must match `[a-z0-9][a-z0-9._-]*` (no `@`)
+    /// - revision_id must start with `rev_sha256:` followed by exactly 64 lowercase hex chars
     pub fn parse(s: &str) -> Option<Self> {
-        let at_pos = s.rfind('@')?;
-        if at_pos == 0 || at_pos == s.len() - 1 {
+        let at_pos = s.find('@')?;
+        if at_pos == 0 || at_pos != s.rfind('@').unwrap_or(0) {
             return None;
         }
-        let agent_id = s[..at_pos].to_string();
-        let revision_id = s[at_pos + 1..].to_string();
+        let agent_id = &s[..at_pos];
+        let revision_id = &s[at_pos + 1..];
+
         if agent_id.is_empty() || revision_id.is_empty() {
             return None;
         }
+
+        if !Self::is_valid_agent_id(agent_id) {
+            return None;
+        }
+
+        if !Self::is_valid_revision_id(revision_id) {
+            return None;
+        }
+
         Some(Self {
-            agent_id,
-            revision_id,
+            agent_id: agent_id.to_string(),
+            revision_id: revision_id.to_string(),
         })
+    }
+
+    fn is_valid_agent_id(s: &str) -> bool {
+        if s.is_empty() {
+            return false;
+        }
+        let first = s.chars().next().unwrap();
+        if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+            return false;
+        }
+        s.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-'
+        })
+    }
+
+    fn is_valid_revision_id(s: &str) -> bool {
+        let prefix = "rev_sha256:";
+        if !s.starts_with(prefix) {
+            return false;
+        }
+        let hex = &s[prefix.len()..];
+        if hex.len() != 64 {
+            return false;
+        }
+        hex.chars()
+            .all(|c| c.is_ascii_hexdigit() && (c.is_ascii_lowercase() || c.is_ascii_digit()))
     }
 
     /// Format as `agent_id@revision_id`.
@@ -126,8 +167,8 @@ pub struct SessionAgentBinding {
     pub session_id: String,
     /// Root session ID for grouping related sessions.
     pub root_session_id: String,
-    /// Resolved alias ID.
-    pub alias_id: String,
+    /// Resolved alias ID (None if resolved directly from agent_ref without alias).
+    pub alias_id: Option<String>,
     /// Logical agent ID.
     pub agent_id: String,
     /// Pinned immutable revision ID.
@@ -138,6 +179,8 @@ pub struct SessionAgentBinding {
     pub home_node_id: String,
     /// RFC3339 creation timestamp.
     pub created_at: String,
+    /// The original target the caller requested (agent_id or agent_ref string).
+    pub requested_target: String,
 }
 
 /// Type of promotion action.

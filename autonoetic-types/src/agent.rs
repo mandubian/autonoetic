@@ -43,6 +43,9 @@ pub struct LlmConfig {
     /// If unset, use env `AUTONOETIC_LLM_CONTEXT_WINDOW` or omit percentage.
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
+    /// Optional base URL override for OpenAI-compatible providers (e.g., LM Studio, Ollama).
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 /// One provider round-trip: token counts and optional context window utilization.

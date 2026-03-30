@@ -13,11 +13,27 @@ pub enum DisclosureClass {
     Public,
     /// Information that must be redacted from the assistant reply.
     Restricted,
+    /// Legacy variant mapped to Restricted.
+    #[serde(alias = "internal")]
+    Internal,
+    /// Legacy variant mapped to Restricted.
+    #[serde(alias = "confidential")]
+    Confidential,
+    /// Legacy variant mapped to Restricted.
+    #[serde(alias = "secret")]
+    Secret,
 }
 
 impl Default for DisclosureClass {
     fn default() -> Self {
         Self::Public
+    }
+}
+
+impl DisclosureClass {
+    /// Returns true if this class represents restricted content.
+    pub fn is_restricted(&self) -> bool {
+        !matches!(self, Self::Public)
     }
 }
 

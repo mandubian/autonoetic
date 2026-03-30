@@ -1,6 +1,6 @@
 //! Durable workflow orchestration records (gateway-owned persistence).
 //!
-//! These types back the workflow layer described in `autonoetic/plan_workflow_orchestration.md`.
+//! These types back the workflow layer described in `docs/archived/plan_workflow_orchestration.md`.
 //! They intentionally avoid session-path parsing semantics — callers supply explicit
 //! `root_session_id` and `workflow_id` at persistence boundaries.
 
