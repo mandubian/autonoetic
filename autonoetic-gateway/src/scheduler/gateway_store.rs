@@ -627,6 +627,19 @@ impl GatewayStore {
             CREATE INDEX IF NOT EXISTS idx_eval_case_results_run ON eval_case_results(eval_run_id);
             ",
         )?;
+
+        // Short ID index for LLM-friendly revision references
+        // Populated automatically when revisions are inserted.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS short_id_index (
+                short_id TEXT PRIMARY KEY,
+                revision_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_short_id_index_revision ON short_id_index(revision_id);
+            ",
+        )?;
+
         Ok(())
     }
 
@@ -2420,33 +2433,38 @@ impl GatewayStore {
     // --- Agent Revisions ---
 
     pub fn insert_agent_revision(&self, rev: &AgentRevisionRecord) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
         let metadata_json = serde_json::to_string(&rev.metadata_json)?;
-        conn.execute(
-            "INSERT INTO agent_revisions (
-                revision_id, agent_id, base_revision_id, artifact_id, content_digest,
-                runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            params![
-                &rev.revision_id,
-                &rev.agent_id,
-                rev.base_revision_id,
-                rev.artifact_id,
-                &rev.content_digest,
-                &rev.runtime_lock_hash,
-                &rev.manifest_hash,
-                &rev.created_at,
-                &rev.created_by_type,
-                &rev.created_by_id,
-                &rev.source_kind,
-                rev.source_ref,
-                &rev.origin_node_id,
-                &rev.trust_domain,
-                &format!("{:?}", rev.status),
-                metadata_json,
-            ],
-        )?;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agent_revisions (
+                    revision_id, agent_id, base_revision_id, artifact_id, content_digest,
+                    runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                params![
+                    &rev.revision_id,
+                    &rev.agent_id,
+                    rev.base_revision_id,
+                    rev.artifact_id,
+                    &rev.content_digest,
+                    &rev.runtime_lock_hash,
+                    &rev.manifest_hash,
+                    &rev.created_at,
+                    &rev.created_by_type,
+                    &rev.created_by_id,
+                    &rev.source_kind,
+                    rev.source_ref,
+                    &rev.origin_node_id,
+                    &rev.trust_domain,
+                    &format!("{:?}", rev.status),
+                    metadata_json,
+                ],
+            )?;
+        } // Release lock here
+          // Auto-register short ID for LLM-friendly references
+        let short = autonoetic_types::agent_revision::short_id(&rev.revision_id, None);
+        self.register_short_id(&rev.revision_id, &short)?;
         Ok(())
     }
 
@@ -2922,6 +2940,47 @@ impl GatewayStore {
                 output_json,
             })
         })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    // --- Short ID Index ---
+
+    /// Register a short ID for a revision. Called automatically on revision insert.
+    pub fn register_short_id(&self, revision_id: &str, short_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO short_id_index (short_id, revision_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![short_id, revision_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Look up a short ID to get the full revision_id.
+    pub fn lookup_short_id(&self, short_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT revision_id FROM short_id_index WHERE short_id = ?1")?;
+        let result = stmt.query_row(params![short_id], |row| row.get(0))?;
+        Ok(Some(result))
+    }
+
+    /// List all short IDs for an agent.
+    pub fn list_short_ids_for_agent(&self, agent_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT si.short_id, si.revision_id
+             FROM short_id_index si
+             JOIN agent_revisions ar ON si.revision_id = ar.revision_id
+             WHERE ar.agent_id = ?1
+             ORDER BY ar.created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![agent_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
         let mut results = Vec::new();
         for r in rows {
             results.push(r?);

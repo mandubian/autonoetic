@@ -132,16 +132,23 @@ Format:
 <agent_id>@<revision_id>
 ```
 
-Example:
+Example (full):
 
 ```text
 planner.default@rev_sha256:4b1a...
 ```
 
+Example (short, for LLM consumption):
+
+```text
+planner.default@rev_abc12345
+```
+
 Parsing rules:
 
 - `agent_ref` parses only when a target contains exactly one `@` delimiter and both sides validate as `agent_id` plus `revision_id`;
-- a target containing `@` that fails full `agent_ref` parsing is invalid and must not fall back to alias lookup.
+- a target containing `@` that fails full `agent_ref` parsing is invalid and must not fall back to alias lookup;
+- short revision IDs (`rev_<crockford8>`) are resolved via the `short_id_index` table in the gateway store, not via `AgentRef::parse()`.
 
 ### 5.3 Revisions are content-addressed directories
 
@@ -918,10 +925,11 @@ pub fn list_aliases(&self) -> anyhow::Result<Vec<AgentAliasRecord>>;
 Resolution rules:
 
 1. if `target` contains `@`, it must parse as a valid `agent_ref` or fail validation;
-2. if `target` parses as `agent_ref`, load that exact revision;
-3. else treat `target` as alias id;
-4. if alias exists, load alias target revision;
-5. else return not found.
+2. if `target` parses as a full `agent_ref` (64-char hex), load that exact revision;
+3. if `target` contains `@` with a short revision ID (`rev_<crockford>`), resolve via `short_id_index` table;
+4. else treat `target` as alias id;
+5. if alias exists, load alias target revision;
+6. else return not found.
 
 Additional rules:
 
