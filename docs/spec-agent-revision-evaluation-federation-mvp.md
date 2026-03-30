@@ -836,7 +836,7 @@ Notes:
 
 - `patterns` follow the same pattern semantics as the rest of the capability model;
 - `AgentRevision.patterns` match logical agent ids, alias ids, or full `agent_ref` prefixes;
-- `Evaluation.patterns` match suite ids and subject agent ids;
+- `Evaluation.patterns` match suite names for publish operations, and match suite ids or subject agent ids for run/report operations;
 - `ApprovalQueue.scopes` are exact scope names, not free-form globs;
 - `SchedulerSignal.patterns` match named signal channels only;
 - `ApprovalQueue` and `SchedulerSignal` are prerequisites from the simplification work;

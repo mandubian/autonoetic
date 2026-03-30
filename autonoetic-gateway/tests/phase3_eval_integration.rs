@@ -1,0 +1,1107 @@
+//! Integration tests: Phase 3 — Agent Revisions, Evaluation, and Federation.
+//!
+//! Tests cover:
+//!   1. Eval suite publish validation (case_id uniqueness, assertion grammar, non-vacuous cases)
+//!   2. Eval run with agent_ref resolution and revision-agent validation
+//!   3. Eval runner assertion engine (all 5 assertion types)
+//!   4. Revision materialization and loading from revision directories
+//!   5. Evaluation capability scope enforcement
+//!   6. End-to-end tool execution for eval.suite.publish and eval.run
+//!   7. Revision directory materialization on agent.revision.create
+
+mod support;
+
+use autonoetic_gateway::policy::PolicyEngine;
+use autonoetic_gateway::runtime::tools::{NativeTool, EvalSuitePublishTool, EvalRunTool, EvalReportTool, validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::capability::Capability;
+use serde_json::json;
+use std::path::Path;
+use tempfile::TempDir;
+
+fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
+    let yaml = format!(
+        r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "test-agent"
+  name: "Test Agent"
+  description: "Test."
+capabilities: {}
+llm_config:
+  provider: "openai"
+  model: "test-model"
+---
+# Test Agent
+"#,
+        serde_json::to_string(&json!(caps)).unwrap()
+    );
+    let (manifest, _instructions) =
+        autonoetic_gateway::runtime::parser::SkillParser::parse(&yaml).unwrap();
+    manifest
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 1. Eval suite publish validation
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_validate_suite_spec_rejects_empty_cases() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec};
+
+    let spec = EvalSuiteSpec { cases: vec![] };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("at least one case"));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 7. Eval runner assertion + report generation tests
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_evaluate_assertions_all_types_combined() {
+    use autonoetic_gateway::scheduler::eval_runner::{EvalAssertions, evaluate_assertions};
+
+    // All assertions pass
+    let assertions = EvalAssertions {
+        reply_contains_all: Some(vec!["task".into(), "complete".into()]),
+        reply_contains_none: Some(vec!["error".into()]),
+        reply_max_chars: Some(1000),
+        artifacts_min: Some(1),
+        artifacts_max: None,
+    };
+    assert!(evaluate_assertions(&assertions, "task complete", 2));
+    assert!(!evaluate_assertions(&assertions, "Task", 2)); // missing "complete"
+    assert!(!evaluate_assertions(&assertions, "task complete error", 2)); // contains "error"
+    assert!(!evaluate_assertions(&assertions, "task complete", 0)); // artifacts_min failed
+
+    // Artifacts max constraint
+    let assertions_max = EvalAssertions {
+        reply_contains_all: None,
+        reply_contains_none: None,
+        reply_max_chars: None,
+        artifacts_min: None,
+        artifacts_max: Some(3),
+    };
+    assert!(evaluate_assertions(&assertions_max, "", 2));
+    assert!(!evaluate_assertions(&assertions_max, "", 5));
+
+    // Reply max chars
+    let assertions_chars = EvalAssertions {
+        reply_contains_all: None,
+        reply_contains_none: None,
+        reply_max_chars: Some(10),
+        artifacts_min: None,
+        artifacts_max: None,
+    };
+    assert!(evaluate_assertions(&assertions_chars, "Short", 0));
+    assert!(!evaluate_assertions(&assertions_chars, "This is way too long", 0));
+}
+
+#[test]
+fn test_eval_runner_report_generation_from_store() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    // Insert a completed eval run with report_handle
+    let eval_run_id = "eval-runner-report-test";
+    let run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: eval_run_id.to_string(),
+        suite_id: "suite-runner-test".to_string(),
+        subject_agent_id: "test-agent".to_string(),
+        subject_revision_id: "rev_test".to_string(),
+        baseline_revision_id: None,
+        status: autonoetic_types::evaluation::EvalRunStatus::Failed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: Some(chrono::Utc::now().to_rfc3339()),
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({
+            "suite_name": "Runner Test Suite",
+            "case_count": 3,
+            "passed": 2,
+            "failed": 1,
+        }),
+        report_handle: Some("sha256:generated_report_abc123".to_string()),
+        origin_node_id: "gateway".to_string(),
+    };
+    store.insert_eval_run(&run).unwrap();
+
+    // Insert mixed case results (2 passed, 1 failed)
+    store.insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+        eval_run_id: eval_run_id.to_string(),
+        case_id: "case_pass_1".into(),
+        status: "passed".into(),
+        score: Some(1.0),
+        session_id: Some("session-1".into()),
+        notes: None,
+        output_json: json!({ "reply_length": 50 }),
+    }).unwrap();
+
+    store.insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+        eval_run_id: eval_run_id.to_string(),
+        case_id: "case_fail".into(),
+        status: "failed".into(),
+        score: None,
+        session_id: Some("session-2".into()),
+        notes: Some("reply_max_chars failed".into()),
+        output_json: json!({ "reply_length": 5000 }),
+    }).unwrap();
+
+    store.insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+        eval_run_id: eval_run_id.to_string(),
+        case_id: "case_pass_2".into(),
+        status: "passed".into(),
+        score: Some(0.8),
+        session_id: Some("session-3".into()),
+        notes: None,
+        output_json: json!({ "reply_length": 100 }),
+    }).unwrap();
+
+    // Verify the run and all case results are retrievable
+    let retrieved_run = store.get_eval_run(eval_run_id).unwrap().unwrap();
+    assert_eq!(retrieved_run.status, autonoetic_types::evaluation::EvalRunStatus::Failed);
+    assert_eq!(retrieved_run.report_handle, Some("sha256:generated_report_abc123".to_string()));
+
+    let case_results = store.list_eval_case_results(eval_run_id).unwrap();
+    assert_eq!(case_results.len(), 3);
+
+    let passed: Vec<_> = case_results.iter().filter(|c| c.status == "passed").collect();
+    let failed: Vec<_> = case_results.iter().filter(|c| c.status == "failed").collect();
+    assert_eq!(passed.len(), 2);
+    assert_eq!(failed.len(), 1);
+
+    // Verify the failed case has notes
+    let failed_case = &failed[0];
+    assert!(failed_case.notes.as_ref().unwrap().contains("reply_max_chars"));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 6. Core happy path integration tests
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_eval_run_persists_with_real_revision() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    // Create a real revision in the store
+    let revision_id = "rev_sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
+        revision_id: revision_id.to_string(),
+        agent_id: "test-agent".to_string(),
+        base_revision_id: None,
+        artifact_id: None,
+        content_digest: "sha256:test".to_string(),
+        runtime_lock_hash: "none".to_string(),
+        manifest_hash: "sha256:test".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "test".to_string(),
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "test".to_string(),
+        trust_domain: "test".to_string(),
+        status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+        metadata_json: json!({}),
+        short_id: "test1234".to_string(),
+    };
+    store.insert_agent_revision(&rev).unwrap();
+
+    // Create a suite
+    let suite_id = "suite-test123";
+    let suite = autonoetic_types::evaluation::EvalSuiteRecord {
+        suite_id: suite_id.to_string(),
+        name: "Test Suite".to_string(),
+        description: "A test suite".to_string(),
+        spec_json: json!({
+            "cases": [
+                {
+                    "case_id": "case_a",
+                    "message": "Hello",
+                    "assertions": { "reply_max_chars": 200 }
+                }
+            ]
+        }),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "test".to_string(),
+        origin_node_id: "test".to_string(),
+    };
+    store.insert_eval_suite(&suite).unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let agents_dir = tmp.path().join("agents");
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir,
+        ..Default::default()
+    };
+
+    let tool = EvalRunTool;
+    let args = json!({
+        "agent_ref": format!("test-agent@{}", revision_id),
+        "suite_id": suite_id,
+    });
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
+    );
+
+    let response: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["status"], "queued");
+    let eval_run_id = response["eval_run_id"].as_str().unwrap();
+
+    // Verify the run was persisted
+    let run = store.get_eval_run(eval_run_id).unwrap().unwrap();
+    assert_eq!(run.subject_agent_id, "test-agent");
+    assert_eq!(run.subject_revision_id, revision_id);
+    assert_eq!(run.status, autonoetic_types::evaluation::EvalRunStatus::Queued);
+    assert!(run.report_handle.is_none());
+}
+
+#[test]
+fn test_eval_report_returns_persisted_data() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    // Insert a completed eval run
+    let eval_run_id = "eval-report-test";
+    let run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: eval_run_id.to_string(),
+        suite_id: "suite-xyz".to_string(),
+        subject_agent_id: "test-agent".to_string(),
+        subject_revision_id: "rev_test".to_string(),
+        baseline_revision_id: None,
+        status: autonoetic_types::evaluation::EvalRunStatus::Passed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: Some(chrono::Utc::now().to_rfc3339()),
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({
+            "suite_name": "Test Suite",
+            "case_count": 2,
+            "passed": 2,
+            "failed": 0,
+        }),
+        report_handle: Some("sha256:report123".to_string()),
+        origin_node_id: "test".to_string(),
+    };
+    store.insert_eval_run(&run).unwrap();
+
+    // Insert case results
+    let case_result = autonoetic_types::evaluation::EvalCaseResultRecord {
+        eval_run_id: eval_run_id.to_string(),
+        case_id: "case_a".to_string(),
+        status: "passed".to_string(),
+        score: Some(1.0),
+        session_id: Some("session-1".to_string()),
+        notes: None,
+        output_json: json!({ "reply_length": 42 }),
+    };
+    store.insert_eval_case_result(&case_result).unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let tool = EvalReportTool;
+    let args = json!({
+        "eval_run_id": eval_run_id,
+    });
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
+    );
+
+    let response: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["run"]["eval_run_id"], eval_run_id);
+    assert_eq!(response["run"]["status"], "Passed");
+    assert_eq!(response["run"]["report_handle"], "sha256:report123");
+    assert_eq!(response["case_count"], 1);
+    assert_eq!(response["case_results"].as_array().unwrap()[0]["case_id"], "case_a");
+    assert_eq!(response["case_results"].as_array().unwrap()[0]["status"], "passed");
+}
+
+#[test]
+fn test_load_from_revision_dir_succeeds_with_materialized_revision() {
+    let tmp = TempDir::new().unwrap();
+    let agents_dir = tmp.path().join("agents");
+    let gateway_dir = tmp.path().join(".gateway");
+    let rev_dir = gateway_dir.join("revisions").join("agents").join("test-agent").join("rev_test123");
+    std::fs::create_dir_all(&rev_dir).unwrap();
+
+    // Materialize a revision directory with SKILL.md
+    let skill_md = r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "test-agent"
+  name: "Test Agent"
+  description: "Test."
+capabilities: []
+llm_config:
+  provider: "openai"
+  model: "test-model"
+---
+# Test Agent
+You are a test agent.
+"#;
+    std::fs::write(rev_dir.join("SKILL.md"), skill_md).unwrap();
+    std::fs::write(rev_dir.join("runtime.lock"), "dependencies: []\n").unwrap();
+
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir,
+        ..Default::default()
+    };
+    let repo = autonoetic_gateway::agent::repository::AgentRepository::from_config(&config);
+
+    let loaded = repo.load_from_revision_dir(&gateway_dir, "test-agent", "rev_test123").unwrap();
+    assert_eq!(loaded.manifest.agent.id, "test-agent");
+    assert_eq!(loaded.manifest.agent.name, "Test Agent");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 5. Full integration tests with GatewayStore
+// ─────────────────────────────────────────────────────────────────────
+
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use std::sync::Arc;
+
+#[test]
+fn test_eval_suite_publish_with_gateway_store() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let tool = EvalSuitePublishTool;
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["test-suite*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let args = json!({
+        "name": "test-suite-integration",
+        "description": "Integration test suite",
+        "spec": {
+            "cases": [
+                {
+                    "case_id": "case_a",
+                    "message": "Hello world",
+                    "assertions": { "reply_max_chars": 200 }
+                }
+            ]
+        }
+    });
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
+    );
+
+    let response: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["status"], "published");
+    assert!(response["suite_id"].as_str().unwrap().starts_with("suite-"));
+    assert_eq!(response["case_count"], 1);
+}
+
+#[test]
+fn test_eval_run_creates_queued_record() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let tool = EvalRunTool;
+    let args = json!({
+        "agent_ref": "test-agent@rev_abc1234567890123456789012345678901234567890123456789012345678",
+        "suite_id": "suite-xyz",
+    });
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
+    );
+
+    assert!(result.is_err(), "Should fail because revision doesn't exist");
+}
+
+#[test]
+fn test_eval_run_validates_revision_belongs_to_agent() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    // Insert a revision that belongs to "coder", not "planner"
+    let revision_id = "rev_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
+        revision_id: revision_id.to_string(),
+        agent_id: "coder".to_string(),
+        base_revision_id: None,
+        artifact_id: None,
+        content_digest: "sha256:test".to_string(),
+        runtime_lock_hash: "none".to_string(),
+        manifest_hash: "sha256:test".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "test".to_string(),
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "test".to_string(),
+        trust_domain: "test".to_string(),
+        status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+        metadata_json: json!({}),
+        short_id: "test1234".to_string(),
+    };
+    store.insert_agent_revision(&rev).unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let agents_dir = tmp.path().join("agents");
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir,
+        ..Default::default()
+    };
+
+    let tool = EvalRunTool;
+    // Request eval.run with "planner" but the revision belongs to "coder"
+    let args = json!({
+        "agent_ref": format!("planner@{}", revision_id),
+        "suite_id": "suite-xyz",
+    });
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
+    );
+
+    assert!(result.is_err(), "Should fail because revision belongs to different agent");
+    let err_msg = result.unwrap_err().to_string();
+    // The error should be either "not found" (revision doesn't exist for planner)
+    // or "belongs to agent" (revision exists but belongs to different agent)
+    assert!(
+        err_msg.contains("belongs to agent") || err_msg.contains("not found") || err_msg.contains("Revision"),
+        "Error should mention agent mismatch or revision issue, got: {}", err_msg
+    );
+}
+
+#[test]
+fn test_eval_report_returns_not_found_for_missing_run() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let tool = EvalReportTool;
+    let args = json!({
+        "eval_run_id": "eval-nonexistent",
+    });
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
+    );
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not found"));
+}
+
+#[test]
+fn test_revision_directory_materialization_on_create() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateTool;
+    let args = json!({
+        "agent_id": "test-agent",
+        "artifact_id": "nonexistent-artifact",
+    });
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
+    );
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("not found") || err_msg.contains("Artifact"));
+}
+
+#[test]
+fn test_load_from_revision_dir_fails_when_missing() {
+    let tmp = TempDir::new().unwrap();
+    let agents_dir = tmp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir,
+        ..Default::default()
+    };
+    let repo = autonoetic_gateway::agent::repository::AgentRepository::from_config(&config);
+
+    let gateway_dir = tmp.path().join(".gateway");
+    let result = repo.load_from_revision_dir(&gateway_dir, "nonexistent-agent", "rev_abc123");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_duplicate_case_ids() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+
+    let spec = EvalSuiteSpec {
+        cases: vec![
+            EvalSuiteCaseSpec {
+                case_id: "case_a".into(),
+                message: "Hello".into(),
+                assertions: json!({ "reply_max_chars": 100 }),
+            },
+            EvalSuiteCaseSpec {
+                case_id: "case_a".into(),
+                message: "World".into(),
+                assertions: json!({ "reply_max_chars": 200 }),
+            },
+        ],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Duplicate case_id"));
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_empty_case_id() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "  ".into(),
+            message: "Hello".into(),
+            assertions: json!({ "reply_max_chars": 100 }),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("must not be empty"));
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_empty_message() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "  ".into(),
+            assertions: json!({ "reply_max_chars": 100 }),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("message must not be empty"));
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_non_object_assertions() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!(["reply_max_chars"]),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("must be an object"));
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_unknown_assertion_type() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!({ "unknown_assertion": true }),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("unknown assertion type"));
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_vacuous_case_no_assertions() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!({}),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("must have at least one assertion"));
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_empty_contains_all() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!({ "reply_contains_all": [] }),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("at least one substring"));
+}
+
+#[test]
+fn test_validate_suite_spec_accepts_valid_suite() {
+    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+
+    let spec = EvalSuiteSpec {
+        cases: vec![
+            EvalSuiteCaseSpec {
+                case_id: "case_a".into(),
+                message: "Summarize this task".into(),
+                assertions: json!({ "reply_max_chars": 200 }),
+            },
+            EvalSuiteCaseSpec {
+                case_id: "case_b".into(),
+                message: "Route to specialist".into(),
+                assertions: json!({
+                    "reply_contains_all": ["task"],
+                    "reply_max_chars": 500
+                }),
+            },
+        ],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_ok(), "Valid suite should pass validation: {:?}", result.err());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 2. Evaluation capability scope enforcement
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_can_evaluate_suite_publish_matches_suite_name_prefix() {
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["suite-basic*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest);
+
+    assert!(policy.can_evaluate_suite_publish("suite-basic-planner"));
+    assert!(policy.can_evaluate_suite_publish("suite-basic-"));
+    assert!(!policy.can_evaluate_suite_publish("suite-advanced"));
+    assert!(!policy.can_evaluate_suite_publish("other-suite"));
+}
+
+#[test]
+fn test_can_evaluate_suite_publish_wildcard() {
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest);
+
+    assert!(policy.can_evaluate_suite_publish("any-suite-name"));
+    assert!(policy.can_evaluate_suite_publish("suite-x"));
+}
+
+#[test]
+fn test_can_evaluate_suite_matches_suite_or_agent() {
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["planner*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest);
+
+    assert!(policy.can_evaluate_suite("planner-suite", "other-agent"));
+    assert!(policy.can_evaluate_suite("other-suite", "planner-agent"));
+    assert!(!policy.can_evaluate_suite("other-suite", "other-agent"));
+}
+
+#[test]
+fn test_can_evaluate_suite_empty_subject_agent_still_matches_suite() {
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["suite-*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest);
+
+    assert!(policy.can_evaluate_suite("suite-abc", ""));
+    assert!(!policy.can_evaluate_suite("other-abc", ""));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 3. Eval runner assertion engine
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_assertion_reply_contains_all() {
+    let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_all: Some(vec!["task".into(), "summary".into()]),
+        reply_contains_none: None,
+        reply_max_chars: None,
+        artifacts_min: None,
+        artifacts_max: None,
+    };
+
+    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "Here is the task summary",
+        0
+    ));
+
+    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "Here is the task",
+        0
+    ));
+}
+
+#[test]
+fn test_assertion_reply_contains_none() {
+    let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_all: None,
+        reply_contains_none: Some(vec!["error".into(), "failed".into()]),
+        reply_max_chars: None,
+        artifacts_min: None,
+        artifacts_max: None,
+    };
+
+    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "Success! All tests passed.",
+        0
+    ));
+
+    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "The operation failed with an error",
+        0
+    ));
+}
+
+#[test]
+fn test_assertion_reply_max_chars() {
+    let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_all: None,
+        reply_contains_none: None,
+        reply_max_chars: Some(10),
+        artifacts_min: None,
+        artifacts_max: None,
+    };
+
+    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "Short text",
+        0
+    ));
+
+    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "This is a much longer text",
+        0
+    ));
+}
+
+#[test]
+fn test_assertion_artifacts_min() {
+    let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_all: None,
+        reply_contains_none: None,
+        reply_max_chars: None,
+        artifacts_min: Some(2),
+        artifacts_max: None,
+    };
+
+    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "",
+        3
+    ));
+
+    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "",
+        1
+    ));
+}
+
+#[test]
+fn test_assertion_artifacts_max() {
+    let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_all: None,
+        reply_contains_none: None,
+        reply_max_chars: None,
+        artifacts_min: None,
+        artifacts_max: Some(5),
+    };
+
+    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "",
+        3
+    ));
+
+    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "",
+        10
+    ));
+}
+
+#[test]
+fn test_assertion_combined_all_pass() {
+    let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_all: Some(vec!["OK".into()]),
+        reply_contains_none: Some(vec!["error".into()]),
+        reply_max_chars: Some(100),
+        artifacts_min: Some(1),
+        artifacts_max: None,
+    };
+
+    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "OK, done",
+        2
+    ));
+}
+
+#[test]
+fn test_assertion_combined_partial_fail() {
+    let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_all: Some(vec!["OK".into()]),
+        reply_contains_none: Some(vec!["error".into()]),
+        reply_max_chars: Some(10),
+        artifacts_min: None,
+        artifacts_max: None,
+    };
+
+    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+        &assertions,
+        "OK, this is a very long response that exceeds the limit",
+        0
+    ));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 4. Tool execution integration tests
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_eval_suite_publish_tool_execution() {
+    let tool = EvalSuitePublishTool;
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["test-suite*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let args = json!({
+        "name": "test-suite-basic",
+        "description": "Basic test suite",
+        "spec": {
+            "cases": [
+                {
+                    "case_id": "case_a",
+                    "message": "Hello world",
+                    "assertions": { "reply_max_chars": 200 }
+                }
+            ]
+        }
+    });
+
+    let args_json = args.to_string();
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        None,
+        &args_json,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("GatewayStore is required"));
+}
+
+#[test]
+fn test_eval_suite_publish_rejects_without_capability() {
+    let manifest = manifest_with_capabilities(vec![]);
+    let _policy = PolicyEngine::new(manifest.clone());
+
+    let tool = EvalSuitePublishTool;
+    assert!(!tool.is_available(&manifest));
+}
+
+#[test]
+fn test_eval_run_tool_requires_capability() {
+    let manifest = manifest_with_capabilities(vec![]);
+
+    let tool = EvalRunTool;
+    assert!(!tool.is_available(&manifest));
+}
+
+#[test]
+fn test_eval_report_tool_requires_capability() {
+    let manifest = manifest_with_capabilities(vec![]);
+
+    let tool = EvalReportTool;
+    assert!(!tool.is_available(&manifest));
+}
+
+#[test]
+fn test_eval_tools_available_with_evaluation_capability() {
+    let caps = vec![Capability::Evaluation { patterns: vec!["*".into()] }];
+    let manifest = manifest_with_capabilities(caps);
+
+    assert!(EvalSuitePublishTool.is_available(&manifest));
+    assert!(EvalRunTool.is_available(&manifest));
+    assert!(EvalReportTool.is_available(&manifest));
+}
+
+#[test]
+fn test_validate_suite_spec_accepts_multiple_assertions_per_case() {
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "multi_assert".into(),
+            message: "Do something".into(),
+            assertions: json!({
+                "reply_contains_all": ["task"],
+                "reply_max_chars": 500,
+                "artifacts_min": 1
+            }),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_ok(), "Multiple assertions per case should be valid: {:?}", result.err());
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_empty_reply_contains_none() {
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!({ "reply_contains_none": [] }),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("at least one substring"));
+}

@@ -69,6 +69,8 @@ impl GatewayServer {
         )?;
         let background_scheduler =
             crate::scheduler::start_background_scheduler(jsonrpc_router.execution_service());
+        let eval_runner =
+            crate::scheduler::eval_runner::start_eval_runner(jsonrpc_router.execution_service());
 
         tracing::info!(
             "GatewayServer starting (jsonrpc_port={}, ofp_port={}, node_id={})",
@@ -90,6 +92,7 @@ impl GatewayServer {
             ),
             jsonrpc::start_jsonrpc_server(jsonrpc_addr, (*jsonrpc_router).clone()),
             background_scheduler,
+            eval_runner,
         )?;
         Ok(())
     }

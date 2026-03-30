@@ -6417,6 +6417,10 @@ impl NativeTool for AgentInstallTool {
                             ..
                         } => "BackgroundReevaluation",
                         autonoetic_types::capability::Capability::EmergencyStop => "EmergencyStop",
+                        autonoetic_types::capability::Capability::AgentRevision { .. } => "AgentRevision",
+                        autonoetic_types::capability::Capability::Evaluation { .. } => "Evaluation",
+                        autonoetic_types::capability::Capability::ApprovalQueue { .. } => "ApprovalQueue",
+                        autonoetic_types::capability::Capability::SchedulerSignal { .. } => "SchedulerSignal",
                     };
                     cap_type == inferred_type.as_str()
                 })
@@ -7702,6 +7706,409 @@ impl NativeTool for AgentRevisionRollbackTool {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Evaluation Tools
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+struct EvalSuitePublishArgs {
+    name: String,
+    description: String,
+    spec: EvalSuiteSpec,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EvalSuiteSpec {
+    pub cases: Vec<EvalSuiteCaseSpec>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EvalSuiteCaseSpec {
+    pub case_id: String,
+    pub message: String,
+    pub assertions: serde_json::Value,
+}
+
+pub struct EvalSuitePublishTool;
+
+impl NativeTool for EvalSuitePublishTool {
+    fn name(&self) -> &'static str {
+        "eval.suite.publish"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::Evaluation { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Publish an evaluation suite defining test cases for agent validation.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Display name for the eval suite" },
+                    "description": { "type": "string", "description": "Short description of what this suite tests" },
+                    "spec": {
+                        "type": "object",
+                        "description": "Suite specification containing test cases",
+                        "properties": {
+                            "cases": {
+                                "type": "array",
+                                "description": "Array of test case definitions. Each case has: case_id, message, assertions",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "case_id": { "type": "string", "description": "Stable case identifier within the suite" },
+                                        "message": { "type": "string", "description": "Input message to send to the agent" },
+                                        "assertions": { "type": "object", "description": "Assertion object with keys like reply_max_chars, reply_contains_all, etc." }
+                                    },
+                                    "required": ["case_id", "message", "assertions"]
+                                }
+                            }
+                        },
+                        "required": ["cases"]
+                    }
+                },
+                "required": ["name", "description", "spec"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: EvalSuitePublishArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required"));
+        };
+
+        if !policy.can_evaluate_suite_publish(&args.name) {
+            return Err(anyhow::anyhow!(
+                "Permission Denied: agent '{}' lacks 'Evaluation' capability to publish suite '{}'",
+                manifest.agent.id, args.name
+            ));
+        }
+
+        validate_suite_spec(&args.spec)?;
+
+        let suite_id = format!("suite-{}", &hex::encode(Sha256::digest(format!("{}-{}", args.name, chrono::Utc::now().to_rfc3339())))[..8]);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let spec_json = serde_json::to_value(&args.spec)?;
+
+        let suite = autonoetic_types::evaluation::EvalSuiteRecord {
+            suite_id: suite_id.clone(),
+            name: args.name.clone(),
+            description: args.description.clone(),
+            spec_json,
+            created_at: now.clone(),
+            created_by_type: "agent".to_string(),
+            created_by_id: manifest.agent.id.clone(),
+            origin_node_id: "gateway".to_string(),
+        };
+
+        gateway_store.insert_eval_suite(&suite)?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "status": "published",
+            "suite_id": suite_id,
+            "name": args.name,
+            "case_count": args.spec.cases.len(),
+        }).to_string())
+    }
+}
+
+pub fn validate_suite_spec(spec: &EvalSuiteSpec) -> anyhow::Result<()> {
+    anyhow::ensure!(!spec.cases.is_empty(), "Suite must have at least one case");
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for case in &spec.cases {
+        anyhow::ensure!(
+            !case.case_id.trim().is_empty(),
+            "case_id must not be empty"
+        );
+        anyhow::ensure!(
+            seen_ids.insert(case.case_id.clone()),
+            "Duplicate case_id: '{}'", case.case_id
+        );
+        anyhow::ensure!(
+            !case.message.trim().is_empty(),
+            "case '{}' message must not be empty", case.case_id
+        );
+
+        let assertions = &case.assertions;
+        let obj = assertions.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "case '{}' assertions must be an object, got {}",
+                case.case_id,
+                assertions
+            )
+        })?;
+
+        let valid_keys = ["reply_contains_all", "reply_contains_none", "reply_max_chars", "artifacts_min", "artifacts_max"];
+        let mut has_assertion = false;
+        for key in obj.keys() {
+            anyhow::ensure!(
+                valid_keys.contains(&key.as_str()),
+                "case '{}' has unknown assertion type '{}'; valid types: {:?}",
+                case.case_id, key, valid_keys
+            );
+            has_assertion = true;
+        }
+        anyhow::ensure!(
+            has_assertion,
+            "case '{}' must have at least one assertion", case.case_id
+        );
+
+        if let Some(v) = obj.get("reply_contains_all") {
+            let arr: Vec<String> = serde_json::from_value(v.clone())
+                .map_err(|_| anyhow::anyhow!("case '{}' reply_contains_all must be an array of strings", case.case_id))?;
+            anyhow::ensure!(!arr.is_empty(), "case '{}' reply_contains_all must have at least one substring", case.case_id);
+        }
+        if let Some(v) = obj.get("reply_contains_none") {
+            let arr: Vec<String> = serde_json::from_value(v.clone())
+                .map_err(|_| anyhow::anyhow!("case '{}' reply_contains_none must be an array of strings", case.case_id))?;
+            anyhow::ensure!(!arr.is_empty(), "case '{}' reply_contains_none must have at least one substring", case.case_id);
+        }
+        if let Some(v) = obj.get("reply_max_chars") {
+            let _: u64 = serde_json::from_value(v.clone())
+                .map_err(|_| anyhow::anyhow!("case '{}' reply_max_chars must be a number", case.case_id))?;
+        }
+        if let Some(v) = obj.get("artifacts_min") {
+            let _: u64 = serde_json::from_value(v.clone())
+                .map_err(|_| anyhow::anyhow!("case '{}' artifacts_min must be a number", case.case_id))?;
+        }
+        if let Some(v) = obj.get("artifacts_max") {
+            let _: u64 = serde_json::from_value(v.clone())
+                .map_err(|_| anyhow::anyhow!("case '{}' artifacts_max must be a number", case.case_id))?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct EvalRunArgs {
+    agent_ref: String,
+    suite_id: String,
+    baseline_ref: Option<String>,
+}
+
+pub struct EvalRunTool;
+
+impl NativeTool for EvalRunTool {
+    fn name(&self) -> &'static str {
+        "eval.run"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::Evaluation { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Execute an evaluation suite against an agent revision. Runs each case and records results.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_ref": { "type": "string", "description": "Agent reference in format 'agent_id@rev_sha256:<64 hex>' or 'agent_id@rev_<short_id>'" },
+                    "suite_id": { "type": "string", "description": "ID of the eval suite to run" },
+                    "baseline_ref": { "type": "string", "description": "Optional: baseline agent reference for comparison" }
+                },
+                "required": ["agent_ref", "suite_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: EvalRunArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required"));
+        };
+
+        let config = config.ok_or_else(|| anyhow::anyhow!("GatewayConfig is required"))?;
+        let repo = crate::agent::repository::AgentRepository::from_config(config);
+
+        let (agent_ref, _rev) = repo.resolve_agent(&args.agent_ref, Some(gateway_store.as_ref()))?;
+
+        if !policy.can_evaluate_suite(&args.suite_id, &agent_ref.agent_id) {
+            return Err(anyhow::anyhow!(
+                "Permission Denied: agent '{}' lacks 'Evaluation' capability to run suite '{}' against agent '{}'",
+                manifest.agent.id, args.suite_id, agent_ref.agent_id
+            ));
+        }
+
+        let suite = gateway_store.get_eval_suite(&args.suite_id)?
+            .ok_or_else(|| anyhow::anyhow!("Eval suite '{}' not found", args.suite_id))?;
+
+        let baseline_revision_id = if let Some(ref baseline) = args.baseline_ref {
+            let (_, base_rev) = repo.resolve_agent(baseline, Some(gateway_store.as_ref()))?;
+            Some(base_rev.revision_id)
+        } else {
+            None
+        };
+
+        let eval_run_id = format!("eval-{}", &hex::encode(Sha256::digest(format!("{}-{}-{}", args.suite_id, agent_ref.agent_id, chrono::Utc::now().to_rfc3339())))[..8]);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let run = autonoetic_types::evaluation::EvalRunRecord {
+            eval_run_id: eval_run_id.clone(),
+            suite_id: args.suite_id.clone(),
+            subject_agent_id: agent_ref.agent_id.clone(),
+            subject_revision_id: agent_ref.revision_id.clone(),
+            baseline_revision_id,
+            status: autonoetic_types::evaluation::EvalRunStatus::Queued,
+            queued_at: now.clone(),
+            started_at: None,
+            completed_at: None,
+            summary_json: serde_json::json!({
+                "suite_name": suite.name,
+                "case_count": 0,
+                "passed": 0,
+                "failed": 0,
+            }),
+            report_handle: None,
+            origin_node_id: "gateway".to_string(),
+        };
+
+        gateway_store.insert_eval_run(&run)?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "status": "queued",
+            "eval_run_id": eval_run_id,
+            "suite_id": args.suite_id,
+            "subject_agent_id": agent_ref.agent_id,
+            "subject_revision_id": agent_ref.revision_id,
+            "baseline_revision_id": run.baseline_revision_id,
+        }).to_string())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EvalReportArgs {
+    eval_run_id: String,
+}
+
+pub struct EvalReportTool;
+
+impl NativeTool for EvalReportTool {
+    fn name(&self) -> &'static str {
+        "eval.report"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::Evaluation { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Get the report for a completed eval run, including case results and summary.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "eval_run_id": { "type": "string", "description": "ID of the eval run to report on" }
+                },
+                "required": ["eval_run_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: EvalReportArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required"));
+        };
+
+        let run = gateway_store.get_eval_run(&args.eval_run_id)?
+            .ok_or_else(|| anyhow::anyhow!("Eval run '{}' not found", args.eval_run_id))?;
+
+        if !policy.can_evaluate_suite(&run.suite_id, &run.subject_agent_id) {
+            return Err(anyhow::anyhow!(
+                "Permission Denied: agent '{}' lacks 'Evaluation' capability to view report for suite '{}' against agent '{}'",
+                manifest.agent.id, run.suite_id, run.subject_agent_id
+            ));
+        }
+
+        let case_results = gateway_store.list_eval_case_results(&args.eval_run_id)?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "run": {
+                "eval_run_id": run.eval_run_id,
+                "suite_id": run.suite_id,
+                "subject_agent_id": run.subject_agent_id,
+                "subject_revision_id": run.subject_revision_id,
+                "baseline_revision_id": run.baseline_revision_id,
+                "status": format!("{:?}", run.status),
+                "queued_at": run.queued_at,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+                "summary": run.summary_json,
+                "report_handle": run.report_handle,
+            },
+            "case_results": case_results,
+            "case_count": case_results.len(),
+        }).to_string())
+    }
+}
+
 fn capability_type_name(cap: &Capability) -> String {
     match cap {
         Capability::SandboxFunctions { .. } => "SandboxFunctions".to_string(),
@@ -7713,6 +8120,10 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation".to_string(),
         Capability::CodeExecution { .. } => "CodeExecution".to_string(),
         Capability::EmergencyStop => "EmergencyStop".to_string(),
+        Capability::AgentRevision { .. } => "AgentRevision".to_string(),
+        Capability::Evaluation { .. } => "Evaluation".to_string(),
+        Capability::ApprovalQueue { .. } => "ApprovalQueue".to_string(),
+        Capability::SchedulerSignal { .. } => "SchedulerSignal".to_string(),
     }
 }
 
@@ -8401,6 +8812,10 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(AgentRevisionInspectTool));
     registry.register(Box::new(AgentRevisionPromoteTool));
     registry.register(Box::new(AgentRevisionRollbackTool));
+    // Evaluation tools
+    registry.register(Box::new(EvalSuitePublishTool));
+    registry.register(Box::new(EvalRunTool));
+    registry.register(Box::new(EvalReportTool));
     // Workflow tools
     registry.register(Box::new(ApprovalStatusTool));
     registry.register(Box::new(WorkflowWaitTool));

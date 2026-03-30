@@ -659,8 +659,14 @@ impl GatewayExecutionService {
                             session_id = session_id,
                             "Resolved session to revision"
                         );
-                        // Load from directory using the resolved agent_id (not the raw target which may contain @rev_...)
-                        repo.get_sync(&agent_ref.agent_id)?
+                        // If target was an explicit agent_ref (contains @), load from revision directory.
+                        // Otherwise fall back to directory loading for alias-based resolution.
+                        if agent_id.contains('@') {
+                            let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+                            repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?
+                        } else {
+                            repo.get_sync(&agent_ref.agent_id)?
+                        }
                     }
                     Err(e) => {
                         // Check if it's a "not found" error → fall back to directory
