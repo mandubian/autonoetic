@@ -652,14 +652,15 @@ impl GatewayExecutionService {
                     Some(gs.as_ref()),
                     &default_gateway_host_id(),
                 ) {
-                    Ok((_agent_ref, _rev, _binding)) => {
+                    Ok((agent_ref, _rev, _binding)) => {
                         tracing::info!(
-                            agent_id = agent_id,
+                            agent_id = %agent_ref.agent_id,
+                            revision_id = %agent_ref.revision_id,
                             session_id = session_id,
                             "Resolved session to revision"
                         );
-                        // Load from directory for now (revision materialization is Phase 4)
-                        repo.get_sync(agent_id)?
+                        // Load from directory using the resolved agent_id (not the raw target which may contain @rev_...)
+                        repo.get_sync(&agent_ref.agent_id)?
                     }
                     Err(e) => {
                         // Check if it's a "not found" error → fall back to directory
@@ -671,7 +672,9 @@ impl GatewayExecutionService {
                                 error = %e,
                                 "Revision resolution failed, falling back to directory loading"
                             );
-                            repo.get_sync(agent_id)?
+                            // Extract plain agent_id from target if it contains @
+                            let plain_agent_id = agent_id.split('@').next().unwrap_or(agent_id);
+                            repo.get_sync(plain_agent_id)?
                         } else {
                             return Err(e);
                         }

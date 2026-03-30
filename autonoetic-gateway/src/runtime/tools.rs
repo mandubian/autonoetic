@@ -7201,6 +7201,21 @@ impl NativeTool for AgentRevisionCreateTool {
             .find(|(name, _)| name == "SKILL.md")
             .map(|(_, content)| content.as_slice())
             .unwrap_or(&[]);
+
+        // Validate: bundle's SKILL.md must declare the same agent_id
+        if !skill_content.is_empty() {
+            let skill_text = String::from_utf8_lossy(skill_content);
+            // Parse just enough to get the agent.id from YAML frontmatter
+            let (manifest, _instructions) = crate::runtime::parser::SkillParser::parse(&skill_text)
+                .map_err(|e| anyhow::anyhow!("Failed to parse SKILL.md from artifact: {}", e))?;
+            anyhow::ensure!(
+                manifest.agent.id == args.agent_id,
+                "Bundle SKILL.md declares agent.id '{}' but revision was requested for '{}'. \
+                 The artifact must match the requested agent identity.",
+                manifest.agent.id, args.agent_id
+            );
+        }
+
         let manifest_hash = format!("sha256:{}", hex::encode(Sha256::digest(skill_content)));
 
         // Compute runtime lock hash
@@ -7307,9 +7322,7 @@ impl NativeTool for AgentRevisionListTool {
         let revisions = if let Some(agent_id) = &args.agent_id {
             gateway_store.list_agent_revisions(agent_id)?
         } else {
-            // List all revisions - iterate all known agents
-            // For MVP, list all without filter
-            Vec::new()
+            gateway_store.list_all_agent_revisions()?
         };
 
         let items: Vec<serde_json::Value> = revisions
