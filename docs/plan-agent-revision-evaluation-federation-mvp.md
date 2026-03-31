@@ -163,7 +163,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 - [x] Create session bindings before the first executable turn.
 - [x] Persist `requested_target`, nullable `alias_id`, revision id, and runtime lock hash.
-- [x] Ensure approval resume, checkpoint resume, and retry paths always reload from binding state.
+- [x] Ensure approval resume, checkpoint resume, and retry paths always reload from binding state for execution. Gateway policy decisions (emergency stop, spawn permissions) consult the current alias state.
 
 ### P1-T09 Seeding flow
 
@@ -398,7 +398,7 @@ This section is intentionally classification, not delivery scope. Only work that
 ## Final Definition of Done
 
 - [x] A new logical agent is activated only through artifact -> revision -> promote.
-- [x] A running session is fully determined by its stored binding.
+- [x] A running session is fully determined by its stored binding for execution (agent files, runtime closure, layer mounts). Gateway policy decisions (emergency stop, spawn permissions) consult the current alias state.
 - [x] A candidate revision can be evaluated before activation.
 - [x] Alias movement is auditable and reversible.
 - [x] Runtime closure includes pinned layer mounts.
