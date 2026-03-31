@@ -356,7 +356,7 @@ schema_enforcement:
 evidence_mode: full
 
 # ── Code Analysis ─────────────────────────────────────────────────────
-# Capability and security analysis for agent.install.
+# Capability and security analysis for tool execution and generated artifacts.
 code_analysis:
   capability_provider: pattern
   security_provider: pattern

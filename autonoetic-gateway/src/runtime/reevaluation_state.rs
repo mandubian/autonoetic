@@ -48,19 +48,10 @@ pub fn execute_scheduled_action(
 ) -> anyhow::Result<String> {
     let policy = PolicyEngine::new(manifest.clone());
     match action {
-        ScheduledAction::AgentInstall {
-            agent_id,
-            summary: _,
-            ..
-        } => {
-            // Approval-only: we do not run an install here. The caller retries agent.install with install_approval_ref to perform the install.
-            Ok(serde_json::json!({
-                "ok": true,
-                "kind": "agent_install_approval_resolved",
-                "agent_id": agent_id
-            })
-            .to_string())
-        }
+        ScheduledAction::AgentInstall { agent_id, .. } => anyhow::bail!(
+            "Legacy scheduled action AgentInstall for '{}' is no longer executable: agent.install has been removed.",
+            agent_id
+        ),
         ScheduledAction::WriteFile { path, content, .. } => {
             anyhow::ensure!(
                 !path.trim().is_empty(),
@@ -166,10 +157,9 @@ mod tests {
         }
     }
 
-    /// Regression: AgentInstall is not executed by the scheduler; it only resolves as approval
-    /// metadata. The background path returns a success payload and performs no install.
+    /// Regression: AgentInstall is not executable by the scheduler.
     #[test]
-    fn test_agent_install_in_background_path_resolves_as_approval_metadata_only() {
+    fn test_agent_install_in_background_path_is_rejected() {
         let action = ScheduledAction::AgentInstall {
             agent_id: "would-be-child".to_string(),
             summary: "Test install".to_string(),
@@ -187,26 +177,13 @@ mod tests {
         let agent_dir = temp.path();
         let registry = crate::runtime::tools::default_registry();
 
-        let result = execute_scheduled_action(&manifest, agent_dir, &action, &registry, None, None)
-            .expect(
-            "execute_scheduled_action(AgentInstall) must succeed with approval-resolved payload",
-        );
-
-        let json: serde_json::Value = serde_json::from_str(&result).expect("result must be JSON");
-        assert_eq!(
-            json.get("ok").and_then(|v| v.as_bool()),
-            Some(true),
-            "payload must indicate success"
-        );
-        assert_eq!(
-            json.get("kind").and_then(|v| v.as_str()),
-            Some("agent_install_approval_resolved"),
-            "payload must be approval-resolution only, not an actual install"
-        );
-        assert_eq!(
-            json.get("agent_id").and_then(|v| v.as_str()),
-            Some("would-be-child"),
-            "agent_id must echo the approval subject"
+        let err = execute_scheduled_action(&manifest, agent_dir, &action, &registry, None, None)
+            .expect_err("execute_scheduled_action(AgentInstall) must fail");
+        assert!(
+            err.to_string().contains("no longer executable")
+                || err.to_string().contains("removed"),
+            "unexpected error: {}",
+            err
         );
 
         // No install must have occurred: no new agent directory under agent_dir

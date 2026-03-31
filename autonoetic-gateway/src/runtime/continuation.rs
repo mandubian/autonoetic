@@ -171,8 +171,7 @@ pub fn list_suspended_task_ids(config: &GatewayConfig) -> anyhow::Result<Vec<Str
 /// `approval_ref` already validated — the handler skips remote-access
 /// detection and runs the sandbox directly.
 ///
-/// For `AgentInstall` this calls the `agent.install` tool handler with the
-/// stored full payload and `promotion_gate.install_approval_ref` set.
+/// `AgentInstall` approvals are legacy-only and are not executable in current runtime.
 ///
 /// Any future `ScheduledAction` variant just needs a match arm here.
 pub fn execute_approved_action(
@@ -235,52 +234,10 @@ pub fn execute_approved_action(
             )
         }
 
-        ScheduledAction::AgentInstall {
-            agent_id, payload, ..
-        } => {
-            // Re-invoke agent.install with the stored payload and the
-            // approval_ref pre-set so the handler skips the approval gate.
-            let stored_payload = payload.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "AgentInstall approval for '{}' has no stored payload",
-                    agent_id
-                )
-            })?;
-
-            // Inject install_approval_ref into the promotion_gate field.
-            let mut args = stored_payload;
-            let gate = args
-                .as_object_mut()
-                .ok_or_else(|| anyhow::anyhow!("AgentInstall payload is not a JSON object"))?
-                .entry("promotion_gate")
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(gate_obj) = gate.as_object_mut() {
-                gate_obj.insert(
-                    "install_approval_ref".to_string(),
-                    serde_json::Value::String(decision.request_id.clone()),
-                );
-            }
-
-            tracing::info!(
-                target: "continuation",
-                request_id = %decision.request_id,
-                agent_id = %agent_id,
-                "Executing approved agent.install action"
-            );
-            registry.execute(
-                "agent.install",
-                manifest,
-                &policy,
-                agent_dir,
-                gateway_dir,
-                &args.to_string(),
-                session_id,
-                None,
-                Some(config),
-                gateway_store,
-                None,
-            )
-        }
+        ScheduledAction::AgentInstall { agent_id, .. } => anyhow::bail!(
+            "Legacy approval action 'AgentInstall' for '{}' cannot be executed: agent.install has been removed. Use revision create + promote workflows.",
+            agent_id
+        ),
 
         other => {
             anyhow::bail!(

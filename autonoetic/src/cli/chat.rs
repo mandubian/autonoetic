@@ -565,7 +565,7 @@ fn format_workflow_event_card(
             let kind = if approval.contains("sandbox") {
                 "sandbox.exec".to_string()
             } else if approval.contains("agent_install") {
-                "agent.install".to_string()
+                "legacy install approval".to_string()
             } else {
                 "tool execution".to_string()
             };

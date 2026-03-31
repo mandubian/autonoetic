@@ -24,7 +24,9 @@ use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::{
     approve_request, load_approval_requests, run_scheduler_tick, workflow_store,
 };
+use autonoetic_types::agent_revision::{AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus};
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRun, WorkflowRunStatus};
+use sha2::{Digest, Sha256};
 use support::{EnvGuard, OpenAiStub};
 
 const LLM_BASE_URL_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
@@ -36,6 +38,89 @@ const LLM_API_KEY_ENV: &str = "AUTONOETIC_LLM_API_KEY";
 /// string and makes no real network call.
 const APPROVAL_TRIGGERING_COMMAND: &str =
     "python3 -c \"import urllib.request; print('exec-output-marker')\"";
+
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            std::fs::create_dir_all(&dst_path)?;
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            if let Some(parent) = dst_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn seed_present_test_agents(
+    config: &autonoetic_types::config::GatewayConfig,
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<()> {
+    let gateway_dir = config.agents_dir.join(".gateway");
+    for entry in std::fs::read_dir(&config.agents_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".gateway" {
+            continue;
+        }
+        let agent_dir = entry.path();
+        if !agent_dir.join("SKILL.md").exists() {
+            continue;
+        }
+        let rev_hex = format!("{:x}", Sha256::digest(name.as_bytes()));
+        let revision_id = format!("rev_sha256:{}", rev_hex);
+        let rev_dir = gateway_dir
+            .join("revisions")
+            .join("agents")
+            .join(&name)
+            .join(&revision_id);
+        if rev_dir.exists() {
+            std::fs::remove_dir_all(&rev_dir)?;
+        }
+        std::fs::create_dir_all(&rev_dir)?;
+        copy_dir_all(&agent_dir, &rev_dir)?;
+
+        let rec = AgentRevisionRecord {
+            revision_id: revision_id.clone(),
+            agent_id: name.clone(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: format!("sha256:{}", rev_hex),
+            runtime_lock_hash: "sha256:test-runtime-lock".to_string(),
+            manifest_hash: "sha256:test-manifest".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            created_by_type: "test".to_string(),
+            created_by_id: "turn_continuation_approval_integration".to_string(),
+            source_kind: "test_seed".to_string(),
+            source_ref: None,
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status: AgentRevisionStatus::Ready,
+            metadata_json: serde_json::json!({}),
+            short_id: String::new(),
+        };
+        let _ = store.insert_agent_revision(&rec)?;
+        store.upsert_agent_alias(&AgentAliasRecord {
+            alias_id: name.clone(),
+            agent_id: name.clone(),
+            revision_id,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            updated_by_type: "test".to_string(),
+            updated_by_id: "turn_continuation_approval_integration".to_string(),
+            reason: Some("seed test alias".to_string()),
+        })?;
+    }
+    Ok(())
+}
 
 fn install_exec_agent(agents_dir: &std::path::Path) -> anyhow::Result<()> {
     let agent_dir = agents_dir.join("exec-agent");
@@ -155,6 +240,7 @@ async fn test_approval_continuation_suspends_and_resumes() -> anyhow::Result<()>
 
     let store =
         Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    seed_present_test_agents(&config, store.as_ref())?;
 
     // Ordered stub responses (call 1 = tool_call, call 2 = final reply).
     let responses = Arc::new(Mutex::new(make_stub_responses(APPROVAL_TRIGGERING_COMMAND)));
@@ -342,6 +428,7 @@ async fn test_approval_continuation_file_deleted_on_cancellation() -> anyhow::Re
 
     let store =
         Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    seed_present_test_agents(&config, store.as_ref())?;
 
     let responses = Arc::new(Mutex::new(make_stub_responses(APPROVAL_TRIGGERING_COMMAND)));
     let responses_clone = Arc::clone(&responses);
@@ -419,6 +506,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
 
     let store =
         Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    seed_present_test_agents(&config, store.as_ref())?;
     let execution = Arc::new(GatewayExecutionService::new(
         config.clone(),
         Some(store.clone()),
@@ -668,6 +756,7 @@ async fn test_approval_timeout_fails_task_and_satisfies_join() -> anyhow::Result
 
     let store =
         Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    seed_present_test_agents(&config, store.as_ref())?;
     let execution = Arc::new(GatewayExecutionService::new(
         config.clone(),
         Some(store.clone()),
@@ -824,6 +913,7 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
 
     let store =
         Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    seed_present_test_agents(&config, store.as_ref())?;
 
     let workflow_id = "wf-restart-e2e";
     let root_session_id = "workflow-root-restart-e2e";
@@ -997,6 +1087,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
 
     let store =
         Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    seed_present_test_agents(&config, store.as_ref())?;
     let execution = Arc::new(GatewayExecutionService::new(
         config.clone(),
         Some(store.clone()),
@@ -1253,6 +1344,7 @@ async fn test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join() -
 
     let store =
         Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    seed_present_test_agents(&config, store.as_ref())?;
 
     let execution = Arc::new(GatewayExecutionService::new(
         config.clone(),

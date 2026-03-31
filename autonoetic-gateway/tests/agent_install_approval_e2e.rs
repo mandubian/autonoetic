@@ -1,4 +1,4 @@
-//! Historical coverage targeted `agent.install` + human approval. `agent.install` is retired.
+//! Historical coverage targeted `agent.install` + human approval. `agent.install` has been removed from native tools.
 //! Approval queues for other tools (e.g. sandbox.exec) remain covered in
 //! `turn_continuation_approval_integration` and related tests.
 
@@ -95,7 +95,7 @@ async fn test_agent_install_no_longer_uses_install_approval_flow() {
             None,
             None,
         )
-        .expect_err("retired");
+        .expect_err("unavailable");
 
-    assert!(err.to_string().contains("retired"), "{}", err);
+    assert!(err.to_string().contains("Unknown native tool"), "{}", err);
 }
