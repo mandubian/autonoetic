@@ -483,17 +483,59 @@ pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Resu
 
 pub async fn handle_agent_list(config_path: &Path) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let repo = autonoetic_gateway::AgentRepository::from_config(&config);
-    let agents = repo.list().await?;
-    if agents.is_empty() {
-        println!("No agents found in {}", config.agents_dir.display());
+    let aliases = list_alias_rows_from_registry(&config)?;
+    if aliases.is_empty() {
+        println!("No aliases found in {}", config.agents_dir.display());
     } else {
-        println!("{:<30} {}", "AGENT ID", "DIRECTORY");
-        for a in &agents {
-            println!("{:<30} {}", a.id, a.dir.display());
+        println!(
+            "{:<28} {:<28} {:<30} {:<10} UPDATED AT",
+            "ALIAS ID", "AGENT ID", "ACTIVE REVISION", "STATUS"
+        );
+        for row in aliases {
+            println!(
+                "{:<28} {:<28} {:<30} {:<10} {}",
+                row.alias_id, row.agent_id, row.active_revision, row.status, row.updated_at
+            );
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AliasListRow {
+    alias_id: String,
+    agent_id: String,
+    active_revision: String,
+    status: String,
+    updated_at: String,
+}
+
+fn list_alias_rows_from_registry(config: &GatewayConfig) -> anyhow::Result<Vec<AliasListRow>> {
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let mut rows = Vec::new();
+    for alias in store.list_agent_aliases(None)? {
+        let revision = store.get_agent_revision(&alias.revision_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Alias '{}' points to missing revision '{}'",
+                alias.alias_id,
+                alias.revision_id
+            )
+        })?;
+        let active_revision = if revision.short_id.is_empty() {
+            alias.revision_id.clone()
+        } else {
+            format!("rev_{}", revision.short_id)
+        };
+        rows.push(AliasListRow {
+            alias_id: alias.alias_id,
+            agent_id: alias.agent_id,
+            active_revision,
+            status: format!("{:?}", revision.status),
+            updated_at: alias.updated_at,
+        });
+    }
+    Ok(rows)
 }
 
 fn admin_revision_manifest() -> AgentManifest {
@@ -1836,6 +1878,64 @@ Use tools when needed.
         .expect("alias inspect should succeed");
         handle_agent_promotion_history(&config_path, Some("planner.default"), true)
             .expect("promotion history should succeed");
+    }
+
+    #[test]
+    fn test_agent_list_reads_aliases_from_registry_state() {
+        let temp = tempdir().expect("tempdir should create");
+        let config_path = temp.path().join("config.yaml");
+        let agents_dir = temp.path().join("runtime_agents");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agents_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
+                agents_dir.display()
+            ),
+        )
+        .expect("config should write");
+        let config = autonoetic_gateway::config::load_config(&config_path).expect("config loads");
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+        let store = GatewayStore::open(&gateway_dir).expect("gateway store opens");
+
+        store
+            .insert_agent_revision(&AgentRevisionRecord {
+                revision_id: "rev_sha256:list123".to_string(),
+                agent_id: "list.agent".to_string(),
+                base_revision_id: None,
+                artifact_id: Some("art_list".to_string()),
+                content_digest: "sha256:list123".to_string(),
+                runtime_lock_hash: "sha256:lock_list".to_string(),
+                manifest_hash: "sha256:man_list".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                created_by_type: "human".to_string(),
+                created_by_id: "operator".to_string(),
+                source_kind: "artifact".to_string(),
+                source_ref: Some("art_list".to_string()),
+                origin_node_id: "gateway".to_string(),
+                trust_domain: "local".to_string(),
+                status: AgentRevisionStatus::Ready,
+                metadata_json: serde_json::json!({}),
+                short_id: "list1234".to_string(),
+            })
+            .expect("revision insert should succeed");
+        store
+            .upsert_agent_alias(&AgentAliasRecord {
+                alias_id: "list.agent".to_string(),
+                agent_id: "list.agent".to_string(),
+                revision_id: "rev_sha256:list123".to_string(),
+                updated_at: "2026-01-01T00:00:01Z".to_string(),
+                updated_by_type: "human".to_string(),
+                updated_by_id: "operator".to_string(),
+                reason: Some("seed".to_string()),
+            })
+            .expect("alias insert should succeed");
+
+        let rows = list_alias_rows_from_registry(&config).expect("rows should load from registry");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].alias_id, "list.agent");
+        assert_eq!(rows[0].agent_id, "list.agent");
+        assert_eq!(rows[0].active_revision, "rev_list1234");
+        assert_eq!(rows[0].status, "Ready");
     }
 
     #[test]

@@ -139,13 +139,13 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 - [x] Persist one mutable alias per logical agent.
 - [x] Treat alias creation as part of promote, not part of revision creation.
-- [ ] Expose alias listing and inspection as admin-safe operations.
+- [x] Expose alias listing and inspection as admin-safe operations.
 
 ### P1-T07 Resolver contract
 
 - [x] Resolve explicit `agent_ref` before attempting alias lookup.
 - [x] Return candidate revisions when an explicit `agent_ref` exists, even if no alias points to it.
-- [ ] List aliases from registry state, not from authoring directories.
+- [x] List aliases from registry state, not from authoring directories.
 
 ### P1-T08 Session binding and resume
 
