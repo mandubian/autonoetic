@@ -1,62 +1,14 @@
-//! Test that agent.install is REJECTED when no promotion records exist.
-//!
-//! Verifies the core security invariant:
-//! - An agent cannot be installed without evaluator/auditor validation
-//! - The gateway rejects install when source_content_handle is provided
-//!   but no promotion records exist for that handle
+//! `agent.install` is retired; these tests ensure the tool fails fast with the retirement error.
 
 mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
-use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::promotion::PromotionRole;
-use std::path::{Path, PathBuf};
 use tempfile::tempdir;
-
-fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, PathBuf) {
-    let gateway_dir = base_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir).unwrap();
-    let content_store = ContentStore::new(&gateway_dir).unwrap();
-    let artifact_store =
-        autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
-    let session_id = "test-session";
-    let mut input_names = Vec::new();
-    for (path, content) in files {
-        let handle = content_store.write(content.as_bytes()).unwrap();
-        content_store
-            .register_name(session_id, path, &handle)
-            .unwrap();
-        input_names.push(path.to_string());
-    }
-    let bundle = artifact_store
-        .build(&input_names, None, None, session_id)
-        .unwrap();
-    let promotion_store = PromotionStore::new(&gateway_dir).unwrap();
-    let _ = promotion_store.record_promotion(
-        bundle.artifact_id.clone(),
-        Some(bundle.digest.clone()),
-        PromotionRole::Evaluator,
-        "evaluator.default",
-        true,
-        vec![],
-        Some("Test auto-pass".to_string()),
-    );
-    let _ = promotion_store.record_promotion(
-        bundle.artifact_id.clone(),
-        Some(bundle.digest.clone()),
-        PromotionRole::Auditor,
-        "auditor.default",
-        true,
-        vec![],
-        Some("Test auto-pass".to_string()),
-    );
-    (bundle.artifact_id, gateway_dir)
-}
 
 fn evolution_manifest() -> AgentManifest {
     AgentManifest {
@@ -85,343 +37,63 @@ fn evolution_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
-
         response_contract: None,
     }
 }
 
-/// Install attempt with a valid content handle but NO promotion records → REJECT.
 #[tokio::test]
-async fn test_promotion_reject_no_records() {
+async fn test_agent_install_rejected_as_retired() {
     let temp = tempdir().expect("tempdir should create");
     let agents_dir = temp.path().join("agents");
-    let gateway_dir = temp.path().join(".gateway");
+    let gateway_dir = agents_dir.join(".gateway");
     let builder_dir = agents_dir.join("specialized_builder.default");
     std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
     std::fs::create_dir_all(&gateway_dir).unwrap();
 
-    // Manually create stores without promotion records
-    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+
+    let store = ContentStore::new(&gateway_dir).unwrap();
+    let content_handle = store.write(b"print(1)").unwrap();
     let artifact_store =
         autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
     let session_id = "test-session";
-    let script_content = "print('hello')\n";
-    let handle = content_store.write(script_content.as_bytes()).unwrap();
-    content_store
-        .register_name(session_id, "main.py", &handle)
-        .unwrap();
+    store.register_name(session_id, "main.py", &content_handle).unwrap();
     let bundle = artifact_store
         .build(&["main.py".to_string()], None, None, session_id)
         .unwrap();
-    let artifact_id = bundle.artifact_id;
-
-    let config = GatewayConfig {
-        agents_dir: agents_dir.clone(),
-        ..Default::default()
-    };
-
-    let content_handle = handle;
-
-    // Verify content exists
-    assert!(
-        content_store.exists(&content_handle),
-        "content should exist in store"
-    );
-
-    // Try to install WITHOUT recording promotion → should REJECT
-    let registry = default_registry();
-    let install_args = serde_json::json!({
-        "agent_id": "unvalidated.agent",
-        "name": "Unvalidated Agent",
-        "description": "An agent that was never validated",
-        "instructions": "---\nname: unvalidated.agent\ndescription: Not validated\nexecution_mode: script\nscript_entry: main.py\n---\n# Unvalidated Agent\n",
-        "capabilities": [],
-        "artifact_id": artifact_id,
-        "source_content_handle": content_handle,
-        "promotion_gate": {
-            "evaluator_pass": true,
-            "auditor_pass": true,
-            "security_analysis": {
-                "passed": true,
-                "threats_detected": [],
-                "remote_access_detected": false
-            },
-            "capability_analysis": {
-                "inferred_capabilities": [],
-                "missing_capabilities": [],
-                "declared_capabilities": [],
-                "analysis_passed": true
-            },
-            "source_content_handle": content_handle,
-        }
-    });
-
-    let result = registry.execute(
-        "agent.install",
-        &evolution_manifest(),
-        &PolicyEngine::new(evolution_manifest()),
-        &builder_dir,
-        Some(&gateway_dir),
-        &serde_json::to_string(&install_args).unwrap(),
-        Some("session-reject-test"),
-        None,
-        Some(&config),
-        None,
-        None,
-    );
-
-    assert!(
-        result.is_err(),
-        "install should be REJECTED when no promotion records exist"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("evaluator_pass is true but no evaluator promotion record exists")
-            || err_msg.contains("no evaluator promotion record exists")
-            || err_msg.contains("no passing evaluator promotion record exists")
-            || err_msg.contains("PromotionStore"),
-        "Error should mention missing promotion record, got: {}",
-        err_msg
-    );
-
-    // Verify agent was NOT installed
-    let agent_dir = agents_dir.join("unvalidated.agent");
-    assert!(!agent_dir.exists(), "agent should NOT be installed");
-}
-
-/// Install attempt where evaluator_pass is false → should REJECT.
-#[tokio::test]
-async fn test_promotion_reject_evaluator_failed() {
-    let temp = tempdir().expect("tempdir should create");
-    let agents_dir = temp.path().join("agents");
-    let gateway_dir = agents_dir.join(".gateway");
-    let builder_dir = agents_dir.join("specialized_builder.default");
-    std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
-
-    let config = GatewayConfig {
-        agents_dir: agents_dir.clone(),
-        ..Default::default()
-    };
-
-    let store = ContentStore::new(&gateway_dir).expect("content store should create");
-    let content_handle = store.write(b"bad script").expect("content should write");
-
-    // Try to install with evaluator_pass=false → REJECT (promotion store says evaluator hasn't passed)
-    let registry = default_registry();
-    let install_args = serde_json::json!({
-        "agent_id": "failed.agent",
-        "name": "Failed Agent",
-        "description": "An agent that failed evaluation",
-        "instructions": "# Failed Agent",
-        "capabilities": [],
-        "source_content_handle": content_handle,
-        "promotion_gate": {
-            "evaluator_pass": false,
-            "auditor_pass": false,
-            "security_analysis": {
-                "passed": true,
-                "threats_detected": [],
-                "remote_access_detected": false
-            },
-            "capability_analysis": {
-                "inferred_capabilities": [],
-                "missing_capabilities": [],
-                "declared_capabilities": [],
-                "analysis_passed": true
-            }
-        }
-    });
-
-    let result = registry.execute(
-        "agent.install",
-        &evolution_manifest(),
-        &PolicyEngine::new(evolution_manifest()),
-        &builder_dir,
-        Some(&gateway_dir),
-        &serde_json::to_string(&install_args).unwrap(),
-        Some("session-reject-eval-fail"),
-        None,
-        Some(&config),
-        None,
-        None,
-    );
-
-    // When evaluator_pass=false, the new validation code checks:
-    // "promotion_gate.evaluator_pass is false but evaluator promotion record exists" →
-    // This only triggers if a record EXISTS.
-    // If no record exists AND evaluator_pass=false, the code enters the else branch
-    // which checks if store.has_passed → returns false → OK (no record = evaluator didn't pass)
-    // So it should NOT error here. The existing boolean check already handles this.
-    //
-    // But the key point is: fake evaluator_pass=true is now caught.
-}
-
-/// Install with fake evaluator_pass=true but auditor_pass=false → REJECT
-#[tokio::test]
-async fn test_promotion_reject_auditor_failed() {
-    let temp = tempdir().expect("tempdir should create");
-    let agents_dir = temp.path().join("agents");
-    let gateway_dir = agents_dir.join(".gateway");
-    let builder_dir = agents_dir.join("specialized_builder.default");
-    std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
-
-    let config = GatewayConfig {
-        agents_dir: agents_dir.clone(),
-        ..Default::default()
-    };
-
-    let store = ContentStore::new(&gateway_dir).expect("content store should create");
-    let content_handle = store.write(b"good script").expect("content should write");
-
-    let artifact_store =
-        autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
-    let session_id = "test-session";
-    let handle = store.write(b"good script").unwrap();
-    store.register_name(session_id, "main.py", &handle).unwrap();
-    let bundle = artifact_store
-        .build(&["main.py".to_string()], None, None, session_id)
-        .unwrap();
-    let artifact_id = bundle.artifact_id;
 
     let registry = default_registry();
     let install_args = serde_json::json!({
-        "agent_id": "half_approved.agent",
-        "name": "Half Approved Agent",
-        "description": "Evaluator passed but auditor failed",
-        "instructions": "# Half Approved Agent",
+        "agent_id": "legacy.agent",
+        "name": "Legacy",
+        "instructions": "# Legacy",
         "capabilities": [],
-        "artifact_id": artifact_id,
-        "source_content_handle": content_handle,
-        "promotion_gate": {
-            "evaluator_pass": true,
-            "auditor_pass": true,  // LLM claims auditor passed
-            "security_analysis": {
-                "passed": true,
-                "threats_detected": [],
-                "remote_access_detected": false
-            },
-            "capability_analysis": {
-                "inferred_capabilities": [],
-                "missing_capabilities": [],
-                "declared_capabilities": [],
-                "analysis_passed": true
-            }
-        }
+        "artifact_id": bundle.artifact_id,
     });
 
-    let result = registry.execute(
-        "agent.install",
-        &evolution_manifest(),
-        &PolicyEngine::new(evolution_manifest()),
-        &builder_dir,
-        Some(&gateway_dir),
-        &serde_json::to_string(&install_args).unwrap(),
-        Some("session-reject-audit-fail"),
-        None,
-        Some(&config),
-        None,
-        None,
-    );
+    let err = registry
+        .execute(
+            "agent.install",
+            &evolution_manifest(),
+            &PolicyEngine::new(evolution_manifest()),
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&install_args).unwrap(),
+            Some("session-retired"),
+            None,
+            Some(&config),
+            None,
+            None,
+        )
+        .expect_err("agent.install must be retired");
 
-    // Both evaluator and auditor are claimed as passed=true, but no records exist
-    // Should be REJECTED because PromotionStore has no records
+    let msg = err.to_string();
     assert!(
-        result.is_err(),
-        "install should be REJECTED when promotion records are missing despite boolean claims"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("no evaluator promotion record exists")
-            || err_msg.contains("no passing evaluator promotion record exists")
-            || err_msg.contains("PromotionStore")
-            || err_msg.contains("promotion"),
-        "Error should mention missing promotion record, got: {}",
-        err_msg
-    );
-
-    let agent_dir = agents_dir.join("half_approved.agent");
-    assert!(!agent_dir.exists(), "agent should NOT be installed");
-}
-
-/// Install with invalid content_handle format → should REJECT.
-#[tokio::test]
-async fn test_promotion_reject_invalid_handle() {
-    let temp = tempdir().expect("tempdir should create");
-    let agents_dir = temp.path().join("agents");
-    let gateway_dir = agents_dir.join(".gateway");
-    let builder_dir = agents_dir.join("specialized_builder.default");
-    std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
-
-    let config = GatewayConfig {
-        agents_dir: agents_dir.clone(),
-        ..Default::default()
-    };
-
-    let content_store = ContentStore::new(&gateway_dir).expect("content store should create");
-    let artifact_store =
-        autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
-    let session_id = "test-session";
-    let handle = content_store.write(b"test content").unwrap();
-    content_store
-        .register_name(session_id, "main.py", &handle)
-        .unwrap();
-    let bundle = artifact_store
-        .build(&["main.py".to_string()], None, None, session_id)
-        .unwrap();
-    let artifact_id = bundle.artifact_id;
-
-    let registry = default_registry();
-    let install_args = serde_json::json!({
-        "agent_id": "fake_handle.agent",
-        "name": "Fake Handle Agent",
-        "description": "Agent with non-existent content handle",
-        "instructions": "# Fake Handle Agent",
-        "capabilities": [],
-        "artifact_id": artifact_id,
-        "source_content_handle": "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        "promotion_gate": {
-            "evaluator_pass": true,
-            "auditor_pass": true,
-            "security_analysis": {
-                "passed": true,
-                "threats_detected": [],
-                "remote_access_detected": false
-            },
-            "capability_analysis": {
-                "inferred_capabilities": [],
-                "missing_capabilities": [],
-                "declared_capabilities": [],
-                "analysis_passed": true
-            }
-        }
-    });
-
-    let result = registry.execute(
-        "agent.install",
-        &evolution_manifest(),
-        &PolicyEngine::new(evolution_manifest()),
-        &builder_dir,
-        Some(&gateway_dir),
-        &serde_json::to_string(&install_args).unwrap(),
-        Some("session-reject-invalid"),
-        None,
-        Some(&config),
-        None,
-        None,
-    );
-
-    // Even with a valid-format handle, if no promotion records exist → REJECT
-    assert!(
-        result.is_err(),
-        "install should be REJECTED with non-existent content handle"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("no evaluator promotion record exists")
-            || err_msg.contains("no passing evaluator promotion record exists")
-            || err_msg.contains("PromotionStore")
-            || err_msg.contains("promotion"),
-        "Error should mention missing promotion, got: {}",
-        err_msg
+        msg.contains("retired"),
+        "expected retirement error, got: {}",
+        msg
     );
 }

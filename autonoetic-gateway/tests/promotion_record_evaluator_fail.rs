@@ -1,10 +1,7 @@
-//! Test that agent.install is REJECTED when evaluator fails.
+//! Promotion store behavior when evaluator or auditor fails, plus `agent.install` retirement.
 //!
-//! Tests the scenario where:
-//! 1. Coder writes content → content_handle = sha256:...
-//! 2. Evaluator validates → FAILS (promotion.record with pass=false)
-//! 3. No auditor record (auditor didn't run because evaluator failed)
-//! 4. specialized_builder tries to install anyway → REJECT
+//! `agent.install` no longer runs; install calls must fail with the retirement error even when
+//! promotion evidence is inconsistent.
 
 mod support;
 
@@ -187,21 +184,21 @@ async fn test_promotion_evaluator_fail_rejected() {
     assert_eq!(eval_parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
 
     // --- Step 3: Verify promotion store reflects failure ---
-    let store = PromotionStore::new(&gateway_dir).expect("promotion store should create");
-    let record = store.get_promotion(&artifact_id);
+    let promotion_store = PromotionStore::new(&gateway_dir).expect("promotion store should create");
+    let record = promotion_store.get_promotion(&artifact_id);
     assert!(record.is_some(), "promotion record should exist");
     let record = record.unwrap();
     assert_eq!(record.evaluator_pass, false, "evaluator should have failed");
     assert!(
-        !store.has_passed(&artifact_id, &PromotionRole::Evaluator),
+        !promotion_store.has_passed(&artifact_id, &PromotionRole::Evaluator),
         "evaluator should NOT have passed"
     );
     assert!(
-        !store.is_fully_promoted(&artifact_id),
+        !promotion_store.is_fully_promoted(&artifact_id),
         "content should NOT be fully promoted"
     );
 
-    // --- Step 4: Specialized_builder tries to install anyway → REJECT ---
+    // --- Step 4: legacy install path is retired ---
     let install_args = serde_json::json!({
         "agent_id": "malicious.agent",
         "name": "Malicious Agent",
@@ -227,25 +224,26 @@ async fn test_promotion_evaluator_fail_rejected() {
         }
     });
 
-    let result = registry.execute(
-        "agent.install",
-        &evolution_manifest(),
-        &PolicyEngine::new(evolution_manifest()),
-        &builder_dir,
-        Some(&gateway_dir),
-        &serde_json::to_string(&install_args).unwrap(),
-        Some("session-reject-failed-eval"),
-        None,
-        Some(&config),
-        None,
-        None,
-    );
+    let err = registry
+        .execute(
+            "agent.install",
+            &evolution_manifest(),
+            &PolicyEngine::new(evolution_manifest()),
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&install_args).unwrap(),
+            Some("session-reject-failed-eval"),
+            None,
+            Some(&config),
+            None,
+            None,
+        )
+        .expect_err("agent.install must be retired");
 
-    // With evaluator_pass=false AND no auditor record, install should be REJECTED
-    // The validation checks that both evaluator AND auditor must pass
     assert!(
-        result.is_err(),
-        "install should be REJECTED when evaluator failed evaluation"
+        err.to_string().contains("retired"),
+        "expected retirement: {}",
+        err
     );
 
     let agent_dir = agents_dir.join("malicious.agent");
@@ -378,7 +376,7 @@ async fn test_promotion_auditor_fail_rejected() {
         "auditor should NOT have passed"
     );
 
-    // --- Install should REJECT because auditor failed ---
+    // --- Legacy install path is retired (promotion store still shows auditor failed) ---
     let install_args = serde_json::json!({
         "agent_id": "exfil.agent",
         "name": "Exfiltration Agent",
@@ -404,33 +402,26 @@ async fn test_promotion_auditor_fail_rejected() {
         }
     });
 
-    let result = registry.execute(
-        "agent.install",
-        &evolution_manifest(),
-        &PolicyEngine::new(evolution_manifest()),
-        &builder_dir,
-        Some(&gateway_dir),
-        &serde_json::to_string(&install_args).unwrap(),
-        Some("session-reject-audit-fail"),
-        None,
-        Some(&config),
-        None,
-        None,
-    );
+    let err = registry
+        .execute(
+            "agent.install",
+            &evolution_manifest(),
+            &PolicyEngine::new(evolution_manifest()),
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&install_args).unwrap(),
+            Some("session-reject-audit-fail"),
+            None,
+            Some(&config),
+            None,
+            None,
+        )
+        .expect_err("agent.install must be retired");
 
-    // Evaluator passed but auditor didn't → REJECT
     assert!(
-        result.is_err(),
-        "install should be REJECTED when auditor failed (even though evaluator passed)"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("no auditor promotion record exists")
-            || err_msg.contains("auditor")
-            || err_msg.contains("PromotionStore")
-            || err_msg.contains("promotion"),
-        "Error should mention auditor issue, got: {}",
-        err_msg
+        err.to_string().contains("retired"),
+        "expected retirement: {}",
+        err
     );
 
     let agent_dir = agents_dir.join("exfil.agent");

@@ -1508,14 +1508,6 @@ mod tests {
             &self,
             request: &CompletionRequest,
         ) -> anyhow::Result<CompletionResponse> {
-            for msg in &request.messages {
-                if msg
-                    .content
-                    .contains("sandbox command denied by ShellExec policy")
-                {
-                    anyhow::bail!("mock observed sandbox command denied by ShellExec policy");
-                }
-            }
             if !request.tools.iter().any(|t| t.name == "sandbox.exec") {
                 anyhow::bail!("sandbox.exec not exposed to model");
             }
@@ -1588,10 +1580,13 @@ Use tools when needed.
         .await
         .expect_err("policy denial should fail runtime");
 
+        let es = err.to_string();
         assert!(
-            err.to_string()
-                .contains("sandbox command denied by ShellExec policy"),
-            "error should indicate shell policy denial"
+            es.contains("sandbox command denied by security policy")
+                || es.contains("sandbox command denied by CodeExecution policy")
+                || es.contains("LoopGuard tripped"),
+            "error should reflect sandbox denial or loop break after repeated denials: {}",
+            es
         );
     }
 

@@ -1,70 +1,16 @@
-//! End-to-end test for agent.install with approval flow.
-//!
-//! Tests the full lifecycle:
-//! 1. Specialized_builder calls agent.install with high-risk capability (NetworkAccess)
-//! 2. Gateway returns approval_required (agent NOT installed)
-//! 3. Programmatically approve the pending request
-//! 4. Retry with install_approval_ref → agent IS installed
-//! 5. Verify the newly installed agent files exist
+//! Historical coverage targeted `agent.install` + human approval. `agent.install` is retired.
+//! Approval queues for other tools (e.g. sandbox.exec) remain covered in
+//! `turn_continuation_approval_integration` and related tests.
 
 mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
+use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
-use std::path::{Path, PathBuf};
 use tempfile::tempdir;
-
-fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, PathBuf) {
-    let gateway_dir = base_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir).unwrap();
-
-    let content_store =
-        autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
-    let artifact_store =
-        autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
-    let promotion_store =
-        autonoetic_gateway::runtime::promotion_store::PromotionStore::new(&gateway_dir).unwrap();
-
-    let session_id = "test-session";
-    let mut input_names = Vec::new();
-    for (path, content) in files {
-        let handle = content_store.write(content.as_bytes()).unwrap();
-        content_store
-            .register_name(session_id, path, &handle)
-            .unwrap();
-        input_names.push(path.to_string());
-    }
-
-    let bundle = artifact_store
-        .build(&input_names, None, None, session_id)
-        .unwrap();
-
-    // Create promotion records so tests claiming evaluator_pass/auditor_pass are backed
-    use autonoetic_types::promotion::PromotionRole;
-    let _ = promotion_store.record_promotion(
-        bundle.artifact_id.clone(),
-        Some(bundle.digest.clone()),
-        PromotionRole::Evaluator,
-        "evaluator.default",
-        true,
-        vec![],
-        Some("Test auto-pass".to_string()),
-    );
-    let _ = promotion_store.record_promotion(
-        bundle.artifact_id.clone(),
-        Some(bundle.digest.clone()),
-        PromotionRole::Auditor,
-        "auditor.default",
-        true,
-        vec![],
-        Some("Test auto-pass".to_string()),
-    );
-
-    (bundle.artifact_id, gateway_dir)
-}
 
 fn evolution_manifest() -> AgentManifest {
     AgentManifest {
@@ -93,535 +39,63 @@ fn evolution_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
-
         response_contract: None,
     }
 }
 
-fn promotion_gate_with_evidence(
-    declared_capabilities: &[&str],
-    remote_access_detected: bool,
-    install_approval_ref: Option<&str>,
-) -> serde_json::Value {
-    let mut gate = serde_json::json!({
-        "evaluator_pass": true,
-        "auditor_pass": true,
-        "security_analysis": {
-            "passed": true,
-            "threats_detected": [],
-            "remote_access_detected": remote_access_detected
-        },
-        "capability_analysis": {
-            "inferred_capabilities": declared_capabilities,
-            "missing_capabilities": [],
-            "declared_capabilities": declared_capabilities,
-            "analysis_passed": true
-        }
-    });
-    if let Some(request_id) = install_approval_ref {
-        gate["install_approval_ref"] = serde_json::Value::String(request_id.to_string());
-    }
-    gate
-}
-
-/// Full approval flow via direct tool registry calls:
-/// 1. Call agent.install with high-risk NetworkAccess capability
-/// 2. Gateway returns approval_required (agent NOT installed)
-/// 3. Programmatically approve the request
-/// 4. Retry with install_approval_ref → agent IS installed
-/// 5. Verify SKILL.md, script files, and payload cleanup
 #[tokio::test]
-#[ignore] // Payload file checks removed with SQLite migration; needs rewrite
-async fn test_agent_install_full_approval_flow() {
-    let manifest = evolution_manifest();
-    let policy = PolicyEngine::new(manifest.clone());
-    let temp = tempdir().expect("tempdir should create");
+async fn test_agent_install_no_longer_uses_install_approval_flow() {
+    let temp = tempdir().expect("tempdir");
     let agents_dir = temp.path().join("agents");
-    let builder_dir = agents_dir.join("specialized_builder.default");
-    std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
-
-    let (artifact_id, gateway_dir) = build_test_artifact(
-        temp.path(),
-        &[("main.py", "import json\nprint(json.dumps({'temp': 22}))\n")],
-    );
-
-    let config = GatewayConfig {
-        agents_dir: agents_dir.clone(),
-        ..Default::default()
-    };
-
-    let registry = default_registry();
-
-    // --- Step 1: Call agent.install with high-risk capability (NetworkAccess) ---
-    let install_args = serde_json::json!({
-        "agent_id": "weather.fetcher",
-        "name": "Weather Fetcher",
-        "description": "Fetches weather from Open-Meteo API",
-        "instructions": "---\nname: weather.fetcher\ndescription: Fetches weather\nexecution_mode: script\nscript_entry: main.py\n---\n# Weather Fetcher\nFetches weather data for given coordinates.",
-        "capabilities": [
-            { "type": "NetworkAccess", "hosts": ["api.open-meteo.com"] }
-        ],
-        "artifact_id": artifact_id,
-        "promotion_gate": promotion_gate_with_evidence(&["NetworkAccess"], true, None)
-    });
-
-    let result = registry
-        .execute(
-            "agent.install",
-            &manifest,
-            &policy,
-            &builder_dir,
-            Some(&gateway_dir),
-            &serde_json::to_string(&install_args).unwrap(),
-            Some("session-approval-test"),
-            None,
-            Some(&config),
-            None,
-            None,
-        )
-        .expect("install should return approval request, not error");
-
-    // --- Step 2: Verify approval_required response ---
-    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-    assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(
-        parsed.get("approval_required").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    assert_eq!(
-        parsed
-            .get("approval")
-            .and_then(|v| v.get("kind"))
-            .and_then(|v| v.as_str()),
-        Some("agent_install")
-    );
-    assert_eq!(
-        parsed
-            .get("approval")
-            .and_then(|v| v.get("retry_field"))
-            .and_then(|v| v.as_str()),
-        Some("promotion_gate.install_approval_ref")
-    );
-    assert_eq!(
-        parsed
-            .get("approval")
-            .and_then(|v| v.get("subject"))
-            .and_then(|v| v.get("agent_id"))
-            .and_then(|v| v.as_str()),
-        Some("weather.fetcher")
-    );
-
-    let request_id = parsed.get("request_id").and_then(|v| v.as_str()).unwrap();
-    assert!(parsed
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .contains("approval"));
-
-    // --- Step 3: Verify agent was NOT installed ---
-    let child_dir = agents_dir.join("weather.fetcher");
-    assert!(
-        !child_dir.exists(),
-        "agent should not be installed while approval is pending"
-    );
-
-    // --- Step 4: Verify payload was stored ---
-    let payload_path = agents_dir
-        .join(".gateway")
-        .join("scheduler")
-        .join("approvals")
-        .join("pending")
-        .join(format!("{}_payload.json", request_id));
-    assert!(payload_path.exists(), "payload file should exist");
-
-    // --- Step 5: Programmatically approve ---
-    let approved_dir = agents_dir
-        .join(".gateway")
-        .join("scheduler")
-        .join("approvals")
-        .join("approved");
-    std::fs::create_dir_all(&approved_dir).unwrap();
-
-    std::fs::write(
-        approved_dir.join(format!("{}.json", request_id)),
-        serde_json::to_string(&serde_json::json!({
-            "request_id": request_id,
-            "agent_id": "specialized_builder.default",
-            "session_id": "session-approval-test",
-            "action": {
-                "type": "agent_install",
-                "agent_id": "weather.fetcher",
-                "summary": "Weather fetcher with NetworkAccess to api.open-meteo.com",
-                "requested_by_agent_id": "specialized_builder.default",
-                "install_fingerprint": "test_fingerprint"
-            },
-            "status": "approved",
-            "decided_at": chrono::Utc::now().to_rfc3339(),
-            "decided_by": "test-admin"
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    // --- Step 6: Retry with install_approval_ref ---
-    let retry_args = serde_json::json!({
-        "agent_id": "weather.fetcher",
-        "instructions": "---\nname: weather.fetcher\ndescription: Fetches weather\nexecution_mode: script\nscript_entry: main.py\n---\n# Weather Fetcher\nFetches weather data for given coordinates.",
-        "capabilities": [
-            { "type": "NetworkAccess", "hosts": ["api.open-meteo.com"] }
-        ],
-        "artifact_id": artifact_id,
-        "promotion_gate": promotion_gate_with_evidence(
-            &["NetworkAccess"],
-            true,
-            Some(request_id)
-        )
-    });
-
-    let retry_result = registry
-        .execute(
-            "agent.install",
-            &manifest,
-            &policy,
-            &builder_dir,
-            Some(&gateway_dir),
-            &serde_json::to_string(&retry_args).unwrap(),
-            Some("session-approval-test"),
-            None,
-            Some(&config),
-            None,
-            None,
-        )
-        .expect("retry should succeed with stored payload");
-
-    let retry_parsed: serde_json::Value = serde_json::from_str(&retry_result).unwrap();
-    assert_eq!(retry_parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        retry_parsed.get("status").and_then(|v| v.as_str()),
-        Some("agent_installed")
-    );
-
-    // --- Step 7: Verify agent was installed ---
-    assert!(
-        child_dir.exists(),
-        "weather.fetcher agent should be installed"
-    );
-    assert!(child_dir.join("SKILL.md").exists(), "SKILL.md should exist");
-    assert!(child_dir.join("main.py").exists(), "main.py should exist");
-
-    // --- Step 8: Verify SKILL.md content ---
-    let skill = std::fs::read_to_string(child_dir.join("SKILL.md")).unwrap();
-    assert!(
-        skill.contains("weather.fetcher"),
-        "SKILL.md should contain agent name"
-    );
-    assert!(
-        skill.contains("script"),
-        "SKILL.md should contain script mode"
-    );
-
-    // --- Step 9: Verify payload cleanup ---
-    assert!(
-        !payload_path.exists(),
-        "payload file should be cleaned up after successful install"
-    );
-}
-
-/// Regression: approved request exists but stored payload is missing → retry is rejected.
-///
-/// If the caller uses install_approval_ref but the _payload.json file was deleted
-/// or corrupted, the gateway must reject the retry with a validation error rather
-/// than silently falling back to the caller's (potentially modified) args.
-#[tokio::test]
-#[ignore] // Payload file checks removed with SQLite migration; needs rewrite
-async fn test_agent_install_rejects_retry_when_payload_missing() {
-    let manifest = evolution_manifest();
-    let policy = PolicyEngine::new(manifest.clone());
-    let temp = tempdir().expect("tempdir should create");
-    let agents_dir = temp.path().join("agents");
-    let builder_dir = agents_dir.join("specialized_builder.default");
-    std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
-
-    let (artifact_id, gateway_dir) =
-        build_test_artifact(temp.path(), &[("main.py", "print('hello')\n")]);
-
-    let config = GatewayConfig {
-        agents_dir: agents_dir.clone(),
-        ..Default::default()
-    };
-
-    let registry = default_registry();
-
-    // --- Step 1: Call agent.install → gets approval_required ---
-    let install_args = serde_json::json!({
-        "agent_id": "test.agent",
-        "instructions": "# Test Agent\nTest instructions.",
-        "capabilities": [
-            { "type": "NetworkAccess", "hosts": ["example.com"] }
-        ],
-        "artifact_id": artifact_id,
-        "promotion_gate": promotion_gate_with_evidence(&["NetworkAccess"], true, None)
-    });
-
-    let result = registry
-        .execute(
-            "agent.install",
-            &manifest,
-            &policy,
-            &builder_dir,
-            Some(&gateway_dir),
-            &serde_json::to_string(&install_args).unwrap(),
-            Some("session-payload-test"),
-            None,
-            Some(&config),
-            None,
-            None,
-        )
-        .expect("install should return approval request");
-
-    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-    let request_id = parsed.get("request_id").and_then(|v| v.as_str()).unwrap();
-
-    // --- Step 2: Verify payload file exists, then DELETE it ---
-    let payload_path = agents_dir
-        .join(".gateway")
-        .join("scheduler")
-        .join("approvals")
-        .join("pending")
-        .join(format!("{}_payload.json", request_id));
-    assert!(
-        payload_path.exists(),
-        "payload file should exist after initial request"
-    );
-    std::fs::remove_file(&payload_path).expect("should be able to delete payload file");
-    assert!(!payload_path.exists(), "payload file should be deleted");
-
-    // --- Step 3: Approve the request ---
-    let approved_dir = agents_dir
-        .join(".gateway")
-        .join("scheduler")
-        .join("approvals")
-        .join("approved");
-    std::fs::create_dir_all(&approved_dir).unwrap();
-
-    std::fs::write(
-        approved_dir.join(format!("{}.json", request_id)),
-        serde_json::to_string(&serde_json::json!({
-            "request_id": request_id,
-            "agent_id": "specialized_builder.default",
-            "session_id": "session-payload-test",
-            "action": {
-                "type": "agent_install",
-                "agent_id": "test.agent",
-                "summary": "Test agent",
-                "requested_by_agent_id": "specialized_builder.default",
-                "install_fingerprint": "test_fingerprint"
-            },
-            "status": "approved",
-            "decided_at": chrono::Utc::now().to_rfc3339(),
-            "decided_by": "test-admin"
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    // --- Step 4: Retry with install_approval_ref → MUST be rejected ---
-    let retry_args = serde_json::json!({
-        "agent_id": "test.agent",
-        "instructions": "# Test Agent\nTest instructions.",
-        "capabilities": [
-            { "type": "NetworkAccess", "hosts": ["example.com"] }
-        ],
-        "artifact_id": artifact_id,
-        "promotion_gate": promotion_gate_with_evidence(
-            &["NetworkAccess"],
-            true,
-            Some(request_id)
-        )
-    });
-
-    let retry_result = registry.execute(
-        "agent.install",
-        &manifest,
-        &policy,
-        &builder_dir,
-        Some(&gateway_dir),
-        &serde_json::to_string(&retry_args).unwrap(),
-        Some("session-payload-test"),
-        None,
-        Some(&config),
-        None,
-        None,
-    );
-
-    // The retry MUST fail — stored payload is missing, so the gateway
-    // cannot verify the approved payload.
-    assert!(
-        retry_result.is_err(),
-        "retry with missing payload must be rejected, not silently fall back to caller args"
-    );
-
-    let err_msg = retry_result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("stored payload is missing"),
-        "error should mention missing payload, got: {}",
-        err_msg
-    );
-    assert!(
-        err_msg.contains(request_id),
-        "error should reference the request_id, got: {}",
-        err_msg
-    );
-
-    // --- Step 5: Verify agent was NOT installed ---
-    let child_dir = agents_dir.join("test.agent");
-    assert!(
-        !child_dir.exists(),
-        "agent should not be installed when payload is missing"
-    );
-}
-
-/// Verify that invalid approval_ref is rejected.
-#[tokio::test]
-async fn test_agent_install_rejects_invalid_approval_ref() {
-    let manifest = evolution_manifest();
-    let policy = PolicyEngine::new(manifest.clone());
-    let temp = tempdir().expect("tempdir should create");
-    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
     let builder_dir = agents_dir.join("specialized_builder.default");
     std::fs::create_dir_all(&builder_dir).unwrap();
-
-    let (artifact_id, gateway_dir) =
-        build_test_artifact(temp.path(), &[("placeholder.txt", "placeholder")]);
+    std::fs::create_dir_all(&gateway_dir).unwrap();
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
 
-    let registry = default_registry();
+    let cs = ContentStore::new(&gateway_dir).unwrap();
+    let h = cs.write(b"x").unwrap();
+    cs.register_name("s", "f.txt", &h).unwrap();
+    let art = autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+    let bundle = art.build(&["f.txt".to_string()], None, None, "s").unwrap();
+
     let args = serde_json::json!({
-        "agent_id": "fake.agent",
-        "instructions": "# Fake Agent",
-        "capabilities": [{ "type": "NetworkAccess", "hosts": ["api.example.com"] }],
-        "artifact_id": artifact_id,
-        "promotion_gate": promotion_gate_with_evidence(
-            &["NetworkAccess"],
-            true,
-            Some("non-existent-request-id")
-        )
+        "agent_id": "legacy",
+        "instructions": "# x",
+        "artifact_id": bundle.artifact_id,
+        "capabilities": [{ "type": "NetworkAccess", "hosts": ["*"] }],
+        "promotion_gate": {
+            "evaluator_pass": true,
+            "auditor_pass": true,
+            "security_analysis": { "passed": true, "threats_detected": [], "remote_access_detected": true },
+            "capability_analysis": {
+                "inferred_capabilities": ["NetworkAccess"],
+                "missing_capabilities": [],
+                "declared_capabilities": ["NetworkAccess"],
+                "analysis_passed": true
+            }
+        }
     });
 
-    let result = registry.execute(
-        "agent.install",
-        &manifest,
-        &policy,
-        &builder_dir,
-        Some(&gateway_dir),
-        &serde_json::to_string(&args).unwrap(),
-        None,
-        None,
-        Some(&config),
-        None,
-        None,
-    );
-
-    // Invalid approval_ref returns an error (not a JSON response)
-    assert!(result.is_err(), "invalid approval_ref should return error");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("not found")
-            || err_msg.contains("not approved")
-            || err_msg.contains("approval"),
-        "Error should mention approval, got: {}",
-        err_msg
-    );
-    assert!(
-        !agents_dir.join("fake.agent").exists(),
-        "agent should not be installed"
-    );
-}
-
-/// Verify approval policy modes: Always requires approval, Never skips it.
-#[tokio::test]
-async fn test_agent_install_approval_policies() {
-    let manifest = evolution_manifest();
-    let policy = PolicyEngine::new(manifest.clone());
-    let temp = tempdir().expect("tempdir should create");
-    let registry = default_registry();
-
-    let (artifact_id, gateway_dir) =
-        build_test_artifact(temp.path(), &[("placeholder.txt", "placeholder")]);
-
-    let install_args = serde_json::json!({
-        "agent_id": "test.worker",
-        "instructions": "# Test Worker",
-        "capabilities": [{ "type": "NetworkAccess", "hosts": ["api.example.com"] }],
-        "artifact_id": artifact_id,
-        "promotion_gate": promotion_gate_with_evidence(&["NetworkAccess"], true, None)
-    });
-
-    // Policy: Always → should require approval
-    let agents_dir_always = temp.path().join("agents_always");
-    let builder_dir_always = agents_dir_always.join("specialized_builder.default");
-    std::fs::create_dir_all(&builder_dir_always).unwrap();
-    let config_always = GatewayConfig {
-        agents_dir: agents_dir_always.clone(),
-        ..Default::default()
-    };
-    let result_always = registry
+    let err = default_registry()
         .execute(
             "agent.install",
-            &manifest,
-            &policy,
-            &builder_dir_always,
+            &evolution_manifest(),
+            &PolicyEngine::new(evolution_manifest()),
+            &builder_dir,
             Some(&gateway_dir),
-            &serde_json::to_string(&install_args).unwrap(),
+            &serde_json::to_string(&args).unwrap(),
+            Some("sid"),
             None,
-            None,
-            Some(&config_always),
+            Some(&config),
             None,
             None,
         )
-        .unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&result_always).unwrap();
-    assert_eq!(
-        parsed.get("approval_required").and_then(|v| v.as_bool()),
-        Some(true),
-        "Always policy should require approval"
-    );
+        .expect_err("retired");
 
-    // Policy: Never → should install directly
-    let agents_dir_never = temp.path().join("agents_never");
-    let builder_dir_never = agents_dir_never.join("specialized_builder.default");
-    std::fs::create_dir_all(&builder_dir_never).unwrap();
-    let config_never = GatewayConfig {
-        agents_dir: agents_dir_never.clone(),
-        ..Default::default()
-    };
-    let result_never = registry
-        .execute(
-            "agent.install",
-            &manifest,
-            &policy,
-            &builder_dir_never,
-            Some(&gateway_dir),
-            &serde_json::to_string(&install_args).unwrap(),
-            None,
-            None,
-            Some(&config_never),
-            None,
-            None,
-        )
-        .unwrap();
-    let parsed2: serde_json::Value = serde_json::from_str(&result_never).unwrap();
-    assert_eq!(
-        parsed2.get("ok").and_then(|v| v.as_bool()),
-        Some(true),
-        "Never policy should install directly"
-    );
-    assert!(
-        agents_dir_never.join("test.worker").exists(),
-        "test.worker should be installed with Never policy"
-    );
+    assert!(err.to_string().contains("retired"), "{}", err);
 }

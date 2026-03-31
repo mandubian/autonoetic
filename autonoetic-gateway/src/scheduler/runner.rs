@@ -123,7 +123,7 @@ pub async fn handle_due_wake(
         outcome = "executed".to_string();
         Some(
             execution
-                .execute_background_action(agent_id, session_id, &decision.action)
+                .execute_background_action(agent_id, session_id, &decision.action, agent_dir)
                 .await,
         )
     } else if let Some(action) = reevaluation.pending_scheduled_action.clone() {
@@ -206,7 +206,7 @@ pub async fn handle_due_wake(
             outcome = "executed".to_string();
             Some(
                 execution
-                    .execute_background_action(agent_id, session_id, &action)
+                    .execute_background_action(agent_id, session_id, &action, agent_dir)
                     .await,
             )
         }

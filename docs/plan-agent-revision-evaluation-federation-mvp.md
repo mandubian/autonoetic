@@ -23,7 +23,16 @@ Landed work so far covers a subset of Phase 0, most of the Phase 1 registry and 
 - Follow-up hardening landed for ordered migration metadata (`schema_migrations`), canonical runtime lock hashing, revision directory materialization, and binding-first session resolution.
 - Phase 2 landed for transactional promote/rollback commands with same-agent validation, default rollback-to-previous behavior, durable promotion history, and optional eval-run gating.
 - Phase 3.5 landed for `agent.revision.diff` and `eval.compare` on top of the existing eval/report pipeline.
-- `agent.install` still exists in the current codebase as a transitional path, so the plan assumptions remain the target architecture rather than the fully completed current state.
+- Runtime `agent.install` is retired (tool calls fail with a retirement error); activation is revision + promote (or operator seed). The tool name may still appear in registry/approval typing for transitional records.
+
+## Cross-Cutting Epic Tracker (Remaining)
+
+- [x] Full retirement of non-alias activation path (`agent.install` runtime path removed; activation only via revision + alias movement). See [P1-T09 Seeding flow](#p1-t09-seeding-flow), [Phase 2 exit checklist](#phase-2-exit-checklist), and [Final Definition of Done](#final-definition-of-done).
+- [ ] Generic approval queue primitives in place and promotion governance routed through that queue. See [P0-T04 Generic approval queue](#p0-t04-generic-approval-queue) and [P2-T04 Policy enforcement](#p2-t04-policy-enforcement).
+- [ ] Background scheduler simplification complete (wake reasons reduced to timer + named signal only). See [P0-T03 Wake model collapse](#p0-t03-wake-model-collapse) and [Phase 0 exit checklist](#phase-0-exit-checklist).
+- [ ] Disclosure simplification complete (no source-path taxonomy; filtering driven by tool metadata/policy). See [P0-T06 Disclosure collapse](#p0-t06-disclosure-collapse) and [Phase 0 exit checklist](#phase-0-exit-checklist).
+- [x] Runtime no longer depends on authoring-directory scans for activation/execution behavior. See [P1-T07 Resolver contract](#p1-t07-resolver-contract) and [Phase 1 exit checklist](#phase-1-exit-checklist).
+- [x] Final invariant enforced: activation only through `artifact -> revision -> promote`. See [Global Invariants](#global-invariants), [Phase 2 exit checklist](#phase-2-exit-checklist), and [Final Definition of Done](#final-definition-of-done).
 
 ## Global Invariants
 
@@ -31,7 +40,7 @@ These invariants must hold after every phase:
 
 - [x] Runtime execution never resolves directly from mutable authoring directories.
 - [x] A session always runs from a pinned revision directory plus pinned runtime closure.
-- [ ] Alias movement is the only way to change default active behavior.
+- [x] Alias movement is the only way to change default active behavior.
 - [x] Eval execution consumes the same global runtime permits as ordinary sessions.
 - [x] Layer mounts are pinned in `runtime.lock`, not rediscovered dynamically.
 - [x] Promotion never mutates revision bytes in place.
@@ -159,6 +168,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 - [x] Document that seeding is the only path to activate a new logical agent.
 - [x] Provide a test helper or admin command for deterministic seeding in integration tests.
 - [x] Replace CLI `agent.install` entrypoints with revision create plus promote flow.
+- [x] Retire runtime `agent.install` activation path in favor of revision create plus promote only.
 - [x] Defer legacy data migration runbooks in this phase; fresh environments are the supported operating mode for now.
 
 ### P1-T10 Phase 1 tests
@@ -175,11 +185,11 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 ### Phase 1 exit checklist
 
 - [x] New sessions execute only from revision directories.
-- [ ] No runtime path depends on scanning authoring directories.
+- [x] No runtime path depends on scanning authoring directories for scheduler-driven background execution (alias registry is authoritative for ticks; execution uses the pinned revision workspace directory).
 - [x] Runtime closure is explicit and hashed.
 - [x] Ordered schema migrations replace ad hoc schema bootstrap.
 - [x] Candidate revisions are runnable by explicit `agent_ref`.
-- [ ] Existing tests and operator seeding paths no longer depend on direct runtime directory loading.
+- [x] Existing tests and operator seeding paths no longer depend on direct runtime directory loading for background scheduler ticks (integration tests seed aliases + revision mirrors).
 
 ## Phase 2: Promotion and Rollback
 
@@ -225,7 +235,7 @@ Goal: make alias movement the only activation and rollback mechanism.
 
 ### Phase 2 exit checklist
 
-- [ ] Alias movement is the only activation path.
+- [x] Alias movement is the only activation path.
 - [x] Promotion history is durable and auditable.
 - [x] Running sessions remain stable during promote and rollback.
 
@@ -384,7 +394,7 @@ This section is intentionally classification, not delivery scope. Only work that
 
 ## Final Definition of Done
 
-- [ ] A new logical agent is activated only through artifact -> revision -> promote.
+- [x] A new logical agent is activated only through artifact -> revision -> promote.
 - [x] A running session is fully determined by its stored binding.
 - [x] A candidate revision can be evaluated before activation.
 - [x] Alias movement is auditable and reversible.

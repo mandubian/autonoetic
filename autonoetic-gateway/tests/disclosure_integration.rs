@@ -240,21 +240,14 @@ disclosure:
     let filtered = state.filter_reply("The top secret password is super_secret_wahoo and internal docs say: confidential_business_plan_v2");
 
     assert!(
-        filtered.contains("[REDACTED: Secret content]"),
-        "Should contain secret redaction marker"
+        filtered.contains("[REDACTED]"),
+        "Should contain restricted-output redaction marker"
     );
     assert!(
         !filtered.contains("super_secret_wahoo"),
         "Should not contain secret value"
     );
-    assert!(
-        filtered.contains("[REDACTED: Confidential content]"),
-        "Should contain confidential redaction marker"
-    );
-    assert!(
-        !filtered.contains("confidential_business_plan_v2"),
-        "Should not contain confidential value"
-    );
+    assert!(!filtered.contains("confidential_business_plan_v2"));
 
     server_task.abort();
 }
