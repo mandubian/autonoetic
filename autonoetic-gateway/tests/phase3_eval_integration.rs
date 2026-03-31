@@ -13,8 +13,9 @@ mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::{
-    validate_suite_spec, AgentRevisionDiffTool, EvalCompareTool, EvalReportTool, EvalRunTool,
-    EvalSuiteCaseSpec, EvalSuitePublishTool, EvalSuiteSpec, NativeTool,
+    validate_suite_spec, AgentRevisionDiffTool, AgentRevisionPromoteTool, EvalCompareTool,
+    EvalReportTool, EvalRunTool, EvalSuiteCaseSpec, EvalSuitePublishTool, EvalSuiteSpec,
+    NativeTool,
 };
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
@@ -869,6 +870,103 @@ fn test_eval_report_returns_not_found_for_missing_run() {
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
+}
+
+#[test]
+fn test_promote_rejects_required_eval_run_for_different_revision() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let rev_target = autonoetic_types::agent_revision::AgentRevisionRecord {
+        revision_id: "rev_sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            .to_string(),
+        agent_id: "planner.default".to_string(),
+        base_revision_id: None,
+        artifact_id: None,
+        content_digest: "sha256:target".to_string(),
+        runtime_lock_hash: "none".to_string(),
+        manifest_hash: "sha256:target".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "test".to_string(),
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+        metadata_json: json!({}),
+        short_id: "target111".to_string(),
+    };
+    let rev_other = autonoetic_types::agent_revision::AgentRevisionRecord {
+        revision_id: "rev_sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            .to_string(),
+        agent_id: "planner.default".to_string(),
+        base_revision_id: None,
+        artifact_id: None,
+        content_digest: "sha256:other".to_string(),
+        runtime_lock_hash: "none".to_string(),
+        manifest_hash: "sha256:other".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "test".to_string(),
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+        metadata_json: json!({}),
+        short_id: "other222".to_string(),
+    };
+    store.insert_agent_revision(&rev_target).unwrap();
+    store.insert_agent_revision(&rev_other).unwrap();
+
+    let eval_run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: "eval-mismatch".to_string(),
+        suite_id: "suite-mismatch".to_string(),
+        subject_agent_id: "planner.default".to_string(),
+        subject_revision_id: rev_other.revision_id.clone(),
+        baseline_revision_id: None,
+        status: autonoetic_types::evaluation::EvalRunStatus::Passed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: Some(chrono::Utc::now().to_rfc3339()),
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({"passed": 1, "failed": 0}),
+        report_handle: Some("sha256:report".to_string()),
+        origin_node_id: "gateway".to_string(),
+    };
+    store.insert_eval_run(&eval_run).unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["planner.default*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let tool = AgentRevisionPromoteTool;
+    let args = json!({
+        "agent_id": "planner.default",
+        "revision_id": rev_target.revision_id,
+        "required_eval_run_id": eval_run.eval_run_id,
+    });
+
+    let err = tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &args.to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .expect_err("promotion should fail when required eval run points to another revision");
+    assert!(
+        err.to_string().contains("was for revision"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

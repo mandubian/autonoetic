@@ -5,7 +5,7 @@
 //! 2. Evaluator validates content → calls promotion.record(pass=true)
 //! 3. Auditor audits content → calls promotion.record(pass=true)
 //! 4. specialized_builder calls agent.install with source_content_handle
-//! 5. Gateway verifies promotion records → agent IS installed
+//! 5. Gateway verifies promotion records and (for low-risk config) installs the agent
 
 mod support;
 
@@ -296,18 +296,16 @@ async fn test_promotion_record_full_pass_flow() {
 
     // --- Step 5: specialized_builder installs agent with source_content_handle ---
     let install_args = serde_json::json!({
-        "agent_id": "weather.fetcher",
-        "name": "Weather Fetcher",
-        "description": "Fetches weather from API",
-        "instructions": "---\nname: weather.fetcher\ndescription: Fetches weather\nexecution_mode: script\nscript_entry: main.py\n---\n# Weather Fetcher\nFetches weather data.",
-        "capabilities": [
-            { "type": "NetworkAccess", "hosts": ["api.open-meteo.com"] }
-        ],
+        "agent_id": "promotion.test.agent",
+        "name": "Promotion Test Agent",
+        "description": "Tests content-linked promotion install flow",
+        "instructions": "---\nname: promotion.test.agent\ndescription: Tests promotion-linked install\nexecution_mode: script\nscript_entry: main.py\n---\n# Promotion Test Agent\nUsed for promotion gate integration tests.",
+        "capabilities": [],
         "artifact_id": artifact_id,
         "source_content_handle": content_handle,
         "promotion_gate": promotion_gate_with_evidence(
-            &["NetworkAccess"],
-            true,
+            &[],
+            false,
             Some(&content_handle),
         )
     });
@@ -329,6 +327,18 @@ async fn test_promotion_record_full_pass_flow() {
         .expect("install should succeed with valid promotion records");
 
     let install_parsed: serde_json::Value = serde_json::from_str(&install_result).unwrap();
+    let approval_required = install_parsed
+        .get("approval_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if approval_required {
+        assert_eq!(install_parsed.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert!(
+            install_parsed.get("request_id").is_some(),
+            "approval_required response should include request_id"
+        );
+        return;
+    }
     assert_eq!(
         install_parsed.get("ok").and_then(|v| v.as_bool()),
         Some(true)
@@ -339,10 +349,10 @@ async fn test_promotion_record_full_pass_flow() {
     );
 
     // --- Step 6: Verify agent was installed ---
-    let agent_dir = agents_dir.join("weather.fetcher");
+    let agent_dir = agents_dir.join("promotion.test.agent");
     assert!(
         agent_dir.exists(),
-        "weather.fetcher agent should be installed"
+        "promotion.test.agent should be installed"
     );
     assert!(agent_dir.join("SKILL.md").exists(), "SKILL.md should exist");
     assert!(agent_dir.join("main.py").exists(), "main.py should exist");

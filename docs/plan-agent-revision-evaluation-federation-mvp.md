@@ -289,7 +289,7 @@ Goal: add measurable evidence before alias movement.
 
 - [x] Eval run records are durable across restart.
 - [x] Case failures produce failed run status and preserved report output.
-- [ ] Promote fails when `required_eval_run_id` does not match the target revision.
+- [x] Promote fails when `required_eval_run_id` does not match the target revision.
 - [x] Eval sessions against candidate revisions run with null `alias_id`.
 
 ### Phase 3 exit checklist
