@@ -2725,6 +2725,11 @@ impl NativeTool for ArtifactBuildTool {
                             "required": ["layer_id", "name", "mount_path", "digest"]
                         },
                         "description": "Optional list of layer references to include in the artifact"
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["binary", "skill_bundle", "agent_bundle", "dataset", "gateway_runtime", "report"],
+                        "description": "Optional artifact kind for downstream policy checks. Defaults to 'binary'."
                     }
                 },
                 "required": ["inputs"],
@@ -2751,6 +2756,7 @@ impl NativeTool for ArtifactBuildTool {
             inputs: Vec<String>,
             entrypoints: Option<Vec<String>>,
             layers: Option<Vec<autonoetic_types::layer::ArtifactLayer>>,
+            kind: Option<String>,
         }
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -2782,10 +2788,23 @@ impl NativeTool for ArtifactBuildTool {
             }
         }
 
-        let bundle = store.build(
+        let raw_kind = args.kind.clone();
+        let kind = raw_kind
+            .as_deref()
+            .map(|raw| {
+                serde_json::from_value::<autonoetic_types::artifact::ArtifactKind>(
+                    serde_json::Value::String(raw.to_string()),
+                )
+            })
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("Invalid artifact kind '{}'", raw_kind.unwrap_or_default()))?
+            .unwrap_or(autonoetic_types::artifact::ArtifactKind::Binary);
+
+        let bundle = store.build_with_kind(
             &args.inputs,
             args.entrypoints.as_deref(),
             args.layers.as_deref(),
+            kind.clone(),
             sid,
         )?;
 
@@ -2841,6 +2860,8 @@ impl NativeTool for ArtifactBuildTool {
         let mut out = serde_json::json!({
             "ok": true,
             "artifact_id": bundle.artifact_id,
+            "kind": serde_json::to_value(&bundle.kind)
+                .unwrap_or(serde_json::Value::String("binary".to_string())),
             "digest": bundle.digest,
             "artifact_digest": bundle.digest,
             "files": bundle.files.iter().map(|f| serde_json::json!({
@@ -7474,6 +7495,12 @@ impl NativeTool for AgentRevisionCreateTool {
         let bundle = artifact
             .inspect(&args.artifact_id)
             .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", args.artifact_id, e))?;
+        anyhow::ensure!(
+            bundle.kind == autonoetic_types::artifact::ArtifactKind::AgentBundle,
+            "Artifact '{}' has kind '{:?}'. agent.revision.create requires kind 'agent_bundle'.",
+            args.artifact_id,
+            bundle.kind
+        );
 
         let files = artifact.resolve_files(&args.artifact_id)?;
         let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();

@@ -126,7 +126,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 ### P1-T04 Agent bundle artifact kind
 
 - [x] Add an explicit `AgentBundle` artifact kind.
-- [ ] Validate that revision creation only accepts `AgentBundle` artifacts.
+- [x] Validate that revision creation only accepts `AgentBundle` artifacts.
 - [x] Validate `SKILL.md`, manifest identity, and runtime lock presence before materialization.
 
 ### P1-T05 Revision materialization

@@ -1006,9 +1006,100 @@ fn test_revision_directory_materialization_on_create() {
 }
 
 #[test]
+fn test_revision_create_rejects_non_agent_bundle_kind() {
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_gateway::runtime::content_store::ContentStore;
+
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let session_id = "test-session";
+
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+
+    let skill_md = r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "kind.check"
+  name: "Kind Check"
+  description: "Kind check"
+---
+# Kind Check
+"#;
+    let runtime_lock = r#"gateway:
+  artifact: "gateway"
+  version: "0.1.0"
+  sha256: "sha256:gateway"
+sdk:
+  version: "0.1.0"
+sandbox:
+  backend: "bubblewrap"
+dependencies: []
+artifacts: []
+layers: []
+"#;
+    for (name, content) in [
+        ("SKILL.md", skill_md.as_bytes()),
+        ("runtime.lock", runtime_lock.as_bytes()),
+        ("main.py", b"print('hello')".as_ref()),
+    ] {
+        let handle = content_store.write(content).unwrap();
+        content_store.register_name(session_id, name, &handle).unwrap();
+    }
+    // Intentionally build with default kind ("binary"), not agent_bundle.
+    let bundle = artifact_store
+        .build(
+            &[
+                "SKILL.md".to_string(),
+                "runtime.lock".to_string(),
+                "main.py".to_string(),
+            ],
+            Some(&["main.py".to_string()]),
+            None,
+            session_id,
+        )
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["kind.check*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let create_tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateTool;
+    let err = create_tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &json!({
+                "agent_id": "kind.check",
+                "artifact_id": bundle.artifact_id,
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .expect_err("revision creation must require artifact kind agent_bundle");
+    assert!(err.to_string().contains("requires kind 'agent_bundle'"));
+}
+
+#[test]
 fn test_candidate_revision_runs_without_alias_via_explicit_agent_ref() {
     use autonoetic_gateway::artifact_store::ArtifactStore;
     use autonoetic_gateway::runtime::content_store::ContentStore;
+    use autonoetic_types::artifact::ArtifactKind;
 
     let tmp = TempDir::new().unwrap();
     let gateway_dir = tmp.path().join(".gateway");
@@ -1057,7 +1148,7 @@ layers: []
         content_store.register_name(session_id, name, &handle).unwrap();
     }
     let bundle = artifact_store
-        .build(
+        .build_with_kind(
             &[
                 "SKILL.md".to_string(),
                 "runtime.lock".to_string(),
@@ -1065,6 +1156,7 @@ layers: []
             ],
             Some(&["main.py".to_string()]),
             None,
+            ArtifactKind::AgentBundle,
             session_id,
         )
         .unwrap();
@@ -1124,6 +1216,7 @@ fn test_changing_pinned_layer_mounts_changes_revision_identity() {
     use autonoetic_gateway::artifact_store::ArtifactStore;
     use autonoetic_gateway::layer_store::{LayerLimits, LayerStore};
     use autonoetic_gateway::runtime::content_store::ContentStore;
+    use autonoetic_types::artifact::ArtifactKind;
     use autonoetic_types::layer::ArtifactLayer;
 
     let tmp = TempDir::new().unwrap();
@@ -1187,7 +1280,7 @@ agent:
             digest: captured.digest.clone(),
         }];
         artifact_store
-            .build(
+            .build_with_kind(
                 &[
                     "SKILL.md".to_string(),
                     "runtime.lock".to_string(),
@@ -1195,6 +1288,7 @@ agent:
                 ],
                 Some(&["main.py".to_string()]),
                 Some(&layers),
+                ArtifactKind::AgentBundle,
                 session_id,
             )
             .unwrap()
