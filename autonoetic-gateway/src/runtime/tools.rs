@@ -206,7 +206,7 @@ pub trait NativeTool: Send + Sync {
     /// Checks if the manifest/policy allows this tool to be exposed or called.
     fn is_available(&self, manifest: &AgentManifest) -> bool;
 
-    /// Executes the tool call. `config` is provided when the gateway runs with config (e.g. for agent.install approval policy); tests may pass `None`.
+    /// Executes the tool call. `config` is provided when the gateway runs with config; tests may pass `None`.
     fn execute(
         &self,
         manifest: &AgentManifest,
@@ -888,7 +888,7 @@ impl NativeTool for SandboxExecTool {
         let remote_analysis =
             crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&code_to_analyze);
         // Always log so operators can see why a run proceeds vs blocks (static analysis only;
-        // unrelated to agent.install `AnalysisProvider` — see docs/agent-install-approval-retry.md).
+        // unrelated to install approval retry behavior — see docs/agent-install-approval-retry.md).
         tracing::info!(
             target: "sandbox.exec",
             agent_id = %manifest.agent.id,
@@ -3008,7 +3008,7 @@ impl NativeTool for ExecutionSearchTool {
                 "properties": {
                     "tool_name": {
                         "type": "string",
-                        "description": "Filter by tool name (e.g., 'sandbox.exec', 'agent.install'). Optional."
+                        "description": "Filter by tool name (e.g., 'sandbox.exec'). Optional."
                     },
                     "success": {
                         "type": "boolean",
@@ -5247,242 +5247,6 @@ impl NativeTool for WorkflowStateTool {
         });
 
         serde_json::to_string(&state).map_err(Into::into)
-    }
-}
-
-/// Provides helpful error context for capability-related deserialization errors.
-fn capability_error_context(serde_error: &serde_json::Error) -> String {
-    let err_str = serde_error.to_string();
-
-    // Check for common capability format mistakes
-    if err_str.contains("hosts") {
-        return format!(
-            "{}\n\nHELP: NetworkAccess capability requires 'hosts' field.\n\
-            Correct format: {{\"type\": \"NetworkAccess\", \"hosts\": [\"api.example.com\"]}}\n\
-            Use [\"*\"] to allow all hosts.",
-            err_str
-        );
-    }
-
-    if err_str.contains("allowed") {
-        return format!(
-            "{}\n\nHELP: SandboxFunctions capability requires 'allowed' field.\n\
-            Correct format: {{\"type\": \"SandboxFunctions\", \"allowed\": [\"web.\", \"content.\"]}}",
-            err_str
-        );
-    }
-
-    if err_str.contains("scopes") {
-        return format!(
-            "{}\n\nHELP: ReadAccess or WriteAccess requires 'scopes' field.\n\
-            Correct format: {{\"type\": \"ReadAccess\", \"scopes\": [\"self.*\"]}}",
-            err_str
-        );
-    }
-
-    if err_str.contains("max_children") {
-        return format!(
-            "{}\n\nHELP: AgentSpawn capability requires 'max_children' field.\n\
-            Correct format: {{\"type\": \"AgentSpawn\", \"max_children\": 3}}",
-            err_str
-        );
-    }
-
-    if err_str.contains("unknown field") {
-        return format!(
-            "{}\n\nHELP: Unexpected field detected. Capability types only accept specific fields.\n\
-            - NetworkAccess: type, hosts\n\
-            - SandboxFunctions: type, allowed\n\
-            - ReadAccess/WriteAccess: type, scopes\n\
-            - AgentSpawn: type, max_children\n\
-            - CodeExecution: type, patterns\n\
-            Remove extra fields like 'description' or 'runtime'.",
-            err_str
-        );
-    }
-
-    err_str
-}
-
-pub struct AgentInstallTool;
-
-impl NativeTool for AgentInstallTool {
-    fn name(&self) -> &'static str {
-        "agent.install"
-    }
-
-    fn is_available(&self, manifest: &AgentManifest) -> bool {
-        // Any agent with AgentSpawn capability can install agents
-        manifest
-            .capabilities
-            .iter()
-            .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name().to_string(),
-            description: "Removed: use artifact.build (agent_bundle), agent.revision.create, agent.revision.promote, or `autonoetic agent seed`. Calling this tool fails with a retirement error.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "agent_id": { 
-                        "type": "string",
-                        "description": "Unique identifier for the agent (e.g., 'weather-fetcher'). Use lowercase with hyphens."
-                    },
-                    "name": { 
-                        "type": "string",
-                        "description": "Display name for the agent."
-                    },
-                    "description": { 
-                        "type": "string",
-                        "description": "What this agent does."
-                    },
-                    "instructions": { 
-                        "type": "string",
-                        "description": "The agent's SKILL.md content with instructions."
-                    },
-                    "capabilities": {
-                        "type": "array",
-                        "description": "List of capabilities this agent needs.",
-                        "items": {
-                            "type": "object",
-                            "description": "Capability object with 'type' and type-specific fields.",
-                            "oneOf": [
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "NetworkAccess" },
-                                        "hosts": { "type": "array", "items": { "type": "string" }, "description": "Allowed hosts. Use ['*'] for all." }
-                                    },
-                                    "required": ["type", "hosts"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "SandboxFunctions" },
-                                        "allowed": { "type": "array", "items": { "type": "string" } }
-                                    },
-                                    "required": ["type", "allowed"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "ReadAccess" },
-                                        "scopes": { "type": "array", "items": { "type": "string" } }
-                                    },
-                                    "required": ["type", "scopes"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "WriteAccess" },
-                                        "scopes": { "type": "array", "items": { "type": "string" } }
-                                    },
-                                    "required": ["type", "scopes"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "AgentSpawn" },
-                                        "max_children": { "type": "integer" }
-                                    },
-                                    "required": ["type", "max_children"]
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "type": { "const": "CodeExecution" },
-                                        "patterns": { "type": "array", "items": { "type": "string" } }
-                                    },
-                                    "required": ["type", "patterns"]
-                                }
-                            ]
-                        }
-                    },
-                    "artifact_id": {
-                        "type": "string",
-                        "description": "Required. Artifact ID to install from. Files are extracted from the artifact. Enforces 'no artifact, no promotion' rule."
-                    },
-                    "promotion_gate": {
-                        "type": "object",
-                        "description": "Required for evolution roles. Booleans alone are insufficient: provide concrete security_analysis and capability_analysis evidence.",
-                        "properties": {
-                            "evaluator_pass": { "type": "boolean" },
-                            "auditor_pass": { "type": "boolean" },
-                            "override_approval_ref": {
-                                "type": "string",
-                                "description": "Optional exceptional override reference."
-                            },
-                            "install_approval_ref": {
-                                "type": "string",
-                                "description": "Set when retrying after human approval."
-                            },
-                            "security_analysis": {
-                                "type": "object",
-                                "properties": {
-                                    "passed": { "type": "boolean" },
-                                    "threats_detected": { "type": "array", "items": { "type": "string" } },
-                                    "remote_access_detected": { "type": "boolean" },
-                                    "analyzer_version": { "type": "string" }
-                                },
-                                "required": ["passed", "threats_detected", "remote_access_detected"]
-                            },
-                            "capability_analysis": {
-                                "type": "object",
-                                "properties": {
-                                    "inferred_capabilities": { "type": "array", "items": { "type": "string" } },
-                                    "missing_capabilities": { "type": "array", "items": { "type": "string" } },
-                                    "declared_capabilities": { "type": "array", "items": { "type": "string" } },
-                                    "analysis_passed": { "type": "boolean" }
-                                },
-                                "required": [
-                                    "inferred_capabilities",
-                                    "missing_capabilities",
-                                    "declared_capabilities",
-                                    "analysis_passed"
-                                ]
-                            }
-                        },
-                        "required": ["evaluator_pass", "auditor_pass"]
-                    },
-                    "execution_mode": {
-                        "type": "string",
-                        "enum": ["script", "reasoning"],
-                        "description": "Script mode runs code without LLM. Reasoning mode uses LLM (default)."
-                    },
-                    "script_entry": {
-                        "type": "string",
-                        "description": "Entry script path when execution_mode is 'script' (e.g., 'scripts/main.py')."
-                    }
-                },
-                "required": ["agent_id", "instructions", "artifact_id"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    fn execute(
-        &self,
-        _manifest: &AgentManifest,
-        _policy: &PolicyEngine,
-        _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
-        arguments_json: &str,
-        _session_id: Option<&str>,
-        _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
-    ) -> anyhow::Result<String> {
-        let _: serde_json::Value = serde_json::from_str(arguments_json).map_err(|e| {
-            let context = capability_error_context(&e);
-            anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), context)
-        })?;
-        anyhow::bail!(
-            "agent.install is retired. Activate agents with artifact.build (kind: agent_bundle), \
-             agent.revision.create, agent.revision.promote, or operator CLI `autonoetic agent seed`."
-        );
     }
 }
 
@@ -8189,7 +7953,6 @@ pub fn default_registry() -> NativeToolRegistry {
     registry.register(Box::new(SessionEscalateTool));
     // Agent tools
     registry.register(Box::new(AgentSpawnTool));
-    registry.register(Box::new(AgentInstallTool));
     registry.register(Box::new(AgentExistsTool));
     registry.register(Box::new(AgentDiscoverTool));
     // Agent revision tools
@@ -8261,12 +8024,6 @@ mod tests {
         test_manifest_with_id("test-agent", capabilities)
     }
 
-    /// Creates a manifest for an evolution role (specialized_builder or evolution-steward).
-    /// These roles have access to agent.install.
-    fn test_evolution_manifest(capabilities: Vec<Capability>) -> AgentManifest {
-        test_manifest_with_id("specialized_builder.default", capabilities)
-    }
-
     fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
         AgentManifest {
             version: "1.0".to_string(),
@@ -8324,60 +8081,6 @@ mod tests {
             }
         });
         (format!("http://{}", addr), handle)
-    }
-
-    /// Helper: builds an artifact from a list of (path, content) pairs.
-    /// Creates a .gateway directory inside `base_dir`, writes files to content store,
-    /// builds an artifact, and creates promotion records for it.
-    /// Returns (artifact_id, gateway_dir_path).
-    fn build_test_artifact(
-        base_dir: &std::path::Path,
-        files: &[(&str, &str)],
-    ) -> (String, std::path::PathBuf) {
-        let gateway_dir = base_dir.join(".gateway");
-        std::fs::create_dir_all(&gateway_dir).unwrap();
-
-        let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
-        let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
-        let promotion_store =
-            crate::runtime::promotion_store::PromotionStore::new(&gateway_dir).unwrap();
-
-        let session_id = "test-session";
-        let mut input_names = Vec::new();
-        for (path, content) in files {
-            let handle = content_store.write(content.as_bytes()).unwrap();
-            content_store
-                .register_name(session_id, path, &handle)
-                .unwrap();
-            input_names.push(path.to_string());
-        }
-
-        let bundle = artifact_store
-            .build(&input_names, None, None, session_id)
-            .unwrap();
-
-        // Create promotion records so tests claiming evaluator_pass/auditor_pass are backed
-        use autonoetic_types::promotion::PromotionRole;
-        let _ = promotion_store.record_promotion(
-            bundle.artifact_id.clone(),
-            Some(bundle.digest.clone()),
-            PromotionRole::Evaluator,
-            "evaluator.default",
-            true,
-            vec![],
-            Some("Test auto-pass".to_string()),
-        );
-        let _ = promotion_store.record_promotion(
-            bundle.artifact_id.clone(),
-            Some(bundle.digest.clone()),
-            PromotionRole::Auditor,
-            "auditor.default",
-            true,
-            vec![],
-            Some("Test auto-pass".to_string()),
-        );
-
-        (bundle.artifact_id, gateway_dir)
     }
 
     fn spawn_counting_http_server(
@@ -8446,24 +8149,12 @@ mod tests {
         let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
         let defs_spawn = registry.available_definitions(&manifest_spawn);
         // Keep this assertion non-brittle as always-available tool set can evolve.
-        assert!(defs_spawn.len() >= 8);
+        assert!(defs_spawn.len() >= 7);
         assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
-        assert!(
-            defs_spawn.iter().any(|d| d.name == "agent.install"),
-            "agent.install should be available to agents with AgentSpawn capability"
-        );
         assert!(defs_spawn.iter().any(|d| d.name == "agent.exists"));
         assert!(defs_spawn.iter().any(|d| d.name == "agent.discover"));
         assert!(defs_spawn.iter().any(|d| d.name == "workflow.wait"));
 
-        // agent.install should also be available to any agent with AgentSpawn
-        let manifest_evolution =
-            test_evolution_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
-        let defs_evolution = registry.available_definitions(&manifest_evolution);
-        assert!(
-            defs_evolution.iter().any(|d| d.name == "agent.install"),
-            "agent.install should be available to agents with AgentSpawn capability"
-        );
 
         let manifest_revision = test_manifest(vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -9166,48 +8857,6 @@ mod tests {
             )
             .expect_err("empty message should still be rejected");
         assert!(err.to_string().contains("message must not be empty"));
-    }
-
-    #[test]
-    fn test_agent_install_is_retired() {
-        let manifest = test_manifest_with_id(
-            "specialized_builder.default",
-            vec![Capability::AgentSpawn { max_children: 4 }],
-        );
-        let policy = PolicyEngine::new(manifest.clone());
-        let temp = tempdir().expect("tempdir should create");
-        let agents_dir = temp.path().join("agents");
-        let parent_dir = agents_dir.join("specialized_builder.default");
-        std::fs::create_dir_all(&parent_dir).expect("parent dir should create");
-        let (artifact_id, gateway_dir) =
-            build_test_artifact(temp.path(), &[("placeholder.txt", "placeholder")]);
-        let args = serde_json::json!({
-            "agent_id": "child.worker",
-            "instructions": "# Child Worker\nDo one job.",
-            "artifact_id": artifact_id,
-        });
-        let registry = default_registry();
-        let err = registry
-            .execute(
-                "agent.install",
-                &manifest,
-                &policy,
-                &parent_dir,
-                Some(&gateway_dir),
-                &serde_json::to_string(&args).expect("json should encode"),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .expect_err("agent.install must fail");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("agent.install is retired") || msg.contains("retired"),
-            "unexpected error: {}",
-            msg
-        );
     }
 
 }

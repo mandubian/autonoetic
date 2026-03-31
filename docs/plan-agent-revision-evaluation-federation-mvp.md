@@ -23,7 +23,7 @@ Landed work so far covers a subset of Phase 0, most of the Phase 1 registry and 
 - Follow-up hardening landed for ordered migration metadata (`schema_migrations`), canonical runtime lock hashing, revision directory materialization, and binding-first session resolution.
 - Phase 2 landed for transactional promote/rollback commands with same-agent validation, default rollback-to-previous behavior, durable promotion history, and optional eval-run gating.
 - Phase 3.5 landed for `agent.revision.diff` and `eval.compare` on top of the existing eval/report pipeline.
-- Runtime `agent.install` is retired (tool calls fail with a retirement error); activation is revision + promote (or operator seed). The tool name may still appear in registry/approval typing for transitional records.
+- Runtime `agent.install` is removed from active native tool exposure; activation is revision + promote (or operator seed).
 
 ## Cross-Cutting Epic Tracker (Remaining)
 
@@ -32,15 +32,15 @@ Landed work so far covers a subset of Phase 0, most of the Phase 1 registry and 
 - [ ] Background scheduler simplification complete (wake reasons reduced to timer + named signal only). See [P0-T03 Wake model collapse](#p0-t03-wake-model-collapse) and [Phase 0 exit checklist](#phase-0-exit-checklist).
 - [ ] Disclosure simplification complete (no source-path taxonomy; filtering driven by tool metadata/policy). See [P0-T06 Disclosure collapse](#p0-t06-disclosure-collapse) and [Phase 0 exit checklist](#phase-0-exit-checklist).
 - [x] Runtime no longer depends on authoring-directory scans for activation/execution behavior. See [P1-T07 Resolver contract](#p1-t07-resolver-contract) and [Phase 1 exit checklist](#phase-1-exit-checklist).
-- [x] Final invariant enforced: activation only through `artifact -> revision -> promote`. See [Global Invariants](#global-invariants), [Phase 2 exit checklist](#phase-2-exit-checklist), and [Final Definition of Done](#final-definition-of-done).
+- [ ] Final invariant enforced: activation only through `artifact -> revision -> promote`. See [Global Invariants](#global-invariants), [Phase 2 exit checklist](#phase-2-exit-checklist), and [Final Definition of Done](#final-definition-of-done).
 
 ## Global Invariants
 
 These invariants must hold after every phase:
 
-- [x] Runtime execution never resolves directly from mutable authoring directories.
+- [ ] Runtime execution never resolves directly from mutable authoring directories (remaining gap: runtime fallback path still exists when `GatewayStore` is unavailable).
 - [x] A session always runs from a pinned revision directory plus pinned runtime closure.
-- [x] Alias movement is the only way to change default active behavior.
+- [ ] Alias movement is the only way to change default active behavior (remaining gap: non-store runtime fallback path bypasses alias resolution).
 - [x] Eval execution consumes the same global runtime permits as ordinary sessions.
 - [x] Layer mounts are pinned in `runtime.lock`, not rediscovered dynamically.
 - [x] Promotion never mutates revision bytes in place.
@@ -235,7 +235,7 @@ Goal: make alias movement the only activation and rollback mechanism.
 
 ### Phase 2 exit checklist
 
-- [x] Alias movement is the only activation path.
+- [ ] Alias movement is the only activation path.
 - [x] Promotion history is durable and auditable.
 - [x] Running sessions remain stable during promote and rollback.
 
@@ -394,7 +394,7 @@ This section is intentionally classification, not delivery scope. Only work that
 
 ## Final Definition of Done
 
-- [x] A new logical agent is activated only through artifact -> revision -> promote.
+- [ ] A new logical agent is activated only through artifact -> revision -> promote.
 - [x] A running session is fully determined by its stored binding.
 - [x] A candidate revision can be evaluated before activation.
 - [x] Alias movement is auditable and reversible.

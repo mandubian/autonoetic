@@ -180,7 +180,7 @@ pub struct AgentExecutor {
     pub session_id: Option<String>,
     pub session_started: bool,
     pub turn_counter: u64,
-    /// When set, passed to tool execution (e.g. agent.install approval policy).
+    /// When set, passed to tool execution for config-dependent behavior.
     pub config: Option<Arc<GatewayConfig>>,
     /// Optional per-session LLM/tool/token/wall-clock budgets (shared `Arc` across spawns).
     pub session_budget: Option<Arc<SessionBudgetRegistry>>,

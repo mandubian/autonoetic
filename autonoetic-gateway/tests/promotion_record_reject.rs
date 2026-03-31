@@ -1,4 +1,4 @@
-//! `agent.install` is retired; these tests ensure the tool fails fast with the retirement error.
+//! `agent.install` has been removed; these tests ensure calls fail fast.
 
 mod support;
 
@@ -42,7 +42,7 @@ fn evolution_manifest() -> AgentManifest {
 }
 
 #[tokio::test]
-async fn test_agent_install_rejected_as_retired() {
+async fn test_agent_install_is_unavailable() {
     let temp = tempdir().expect("tempdir should create");
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");
@@ -82,18 +82,18 @@ async fn test_agent_install_rejected_as_retired() {
             &builder_dir,
             Some(&gateway_dir),
             &serde_json::to_string(&install_args).unwrap(),
-            Some("session-retired"),
+            Some("session-unavailable"),
             None,
             Some(&config),
             None,
             None,
         )
-        .expect_err("agent.install must be retired");
+        .expect_err("agent.install must not be available");
 
     let msg = err.to_string();
     assert!(
-        msg.contains("retired"),
-        "expected retirement error, got: {}",
+        msg.contains("Unknown native tool"),
+        "expected unavailable-tool error, got: {}",
         msg
     );
 }

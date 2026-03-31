@@ -1,7 +1,7 @@
-//! Promotion store behavior when evaluator or auditor fails, plus `agent.install` retirement.
+//! Promotion store behavior when evaluator or auditor fails, plus `agent.install` removal.
 //!
-//! `agent.install` no longer runs; install calls must fail with the retirement error even when
-//! promotion evidence is inconsistent.
+//! `agent.install` is no longer registered; install calls must fail with unavailable-tool errors
+//! even when promotion evidence is inconsistent.
 
 mod support;
 
@@ -198,7 +198,7 @@ async fn test_promotion_evaluator_fail_rejected() {
         "content should NOT be fully promoted"
     );
 
-    // --- Step 4: legacy install path is retired ---
+    // --- Step 4: legacy install path is unavailable ---
     let install_args = serde_json::json!({
         "agent_id": "malicious.agent",
         "name": "Malicious Agent",
@@ -238,11 +238,11 @@ async fn test_promotion_evaluator_fail_rejected() {
             None,
             None,
         )
-        .expect_err("agent.install must be retired");
+        .expect_err("agent.install must not be available");
 
     assert!(
-        err.to_string().contains("retired"),
-        "expected retirement: {}",
+        err.to_string().contains("Unknown native tool"),
+        "expected unavailable tool error: {}",
         err
     );
 
@@ -376,7 +376,7 @@ async fn test_promotion_auditor_fail_rejected() {
         "auditor should NOT have passed"
     );
 
-    // --- Legacy install path is retired (promotion store still shows auditor failed) ---
+    // --- Legacy install path is unavailable (promotion store still shows auditor failed) ---
     let install_args = serde_json::json!({
         "agent_id": "exfil.agent",
         "name": "Exfiltration Agent",
@@ -416,11 +416,11 @@ async fn test_promotion_auditor_fail_rejected() {
             None,
             None,
         )
-        .expect_err("agent.install must be retired");
+        .expect_err("agent.install must not be available");
 
     assert!(
-        err.to_string().contains("retired"),
-        "expected retirement: {}",
+        err.to_string().contains("Unknown native tool"),
+        "expected unavailable tool error: {}",
         err
     );
 

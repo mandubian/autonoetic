@@ -26,7 +26,7 @@ pub struct ToolCallProcessor<'a> {
     secret_store: Option<&'a mut SecretStoreRuntime>,
     session_id: Option<String>,
     turn_id: Option<String>,
-    /// When set, passed to native tools (e.g. agent.install for approval policy).
+    /// When set, passed to native tools for config-dependent behavior.
     config: Option<&'a GatewayConfig>,
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     run_context: Option<crate::runtime::active_execution_registry::NativeToolRunContext>,
@@ -36,7 +36,6 @@ impl<'a> ToolCallProcessor<'a> {
     fn canonical_tool_name(name: &str) -> &str {
         match name {
             "spawn" => "agent.spawn",
-            "install" => "agent.install",
             "message" => "agent.message",
             "search" => "web.search",
             "fetch" => "web.fetch",
@@ -1081,10 +1080,6 @@ mod tests {
         assert_eq!(
             ToolCallProcessor::canonical_tool_name("spawn"),
             "agent.spawn"
-        );
-        assert_eq!(
-            ToolCallProcessor::canonical_tool_name("install"),
-            "agent.install"
         );
         assert_eq!(
             ToolCallProcessor::canonical_tool_name("message"),
