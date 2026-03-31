@@ -218,16 +218,17 @@ autonoetic agent bootstrap [--from PATH] [--overwrite]
 
 ### `autonoetic agent seed`
 
-Activate an alias by promoting a specific revision (admin/test seeding path).
+Seed an alias to a specific revision for deterministic setup and tests.
 
 ```bash
 autonoetic agent seed <agent_id> <revision_id> [--promotion-id <ID>] [--reason <TEXT>] [--json]
 ```
 
 Notes:
-- This performs alias activation through the same promote transaction used by runtime promotion flows.
+- This performs alias movement using the same atomic alias update + promotion-history write used by promotion flows.
 - Use `--promotion-id` in integration tests when deterministic promotion lineage identifiers are required.
-- Activation is explicit: `artifact -> revision create -> promote` (or `agent seed` for controlled seeding).
+- This is a setup convenience path; it does not expose eval-gating flags.
+- Activation remains explicit: `artifact -> revision create -> promote`.
 
 ### `autonoetic agent revision create`
 
@@ -244,6 +245,12 @@ Promote a revision to the active alias target.
 ```bash
 autonoetic agent revision promote <agent_id> <revision_id> [--reason <TEXT>] [--required-eval-run-id <RUN>] [--json]
 ```
+
+### `seed` vs `revision promote`
+
+- Use `agent revision promote` for normal lifecycle movement; it supports governance/eval gating with `--required-eval-run-id`.
+- Use `agent seed` for deterministic initialization/bootstrap flows (especially integration tests).
+- Both commands move (or create) the alias target and emit promotion history.
 
 ### `autonoetic agent alias list`
 
