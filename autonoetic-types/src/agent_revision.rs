@@ -9,6 +9,38 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Parsed target used by ingress/resolver entrypoints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedAgentTarget {
+    /// Plain alias/agent id (no explicit revision selector).
+    AliasId(String),
+    /// Explicit revision selector (`agent_id@...`).
+    ExplicitRef {
+        agent_id: String,
+        revision_selector: String,
+    },
+}
+
+/// Parse an incoming target string into alias or explicit-ref form.
+///
+/// Returns `None` when the target is syntactically invalid (empty values or
+/// multiple `@` separators).
+pub fn parse_agent_target(target: &str) -> Option<ParsedAgentTarget> {
+    if target.is_empty() {
+        return None;
+    }
+    if let Some((agent_id, revision_selector)) = target.split_once('@') {
+        if agent_id.is_empty() || revision_selector.is_empty() || revision_selector.contains('@') {
+            return None;
+        }
+        return Some(ParsedAgentTarget::ExplicitRef {
+            agent_id: agent_id.to_string(),
+            revision_selector: revision_selector.to_string(),
+        });
+    }
+    Some(ParsedAgentTarget::AliasId(target.to_string()))
+}
+
 /// A fully qualified immutable agent reference.
 ///
 /// Format: `<agent_id>@rev_sha256:<64 hex chars>`
@@ -503,5 +535,32 @@ mod tests {
         let rollback = PromotionKind::Rollback;
         let json = serde_json::to_string(&rollback).expect("serialize");
         assert_eq!(json, "\"rollback\"");
+    }
+
+    #[test]
+    fn test_parse_agent_target_alias() {
+        assert_eq!(
+            parse_agent_target("planner.default"),
+            Some(ParsedAgentTarget::AliasId("planner.default".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_agent_target_explicit_ref() {
+        assert_eq!(
+            parse_agent_target("planner.default@rev_abcd1234"),
+            Some(ParsedAgentTarget::ExplicitRef {
+                agent_id: "planner.default".to_string(),
+                revision_selector: "rev_abcd1234".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_agent_target_rejects_invalid_shapes() {
+        assert!(parse_agent_target("").is_none());
+        assert!(parse_agent_target("@rev_abcd1234").is_none());
+        assert!(parse_agent_target("planner.default@").is_none());
+        assert!(parse_agent_target("a@b@c").is_none());
     }
 }

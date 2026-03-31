@@ -3,7 +3,9 @@
 use crate::runtime::parser::SkillParser;
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentManifest, AgentMeta};
-use autonoetic_types::agent_revision::{AgentRef, AgentRevisionRecord, SessionAgentBinding};
+use autonoetic_types::agent_revision::{
+    parse_agent_target, AgentRef, AgentRevisionRecord, ParsedAgentTarget, SessionAgentBinding,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -236,7 +238,11 @@ impl AgentRepository {
             anyhow::bail!("GatewayStore is required for revision-based resolution");
         };
 
-        if target.contains('@') {
+        match parse_agent_target(target) {
+            Some(ParsedAgentTarget::ExplicitRef {
+                agent_id: agent_id_part,
+                revision_selector: rev_part,
+            }) => {
             // Try strict agent_ref parsing first (full hex format)
             if let Some(agent_ref) = AgentRef::parse(target) {
                 let rev = match gateway_store.get_agent_revision(&agent_ref.revision_id)? {
@@ -256,12 +262,6 @@ impl AgentRepository {
             }
 
             // Try short ID resolution: target is like "agent_id@rev_abc12345"
-            let at_pos = target
-                .find('@')
-                .ok_or_else(|| anyhow::anyhow!("Invalid target '{}': must contain '@'", target))?;
-            let agent_id_part = &target[..at_pos];
-            let rev_part = &target[at_pos + 1..];
-
             // Check if rev_part looks like a short ID (rev_<alphanumeric>)
             if rev_part.starts_with("rev_") && rev_part.len() > 4 {
                 let short_id = &rev_part[4..]; // strip "rev_" prefix
@@ -292,29 +292,34 @@ impl AgentRepository {
                 "Invalid agent_ref '{}': must be in format 'agent_id@rev_sha256:<64 hex chars>' or 'agent_id@rev_<short_id>' with a registered short ID",
                 target
             );
+            }
+            Some(ParsedAgentTarget::AliasId(alias_id)) => {
+                // Plain agent_id — resolve via alias
+                let alias = match gateway_store.resolve_alias(&alias_id)? {
+                    Some(a) => a,
+                    None => anyhow::bail!(
+                        "No alias '{}' found. Create a revision and promote it first.",
+                        alias_id
+                    ),
+                };
+
+                let rev = match gateway_store.get_agent_revision(&alias.revision_id)? {
+                    Some(r) => r,
+                    None => anyhow::bail!(
+                        "Revision '{}' referenced by alias '{}' not found",
+                        alias.revision_id,
+                        alias_id
+                    ),
+                };
+
+                let agent_ref = AgentRef::new(alias.agent_id.clone(), alias.revision_id.clone());
+                Ok((agent_ref, rev))
+            }
+            None => anyhow::bail!(
+                "Invalid target '{}': expected '<agent_id>' or '<agent_id>@<revision>'",
+                target
+            ),
         }
-
-        // Plain agent_id — resolve via alias
-        let alias_id = target; // MVP: alias_id defaults to agent_id
-        let alias = match gateway_store.resolve_alias(alias_id)? {
-            Some(a) => a,
-            None => anyhow::bail!(
-                "No alias '{}' found. Create a revision and promote it first.",
-                alias_id
-            ),
-        };
-
-        let rev = match gateway_store.get_agent_revision(&alias.revision_id)? {
-            Some(r) => r,
-            None => anyhow::bail!(
-                "Revision '{}' referenced by alias '{}' not found",
-                alias.revision_id,
-                alias_id
-            ),
-        };
-
-        let agent_ref = AgentRef::new(alias.agent_id.clone(), alias.revision_id.clone());
-        Ok((agent_ref, rev))
     }
 
     /// Resolve and pin a session to an agent revision.
@@ -348,11 +353,10 @@ impl AgentRepository {
 
         let (agent_ref, rev) = self.resolve_agent(target, gateway_store)?;
 
-        // Determine alias_id: explicit refs (full or short) bypass aliases.
-        let alias_id = if target.contains('@') {
-            None // explicit ref, no alias involved
-        } else {
-            Some(target.to_string())
+        // Determine alias_id from shared target parsing: explicit refs bypass aliases.
+        let alias_id = match parse_agent_target(target) {
+            Some(ParsedAgentTarget::AliasId(alias_id)) => Some(alias_id),
+            Some(ParsedAgentTarget::ExplicitRef { .. }) | None => None,
         };
 
         let binding = SessionAgentBinding {
