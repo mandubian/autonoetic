@@ -2674,6 +2674,11 @@ fn mint_artifact_ref_id() -> String {
     )
 }
 
+fn mint_hashed_id(prefix: &str, entropy: &str) -> String {
+    let digest_hex = hex::encode(Sha256::digest(entropy.as_bytes()));
+    format!("{}{}", prefix, &digest_hex[..12])
+}
+
 // ---------------------------------------------------------------------------
 // Artifact Build Tool
 // ---------------------------------------------------------------------------
@@ -7983,14 +7988,14 @@ impl NativeTool for AgentRevisionPromoteTool {
             );
         }
 
-        let promotion_id = format!(
-            "prom-{}",
-            &hex::encode(Sha256::digest(format!(
+        let promotion_id = mint_hashed_id(
+            "prom-",
+            &format!(
                 "{}-{}-{}",
                 args.agent_id,
                 args.revision_id,
                 chrono::Utc::now().to_rfc3339()
-            )))[..8]
+            ),
         );
 
         let previous_revision_id = gateway_store.atomic_promote(
@@ -8134,14 +8139,14 @@ impl NativeTool for AgentRevisionRollbackTool {
             .get_agent_revision(&target_revision_id)?
             .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", target_revision_id))?;
 
-        let promotion_id = format!(
-            "roll-{}",
-            &hex::encode(Sha256::digest(format!(
+        let promotion_id = mint_hashed_id(
+            "prom-",
+            &format!(
                 "{}-{}-{}",
                 args.agent_id,
                 target_revision_id,
                 chrono::Utc::now().to_rfc3339()
-            )))[..8]
+            ),
         );
 
         let previous_revision_id = gateway_store.atomic_rollback(
@@ -8420,13 +8425,9 @@ impl NativeTool for EvalSuitePublishTool {
 
         validate_suite_spec(&args.spec)?;
 
-        let suite_id = format!(
-            "suite-{}",
-            &hex::encode(Sha256::digest(format!(
-                "{}-{}",
-                args.name,
-                chrono::Utc::now().to_rfc3339()
-            )))[..8]
+        let suite_id = mint_hashed_id(
+            "suite-",
+            &format!("{}-{}", args.name, chrono::Utc::now().to_rfc3339()),
         );
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -8561,14 +8562,14 @@ fn enqueue_eval_run(
     baseline_revision_id: Option<String>,
     origin_node_id: &str,
 ) -> anyhow::Result<autonoetic_types::evaluation::EvalRunRecord> {
-    let eval_run_id = format!(
-        "eval-{}",
-        &hex::encode(Sha256::digest(format!(
+    let eval_run_id = mint_hashed_id(
+        "eval-",
+        &format!(
             "{}-{}-{}",
             suite_id,
             subject_revision_id,
             chrono::Utc::now().to_rfc3339()
-        )))[..8]
+        ),
     );
     let now = chrono::Utc::now().to_rfc3339();
     let run = autonoetic_types::evaluation::EvalRunRecord {

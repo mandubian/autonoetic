@@ -105,7 +105,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 - [x] Add types for `AgentRef`, revision status, alias record, session binding, and promotion record.
 - [x] Ensure `SessionAgentBinding` stores `requested_target` and nullable `alias_id`.
-- [ ] Reserve stable ID formats exactly as defined in the spec.
+- [x] Reserve stable ID formats exactly as defined in the spec.
 - [x] Document and enforce MVP revision status semantics for `candidate`, `ready`, `rejected`, and `archived`.
 
 ### P1-T02 Gateway schema migration

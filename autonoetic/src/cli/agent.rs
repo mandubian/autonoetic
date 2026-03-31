@@ -854,7 +854,10 @@ pub fn handle_agent_seed(
 
     let promotion_id = promotion_id
         .map(|id| id.to_string())
-        .unwrap_or_else(|| format!("prom_seed_{}", uuid::Uuid::new_v4().simple()));
+        .unwrap_or_else(|| {
+            let entropy = uuid::Uuid::new_v4().simple().to_string();
+            format!("prom-{}", &entropy[..12])
+        });
 
     let previous_revision_id = store.atomic_promote(
         agent_id,
