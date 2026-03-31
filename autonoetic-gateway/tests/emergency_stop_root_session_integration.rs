@@ -16,7 +16,7 @@ use autonoetic_types::background::{
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use chrono::Utc;
 use std::sync::Arc;
-use support::TestWorkspace;
+use support::{seed_agent_revision, TestWorkspace};
 
 fn write_planner_agent(agents_dir: &std::path::Path) -> anyhow::Result<()> {
     let agent_dir = agents_dir.join("planner.default");
@@ -605,6 +605,11 @@ async fn emergency_stop_authorization_matrix() -> anyhow::Result<()> {
         config.clone(),
         Some(store.clone()),
     ));
+
+    // Seed all agents through the GatewayStore
+    seed_agent_revision(&store, &config, "emergency-manager.default", &workspace.agents_dir.join("emergency-manager.default"))?;
+    seed_agent_revision(&store, &config, "regular-agent.default", &workspace.agents_dir.join("regular-agent.default"))?;
+    seed_agent_revision(&store, &config, "planner.default", &workspace.agents_dir.join("planner.default"))?;
 
     // --- Set up a minimal workflow so emergency_stop can proceed ---
     let root_session = "root-2c-auth";

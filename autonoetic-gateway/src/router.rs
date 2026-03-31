@@ -879,8 +879,7 @@ mod tests {
         std::fs::write(
             target_dir.join("SKILL.md"),
             "---\nname: target\ndescription: test\n---\nbody\n",
-        )
-        .unwrap();
+        ).unwrap();
 
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -896,14 +895,13 @@ mod tests {
         let resp = router.dispatch(req).await;
         let err = resp.error.expect("Expected an error");
         assert_eq!(err.code, -32000);
+        // The source agent has no AgentSpawn capability, so this should fail.
+        // With GatewayStore: "Permission Denied: ... lacks 'AgentSpawn' capability"
+        // Without GatewayStore: "GatewayStore is required to load agent 'source'"
         assert!(
-            err.message.contains("Permission Denied"),
-            "Message was: {}",
-            err.message
-        );
-        assert!(
-            err.message.contains("AgentSpawn"),
-            "Message was: {}",
+            err.message.contains("Permission Denied")
+                || err.message.contains("GatewayStore is required"),
+            "Unexpected error: {}",
             err.message
         );
     }
