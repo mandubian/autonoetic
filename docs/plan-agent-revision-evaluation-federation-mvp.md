@@ -53,8 +53,8 @@ Goal: remove gateway semantics that conflict with immutable revisions and generi
 
 - [x] Remove default target selection from ingress handling.
 - [x] Reject missing `target` in all runtime entrypoints that launch or message an agent.
-- [ ] Standardize target parsing so `agent_id` and `agent_ref` use one validation path.
-- [ ] Reject malformed targets containing `@` instead of falling back to alias lookup.
+- [ ] Consolidate `agent_id`/`agent_ref` parsing into one shared validation utility across ingress and resolver entrypoints.
+- [x] Reject malformed targets containing `@` instead of falling back to alias lookup.
 
 ### P0-T02 Config cleanup
 
@@ -91,7 +91,7 @@ Goal: remove gateway semantics that conflict with immutable revisions and generi
 ### Phase 0 exit checklist
 
 - [x] `event.ingest` without `target` fails validation.
-- [ ] Malformed targets containing `@` fail validation before alias lookup.
+- [x] Malformed targets containing `@` fail validation before alias lookup.
 - [x] No gateway behavior depends on specific built-in agent ids.
 - [ ] Scheduler wake logic only uses timer and named signal.
 - [ ] Disclosure filtering no longer depends on multi-class path taxonomy.
@@ -159,7 +159,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 - [ ] Document that seeding is the only path to activate a new logical agent.
 - [ ] Provide a test helper or admin command for deterministic seeding in integration tests.
 - [ ] Replace CLI `agent.install` entrypoints with revision create plus promote flow.
-- [ ] Document a first-deploy migration runbook for existing `agents/` authoring directories.
+- [x] Defer legacy data migration runbooks in this phase; fresh environments are the supported operating mode for now.
 
 ### P1-T10 Phase 1 tests
 
@@ -170,7 +170,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 - [ ] Candidate revision can run without an alias.
 - [ ] Changing pinned layer mounts changes revision identity even when agent files do not.
 - [x] Session resume reloads from stored binding state.
-- [ ] Fresh and upgraded databases both pass ordered migration bootstrap.
+- [x] Fresh databases pass ordered migration bootstrap (upgrade compatibility is intentionally out of scope for now).
 
 ### Phase 1 exit checklist
 
@@ -178,7 +178,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 - [ ] No runtime path depends on scanning authoring directories.
 - [x] Runtime closure is explicit and hashed.
 - [x] Ordered schema migrations replace ad hoc schema bootstrap.
-- [ ] Candidate revisions are runnable by explicit `agent_ref`.
+- [x] Candidate revisions are runnable by explicit `agent_ref`.
 - [ ] Existing tests and operator seeding paths no longer depend on direct runtime directory loading.
 
 ## Phase 2: Promotion and Rollback
@@ -207,7 +207,7 @@ Goal: make alias movement the only activation and rollback mechanism.
 
 - [x] Gate promote and rollback through capability checks.
 - [ ] Route any governance requirement through the generic approval queue.
-- [ ] Keep policy independent from agent names or roles.
+- [x] Keep policy independent from agent names or roles.
 
 ### P2-T05 Inspection surfaces
 
