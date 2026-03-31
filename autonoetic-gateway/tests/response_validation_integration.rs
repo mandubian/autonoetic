@@ -2,9 +2,10 @@
 
 mod support;
 
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::GatewayExecutionService;
 use std::sync::{Arc, Mutex};
-use support::{EnvGuard, OpenAiStub, TestWorkspace};
+use support::{seed_agent_revision, EnvGuard, OpenAiStub, TestWorkspace};
 
 fn install_validation_agent(
     agent_dir: &std::path::Path,
@@ -46,6 +47,23 @@ You are a validation test agent. Produce the requested output.
     Ok(dir)
 }
 
+fn setup_store_and_seed(
+    config: &autonoetic_types::config::GatewayConfig,
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+) -> anyhow::Result<Arc<GatewayStore>> {
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(
+        &store,
+        config,
+        agent_id,
+        &agents_dir.join(agent_id),
+    )?;
+    Ok(store)
+}
+
 #[serial_test::serial]
 #[tokio::test]
 async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<()> {
@@ -53,12 +71,9 @@ async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<(
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "valid.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "valid.agent")?;
 
-    // LLM returns a simple reply
     let call_count = Arc::new(Mutex::new(0usize));
     let cc = call_count.clone();
     let stub = OpenAiStub::spawn(move |_raw, _body| {
@@ -76,9 +91,8 @@ async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<(
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
-    // No response_contract in metadata — validation should be skipped (pass trivially)
     let result = execution
         .spawn_agent_once(
             "valid.agent",
@@ -101,14 +115,11 @@ async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<(
 #[tokio::test]
 async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
-    // Default config has response_validation.enabled = false
     let config = workspace.gateway_config();
     assert!(!config.response_validation.enabled);
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "noval.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "noval.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
         serde_json::json!({
@@ -120,9 +131,8 @@ async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> 
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
-    // With validation disabled, even a metadata contract should not be enforced
     let metadata = serde_json::json!({
         "response_contract": {
             "required_artifacts": ["missing.md"],
@@ -155,10 +165,8 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "missing.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "missing.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
         serde_json::json!({
@@ -170,7 +178,7 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
     let metadata = serde_json::json!({
         "response_contract": {
@@ -222,10 +230,8 @@ async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<(
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "leak.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "leak.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
         serde_json::json!({
@@ -237,7 +243,7 @@ async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<(
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
     let metadata = serde_json::json!({
         "response_contract": {
@@ -279,10 +285,8 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "schema.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "schema.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
         serde_json::json!({
@@ -294,7 +298,7 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
     let metadata = serde_json::json!({
         "response_contract": {
@@ -344,12 +348,9 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "evidence.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "evidence.agent")?;
 
-    // Agent returns plain text and does not invoke artifact.build.
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
         serde_json::json!({
             "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
@@ -360,9 +361,7 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    // No GatewayStore passed to execution service in this test harness, so
-    // evidence verification should fail explicitly instead of silently passing.
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
     let metadata = serde_json::json!({
         "response_contract": {
@@ -393,8 +392,8 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
         msg
     );
     assert!(
-        msg.contains("gateway store unavailable"),
-        "error should explain evidence source was unavailable, got: {}",
+        msg.contains("artifact.build"),
+        "error should explain that artifact.build calls were insufficient, got: {}",
         msg
     );
 
@@ -408,16 +407,8 @@ async fn test_response_validation_skipped_on_suspended_session() -> anyhow::Resu
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "suspend.agent")?;
-
-    // This test verifies that validation is NOT run when the session suspends
-    // for approval. We use a trivial spawn that completes normally (since testing
-    // actual suspension requires approval flow setup). The important assertion
-    // is that suspended_for_approval=None means validation IS applied, and
-    // the code path skips validation when suspended_for_approval=Some.
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "suspend.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
         serde_json::json!({
@@ -429,9 +420,8 @@ async fn test_response_validation_skipped_on_suspended_session() -> anyhow::Resu
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
-    // No contract — should pass
     let result = execution
         .spawn_agent_once(
             "suspend.agent",
@@ -459,10 +449,8 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
     config.response_validation.enabled = true;
     config.response_validation.repair_enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "repair.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "repair.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
         serde_json::json!({
@@ -474,7 +462,7 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
     let metadata = serde_json::json!({
         "response_contract": {
@@ -501,8 +489,6 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
 
     let msg = err.to_string();
 
-    // When repair is enabled, the error includes session context even when max_loops=1
-    // (no actual repair rounds attempted, but session_id is surfaced for external recovery).
     assert!(
         msg.contains("sess-repair-1"),
         "error should include session_id for re-spawn, got: {}",
@@ -527,9 +513,6 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
     Ok(())
 }
 
-/// Test that the repair loop is actually entered: the agent fails the first time, then
-/// (on the second invocation via checkpoint respawn) still fails, and we get max_loops
-/// exhausted with session context in the error.  The LLM call count confirms two rounds.
 #[serial_test::serial]
 #[tokio::test]
 async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> anyhow::Result<()> {
@@ -538,12 +521,9 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
     config.response_validation.enabled = true;
     config.response_validation.repair_enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "exhaust.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "exhaust.agent")?;
 
-    // Both LLM calls return a reply that still violates the contract (no artifact produced).
     let call_count = Arc::new(Mutex::new(0usize));
     let cc = call_count.clone();
     let stub = OpenAiStub::spawn(move |_raw, _body| {
@@ -561,9 +541,8 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
+    let execution = GatewayExecutionService::new(config, Some(store));
 
-    // max_loops=2 → 1 initial run + 1 repair attempt.
     let metadata = serde_json::json!({
         "response_contract": {
             "required_artifacts": ["output.md"],
@@ -604,7 +583,6 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
         msg
     );
 
-    // The LLM was called at least twice: once for the initial run and once for the repair turn.
     let calls = *call_count.lock().unwrap();
     assert!(
         calls >= 2,
@@ -615,8 +593,6 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
     Ok(())
 }
 
-/// Critical test: agent receives validation feedback, fixes the issue, and passes on the retry.
-/// Demonstrates the complete repair loop success path.
 #[serial_test::serial]
 #[tokio::test]
 async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
@@ -625,13 +601,9 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
     config.response_validation.enabled = true;
     config.response_validation.repair_enabled = true;
 
-    let gateway_dir = workspace.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-
     install_validation_agent(&workspace.agents_dir, "fixer.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "fixer.agent")?;
 
-    // First LLM call: agent forgets to produce artifact
-    // Second LLM call (during repair): agent reads the repair feedback and produces the artifact
     let call_count = Arc::new(Mutex::new(0usize));
     let cc = call_count.clone();
     let stub = OpenAiStub::spawn(move |_raw, body_json| {
@@ -640,14 +612,10 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
             let mut n = cc.lock().unwrap();
             *n += 1;
 
-            // Detect if this is the repair turn by checking if repair prompt is in the request
             let body_str = body_json.to_string();
             let is_repair_turn = body_str.contains("GATEWAY_VALIDATION");
 
             if is_repair_turn {
-                // Second turn: agent receives repair feedback and produces the artifact
-                // We need to simulate the agent calling content.write and artifact.build
-                // For this test, the agent returns a reply indicating completion
                 serde_json::json!({
                     "choices": [{
                         "message": {
@@ -658,7 +626,6 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
                     "usage": {"prompt_tokens": 150, "completion_tokens": 10}
                 })
             } else {
-                // First turn: agent does not produce artifact (violates contract)
                 serde_json::json!({
                     "choices": [{
                         "message": {
@@ -675,13 +642,7 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, None);
-
-    // For this test to work, we need the agent to actually write an artifact on the second turn.
-    // Since we're using a mock LLM, we need to trick the system into thinking an artifact exists.
-    // The validation checks for artifacts in SpawnResult.artifacts, so we need to modify the agent
-    // setup or the test to inject an artifact. For now, let's create a simpler test that at least
-    // proves the repair loop runs and the agent sees the repair message.
+    let execution = GatewayExecutionService::new(config, Some(store));
 
     let metadata = serde_json::json!({
         "response_contract": {
@@ -691,7 +652,6 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
         }
     });
 
-    // This should fail initially (agent doesn't produce artifact)
     let result = execution
         .spawn_agent_once(
             "fixer.agent",
@@ -706,7 +666,6 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
         )
         .await;
 
-    // Check that repair was actually attempted (at least 2 LLM calls)
     let calls = *call_count.lock().unwrap();
     assert!(
         calls >= 2,
@@ -714,8 +673,6 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
         calls
     );
 
-    // The result will still fail since our mock doesn't actually create artifacts,
-    // but we've proven that the repair loop ran (LLM was called at least twice with different prompts)
     assert!(
         result.is_err(),
         "result should be Err since artifact isn't really created"

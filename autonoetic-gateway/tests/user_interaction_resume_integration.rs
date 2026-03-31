@@ -9,7 +9,7 @@ use autonoetic_gateway::runtime::checkpoint::{load_latest_checkpoint, YieldReaso
 use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::{UserInteractionAnswer, UserInteractionStatus};
-use support::{EnvGuard, OpenAiStub, TestWorkspace};
+use support::{seed_agent_revision, EnvGuard, OpenAiStub, TestWorkspace};
 
 const LLM_BASE_URL_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_ENV: &str = "AUTONOETIC_LLM_API_KEY";
@@ -89,6 +89,14 @@ async fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> 
     let agent_id = "ask-agent-2b9";
     install_ask_agent(&workspace.agents_dir, agent_id)?;
 
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(
+        &store,
+        &config,
+        agent_id,
+        &workspace.agents_dir.join(agent_id),
+    )?;
+
     let ask_args = serde_json::json!({
         "question": "Ready to proceed?",
         "kind": "clarification",
@@ -121,7 +129,6 @@ async fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> 
     let _base = EnvGuard::set(LLM_BASE_URL_ENV, stub.completion_url());
     let _key = EnvGuard::set(LLM_API_KEY_ENV, "test-key");
 
-    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let execution = Arc::new(GatewayExecutionService::new(
         config.clone(),
         Some(store.clone()),
@@ -257,6 +264,12 @@ async fn test_user_ask_resume_option_selected_value() -> anyhow::Result<()> {
     let _key = EnvGuard::set(LLM_API_KEY_ENV, "test-key");
 
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(
+        &store,
+        &config,
+        agent_id,
+        &workspace.agents_dir.join(agent_id),
+    )?;
     let execution = Arc::new(GatewayExecutionService::new(
         config.clone(),
         Some(store.clone()),
@@ -353,6 +366,12 @@ async fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
     let _key = EnvGuard::set(LLM_API_KEY_ENV, "test-key");
 
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(
+        &store,
+        &config,
+        agent_id,
+        &workspace.agents_dir.join(agent_id),
+    )?;
     let execution = Arc::new(GatewayExecutionService::new(
         config.clone(),
         Some(store.clone()),
