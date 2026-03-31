@@ -52,12 +52,13 @@ impl ArtifactStore {
         })
     }
 
-    /// Computes a deterministic artifact ID from sorted inputs and entrypoints and layers.
-    /// Same inputs + entrypoints + layers always produce the same artifact ID.
+    /// Computes a deterministic artifact ID from sorted inputs, entrypoints, and
+    /// full layer mount identity.
+    /// Same inputs + entrypoints + layer mounts always produce the same artifact ID.
     fn compute_deterministic_artifact_id(
         file_handles: &[String],
         entrypoints: Option<&[String]>,
-        layer_digests: &[String],
+        layers: &[ArtifactLayer],
     ) -> String {
         let mut hasher = Sha256::new();
 
@@ -79,10 +80,26 @@ impl ArtifactStore {
             }
         }
 
-        // Sort layer digests for determinism
-        let mut sorted_layers = layer_digests.to_vec();
+        // Sort full layer identity for determinism (digest + mount shape matters).
+        let mut sorted_layers: Vec<(String, String, String, String)> = layers
+            .iter()
+            .map(|l| {
+                (
+                    l.layer_id.clone(),
+                    l.name.clone(),
+                    l.mount_path.clone(),
+                    l.digest.clone(),
+                )
+            })
+            .collect();
         sorted_layers.sort();
-        for digest in sorted_layers {
+        for (layer_id, name, mount_path, digest) in sorted_layers {
+            hasher.update(layer_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(name.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(mount_path.as_bytes());
+            hasher.update(b"\0");
             hasher.update(digest.as_bytes());
             hasher.update(b"\0");
         }
@@ -122,13 +139,17 @@ impl ArtifactStore {
         Ok(Self::compute_digest(&bundle_json))
     }
 
-    /// Sorted (name, handle) pairs, sorted entrypoints, and sorted layer digests
+    /// Sorted (name, handle) pairs, sorted entrypoints, and sorted full layer identity
     /// for identity checks on dedup.
     fn normalized_artifact_identity(
         files: &[ArtifactFileEntry],
         entrypoints: &[String],
         layers: &[ArtifactLayer],
-    ) -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
+    ) -> (
+        Vec<(String, String)>,
+        Vec<String>,
+        Vec<(String, String, String, String)>,
+    ) {
         let mut pairs: Vec<(String, String)> = files
             .iter()
             .map(|f| (f.name.clone(), f.handle.clone()))
@@ -136,9 +157,19 @@ impl ArtifactStore {
         pairs.sort();
         let mut eps = entrypoints.to_vec();
         eps.sort();
-        let mut layer_digests: Vec<String> = layers.iter().map(|l| l.digest.clone()).collect();
-        layer_digests.sort();
-        (pairs, eps, layer_digests)
+        let mut layer_identity: Vec<(String, String, String, String)> = layers
+            .iter()
+            .map(|l| {
+                (
+                    l.layer_id.clone(),
+                    l.name.clone(),
+                    l.mount_path.clone(),
+                    l.digest.clone(),
+                )
+            })
+            .collect();
+        layer_identity.sort();
+        (pairs, eps, layer_identity)
     }
 
     /// Loads the artifact index from disk.
@@ -241,17 +272,23 @@ impl ArtifactStore {
         let layers_vec: Vec<ArtifactLayer> = layers
             .map(|l| {
                 let mut l = l.to_vec();
-                l.sort_by_key(|layer| layer.layer_id.clone());
+                l.sort_by(|a, b| {
+                    (&a.mount_path, &a.layer_id, &a.digest, &a.name).cmp(&(
+                        &b.mount_path,
+                        &b.layer_id,
+                        &b.digest,
+                        &b.name,
+                    ))
+                });
                 l
             })
             .unwrap_or_default();
-        let layer_digests: Vec<String> = layers_vec.iter().map(|l| l.digest.clone()).collect();
 
         // Phase 2: Compute deterministic artifact ID from handles + entrypoints + layers
         let artifact_id = Self::compute_deterministic_artifact_id(
             &file_handles,
             Some(ep.as_slice()),
-            &layer_digests,
+            &layers_vec,
         );
 
         // Phase 3: Check if artifact already exists (deduplication)
