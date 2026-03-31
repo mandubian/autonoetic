@@ -855,8 +855,14 @@ pub fn handle_agent_seed(
     let promotion_id = promotion_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| {
-            let entropy = uuid::Uuid::new_v4().simple().to_string();
-            format!("prom-{}", &entropy[..12])
+            let now_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            autonoetic_types::id_format::mint_hashed_prefixed_id(
+                "prom-",
+                &format!("{}-{}-{}", agent_id, revision_id, now_nanos),
+            )
         });
 
     let previous_revision_id = store.atomic_promote(

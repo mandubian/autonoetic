@@ -2674,11 +2674,6 @@ fn mint_artifact_ref_id() -> String {
     )
 }
 
-fn mint_hashed_id(prefix: &str, entropy: &str) -> String {
-    let digest_hex = hex::encode(Sha256::digest(entropy.as_bytes()));
-    format!("{}{}", prefix, &digest_hex[..12])
-}
-
 // ---------------------------------------------------------------------------
 // Artifact Build Tool
 // ---------------------------------------------------------------------------
@@ -7977,7 +7972,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             );
         }
 
-        let promotion_id = mint_hashed_id(
+        let promotion_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
             "prom-",
             &format!(
                 "{}-{}-{}",
@@ -8128,7 +8123,7 @@ impl NativeTool for AgentRevisionRollbackTool {
             .get_agent_revision(&target_revision_id)?
             .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", target_revision_id))?;
 
-        let promotion_id = mint_hashed_id(
+        let promotion_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
             "prom-",
             &format!(
                 "{}-{}-{}",
@@ -8414,7 +8409,7 @@ impl NativeTool for EvalSuitePublishTool {
 
         validate_suite_spec(&args.spec)?;
 
-        let suite_id = mint_hashed_id(
+        let suite_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
             "suite-",
             &format!("{}-{}", args.name, chrono::Utc::now().to_rfc3339()),
         );
@@ -8551,7 +8546,7 @@ fn enqueue_eval_run(
     baseline_revision_id: Option<String>,
     origin_node_id: &str,
 ) -> anyhow::Result<autonoetic_types::evaluation::EvalRunRecord> {
-    let eval_run_id = mint_hashed_id(
+    let eval_run_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
         "eval-",
         &format!(
             "{}-{}-{}",
