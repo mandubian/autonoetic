@@ -328,31 +328,31 @@ Goal: make single-gateway behavior forward-compatible with exchange and import.
 
 - [x] Ensure revision, promotion, eval suite, and eval run records all carry `origin_node_id`.
 - [x] Ensure imported objects carry `trust_domain`, `source_kind`, and `source_ref`.
-- [ ] Keep provenance mandatory rather than inferred.
+- [x] Keep provenance mandatory rather than inferred.
 
 ### P4-T02 Capsule closure model
 
-- [ ] Define future capsule manifest fields for `agent_ref` and pinned runtime closure.
-- [ ] Reserve `included_layers` for hermetic export.
-- [ ] Ensure capsule planning uses revision identity rather than directory naming.
+- [x] Define future capsule manifest fields for `agent_ref` and pinned runtime closure.
+- [x] Reserve `included_layers` for hermetic export.
+- [x] Ensure capsule planning uses revision identity rather than directory naming.
 
 ### P4-T03 Import semantics
 
-- [ ] Define candidate status for imported foreign revisions.
-- [ ] Define trust-domain handling for imported revisions and eval artifacts.
-- [ ] Define that import never auto-promotes a foreign object.
+- [x] Define candidate status for imported foreign revisions.
+- [x] Define trust-domain handling for imported revisions and eval artifacts.
+- [x] Define that import never auto-promotes a foreign object.
 
 ### P4-T04 Round-trip validation
 
-- [ ] Serialize and deserialize provenance-bearing records without loss.
-- [ ] Preserve provenance through export planning and import parsing.
-- [ ] Verify foreign revisions remain distinguishable from local revisions.
+- [x] Serialize and deserialize provenance-bearing records without loss.
+- [x] Preserve provenance through export planning and import parsing.
+- [x] Verify foreign revisions remain distinguishable from local revisions.
 
 ### Phase 4 exit checklist
 
-- [ ] Every durable record needed for future exchange has provenance.
-- [ ] Capsule and import planning refer to revision identity plus runtime closure.
-- [ ] No imported object is treated as implicitly trusted or active.
+- [x] Every durable record needed for future exchange has provenance.
+- [x] Capsule and import planning refer to revision identity plus runtime closure.
+- [x] No imported object is treated as implicitly trusted or active.
 
 ## Post-MVP Follow-ons from Archived Backlog
 

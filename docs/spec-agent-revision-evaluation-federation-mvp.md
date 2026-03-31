@@ -1115,6 +1115,21 @@ Outcome:
 - every revision, promotion, and eval carries durable provenance;
 - export and import concepts preserve revision identity plus runtime closure.
 
+Phase-4 contract details:
+
+- Provenance is mandatory on durable records; it is never inferred from directory layout or local defaults at read time.
+- Future capsule manifests reserve explicit fields for:
+  - `agent_ref` (full immutable identity),
+  - pinned runtime closure identity (`runtime_lock_hash`),
+  - `included_layers` (reserved for hermetic export planning).
+- Capsule planning keys on immutable revision identity and pinned closure, not mutable directory names.
+- Imported foreign revisions are created in `candidate` lifecycle status by default.
+- Imported revisions and eval artifacts must carry explicit `trust_domain` (`partner`, `foreign`, `untrusted`) plus original `source_kind`/`source_ref`.
+- Import never auto-promotes aliases; activation is always an explicit later alias move.
+- Serialization and deserialization of provenance-bearing records must round-trip without lossy field drops.
+- Export planning and import parsing preserve provenance fields end-to-end.
+- Foreign objects remain distinguishable from local objects through `origin_node_id` + `trust_domain` + source metadata.
+
 ## 18. Testing Plan
 
 Minimum test coverage required:
