@@ -2,10 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::cli::common::AgentAliasCommands;
+use crate::cli::common::{AgentAliasCommands, AgentRevisionCommands};
 use autonoetic_gateway::llm::Message;
+use autonoetic_gateway::policy::PolicyEngine;
+use autonoetic_gateway::runtime::tools::NativeTool;
 use autonoetic_types::agent::LlmExchangeUsage;
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
 use autonoetic_types::agent_revision::PromotionKind;
+use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -487,6 +491,130 @@ pub async fn handle_agent_list(config_path: &Path) -> anyhow::Result<()> {
         println!("{:<30} {}", "AGENT ID", "DIRECTORY");
         for a in &agents {
             println!("{:<30} {}", a.id, a.dir.display());
+        }
+    }
+    Ok(())
+}
+
+fn admin_revision_manifest() -> AgentManifest {
+    AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "cli.admin".to_string(),
+            name: "CLI Admin".to_string(),
+            description: "CLI administrative operator".to_string(),
+        },
+        capabilities: vec![Capability::AgentRevision {
+            patterns: vec!["*".to_string()],
+        }],
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        response_contract: None,
+        execution_mode: ExecutionMode::Reasoning,
+        script_entry: None,
+        gateway_url: None,
+        gateway_token: None,
+    }
+}
+
+pub fn handle_agent_revision(
+    config_path: &Path,
+    command: &AgentRevisionCommands,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
+    );
+    let manifest = admin_revision_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+
+    match command {
+        AgentRevisionCommands::Create {
+            agent_id,
+            artifact_id,
+            base_revision_id,
+            summary,
+            json,
+        } => {
+            let args = serde_json::json!({
+                "agent_id": agent_id,
+                "artifact_id": artifact_id,
+                "base_revision_id": base_revision_id,
+                "summary": summary,
+            });
+            let tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateTool;
+            let output = tool.execute(
+                &manifest,
+                &policy,
+                Path::new("/tmp"),
+                Some(&gateway_dir),
+                &args.to_string(),
+                None,
+                None,
+                Some(&config),
+                Some(store.clone()),
+                None,
+            )?;
+            if *json {
+                println!("{}", output);
+            } else {
+                let parsed: serde_json::Value = serde_json::from_str(&output)?;
+                println!(
+                    "Created revision {} for {}",
+                    parsed["revision_id"].as_str().unwrap_or("<unknown>"),
+                    parsed["agent_id"].as_str().unwrap_or(agent_id)
+                );
+            }
+        }
+        AgentRevisionCommands::Promote {
+            agent_id,
+            revision_id,
+            reason,
+            required_eval_run_id,
+            json,
+        } => {
+            let args = serde_json::json!({
+                "agent_id": agent_id,
+                "revision_id": revision_id,
+                "reason": reason,
+                "required_eval_run_id": required_eval_run_id,
+            });
+            let tool = autonoetic_gateway::runtime::tools::AgentRevisionPromoteTool;
+            let output = tool.execute(
+                &manifest,
+                &policy,
+                Path::new("/tmp"),
+                Some(&gateway_dir),
+                &args.to_string(),
+                None,
+                None,
+                Some(&config),
+                Some(store.clone()),
+                None,
+            )?;
+            if *json {
+                println!("{}", output);
+            } else {
+                let parsed: serde_json::Value = serde_json::from_str(&output)?;
+                println!(
+                    "Promoted {} to {}",
+                    parsed["agent_id"].as_str().unwrap_or(agent_id),
+                    parsed["revision_id"].as_str().unwrap_or(revision_id)
+                );
+            }
         }
     }
     Ok(())
@@ -1312,7 +1440,10 @@ mod tests {
     use autonoetic_gateway::llm::{
         CompletionRequest, CompletionResponse, LlmDriver, StopReason, TokenUsage, ToolCall,
     };
+    use autonoetic_gateway::runtime::content_store::ContentStore;
     use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_types::artifact::ArtifactKind;
     use autonoetic_types::agent_revision::{
         AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus, PromotionKind, PromotionRecord,
     };
@@ -1771,5 +1902,115 @@ Use tools when needed.
             history.iter().any(|row| row.promotion_id == "prom_seed_test"),
             "expected deterministic promotion id in history"
         );
+    }
+
+    #[test]
+    fn test_revision_handlers_create_and_promote() {
+        let temp = tempdir().expect("tempdir should create");
+        let config_path = temp.path().join("config.yaml");
+        let agents_dir = temp.path().join("runtime_agents");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agents_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
+                agents_dir.display()
+            ),
+        )
+        .expect("config should write");
+
+        let config = autonoetic_gateway::config::load_config(&config_path).expect("config loads");
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should exist");
+        let content_store = ContentStore::new(&gateway_dir).expect("content store");
+        let artifact_store = ArtifactStore::new(&gateway_dir).expect("artifact store");
+        let session_id = "rev-handler-test";
+
+        let skill_md = r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "revision.handler"
+  name: "Revision Handler"
+  description: "Revision handler test"
+---
+# Revision Handler
+"#;
+        let runtime_lock = r#"gateway:
+  artifact: "gateway"
+  version: "0.1.0"
+  sha256: "sha256:gateway"
+sdk:
+  version: "0.1.0"
+sandbox:
+  backend: "bubblewrap"
+dependencies: []
+artifacts: []
+layers: []
+"#;
+        for (name, content) in [
+            ("SKILL.md", skill_md.as_bytes()),
+            ("runtime.lock", runtime_lock.as_bytes()),
+            ("main.py", b"print('hello')".as_ref()),
+        ] {
+            let handle = content_store.write(content).expect("write content");
+            content_store
+                .register_name(session_id, name, &handle)
+                .expect("register name");
+        }
+        let bundle = artifact_store
+            .build_with_kind(
+                &[
+                    "SKILL.md".to_string(),
+                    "runtime.lock".to_string(),
+                    "main.py".to_string(),
+                ],
+                Some(&["main.py".to_string()]),
+                None,
+                ArtifactKind::AgentBundle,
+                session_id,
+            )
+            .expect("build bundle");
+
+        handle_agent_revision(
+            &config_path,
+            &AgentRevisionCommands::Create {
+                agent_id: "revision.handler".to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                base_revision_id: None,
+                summary: Some("create revision".to_string()),
+                json: true,
+            },
+        )
+        .expect("revision create should succeed");
+
+        let store = GatewayStore::open(&gateway_dir).expect("gateway store opens");
+        let revisions = store
+            .list_agent_revisions("revision.handler")
+            .expect("list revisions");
+        assert_eq!(revisions.len(), 1);
+
+        handle_agent_revision(
+            &config_path,
+            &AgentRevisionCommands::Promote {
+                agent_id: "revision.handler".to_string(),
+                revision_id: revisions[0].revision_id.clone(),
+                reason: Some("activate".to_string()),
+                required_eval_run_id: None,
+                json: true,
+            },
+        )
+        .expect("revision promote should succeed");
+
+        let alias = store
+            .resolve_alias("revision.handler")
+            .expect("alias lookup")
+            .expect("alias should exist");
+        assert_eq!(alias.revision_id, revisions[0].revision_id);
     }
 }

@@ -267,6 +267,11 @@ pub enum AgentCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Revision-based lifecycle operations (create/promote)
+    Revision {
+        #[command(subcommand)]
+        command: AgentRevisionCommands,
+    },
     /// Inspect durable promote/rollback history
     PromotionHistory {
         /// Filter by logical agent ID
@@ -286,6 +291,42 @@ pub enum AgentCommands {
         /// Overwrite existing config file
         #[arg(long)]
         overwrite: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentRevisionCommands {
+    /// Create immutable revision from an AgentBundle artifact
+    Create {
+        /// Logical agent ID to create the revision for
+        agent_id: String,
+        /// Source artifact ID (must be kind=agent_bundle)
+        artifact_id: String,
+        /// Optional base revision ID/ref for lineage metadata
+        #[arg(long)]
+        base_revision_id: Option<String>,
+        /// Optional short summary
+        #[arg(long)]
+        summary: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote a revision to active alias target
+    Promote {
+        /// Logical agent ID / alias ID
+        agent_id: String,
+        /// Target revision ID
+        revision_id: String,
+        /// Optional reason in promotion history
+        #[arg(long)]
+        reason: Option<String>,
+        /// Optional eval run that must match the target revision
+        #[arg(long)]
+        required_eval_run_id: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
     },
 }
 
