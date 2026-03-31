@@ -216,6 +216,43 @@ Seed reference agent bundles into the runtime agents directory.
 autonoetic agent bootstrap [--from PATH] [--overwrite]
 ```
 
+### `autonoetic agent seed`
+
+Activate an alias by promoting a specific revision (admin/test seeding path).
+
+```bash
+autonoetic agent seed <agent_id> <revision_id> [--promotion-id <ID>] [--reason <TEXT>] [--json]
+```
+
+Notes:
+- This performs alias activation through the same promote transaction used by runtime promotion flows.
+- Use `--promotion-id` in integration tests when deterministic promotion lineage identifiers are required.
+- Activation is explicit: `artifact -> revision create -> promote` (or `agent seed` for controlled seeding).
+
+### `autonoetic agent alias list`
+
+List alias bindings and currently active revision targets.
+
+```bash
+autonoetic agent alias list [--agent-id <ID>] [--json]
+```
+
+### `autonoetic agent alias inspect`
+
+Inspect one alias and its active revision details.
+
+```bash
+autonoetic agent alias inspect <alias_id> [--json]
+```
+
+### `autonoetic agent promotion-history`
+
+Inspect durable promote/rollback history.
+
+```bash
+autonoetic agent promotion-history [--agent-id <ID>] [--json]
+```
+
 ---
 
 ## Chat Command
