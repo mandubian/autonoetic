@@ -83,21 +83,46 @@ async fn run_scheduler_tick_at(
 
     let config = execution.config();
     let repo = crate::agent::AgentRepository::from_config(&config);
-    let agent_metas = repo.list().await?;
+    let gateway_dir = crate::execution::gateway_root_dir(&config);
+    let mut loaded_agents: Vec<crate::agent::LoadedAgent> = Vec::new();
+
+    if let Some(gateway_store) = execution.gateway_store() {
+        let alias_rows = gateway_store.list_agent_aliases(None)?;
+        for alias in alias_rows {
+            let loaded = repo
+                .load_from_revision_dir(&gateway_dir, &alias.agent_id, &alias.revision_id)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to load agent '{}' from active alias revision '{}': {}",
+                        alias.agent_id,
+                        alias.revision_id,
+                        e
+                    )
+                })?;
+            loaded_agents.push(loaded);
+        }
+    }
+
+    if loaded_agents.is_empty() {
+        let agent_metas = repo.list().await?;
+        for agent_meta in agent_metas {
+            let loaded = repo.get_sync(&agent_meta.id).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load agent '{}': {}. Fix or remove the agent directory.",
+                    agent_meta.id,
+                    e
+                )
+            })?;
+            loaded_agents.push(loaded);
+        }
+    }
+
     let mut admitted = 0usize;
 
-    for agent_meta in agent_metas {
+    for loaded in loaded_agents {
         if admitted >= config.max_background_due_per_tick.max(1) {
             break;
         }
-
-        let loaded = repo.get_sync(&agent_meta.id).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to load agent '{}': {}. Fix or remove the agent directory.",
-                agent_meta.id,
-                e
-            )
-        })?;
 
         let Some(background) = loaded.manifest.background.clone() else {
             continue;

@@ -33,7 +33,7 @@ These invariants must hold after every phase:
 - [x] A session always runs from a pinned revision directory plus pinned runtime closure.
 - [ ] Alias movement is the only way to change default active behavior.
 - [x] Eval execution consumes the same global runtime permits as ordinary sessions.
-- [ ] Layer mounts are pinned in `runtime.lock`, not rediscovered dynamically.
+- [x] Layer mounts are pinned in `runtime.lock`, not rediscovered dynamically.
 - [x] Promotion never mutates revision bytes in place.
 
 ## Delivery Order
@@ -388,5 +388,5 @@ This section is intentionally classification, not delivery scope. Only work that
 - [x] A running session is fully determined by its stored binding.
 - [x] A candidate revision can be evaluated before activation.
 - [x] Alias movement is auditable and reversible.
-- [ ] Runtime closure includes pinned layer mounts.
+- [x] Runtime closure includes pinned layer mounts.
 - [x] Provenance is present for later federation work.
