@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::layer::ArtifactLayer;
 
 /// The kind of artifact stored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Binary,
@@ -70,6 +70,9 @@ pub struct ArtifactFileEntry {
 /// They are built from session content and are immutable once created.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactBundle {
+    /// Artifact semantic kind for downstream validation.
+    #[serde(default = "default_artifact_bundle_kind")]
+    pub kind: ArtifactKind,
     /// Short unique ID (e.g., "art_a1b2c3d4")
     pub artifact_id: String,
     /// Files included in the artifact
@@ -89,6 +92,10 @@ pub struct ArtifactBundle {
     /// True if this artifact was reused from an existing artifact with same inputs
     #[serde(default)]
     pub reused: bool,
+}
+
+fn default_artifact_bundle_kind() -> ArtifactKind {
+    ArtifactKind::Binary
 }
 
 // ---------------------------------------------------------------------------

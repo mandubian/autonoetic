@@ -14,7 +14,7 @@
 //! ```
 
 use crate::runtime::content_store::{root_session_id, ContentStore};
-use autonoetic_types::artifact::{ArtifactBundle, ArtifactFileEntry};
+use autonoetic_types::artifact::{ArtifactBundle, ArtifactFileEntry, ArtifactKind};
 use autonoetic_types::layer::ArtifactLayer;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -59,8 +59,12 @@ impl ArtifactStore {
         file_handles: &[String],
         entrypoints: Option<&[String]>,
         layers: &[ArtifactLayer],
+        kind: &ArtifactKind,
     ) -> String {
         let mut hasher = Sha256::new();
+        let kind_bytes = serde_json::to_string(kind).unwrap_or_else(|_| "\"binary\"".to_string());
+        hasher.update(kind_bytes.as_bytes());
+        hasher.update(b"\0");
 
         // Sort file handles for determinism
         let mut sorted_handles = file_handles.to_vec();
@@ -145,11 +149,14 @@ impl ArtifactStore {
         files: &[ArtifactFileEntry],
         entrypoints: &[String],
         layers: &[ArtifactLayer],
+        kind: &ArtifactKind,
     ) -> (
+        String,
         Vec<(String, String)>,
         Vec<String>,
         Vec<(String, String, String, String)>,
     ) {
+        let kind_id = serde_json::to_string(kind).unwrap_or_else(|_| "\"binary\"".to_string());
         let mut pairs: Vec<(String, String)> = files
             .iter()
             .map(|f| (f.name.clone(), f.handle.clone()))
@@ -169,7 +176,7 @@ impl ArtifactStore {
             })
             .collect();
         layer_identity.sort();
-        (pairs, eps, layer_identity)
+        (kind_id, pairs, eps, layer_identity)
     }
 
     /// Loads the artifact index from disk.
@@ -205,6 +212,23 @@ impl ArtifactStore {
         inputs: &[String],
         entrypoints: Option<&[String]>,
         layers: Option<&[ArtifactLayer]>,
+        builder_session_id: &str,
+    ) -> anyhow::Result<ArtifactBundle> {
+        self.build_with_kind(
+            inputs,
+            entrypoints,
+            layers,
+            ArtifactKind::Binary,
+            builder_session_id,
+        )
+    }
+
+    pub fn build_with_kind(
+        &self,
+        inputs: &[String],
+        entrypoints: Option<&[String]>,
+        layers: Option<&[ArtifactLayer]>,
+        kind: ArtifactKind,
         builder_session_id: &str,
     ) -> anyhow::Result<ArtifactBundle> {
         anyhow::ensure!(!inputs.is_empty(), "artifact inputs must not be empty");
@@ -289,19 +313,25 @@ impl ArtifactStore {
             &file_handles,
             Some(ep.as_slice()),
             &layers_vec,
+            &kind,
         );
 
         // Phase 3: Check if artifact already exists (deduplication)
         if self.artifact_exists(&artifact_id) {
             let existing_bundle = self.inspect(&artifact_id)?;
-            let (want_pairs, want_eps, want_layers) =
-                Self::normalized_artifact_identity(&files, &ep, &layers_vec);
-            let (got_pairs, got_eps, got_layers) = Self::normalized_artifact_identity(
+            let (want_kind, want_pairs, want_eps, want_layers) =
+                Self::normalized_artifact_identity(&files, &ep, &layers_vec, &kind);
+            let (got_kind, got_pairs, got_eps, got_layers) = Self::normalized_artifact_identity(
                 &existing_bundle.files,
                 &existing_bundle.entrypoints,
                 &existing_bundle.layers,
+                &existing_bundle.kind,
             );
-            if want_pairs != got_pairs || want_eps != got_eps || want_layers != got_layers {
+            if want_kind != got_kind
+                || want_pairs != got_pairs
+                || want_eps != got_eps
+                || want_layers != got_layers
+            {
                 anyhow::bail!(
                     "artifact id '{}' already exists but its manifest does not match the requested inputs (identity mismatch). Refusing reuse; remove or repair the on-disk artifact if it is corrupted.",
                     artifact_id
@@ -322,6 +352,7 @@ impl ArtifactStore {
         let created_at = chrono::Utc::now().to_rfc3339();
 
         let bundle = ArtifactBundle {
+            kind,
             artifact_id: artifact_id.clone(),
             files,
             layers: layers_vec,
