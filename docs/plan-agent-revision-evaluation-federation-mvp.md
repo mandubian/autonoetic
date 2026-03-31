@@ -132,7 +132,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 ### P1-T05 Revision materialization
 
 - [x] Materialize immutable revision directories under the revision store.
-- [ ] Write revision metadata and status in one transactional flow.
+- [x] Write revision metadata and status in one transactional flow.
 - [x] Ensure revision materialization is idempotent for the same content digest.
 
 ### P1-T06 Alias registry

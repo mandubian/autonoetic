@@ -2472,22 +2472,34 @@ impl GatewayStore {
     // --- Agent Revisions ---
 
     pub fn insert_agent_revision(&self, rev: &AgentRevisionRecord) -> Result<()> {
+        let _ = self.insert_agent_revision_transactional(rev)?;
+        Ok(())
+    }
+
+    pub fn insert_agent_revision_transactional(&self, rev: &AgentRevisionRecord) -> Result<String> {
         let metadata_json = serde_json::to_string(&rev.metadata_json)?;
-        // Compute collision-safe short ID BEFORE inserting (exclude current revision)
-        let existing: Vec<String> = self
-            .list_all_agent_revisions()?
-            .into_iter()
-            .filter(|r| r.revision_id != rev.revision_id)
-            .map(|r| r.revision_id)
-            .collect();
-        let short = autonoetic_types::agent_revision::short_id_unique(
-            &rev.revision_id,
-            existing.iter().map(|s| s.as_str()),
-            None,
-        );
-        {
-            let conn = self.conn.lock().unwrap();
-            conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let short = if rev.short_id.trim().is_empty() {
+            let mut stmt = tx.prepare(
+                "SELECT revision_id FROM agent_revisions WHERE revision_id != ?1",
+            )?;
+            let rows = stmt.query_map(params![&rev.revision_id], |row| row.get::<_, String>(0))?;
+            let mut existing = Vec::new();
+            for row in rows {
+                existing.push(row?);
+            }
+            autonoetic_types::agent_revision::short_id_unique(
+                &rev.revision_id,
+                existing.iter().map(|s| s.as_str()),
+                None,
+            )
+        } else {
+            rev.short_id.clone()
+        };
+
+        tx.execute(
                 "INSERT INTO agent_revisions (
                     revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
@@ -2510,13 +2522,18 @@ impl GatewayStore {
                     &rev.trust_domain,
                     &format!("{:?}", rev.status),
                     metadata_json,
-                    &rev.short_id,
+                    &short,
                 ],
             )?;
-        }
-        // Register short ID in the index
-        self.register_short_id(&rev.revision_id, &short)?;
-        Ok(())
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT OR IGNORE INTO short_id_index (short_id, revision_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![&short, &rev.revision_id, now],
+        )?;
+        tx.commit()?;
+
+        Ok(short)
     }
 
     pub fn get_agent_revision(&self, revision_id: &str) -> Result<Option<AgentRevisionRecord>> {
