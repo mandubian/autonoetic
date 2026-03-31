@@ -664,6 +664,59 @@ pub fn handle_agent_promotion_history(
     Ok(())
 }
 
+pub fn handle_agent_seed(
+    config_path: &Path,
+    agent_id: &str,
+    revision_id: &str,
+    promotion_id: Option<&str>,
+    reason: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!agent_id.trim().is_empty(), "agent_id must not be empty");
+    anyhow::ensure!(
+        !revision_id.trim().is_empty(),
+        "revision_id must not be empty"
+    );
+
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    let promotion_id = promotion_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| format!("prom_seed_{}", uuid::Uuid::new_v4().simple()));
+
+    let previous_revision_id = store.atomic_promote(
+        agent_id,
+        revision_id,
+        &promotion_id,
+        "human",
+        "cli.seed",
+        reason,
+        None,
+    )?;
+    let payload = serde_json::json!({
+        "ok": true,
+        "agent_id": agent_id,
+        "revision_id": revision_id,
+        "promotion_id": promotion_id,
+        "previous_revision_id": previous_revision_id,
+    });
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "Seeded alias '{}' to revision '{}' (promotion_id: {})",
+            agent_id, revision_id, payload["promotion_id"].as_str().unwrap_or("")
+        );
+        if let Some(prev) = payload["previous_revision_id"].as_str() {
+            println!("Previous revision: {}", prev);
+        }
+    }
+    Ok(())
+}
+
 pub fn handle_agent_bootstrap(
     config_path: &Path,
     from: Option<&str>,
@@ -1652,5 +1705,71 @@ Use tools when needed.
         .expect("alias inspect should succeed");
         handle_agent_promotion_history(&config_path, Some("planner.default"), true)
             .expect("promotion history should succeed");
+    }
+
+    #[test]
+    fn test_seed_handler_promotes_alias_to_target_revision() {
+        let temp = tempdir().expect("tempdir should create");
+        let config_path = temp.path().join("config.yaml");
+        let agents_dir = temp.path().join("runtime_agents");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agents_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
+                agents_dir.display()
+            ),
+        )
+        .expect("config should write");
+
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(
+            &autonoetic_gateway::config::load_config(&config_path).expect("config should load"),
+        );
+        let store = GatewayStore::open(&gateway_dir).expect("gateway store should open");
+        let revision = AgentRevisionRecord {
+            revision_id: "rev_sha256:seed123".to_string(),
+            agent_id: "seed.agent".to_string(),
+            base_revision_id: None,
+            artifact_id: Some("art_seed".to_string()),
+            content_digest: "sha256:seed123".to_string(),
+            runtime_lock_hash: "sha256:lock_seed".to_string(),
+            manifest_hash: "sha256:man_seed".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            created_by_type: "human".to_string(),
+            created_by_id: "operator".to_string(),
+            source_kind: "artifact".to_string(),
+            source_ref: Some("art_seed".to_string()),
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status: AgentRevisionStatus::Candidate,
+            metadata_json: serde_json::json!({}),
+            short_id: "seed1234".to_string(),
+        };
+        store
+            .insert_agent_revision(&revision)
+            .expect("revision should insert");
+
+        handle_agent_seed(
+            &config_path,
+            "seed.agent",
+            &revision.revision_id,
+            Some("prom_seed_test"),
+            Some("deterministic test seed"),
+            true,
+        )
+        .expect("seed command should succeed");
+
+        let alias = store
+            .resolve_alias("seed.agent")
+            .expect("alias lookup should work")
+            .expect("alias should exist");
+        assert_eq!(alias.revision_id, revision.revision_id);
+
+        let history = store
+            .list_promotion_history("seed.agent")
+            .expect("history should list");
+        assert!(
+            history.iter().any(|row| row.promotion_id == "prom_seed_test"),
+            "expected deterministic promotion id in history"
+        );
     }
 }
