@@ -7611,17 +7611,6 @@ impl NativeTool for AgentRevisionCreateTool {
             materialize_revision_directory(gateway_dir, &args.agent_id, &revision_id, &file_map)?;
 
         let now = chrono::Utc::now().to_rfc3339();
-        // Compute collision-safe short ID
-        let existing: Vec<String> = gateway_store
-            .list_all_agent_revisions()?
-            .into_iter()
-            .map(|r| r.revision_id)
-            .collect();
-        let short_id = autonoetic_types::agent_revision::short_id_unique(
-            &revision_id,
-            existing.iter().map(|s| s.as_str()),
-            None,
-        );
 
         let base_revision_id = args.base_revision_id.as_ref().map(|value| {
             if let Some(parsed) = autonoetic_types::agent_revision::AgentRef::parse(value) {
@@ -7651,10 +7640,10 @@ impl NativeTool for AgentRevisionCreateTool {
                 "summary": args.summary,
                 "metadata": args.metadata,
             }),
-            short_id: short_id.clone(),
+            short_id: String::new(),
         };
 
-        gateway_store.insert_agent_revision(&rev)?;
+        let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
 
         let short_ref = format!("{}@rev_{}", args.agent_id, short_id);
         Ok(serde_json::json!({
