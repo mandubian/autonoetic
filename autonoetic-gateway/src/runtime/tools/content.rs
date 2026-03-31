@@ -1,0 +1,262 @@
+use crate::llm::ToolDefinition;
+use crate::policy::PolicyEngine;
+use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
+use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::capability::Capability;
+use serde::Deserialize;
+use std::path::Path;
+
+pub fn register_tools(registry: &mut NativeToolRegistry) {
+    registry.register(Box::new(ContentWriteTool));
+    registry.register(Box::new(ContentReadTool));
+}
+
+pub struct ContentWriteTool;
+
+impl NativeTool for ContentWriteTool {
+    fn name(&self) -> &'static str {
+        "content.write"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::WriteAccess { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Write content to the session's content store. Returns a content handle (SHA-256) that can be used to retrieve the content later. Content is automatically named in the session for easy retrieval.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "A name for this content (e.g., 'main.py', 'scripts/main.py'). Supports path-like names with slashes."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to store"
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["private", "session", "global"],
+                        "description": "Visibility scope: 'private' (only this session), 'session' (all sessions under same root, default), 'global' (cross-session)."
+                    }
+                },
+                "required": ["name", "content"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            name: String,
+            content: String,
+            #[serde(default)]
+            visibility: Option<String>,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        anyhow::ensure!(!args.name.trim().is_empty(), "name must not be empty");
+        anyhow::ensure!(
+            args.name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/'),
+            "name must contain only alphanumeric characters, underscores, hyphens, dots, or slashes"
+        );
+
+        let content_visibility = match args.visibility.as_deref() {
+            Some("private") => crate::runtime::content_store::ContentVisibility::Private,
+            Some("session") | None => crate::runtime::content_store::ContentVisibility::Session,
+            Some("global") => crate::runtime::content_store::ContentVisibility::Global,
+            Some(other) => anyhow::bail!(
+                "Invalid visibility '{}'. Must be one of: private, session, global",
+                other
+            ),
+        };
+
+        let Some(gw_dir) = gateway_dir else {
+            anyhow::bail!("Content store requires gateway directory to be configured");
+        };
+
+        let sid = _session_id.unwrap_or(&_manifest.agent.id);
+        let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
+
+        let handle = store.write(args.content.as_bytes())?;
+        store.register_name_with_visibility(sid, &args.name, &handle, content_visibility)?;
+
+        let short_alias = crate::runtime::content_store::ContentStore::get_short_alias(&handle);
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "handle": handle,
+            "alias": short_alias,
+            "name": args.name,
+            "bytes_written": args.content.len(),
+            "visibility": match content_visibility {
+                crate::runtime::content_store::ContentVisibility::Private => "private",
+                crate::runtime::content_store::ContentVisibility::Session => "session",
+                crate::runtime::content_store::ContentVisibility::Global => "global",
+            },
+        }))
+        .map_err(Into::into)
+    }
+
+    fn extract_metadata(&self, arguments_json: &str) -> ToolMetadata {
+        let mut meta = ToolMetadata::default();
+        if let Ok(parsed_args) = serde_json::from_str::<serde_json::Value>(arguments_json) {
+            if let Some(name) = parsed_args.get("name").and_then(|v| v.as_str()) {
+                meta.path = Some(name.to_string());
+            }
+        }
+        meta
+    }
+}
+
+pub struct ContentReadTool;
+
+impl NativeTool for ContentReadTool {
+    fn name(&self) -> &'static str {
+        "content.read"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Read content from the session's content store. Can read by name (e.g., 'main.py') or by content handle (e.g., 'sha256:abc123...').".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name_or_handle": {
+                        "type": "string",
+                        "description": "The content name (e.g., 'main.py') or content handle (e.g., 'sha256:abc123...') to read"
+                    }
+                },
+                "required": ["name_or_handle"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            name_or_handle: String,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        anyhow::ensure!(
+            !args.name_or_handle.trim().is_empty(),
+            "name_or_handle must not be empty"
+        );
+
+        let Some(gw_dir) = gateway_dir else {
+            anyhow::bail!("Content store requires gateway directory to be configured");
+        };
+
+        let sid = _session_id.unwrap_or(&_manifest.agent.id);
+        let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
+
+        let content_result = store.read_by_name_or_handle(sid, &args.name_or_handle);
+
+        let content = match content_result {
+            Ok(c) => c,
+            Err(e) => {
+                let looks_like_guessed_name = !args.name_or_handle.starts_with("sha256:");
+
+                if looks_like_guessed_name {
+                    let hints = find_available_artifacts(&store, sid, &args.name_or_handle);
+
+                    if !hints.is_empty() {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": "resource",
+                            "error": "content_not_found",
+                            "message": format!("Content '{}' not found in session '{}'", args.name_or_handle, sid),
+                            "hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
+                            "available_artifacts": hints
+                        }).to_string());
+                    }
+                }
+
+                anyhow::bail!(
+                    "Content '{}' not found in session '{}': {}",
+                    args.name_or_handle,
+                    sid,
+                    e
+                );
+            }
+        };
+
+        let content_str = String::from_utf8(content)
+            .map_err(|e| anyhow::anyhow!("Content is not valid UTF-8: {}", e))?;
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "content": content_str,
+        }))
+        .map_err(Into::into)
+    }
+
+    fn extract_metadata(&self, arguments_json: &str) -> ToolMetadata {
+        let mut meta = ToolMetadata::default();
+        if let Ok(parsed_args) = serde_json::from_str::<serde_json::Value>(arguments_json) {
+            if let Some(name) = parsed_args.get("name_or_handle").and_then(|v| v.as_str()) {
+                meta.path = Some(name.to_string());
+            }
+        }
+        meta
+    }
+}
+
+fn find_available_artifacts(
+    _store: &crate::runtime::content_store::ContentStore,
+    _session_id: &str,
+    _requested_name: &str,
+) -> Vec<serde_json::Value> {
+    let mut hints = Vec::new();
+
+    hints.push(serde_json::json!({
+        "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with an implicit artifact_id.",
+        "example": "Call workflow.state first, then use the artifact_id from completed_tasks[].output to read the child's result."
+    }));
+
+    hints
+}

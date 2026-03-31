@@ -282,6 +282,15 @@ pub struct ContextState {
 
 **Complexity:** ~600 lines Rust. Medium risk — context manipulation is sensitive; bad compression breaks agent reasoning. Needs extensive testing with real sessions.
 
+> **Future work: quality regression framework.** Context compression is the only proposed feature that **deliberately discards information** from the LLM's input. Unlike the other three enhancements (which add capabilities or change performance), compression can silently degrade agent reasoning quality without producing an obvious error. A dedicated test harness would:
+>
+> 1. **Record golden sessions** — multi-turn sessions captured as JSON fixtures (the existing `CompletionRequest`/`CompletionResponse` types are already serializable).
+> 2. **Replay with/without compression** — run the same session twice through a replay executor (similar to the existing `FixedTextDriver` test pattern in `lifecycle.rs`), once uncompressed and once with compression triggered at turn N.
+> 3. **Structural comparison** — compare tool call sequences, decisions taken, and final output shape (not exact string equality — LLM outputs vary).
+> 4. **Threshold scanning** — run the same session at different compression trigger points to catch edge cases where compressing at a critical moment loses essential context.
+>
+> This adds ~300–400 lines of test infrastructure. It is not a prerequisite for shipping compression (making compression **opt-in per agent** via SKILL.md manifest mitigates the risk), but it is essential for building confidence before enabling it as a default.
+
 ---
 
 ### 3. Smart Model Routing
@@ -1104,6 +1113,936 @@ Main risk is not the FTS5 implementation (battle-tested SQLite) but ensuring the
 
 ---
 
+### 5. Prompt Budget Transparency and Optimization
+
+**Problem:** the full prompt sent to the LLM before the first user turn already exceeds 10,000 tokens. The developer has no visibility into what's consuming the budget, and no mechanism to control it.
+
+#### Current prompt anatomy (measured from the codebase)
+
+The system prompt is assembled in `lifecycle.rs:584–612` by concatenating several sources. Here is what each contributes:
+
+| Component | Source | Estimated tokens | Sent when |
+|---|---|---|---|
+| **Foundation instructions** | `foundation_instructions.md` — 135 lines, ~10KB of gateway rules (16 sections: content storage, artifacts, knowledge, sandbox, clarification protocol, digest, etc.) | ~2,500 | Every turn, every agent |
+| **Agent-specific instructions** | SKILL.md body (e.g., auditor.default = 55 lines, ~1,500 tokens) | 500–3,000 | Every turn |
+| **Response contract** | Injected by `compose_system_instructions_with_metadata()` when `response_contract` is declared | 200–500 | Every turn (when declared) |
+| **Tool definitions** | 38 registered native tools × JSON schema — serialized at line 595–603 | 4,000–6,000 | Every turn, all available tools |
+| **Conversation history** | All prior user/assistant/tool result messages | Grows unbounded | Every turn |
+| **Total (turn 1, before user message)** | | **~7,200–12,000+** | |
+
+The gateway currently logs `input_tokens` and `input_context_pct` *after* the LLM call returns (line 741–786), but there is **no pre-call breakdown**, **no per-component budget**, and **no mechanism to trim or tier any component**.
+
+#### Observability first: prompt budget breakdown
+
+Before optimizing, the gateway must emit a structured breakdown of what it's about to send. This is a pre-LLM-call computation inserted at line 604 (after tools are assembled, before `CompletionRequest` is built):
+
+```rust
+/// Approximate token count for a string (~4 chars/token for English text).
+fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as u64 + 3) / 4
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptBudgetBreakdown {
+    pub system_prompt_tokens: u64,
+    pub tool_definitions_tokens: u64,
+    pub conversation_history_tokens: u64,
+    pub total_estimated_tokens: u64,
+    pub context_window: Option<u64>,
+    pub utilization_pct: Option<f64>,
+    pub tool_count: usize,
+    pub history_message_count: usize,
+}
+```
+
+This struct is logged to the causal chain and as `tracing::info!` so operators can see exactly where tokens go. Cost: ~10 lines of code, zero runtime overhead (string length is O(1) after allocation).
+
+For more precise token counting, a lightweight tokenizer like `tiktoken-rs` (BPE tokenizer for OpenAI models) or a provider-specific byte-pair lookup can be used. The `~4 chars/token` heuristic is accurate enough for budgeting decisions, not for billing.
+
+#### Strategy A: tool tiering — send only relevant tools
+
+The 38 registered native tools include specialized tools (eval, revision, promotion) that are irrelevant to most agents. Currently, all tools that pass `policy.can_invoke_tool()` are sent on every turn (line 599). Adding a relevance tier reduces the tool payload by 50–70% for simple agents:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolTier {
+    /// Always sent: content.write, content.read, sandbox.exec, knowledge.store/recall/search
+    Core,
+    /// Sent when agent is in a workflow or delegates: agent.spawn, workflow.wait, workflow.state
+    Workflow,
+    /// Sent only to agents with matching capabilities: eval.*, agent.revision.*, artifact.build
+    Specialized,
+}
+```
+
+The tier is a static property of each tool (determined at registration, not at runtime). The filter runs in `default_registry()` or at tool collection time:
+
+```rust
+let tools: Vec<ToolDefinition> = self.registry
+    .available_definitions(&self.manifest)
+    .into_iter()
+    .filter(|def| {
+        let tier = self.registry.tool_tier(&def.name);
+        match tier {
+            ToolTier::Core => true,
+            ToolTier::Workflow => self.is_in_workflow(),
+            ToolTier::Specialized => self.manifest.has_capability_for(&def.name),
+        }
+    })
+    .collect();
+```
+
+**Token savings estimate:**
+
+| Agent type | Tools sent (current) | Tools sent (tiered) | Token savings |
+|---|---|---|---|
+| Simple agent (Q&A, research) | 38 | ~10 (core only) | ~3,500 tokens |
+| Workflow agent (planner, builder) | 38 | ~20 (core + workflow) | ~2,000 tokens |
+| Specialist (auditor, evaluator) | 38 | ~25 (core + workflow + relevant specialized) | ~1,200 tokens |
+
+#### Strategy B: progressive foundation instructions
+
+The 135-line `foundation_instructions.md` contains 16 sections, many of which are only relevant to specific agent types. Instead of one monolithic block, split into layers:
+
+```rust
+const FOUNDATION_CORE: &str = include_str!("foundation_core.md");           // ~50 lines
+const FOUNDATION_WORKFLOW: &str = include_str!("foundation_workflow.md");     // ~30 lines
+const FOUNDATION_ARTIFACT: &str = include_str!("foundation_artifact.md");     // ~25 lines
+const FOUNDATION_SCRIPT: &str = include_str!("foundation_script.md");         // ~15 lines
+const FOUNDATION_DIGEST: &str = include_str!("foundation_digest.md");         // ~15 lines
+```
+
+Assembly selects layers based on agent capabilities:
+
+```rust
+fn compose_foundation(manifest: &AgentManifest) -> String {
+    let mut parts = vec![FOUNDATION_CORE];
+
+    if manifest.has_workflow_tools() {
+        parts.push(FOUNDATION_WORKFLOW);
+    }
+    if manifest.has_artifact_capability() {
+        parts.push(FOUNDATION_ARTIFACT);
+    }
+    if matches!(manifest.execution_mode, ExecutionMode::Script) {
+        parts.push(FOUNDATION_SCRIPT);
+    }
+    if manifest.has_digest_capability() {
+        parts.push(FOUNDATION_DIGEST);
+    }
+
+    parts.join("\n\n---\n\n")
+}
+```
+
+**Token savings:** ~800–1,500 tokens for simple agents that don't need workflow/artifact/script sections.
+
+#### Strategy C: token budget enforcement
+
+Declare per-component budgets in config. The gateway enforces them by truncating or warning:
+
+```yaml
+prompt_budget:
+  system_prompt_max_tokens: 4000
+  tool_definitions_max_tokens: 5000
+  history_reserve_tokens: null      # computed as: context_window - system - tools - margin
+  margin_tokens: 2000               # reserved for the LLM's response
+  warn_at_pct: 80                   # emit warning when total exceeds this % of context window
+```
+
+When the budget is exceeded, the gateway can:
+- **Warn**: log to causal chain, continue
+- **Trim history**: drop oldest non-system messages (this is the context compression feature)
+- **Demote tools**: switch from full tool definitions to a summarized index (name + one-line description only, no JSON schema)
+
+#### Strategy D: tool definition compression
+
+For models that support it, send abbreviated tool definitions after the first turn. On turn 1, send full schemas. On subsequent turns, send only tool names and short descriptions (the LLM has already seen the schemas and can infer parameters). This requires models that maintain cross-turn tool memory — most frontier models do.
+
+```rust
+fn compress_tool_definitions(tools: &[ToolDefinition], turn: u32) -> Vec<ToolDefinition> {
+    if turn == 0 {
+        return tools.to_vec(); // full definitions on first turn
+    }
+    tools.iter().map(|t| ToolDefinition {
+        name: t.name.clone(),
+        description: t.description.chars().take(80).collect(),
+        input_schema: serde_json::json!({"type": "object"}), // minimal schema
+    }).collect()
+}
+```
+
+**Token savings:** ~3,000–4,000 tokens on turns 2+. Risk: some models may forget parameter names. Needs empirical validation per model.
+
+#### Relationship to context compression and model routing
+
+Prompt budget transparency feeds directly into the other two features:
+- **Context compression** uses the budget breakdown to decide *when* to trigger summarization (when `conversation_history_tokens` exceeds `history_reserve_tokens`)
+- **Model routing** uses the budget breakdown as a `ComplexitySignal` (high input token count → needs a model with a large context window)
+
+#### Complexity breakdown
+
+| Component | Lines (est.) | Risk |
+|---|---|---|
+| `PromptBudgetBreakdown` struct + logging | ~60 | Low — observability only |
+| Token estimation function | ~20 | Low — heuristic, can upgrade to tiktoken later |
+| Tool tiering (`ToolTier` enum + filter) | ~120 | Low — extends existing `is_available()` pattern |
+| Progressive foundation instructions (file split + assembly) | ~80 | Low — refactoring, no behavior change |
+| Config-driven budget enforcement | ~150 | Medium — needs careful truncation logic |
+| Tool definition compression (turn-aware) | ~80 | Medium — model-dependent, needs validation |
+| Tests | ~150 | Low |
+| **Total** | **~660** | **Low-Medium overall** |
+
+MVP: ship observability (`PromptBudgetBreakdown`) + tool tiering (~200 lines). This gives immediate token savings and the data to guide further optimization.
+
+---
+
+### 6. Agent Skills (agentskills.io) Compatibility
+
+**Problem:** the [Agent Skills](https://agentskills.io) open standard (originated by Anthropic, adopted by Claude Code, Cursor, Copilot, etc.) enables portable, reusable agent skills packaged as `SKILL.md` folders. Autonoetic also uses `SKILL.md` as its agent manifest format. External skills should be importable into Autonoetic, but the two formats have different frontmatter schemas and fundamentally different trust models.
+
+#### The two SKILL.md formats
+
+| Aspect | Agent Skills (agentskills.io) | Autonoetic SKILL.md |
+|---|---|---|
+| **Frontmatter fields** | `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools` | `metadata.autonoetic.runtime`, `.agent`, `.capabilities`, `.llm_config`, `.limits`, `.background`, `.disclosure`, `.io`, `.response_contract`, `.execution_mode` |
+| **Body content** | Free-form instructions for the LLM | Agent-specific instructions (same purpose) |
+| **Tool access** | `allowed-tools` is advisory — the host decides enforcement | `capabilities` are enforced by the gateway policy engine |
+| **Execution model** | LLM reads instructions, uses host's tools freely | Sandboxed execution, capability-gated tools, approval gates |
+| **Trust model** | Implicit trust (single user, local environment) | Multi-user ACLs, approval gates, disclosure policies |
+| **File access** | Direct filesystem | Content store (`content.write`/`content.read`), sandboxed mounts |
+| **Networking** | Assumed available | `NetworkAccess` capability, approval-gated |
+| **Resources** | `scripts/`, `references/`, `assets/` loaded on demand | Agent directory files mounted in sandbox |
+| **Progressive disclosure** | 3 tiers: metadata (~100 tokens) → instructions (<5000 tokens) → resources (on demand) | All instructions loaded at agent wake |
+
+**YAML namespace compatibility:** Autonoetic already nests all its custom fields under `metadata.autonoetic` (e.g., `metadata.autonoetic.runtime`, `metadata.autonoetic.capabilities`). The Agent Skills spec explicitly recommends namespacing custom metadata keys to avoid collisions. This means both formats **already coexist cleanly** in the same YAML frontmatter — an Autonoetic SKILL.md *is* a valid Agent Skills file with extra metadata. The top-level `name`, `description`, and `metadata` keys are shared; only the content under `metadata.autonoetic` is Autonoetic-specific.
+
+This simplifies the adapter significantly: importing an external Agent Skill mostly means **adding** the `metadata.autonoetic` block rather than converting between incompatible schemas. And Autonoetic agents are already compatible with Agent Skills clients that ignore unknown metadata keys.
+
+**Key observation:** Agent Skills are **instructions for LLM agents**, not executable programs. They tell the LLM what to do and what tools to use. The adaptation problem is therefore about mapping the *expectations* (tool names, file access patterns, trust assumptions) rather than porting executable code.
+
+#### Design: adapter layer
+
+```
+External Agent Skill (agentskills.io format)
+     │
+     ▼
+┌─────────────────────────────────┐
+│  AgentSkillAdapter              │  translates frontmatter, maps tools,
+│  (import-time, not runtime)     │  wraps instructions, declares capabilities
+└─────────────────────────────────┘
+     │
+     ▼
+Autonoetic Agent (native SKILL.md format)
+     │
+     ▼
+┌─────────────────────────────────┐
+│  Gateway (unchanged)            │  enforces capabilities, approvals,
+│                                 │  sandbox, disclosure — as usual
+└─────────────────────────────────┘
+```
+
+The adapter runs at **import time** (when a user installs an external skill), not at runtime. It produces a standard Autonoetic agent that the gateway handles normally. No runtime adapter overhead.
+
+#### Frontmatter mapping
+
+```rust
+fn adapt_agentskills_frontmatter(
+    external: &AgentSkillsFrontmatter,
+) -> AutonoeticManifest {
+    AutonoeticManifest {
+        agent: AgentIdentity {
+            id: external.name.clone(),
+            name: external.name.replace('-', " ").to_title_case(),
+            description: external.description.clone(),
+        },
+        execution_mode: ExecutionMode::Reasoning, // Agent Skills are LLM-driven
+        capabilities: infer_capabilities(&external.allowed_tools),
+        // ... default runtime, llm_config from gateway defaults
+    }
+}
+
+fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
+    let mut caps = vec![
+        // All imported skills get read access to their own directory
+        Capability::ReadAccess { scopes: vec!["self.*".into()] },
+    ];
+
+    for tool in allowed_tools {
+        match tool {
+            t if t.starts_with("Bash(") => {
+                // Bash(git:*) → SandboxFunctions with allowed patterns
+                caps.push(Capability::SandboxFunctions {
+                    allowed: extract_bash_patterns(t),
+                });
+            }
+            "Read" | "View" => {
+                // Already covered by ReadAccess
+            }
+            "Write" | "Edit" => {
+                caps.push(Capability::WriteAccess {
+                    scopes: vec!["self.*".into(), "skills/*".into()],
+                });
+            }
+            "WebSearch" | "WebFetch" => {
+                caps.push(Capability::NetworkAccess {
+                    hosts: vec!["*".into()], // will require approval
+                });
+            }
+            _ => {
+                // Unknown tool — flag for manual review
+                caps.push(Capability::SandboxFunctions {
+                    allowed: vec![tool.clone()],
+                });
+            }
+        }
+    }
+    caps
+}
+```
+
+#### Tool name bridging
+
+External skills reference tools by names defined in their host environment (e.g., `Bash`, `Read`, `WebSearch` for Claude Code). Autonoetic uses different names (`sandbox.exec`, `content.read`, `web.search`). The adapter injects a short **tool name mapping** into the agent's instructions:
+
+```markdown
+---
+## Tool Compatibility Notes (auto-generated from Agent Skills import)
+
+This skill was imported from the Agent Skills (agentskills.io) format.
+The following tool mappings apply:
+
+| Skill references | Autonoetic equivalent |
+|---|---|
+| `Bash(command)` | `sandbox.exec(command)` |
+| `Read(path)` | `content.read(name_or_handle)` — files must be loaded via content store |
+| `Write(path, content)` | `content.write(name, content)` |
+| `WebSearch(query)` | `web.search(query)` |
+| `WebFetch(url)` | `web.fetch(url)` |
+
+File paths referenced by the skill are mounted in the sandbox at `/workspace/`.
+Use `content.read` for any file the skill's instructions reference.
+```
+
+This mapping is appended to the agent's system prompt. The LLM handles the translation naturally — it reads "use `Bash(git log)`" in the skill instructions and translates it to `sandbox.exec({"command": "git log"})` based on the mapping table. Token cost: ~200 tokens.
+
+#### Resource mounting
+
+Agent Skills may include `scripts/`, `references/`, `assets/` directories. The adapter:
+
+1. Copies these directories into the agent's directory under `imported/`
+2. Registers them as content store entries (so they're accessible via `content.read`)
+3. Mounts them into the sandbox at their expected paths
+
+```rust
+fn import_skill_resources(
+    skill_dir: &Path,
+    agent_dir: &Path,
+    content_store: &ContentStore,
+    session_id: &str,
+) -> Result<Vec<String>> {
+    let mut mounted = Vec::new();
+    for subdir in &["scripts", "references", "assets"] {
+        let source = skill_dir.join(subdir);
+        if source.is_dir() {
+            for entry in walkdir::WalkDir::new(&source).max_depth(3) {
+                let entry = entry?;
+                if entry.file_type().is_file() {
+                    let content = std::fs::read(entry.path())?;
+                    let handle = content_store.write(&content)?;
+                    let name = format!("{}/{}", subdir, entry.path().strip_prefix(&source)?.display());
+                    content_store.register_name(session_id, &name, &handle)?;
+                    mounted.push(name);
+                }
+            }
+        }
+    }
+    Ok(mounted)
+}
+```
+
+#### Progressive disclosure (solving prompt size too)
+
+The Agent Skills spec recommends progressive disclosure:
+1. **Metadata** (~100 tokens): `name` + `description` — loaded at startup for all skills
+2. **Instructions** (<5,000 tokens): full SKILL.md body — loaded when skill is activated
+3. **Resources** (as needed): `scripts/`, `references/`, `assets/` — loaded on demand
+
+Autonoetic can adopt the same pattern for *all* agents, not just imported skills. Instead of injecting the full agent instructions into every system prompt, inject only the description at startup and the full body when the agent is explicitly activated for a task. This directly addresses the prompt size problem from section 5.
+
+```rust
+fn compose_agent_instructions(
+    manifest: &AgentManifest,
+    activated: bool,
+    full_instructions: &str,
+) -> String {
+    if activated {
+        full_instructions.to_string()
+    } else {
+        // Metadata-only: just the description
+        format!(
+            "Agent: {}\nDescription: {}\n\nFull instructions will be provided when this skill is activated.",
+            manifest.agent.name,
+            manifest.agent.description,
+        )
+    }
+}
+```
+
+#### Trust modes for imported skills
+
+When importing an external skill, the user chooses a trust mode that maps to Autonoetic's existing governance:
+
+| Trust mode | Behavior | Use case |
+|---|---|---|
+| **Generous** | Auto-grant all capabilities the skill declares via `allowed-tools` | Trusted skill from a known author |
+| **Strict** | Require approval for each capability the skill requests at first use | Skills from unknown sources |
+| **Audit** | Run the skill in a dry-run sandbox, log all tool calls, report before granting | Security review of new skills |
+
+These map directly to the existing approval queue and capability system — no new governance infrastructure needed.
+
+#### Compatibility with Autonoetic's governance
+
+The imported skill runs inside Autonoetic's full governance envelope. It doesn't know about approval gates, disclosure policies, or multi-user ACLs — and it doesn't need to. The gateway handles all of that transparently:
+
+- If the skill tries to `Bash(curl http://example.com)` and the agent doesn't have `NetworkAccess`, the gateway returns a permission error. The LLM sees the error and can adapt (ask the user, try a different approach).
+- If the skill produces an artifact that needs approval, the approval gate fires normally. The skill's instructions don't mention approvals, but the gateway handles them.
+- If the skill writes to the content store, disclosure policies filter the output. The skill is unaware.
+
+This is the key architectural advantage: **Autonoetic's governance is gateway-enforced, not agent-enforced.** External skills that know nothing about governance automatically get governed when they run inside Autonoetic.
+
+#### Complexity breakdown
+
+| Component | Lines (est.) | Risk |
+|---|---|---|
+| `AgentSkillsFrontmatter` parser (YAML) | ~80 | Low — simple YAML parsing |
+| `infer_capabilities()` mapping | ~120 | Low — pattern matching on known tool names |
+| Tool name bridging (instruction injection) | ~60 | Low — template text |
+| Resource mounting (content store import) | ~100 | Low — extends existing content store |
+| Progressive disclosure integration | ~80 | Low — refactoring of existing `compose_system_instructions` |
+| Import CLI / tool (`agent.import_skill`) | ~150 | Low — follows existing `agent.install` pattern |
+| Trust mode selection + approval queue integration | ~80 | Low — reuses existing approval system |
+| Tests | ~150 | Low |
+| **Total** | **~820** | **Low overall** |
+
+The bulk of the complexity is not in the adapter itself (which is straightforward parsing and mapping) but in testing the tool name translation across different real-world skills. The Agent Skills ecosystem is young, so the set of tool names to map is small and well-defined.
+
+---
+
+### 7. Credential Management & Service Registration
+
+**Problem:** agents need to interact with external services (APIs, social platforms, SaaS tools) that require registration, account creation, credential storage, and authenticated requests. The Moltbook skill (a social network for AI agents) is a concrete example: it requires POST to a registration endpoint, receiving an API key, having the human visit a claim URL, storing credentials, and then using them for all subsequent requests. Today, Autonoetic has no mechanism for this — if an agent calls `sandbox.exec(curl register...)`, the API key appears in the response and flows through the LLM, leaking into provider context windows, conversation logs, and the causal chain.
+
+#### The security constraint: zero secret exposure to agents
+
+This is a firm architectural principle inherited from the CCOS secret management design:
+
+> **Agents must never see, handle, or transmit raw secrets.** Any data in the LLM's context window can potentially be transmitted to external LLM providers, extracted via prompt injection, or persisted in logs. Credentials must be handled server-side by the gateway, never by the agent.
+
+Autonoetic's existing `DisclosureClass::Secret` and disclosure redaction rules enforce this on the *output* side (redacting secrets from replies to users). The credential system is the *input* side — preventing secrets from entering the LLM context in the first place.
+
+#### End-to-end walkthrough: Moltbook registration
+
+Here's how the complete Moltbook registration flow would work with the proposed system. The agent drives the process but **never sees the API key**:
+
+```
+Step 1: Agent decides it needs Moltbook access
+─────────────────────────────────────────────
+Agent: "I need to register on Moltbook to post about our project"
+Agent calls → credential.check(service: "moltbook")
+Gateway returns → { available: false, setup_required: true }
+
+Step 2: Agent initiates registration
+─────────────────────────────────────
+Agent calls → credential.setup({
+  service: "moltbook",
+  steps: [{
+    type: "api_call",
+    method: "POST",
+    url: "https://www.moltbook.com/api/v1/agents/register",
+    body: { name: "AutonoeticBot", description: "Gateway-governed AI agent" },
+    extract_secrets: { "api_key": "$.agent.api_key" },        ← JSONPath
+    extract_public: { "claim_url": "$.agent.claim_url" }      ← this IS returned to agent
+  }]
+})
+
+Step 3: Gateway executes server-side (agent is suspended)
+─────────────────────────────────────────────────────────
+Gateway makes the POST request itself (NOT through sandbox)
+Response: { agent: { api_key: "moltbook_xxx", claim_url: "https://..." } }
+Gateway:
+  - Extracts api_key → stores in SecretStore as "moltbook.api_key"
+  - Extracts claim_url → passes to agent (it's public)
+  - NEVER returns api_key in the tool result
+
+Step 4: Agent asks human to claim (agent sees claim_url, NOT api_key)
+─────────────────────────────────────────────────────────────────────
+Gateway returns to agent → {
+  ok: true,
+  credential_id: "cred-moltbook-001",
+  credential_stored: true,
+  public_data: { claim_url: "https://www.moltbook.com/claim/moltbook_claim_xxx" },
+  user_actions: ["Visit the claim URL and verify via Twitter"]
+}
+Agent tells user: "I've registered on Moltbook! Please visit [claim_url] to verify."
+
+Step 5: Agent uses the service (gateway injects credentials transparently)
+──────────────────────────────────────────────────────────────────────────
+Agent calls → credential.request({
+  credential_id: "cred-moltbook-001",
+  method: "POST",
+  url: "https://www.moltbook.com/api/v1/posts",
+  body: { submolt: "general", title: "Hello!", content: "First post from Autonoetic!" }
+})
+Gateway:
+  - Fetches "moltbook.api_key" from SecretStore
+  - Injects Authorization: Bearer moltbook_xxx into the request
+  - Makes the HTTP call
+  - Returns sanitized response to agent (no credentials in response)
+```
+
+At **no point** does the agent see `moltbook_xxx`. It knows credentials exist (via `credential_id`), it knows whether they're valid, but it cannot read or transmit the actual secret.
+
+#### The three registration modes
+
+| Mode | Agent role | Human role | When to use |
+|---|---|---|---|
+| **API-automated** | Agent provides registration parameters (name, description) | Human approves the registration (via approval queue) | Service has a programmatic registration API (Moltbook, most developer APIs) |
+| **Human-assisted** | Agent explains what to register for and why | Human performs the registration, enters credentials in secure prompt | Service requires captcha, OAuth consent, browser interaction, email verification |
+| **Pre-configured** | Agent calls `credential.check`, uses existing credential | Human configured credentials beforehand (env var, config file, keychain) | Credentials already exist from a previous session or manual setup |
+
+#### API-automated mode (detailed)
+
+This is the most interesting mode because the agent drives registration autonomously while the gateway handles all sensitive data:
+
+```rust
+/// A step in a credential setup workflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CredentialSetupStep {
+    /// Gateway makes an HTTP call, extracts secrets from response.
+    ApiCall {
+        method: String,                          // GET, POST, etc.
+        url: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        #[serde(default)]
+        body: Option<serde_json::Value>,
+        /// JSONPath expressions pointing to secret fields in the response.
+        /// These are extracted and stored in SecretStore, never returned to agent.
+        extract_secrets: HashMap<String, String>, // name → JSONPath
+        /// JSONPath expressions for public fields (returned to agent).
+        #[serde(default)]
+        extract_public: HashMap<String, String>,  // name → JSONPath
+    },
+    /// Gateway prompts the human through secure out-of-band channel.
+    UserPrompt {
+        message: String,                         // shown to human
+        secret_fields: Vec<SecretFieldSpec>,       // what to ask for
+    },
+    /// Agent tells the human to do something (no secret involved).
+    UserAction {
+        instruction: String,                     // e.g., "Visit claim URL"
+        /// Optional: agent can reference public data from previous steps.
+        #[serde(default)]
+        data_refs: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretFieldSpec {
+    pub name: String,                            // e.g., "api_key"
+    pub label: String,                           // shown in prompt: "Moltbook API Key"
+    pub masked: bool,                            // password-style input
+}
+```
+
+The `credential.setup` tool accepts a sequence of steps. The gateway executes them **server-side**, one at a time:
+
+```rust
+pub struct CredentialSetupTool;
+
+impl NativeTool for CredentialSetupTool {
+    fn name(&self) -> &'static str { "credential.setup" }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Register with an external service and securely store credentials. \
+                The gateway executes API calls server-side — secrets extracted from responses \
+                are stored in the secret store and NEVER returned to the agent. \
+                Returns a credential_id for subsequent authenticated requests.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Service identifier (e.g., 'moltbook', 'github', 'openweathermap')"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Ordered steps to execute for registration",
+                        "items": { "$ref": "#/definitions/CredentialSetupStep" }
+                    }
+                },
+                "required": ["service", "steps"]
+            }),
+        }
+    }
+    // execute() runs steps server-side, stores secrets, returns credential_id
+}
+```
+
+#### Human-assisted mode (interactive registration)
+
+For services requiring browser interaction (OAuth, captcha, email verification), the agent can't make the API call — a human must do it. But the agent can still **orchestrate** the process:
+
+```
+Agent calls → credential.setup({
+  service: "github",
+  steps: [
+    {
+      type: "user_action",
+      instruction: "Go to https://github.com/settings/tokens/new and create a token with 'repo' scope"
+    },
+    {
+      type: "user_prompt",
+      message: "Paste the GitHub personal access token you just created",
+      secret_fields: [
+        { name: "github_token", label: "GitHub Personal Access Token", masked: true }
+      ]
+    }
+  ]
+})
+```
+
+The gateway:
+1. Returns `user_actions` to the agent so it can explain what the human needs to do
+2. Opens a **secure out-of-band prompt** (TUI modal, CLI password prompt, or web form — NOT through the LLM conversation) for the `user_prompt` step
+3. Human enters the token in the secure channel — the agent never sees it
+4. Gateway stores it and returns `credential_stored: true` to the agent
+
+**Critical: the secure prompt is NOT `user.ask`.** The `user.ask` tool sends the question through the LLM conversation, which means any answer (including a pasted API key) would enter the LLM context. The credential prompt uses a **separate, direct channel** to the human that bypasses the agent entirely:
+
+```
+┌─────────────────────────────────────────────┐
+│  LLM Conversation (agent sees this)         │
+│                                             │
+│  Agent: "Please create a GitHub token..."   │
+│  [credential.setup returns]                 │
+│  Agent: "Great, credentials stored!"        │
+│                                             │
+├─────────────────────────────────────────────┤
+│  Secure Channel (agent CANNOT see this)     │
+│                                             │
+│  Gateway: "Paste GitHub token: "            │
+│  Human:   ghp_xxxxxxxxxxxx                  │
+│  Gateway: → SecretStore → done              │
+│                                             │
+└─────────────────────────────────────────────┘
+```
+
+#### Authenticated requests: `credential.request`
+
+Once credentials are stored, the agent uses them via `credential.request`. It specifies *what* to do but *not* the credentials:
+
+```rust
+pub struct CredentialRequestTool;
+
+impl NativeTool for CredentialRequestTool {
+    fn name(&self) -> &'static str { "credential.request" }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Make an authenticated HTTP request using stored credentials. \
+                The gateway injects credentials server-side — the agent never sees them. \
+                Responses are sanitized to remove any credential echoes.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "credential_id": {
+                        "type": "string",
+                        "description": "Credential ID from credential.setup or credential.check"
+                    },
+                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+                    "url": { "type": "string" },
+                    "headers": {
+                        "type": "object",
+                        "description": "Additional headers (credentials are injected automatically)"
+                    },
+                    "body": {
+                        "description": "Request body (for POST/PUT/PATCH)"
+                    },
+                    "inject_as": {
+                        "type": "string",
+                        "description": "How to inject credentials",
+                        "enum": ["bearer_header", "basic_auth", "query_param", "custom_header"],
+                        "default": "bearer_header"
+                    }
+                },
+                "required": ["credential_id", "method", "url"]
+            }),
+        }
+    }
+}
+```
+
+The gateway:
+1. Looks up `credential_id` in the SecretStore
+2. Injects the credential into the request based on `inject_as`
+3. Makes the HTTP call **server-side**
+4. Sanitizes the response (removes any credential echoes, token refresh responses, etc.)
+5. Returns the sanitized response to the agent
+
+#### Existing infrastructure: Vault + SecretStoreRuntime
+
+Autonoetic **already has** the core secret storage and redaction infrastructure. The credential management system builds on top of it rather than replacing it.
+
+**`Vault`** ([vault.rs](file:///home/mandubian/workspaces/mandubian/autonoetic/autonoetic-gateway/src/vault.rs)) — the physical secret store:
+- In-memory `HashMap<String, SecretString>` — uses the `secrecy` crate so secrets can't be accidentally logged or serialized
+- `get_secret()` returns `&SecretString` — callers must explicitly `.expose_secret()` at the injection boundary
+- `set_secret()` / `load_secret()` for writes
+- `persist_to_file()` / `load_from_file()` for disk persistence
+- Path configured via `AUTONOETIC_VAULT_PATH` environment variable
+
+**`SecretStoreRuntime`** ([store.rs](file:///home/mandubian/workspaces/mandubian/autonoetic/autonoetic-gateway/src/runtime/store.rs)) — the extraction + redaction layer:
+- Parses `Store` directives from skill markdown (e.g., `` From: `response.secret` → To: `secret:MOLTBOOK_SECRET` ``)
+- `apply_and_redact()` — extracts secrets from JSON responses using dot-path notation, stores them in `Vault`, replaces values with `[REDACTED]` before the agent sees them
+- Registers extracted secrets as `DisclosureClass::Restricted` taint in `DisclosureState`
+- **Already integrated** into `ToolCallProcessor` (line 265–272 of [tool_call_processor.rs](file:///home/mandubian/workspaces/mandubian/autonoetic/autonoetic-gateway/src/runtime/tool_call_processor.rs)) — runs **after** every tool call, before results are returned to the LLM
+
+The existing data flow already works correctly:
+```
+Tool call → result JSON → SecretStoreRuntime.apply_and_redact()
+  → extracts secrets via JSONPath → stores in Vault → redacts response → returns to agent
+  → registers taint in DisclosureState → disclosure engine redacts from assistant reply
+```
+
+#### What the existing Vault already covers
+
+| Requirement | Status | Implementation |
+|---|---|---|
+| Secret storage with anti-leak protection | ✅ exists | `SecretString` from `secrecy` crate |
+| Extract secrets from JSON responses | ✅ exists | `SecretStoreRuntime.apply_and_redact()` |
+| Redact secrets before agent sees them | ✅ exists | JSONPath extraction + `[REDACTED]` replacement |
+| Integration with disclosure/taint tracking | ✅ exists | Auto-registers as `DisclosureClass::Restricted` |
+| Integrated into tool call pipeline | ✅ exists | Runs in `ToolCallProcessor` after every call |
+
+#### What needs to be added
+
+**1. Encryption at rest** — the single biggest gap.
+
+The current Vault writes plaintext JSON to disk (`vault.rs:68`):
+```rust
+std::fs::write(path, serde_json::to_string_pretty(&plain)?)?;
+```
+
+The secret is protected in memory by `SecretString`, but on disk it's fully readable. The fix:
+
+```rust
+// vault.rs — proposed change
+pub fn persist_to_file(&self, path: &Path, master_key: &[u8; 32]) -> anyhow::Result<()> {
+    let plain: HashMap<String, String> = self.secrets.iter()
+        .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
+        .collect();
+    let json = serde_json::to_string(&plain)?;
+    let encrypted = encrypt_aes256_gcm(json.as_bytes(), master_key)?;
+    std::fs::write(path, encrypted)?;
+    Ok(())
+}
+
+pub fn load_from_file(path: &Path, master_key: &[u8; 32]) -> anyhow::Result<Self> {
+    if !path.exists() { return Ok(Self::new()); }
+    let encrypted = std::fs::read(path)?;
+    let decrypted = decrypt_aes256_gcm(&encrypted, master_key)?;
+    let plain: HashMap<String, String> = serde_json::from_slice(&decrypted)?;
+    let mut vault = Self::new();
+    for (k, v) in plain { vault.set_secret(&k, v); }
+    Ok(vault)
+}
+```
+
+Master key sources (in order of security):
+
+| Source | Security | UX | When |
+|---|---|---|---|
+| `AUTONOETIC_VAULT_KEY` env var | Low — visible to process tree | Zero-touch | Development |
+| Derived from passphrase at gateway start | Medium — encrypted at rest | Prompt once at boot | Production default |
+| OS keychain (macOS Keychain, Linux libsecret) | High — OS-level access control | Zero-touch after first setup | Optional upgrade |
+
+**2. Credential metadata** — the Vault stores raw `name → value` pairs only.
+
+The credential management use case needs service, injection type, expiry, and ACL data. Store these as records in `gateway.db` (metadata only, no secret values). The actual secret stays in the Vault. This follows the same split as `session_transcripts` — metadata in SQL, sensitive content in a separate store:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRecord {
+    pub credential_id: String,
+    pub service: String,
+    pub secret_name: String,       // key in Vault (NOT the secret value)
+    pub inject_as: InjectMethod,   // bearer_header, basic_auth, query_param
+    pub created_by_agent: String,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub shared_with: Vec<String>,  // agent IDs
+}
+```
+
+**3. Three new native tools** — `credential.check`, `credential.setup`, `credential.request`.
+
+These use the existing Vault for storage and the existing `apply_and_redact` pattern for response sanitization. The `credential.request` tool also needs a gateway-side HTTP client (`reqwest`) for making authenticated calls server-side.
+
+**4. SecretStoreRuntime upgrade** — extend JSONPath parsing.
+
+The current `SecretStoreRuntime` parses directives from markdown using a custom syntax (`` From: `response.xxx` → To: `secret:YYY` ``). The `credential.setup` tool uses standard JSONPath (`$.agent.api_key`). The extraction logic in `extract_json_path_as_string()` already supports dot-separated paths — it just needs to accept `$`-prefixed JSONPath notation too. This is a ~10-line change.
+
+#### Integration with existing gateway systems
+
+The credential system hooks into three existing mechanisms:
+
+**1. Approval queue → `credential.setup` triggers approval**
+
+When an agent calls `credential.setup`, the gateway creates an approval request:
+```
+"Agent 'planner.default' wants to register on service 'moltbook' 
+ and store API credentials. Steps: 1 API call, 1 user action.
+ Approve?"
+```
+The user approves before any HTTP calls are made. This gives the human visibility and control over which services agents register with.
+
+**2. Disclosure policy → credential responses are automatically restricted**
+
+All `credential.request` responses are automatically classified as `DisclosureClass::Restricted` for credential-adjacent fields. The existing `DisclosureState` taint registration (already wired into `ToolCallProcessor`) handles this.
+
+**3. Capability system → `CredentialAccess` capability**
+
+Only agents with the `CredentialAccess` capability can use `credential.setup`, `credential.request`, and `credential.check`. This prevents arbitrary agents from registering on services:
+
+```yaml
+capabilities:
+  - type: "CredentialAccess"
+    services: ["moltbook", "github"]  # restrict to specific services
+```
+
+#### What an external skill (e.g., Moltbook SKILL.md) would look like in Autonoetic
+
+Today the Moltbook skill tells agents to `curl` the registration endpoint and save the key to `~/.config/moltbook/credentials.json`. In Autonoetic, the imported skill's instructions would be wrapped with a credential adapter shim:
+
+```markdown
+## Tool Compatibility Notes (auto-generated from Agent Skills import)
+
+This skill requires API credentials for `moltbook`.
+
+Instead of running `curl` commands with raw API keys:
+- Use `credential.check(service: "moltbook")` to verify credentials exist
+- Use `credential.setup(service: "moltbook", ...)` to register (see below)
+- Use `credential.request(credential_id: "...", ...)` for authenticated API calls
+
+The gateway handles credentials securely — you never need to store or transmit API keys.
+
+### Registration (credential.setup)
+```json
+{
+  "service": "moltbook",
+  "steps": [
+    {
+      "type": "api_call",
+      "method": "POST",
+      "url": "https://www.moltbook.com/api/v1/agents/register",
+      "body": { "name": "YOUR_AGENT_NAME", "description": "YOUR_DESCRIPTION" },
+      "extract_secrets": { "api_key": "$.agent.api_key" },
+      "extract_public": { "claim_url": "$.agent.claim_url" }
+    },
+    {
+      "type": "user_action",
+      "instruction": "Visit the claim URL and verify via Twitter",
+      "data_refs": ["claim_url"]
+    }
+  ]
+}
+```
+```
+
+This shim could be **auto-generated** by the Agent Skills adapter (section 6) when it detects `allowed-tools: Bash(curl:*)` and credential patterns in the skill body. Or it can be manually authored as part of a curated skill import.
+
+#### Full self-registration scenario
+
+Here's the complete agent-initiated, human-supervised, zero-secret-exposure flow:
+
+```
+1. Agent decides it needs Moltbook access (from skill instructions or user request)
+   │
+2. Agent calls credential.check("moltbook")
+   → { available: false }
+   │
+3. Agent calls credential.setup({ service: "moltbook", steps: [...] })
+   │
+4. Gateway creates ApprovalRequest:
+   "Agent wants to register on moltbook. Approve?"
+   │
+5. Human approves (via CLI: autonoetic gateway approvals approve apr-xxx)
+   │
+6. Gateway executes Step 1 (API call) SERVER-SIDE:
+   POST /api/v1/agents/register → gets api_key + claim_url
+   → Stores api_key in Vault (agent never sees it)
+   → Returns claim_url to agent
+   │
+7. Agent tells human: "Please visit https://moltbook.com/claim/xxx to verify"
+   │
+8. Human visits claim URL, verifies (out-of-band, nothing to do with gateway)
+   │
+9. Agent calls credential.request({
+      credential_id: "cred-moltbook-001",
+      method: "POST",
+      url: "https://www.moltbook.com/api/v1/posts",
+      body: { title: "Hello!", content: "My first post!" }
+   })
+   │
+10. Gateway fetches secret from Vault, injects Bearer token,
+    makes call, returns sanitized response:
+    { ok: true, post_id: "post_123", message: "Posted!" }
+```
+
+The human was involved at exactly **two points**: approving the registration (step 5) and verifying the claim (step 8). Everything else was automated. The API key was handled exclusively by the gateway's Vault.
+
+#### Edge cases
+
+**Token refresh / rotation:** Some services issue refresh tokens. The gateway handles this transparently — when a `credential.request` gets a 401, the gateway checks if a refresh token exists, uses it to get a new access token, retries, and updates the Vault. The agent sees a normal response.
+
+**Multi-step registration:** Some services require multiple API calls (register → verify email → create API key). The `steps` array supports sequencing: each step can reference public data from previous steps via `data_refs`.
+
+**Credential sharing between agents:** By default, credentials are scoped to the agent that created them. An agent can grant access to another agent via `credential.share(credential_id, target_agent_id)` — which creates an approval request for the human to authorize.
+
+**Credential expiry / revocation:** The gateway tracks expiry metadata in `CredentialRecord`. When a credential expires, `credential.check` returns `{ available: false, expired: true }`, and the agent can re-initiate `credential.setup`.
+
+#### Complexity breakdown (adjusted for existing infrastructure)
+
+The existing `Vault` (~78 lines) and `SecretStoreRuntime` (~183 lines) already provide anti-leak storage, JSONPath extraction, redaction, and pipeline integration. The new work builds on top:
+
+| Component | Status | Lines (new) | Risk |
+|---|---|---|---|
+| Secret storage (`Vault` + `SecretString`) | ✅ exists | 0 | — |
+| JSON extraction + redaction (`SecretStoreRuntime`) | ✅ exists | 0 | — |
+| Disclosure taint registration | ✅ exists | 0 | — |
+| Tool call pipeline integration | ✅ exists | 0 | — |
+| **Encryption at rest** (AES-256-GCM for vault file) | ❌ new | ~100 | Medium — crypto needs careful implementation |
+| **`CredentialRecord`** metadata in `gateway.db` | ❌ new | ~120 | Low — schema migration + CRUD, follows existing pattern |
+| **`CredentialSetupTool`** (orchestrates registration steps) | ❌ new | ~250 | Medium — multi-step workflow with approval integration |
+| **`CredentialRequestTool`** (authenticated HTTP via `reqwest`) | ❌ new | ~150 | Low — HTTP client with header injection from Vault |
+| **`CredentialCheckTool`** (availability query) | ❌ new | ~50 | Low — read-only query against CredentialRecord |
+| **`CredentialAccess` capability type** | ❌ new | ~40 | Low — extends existing capability enum |
+| **JSONPath `$` prefix support** in `extract_json_path_as_string` | ❌ new | ~10 | Low — trivial parser extension |
+| Secure user prompt channel (TUI/CLI, for human-assisted mode) | ❌ new | ~200 | Medium — must bypass LLM conversation |
+| Approval queue integration for `credential.setup` | ❌ new | ~60 | Low — follows existing approval patterns |
+| Tests | ❌ new | ~150 | Low |
+| **Total new code** | | **~1,130** | **Low-Medium overall** |
+| *Existing code leveraged* | | *~260* | |
+
+MVP: `credential.check` + `credential.request` using the existing Vault with manual pre-configuration (~250 lines new). This gives agents the ability to use pre-configured credentials securely — the human sets up `AUTONOETIC_VAULT_PATH` with credentials, and agents reference them by service name. Full `credential.setup` with automated registration adds ~350 more lines. Encryption at rest adds ~100 more. The secure user prompt channel for human-assisted mode adds ~200 more.
+
+---
+
 ### Implementation Summary
 
 | Feature | Lines (est.) | Complexity | Dependencies | Independent? |
@@ -1112,7 +2051,19 @@ Main risk is not the FTS5 implementation (battle-tested SQLite) but ensuring the
 | **Context compression** | ~600 | Medium-High | Checkpoint system (exists) | Yes |
 | **Smart model routing** | ~1230 (~600 MVP) | Low-Medium | `LlmExchangeUsage.estimated_cost_usd`, `fallback_provider` config, `LlmDriver` trait | Yes (MVP ships `DeterministicRouter` only) |
 | **FTS session search** | ~915 | Medium | Session lifecycle (exists), `persist_history_to_content_store()` fix | Yes (prerequisite fix is internal) |
+| **Prompt budget transparency** | ~660 (~200 MVP) | Low-Medium | Existing prompt assembly in `lifecycle.rs` | Yes (MVP ships observability + tool tiering) |
+| **Agent Skills compatibility** | ~820 | Low | Agent install system (exists), content store (exists) | Yes |
+| **Credential management** | ~1,130 (~250 MVP) | Low-Medium | `Vault` + `SecretStoreRuntime` (exists), disclosure policy (exists), approval queue (exists) | Yes |
 
-All four are **independent** — no ordering dependency. Lowest-risk starting point: **smart model routing** (config fields already exist, mostly wiring). Highest-value: **FTS session search** (unlocks learning tools with actual conversation content, complementing existing `execution.search` and `knowledge.search_by_tags`).
+All seven are **independent** — no ordering dependency. Recommended priority:
+
+1. **Prompt budget transparency** (MVP) — immediate token savings + data to guide everything else
+2. **Smart model routing** (MVP) — wire existing dead config fields, budget-aware routing
+3. **Credential management** (MVP) — unblocks any agent-to-service interaction; start with pre-configured credentials
+4. **FTS session search** — biggest learning infrastructure unlock
+5. **Agent Skills compatibility** — ecosystem growth enabler (credential management makes imported skills actually usable)
+6. **User modeling** — lower urgency until multi-user is live
+7. **Context compression** — highest risk, needs quality regression framework
 
 The distributed/federation considerations don't fundamentally change any design — they add metadata fields (`origin_node_id`, `trust_domain`) and ACL checks consistent with existing Autonoetic patterns. The key difference from Hermes is that every feature must respect multi-user boundaries, approval gates, and cross-node provenance from the start.
+
