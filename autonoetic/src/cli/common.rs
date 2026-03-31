@@ -246,6 +246,20 @@ pub enum AgentCommands {
         #[arg(long)]
         overwrite: bool,
     },
+    /// Inspect mutable alias bindings and active revisions
+    Alias {
+        #[command(subcommand)]
+        command: AgentAliasCommands,
+    },
+    /// Inspect durable promote/rollback history
+    PromotionHistory {
+        /// Filter by logical agent ID
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
     /// Shows available LLM presets and template mappings
     Presets,
     /// Creates a default config.yaml with LLM presets
@@ -256,6 +270,27 @@ pub enum AgentCommands {
         /// Overwrite existing config file
         #[arg(long)]
         overwrite: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentAliasCommands {
+    /// List aliases and their active revision targets
+    List {
+        /// Filter by agent_id or alias_id (MVP: same value)
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect one alias target in detail
+    Inspect {
+        /// Alias ID to inspect (MVP default alias is agent_id)
+        alias_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
     },
 }
 

@@ -211,9 +211,9 @@ Goal: make alias movement the only activation and rollback mechanism.
 
 ### P2-T05 Inspection surfaces
 
-- [ ] Expose alias inspection as admin-safe CLI or HTTP surface.
-- [ ] Expose promotion history inspection as admin-safe CLI or HTTP surface.
-- [ ] Show which revision is active for each alias.
+- [x] Expose alias inspection as admin-safe CLI or HTTP surface.
+- [x] Expose promotion history inspection as admin-safe CLI or HTTP surface.
+- [x] Show which revision is active for each alias.
 
 ### P2-T06 Phase 2 tests
 

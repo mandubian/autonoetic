@@ -2,8 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::cli::common::AgentAliasCommands;
 use autonoetic_gateway::llm::Message;
 use autonoetic_types::agent::LlmExchangeUsage;
+use autonoetic_types::agent_revision::PromotionKind;
 use autonoetic_types::config::GatewayConfig;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -486,6 +488,178 @@ pub async fn handle_agent_list(config_path: &Path) -> anyhow::Result<()> {
         for a in &agents {
             println!("{:<30} {}", a.id, a.dir.display());
         }
+    }
+    Ok(())
+}
+
+pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    match command {
+        AgentAliasCommands::List { agent_id, json } => {
+            let aliases = store.list_agent_aliases(agent_id.as_deref())?;
+            if *json {
+                let mut rows = Vec::new();
+                for alias in aliases {
+                    let revision = store.get_agent_revision(&alias.revision_id)?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Alias '{}' points to missing revision '{}'",
+                            alias.alias_id,
+                            alias.revision_id
+                        )
+                    })?;
+                    rows.push(serde_json::json!({
+                        "alias_id": alias.alias_id,
+                        "agent_id": alias.agent_id,
+                        "revision_id": alias.revision_id,
+                        "revision_short_id": revision.short_id,
+                        "revision_status": format!("{:?}", revision.status),
+                        "updated_at": alias.updated_at,
+                        "updated_by_type": alias.updated_by_type,
+                        "updated_by_id": alias.updated_by_id,
+                        "reason": alias.reason,
+                    }));
+                }
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(());
+            }
+
+            if aliases.is_empty() {
+                println!("No aliases found.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<28} {:<28} {:<30} {:<10} UPDATED AT",
+                "ALIAS ID", "AGENT ID", "ACTIVE REVISION", "STATUS"
+            );
+            for alias in aliases {
+                let revision = store.get_agent_revision(&alias.revision_id)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Alias '{}' points to missing revision '{}'",
+                        alias.alias_id,
+                        alias.revision_id
+                    )
+                })?;
+                let rev_display = if revision.short_id.is_empty() {
+                    alias.revision_id.clone()
+                } else {
+                    format!("rev_{}", revision.short_id)
+                };
+                println!(
+                    "{:<28} {:<28} {:<30} {:<10} {}",
+                    alias.alias_id,
+                    alias.agent_id,
+                    rev_display,
+                    format!("{:?}", revision.status),
+                    alias.updated_at
+                );
+            }
+        }
+        AgentAliasCommands::Inspect { alias_id, json } => {
+            let alias = store.resolve_alias(alias_id)?.ok_or_else(|| {
+                anyhow::anyhow!("Alias '{}' not found. Promote a revision first.", alias_id)
+            })?;
+            let revision = store.get_agent_revision(&alias.revision_id)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Alias '{}' points to missing revision '{}'",
+                    alias.alias_id,
+                    alias.revision_id
+                )
+            })?;
+            let payload = serde_json::json!({
+                "alias_id": alias.alias_id,
+                "agent_id": alias.agent_id,
+                "active_revision_id": alias.revision_id,
+                "active_revision_short_id": revision.short_id,
+                "active_revision_status": format!("{:?}", revision.status),
+                "updated_at": alias.updated_at,
+                "updated_by_type": alias.updated_by_type,
+                "updated_by_id": alias.updated_by_id,
+                "reason": alias.reason,
+            });
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("alias_id: {}", payload["alias_id"].as_str().unwrap_or(""));
+                println!("agent_id: {}", payload["agent_id"].as_str().unwrap_or(""));
+                println!(
+                    "active_revision: {} (short: rev_{})",
+                    payload["active_revision_id"].as_str().unwrap_or(""),
+                    payload["active_revision_short_id"].as_str().unwrap_or("")
+                );
+                println!(
+                    "status: {}",
+                    payload["active_revision_status"].as_str().unwrap_or("")
+                );
+                println!("updated_at: {}", payload["updated_at"].as_str().unwrap_or(""));
+                println!(
+                    "updated_by: {}:{}",
+                    payload["updated_by_type"].as_str().unwrap_or(""),
+                    payload["updated_by_id"].as_str().unwrap_or("")
+                );
+                if !payload["reason"].is_null() {
+                    println!("reason: {}", payload["reason"].as_str().unwrap_or(""));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn handle_agent_promotion_history(
+    config_path: &Path,
+    agent_id: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    let mut rows = Vec::new();
+    if let Some(agent_id) = agent_id {
+        rows = store.list_promotion_history(agent_id)?;
+    } else {
+        for alias in store.list_agent_aliases(None)? {
+            rows.extend(store.list_promotion_history(&alias.agent_id)?);
+        }
+        rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        rows.dedup_by(|a, b| a.promotion_id == b.promotion_id);
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No promotion history found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<14} {:<10} {:<28} {:<28} {:<22} CREATED AT",
+        "ACTION", "AGENT", "FROM", "TO", "EVAL RUN"
+    );
+    for record in rows {
+        let action = match record.kind {
+            PromotionKind::Promote => "promote",
+            PromotionKind::Rollback => "rollback",
+        };
+        println!(
+            "{:<14} {:<10} {:<28} {:<28} {:<22} {}",
+            action,
+            record.agent_id,
+            record
+                .previous_revision_id
+                .unwrap_or_else(|| "-".to_string()),
+            record.new_revision_id,
+            record.source_eval_run_id.unwrap_or_else(|| "-".to_string()),
+            record.created_at
+        );
     }
     Ok(())
 }
@@ -1085,6 +1259,10 @@ mod tests {
     use autonoetic_gateway::llm::{
         CompletionRequest, CompletionResponse, LlmDriver, StopReason, TokenUsage, ToolCall,
     };
+    use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+    use autonoetic_types::agent_revision::{
+        AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus, PromotionKind, PromotionRecord,
+    };
     use tempfile::tempdir;
 
     struct DenySandboxExecDriver;
@@ -1386,5 +1564,93 @@ Use tools when needed.
         )
         .expect_err("missing config should fail fast");
         assert!(err.to_string().contains("Config file not found"));
+    }
+
+    #[test]
+    fn test_alias_and_promotion_history_handlers_with_gateway_store() {
+        let temp = tempdir().expect("tempdir should create");
+        let config_path = temp.path().join("config.yaml");
+        let agents_dir = temp.path().join("runtime_agents");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agents_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
+                agents_dir.display()
+            ),
+        )
+        .expect("config should write");
+
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(
+            &autonoetic_gateway::config::load_config(&config_path).expect("config should load"),
+        );
+        let store = GatewayStore::open(&gateway_dir).expect("gateway store should open");
+        let revision = AgentRevisionRecord {
+            revision_id: "rev_sha256:abc123".to_string(),
+            agent_id: "planner.default".to_string(),
+            base_revision_id: None,
+            artifact_id: Some("art_1234".to_string()),
+            content_digest: "sha256:abc123".to_string(),
+            runtime_lock_hash: "sha256:lock1".to_string(),
+            manifest_hash: "sha256:man1".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            created_by_type: "human".to_string(),
+            created_by_id: "operator".to_string(),
+            source_kind: "artifact".to_string(),
+            source_ref: Some("art_1234".to_string()),
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status: AgentRevisionStatus::Ready,
+            metadata_json: serde_json::json!({}),
+            short_id: "abc12345".to_string(),
+        };
+        store
+            .insert_agent_revision(&revision)
+            .expect("revision should insert");
+        store
+            .upsert_agent_alias(&AgentAliasRecord {
+                alias_id: "planner.default".to_string(),
+                agent_id: "planner.default".to_string(),
+                revision_id: revision.revision_id.clone(),
+                updated_at: "2026-01-01T00:00:01Z".to_string(),
+                updated_by_type: "human".to_string(),
+                updated_by_id: "operator".to_string(),
+                reason: Some("initial seed".to_string()),
+            })
+            .expect("alias should upsert");
+        store
+            .insert_promotion_record(&PromotionRecord {
+                promotion_id: "prom_1".to_string(),
+                kind: PromotionKind::Promote,
+                alias_id: "planner.default".to_string(),
+                agent_id: "planner.default".to_string(),
+                previous_revision_id: None,
+                new_revision_id: revision.revision_id.clone(),
+                source_eval_run_id: Some("eval_1".to_string()),
+                reason: Some("seed".to_string()),
+                created_at: "2026-01-01T00:00:02Z".to_string(),
+                created_by_type: "human".to_string(),
+                created_by_id: "operator".to_string(),
+                origin_node_id: "gateway".to_string(),
+            })
+            .expect("promotion history should insert");
+
+        handle_agent_alias(
+            &config_path,
+            &AgentAliasCommands::List {
+                agent_id: Some("planner.default".to_string()),
+                json: true,
+            },
+        )
+        .expect("alias list should succeed");
+        handle_agent_alias(
+            &config_path,
+            &AgentAliasCommands::Inspect {
+                alias_id: "planner.default".to_string(),
+                json: true,
+            },
+        )
+        .expect("alias inspect should succeed");
+        handle_agent_promotion_history(&config_path, Some("planner.default"), true)
+            .expect("promotion history should succeed");
     }
 }
