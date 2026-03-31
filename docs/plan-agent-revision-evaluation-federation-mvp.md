@@ -53,7 +53,7 @@ Goal: remove gateway semantics that conflict with immutable revisions and generi
 
 - [x] Remove default target selection from ingress handling.
 - [x] Reject missing `target` in all runtime entrypoints that launch or message an agent.
-- [ ] Consolidate `agent_id`/`agent_ref` parsing into one shared validation utility across ingress and resolver entrypoints.
+- [x] Consolidate `agent_id`/`agent_ref` parsing into one shared validation utility across ingress and resolver entrypoints.
 - [x] Reject malformed targets containing `@` instead of falling back to alias lookup.
 
 ### P0-T02 Config cleanup
