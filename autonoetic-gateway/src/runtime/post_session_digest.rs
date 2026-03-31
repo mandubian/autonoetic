@@ -37,13 +37,8 @@ struct DigestLlmOutput {
 
 pub fn load_digest_skill_body(agents_dir: &Path) -> anyhow::Result<String> {
     let path = agents_dir.join("digest").join("SKILL.md");
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
-        anyhow::anyhow!(
-            "post-session digest requires {}: {}",
-            path.display(),
-            e
-        )
-    })?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("post-session digest requires {}: {}", path.display(), e))?;
     Ok(strip_markdown_frontmatter(&raw))
 }
 
@@ -218,10 +213,7 @@ async fn run_post_session_digest_inner(
     driver: &dyn LlmDriver,
 ) -> anyhow::Result<()> {
     let base = base_session_id(session_id);
-    let digest_path = gateway_dir
-        .join("sessions")
-        .join(base)
-        .join("digest.md");
+    let digest_path = gateway_dir.join("sessions").join(base).join("digest.md");
     let live_digest = match std::fs::read_to_string(&digest_path) {
         Ok(s) => s,
         Err(e) => {
@@ -235,15 +227,8 @@ async fn run_post_session_digest_inner(
         }
     };
 
-    let traces = store.search_execution_traces(
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(session_id),
-        64,
-    )?;
+    let traces =
+        store.search_execution_traces(None, None, None, None, None, Some(session_id), 64)?;
     let mut trace_lines = Vec::new();
     let mut success_count = 0usize;
     let mut failure_count = 0usize;

@@ -523,6 +523,20 @@ impl PolicyEngine {
         false
     }
 
+    pub fn can_agent_revision(&self, target: &str) -> bool {
+        for cap in &self.manifest.capabilities {
+            if let Capability::AgentRevision { patterns } = cap {
+                for pattern in patterns {
+                    let prefix = pattern.trim_end_matches('*');
+                    if target.starts_with(prefix) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub fn can_evaluate_suite(&self, suite_id: &str, subject_agent_id: &str) -> bool {
         for cap in &self.manifest.capabilities {
             if let Capability::Evaluation { patterns } = cap {

@@ -2,8 +2,8 @@ use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 use autonoetic_gateway::llm::{CompletionRequest, Message};
-use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::causal_chain::CausalChainEntry;
+use autonoetic_types::config::GatewayConfig;
 use std::collections::BTreeMap;
 
 // Re-exports for modules

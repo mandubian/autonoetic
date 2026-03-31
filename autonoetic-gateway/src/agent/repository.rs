@@ -241,7 +241,9 @@ impl AgentRepository {
             if let Some(agent_ref) = AgentRef::parse(target) {
                 let rev = match gateway_store.get_agent_revision(&agent_ref.revision_id)? {
                     Some(r) => r,
-                    None => anyhow::bail!("Revision '{}' not found in store", agent_ref.revision_id),
+                    None => {
+                        anyhow::bail!("Revision '{}' not found in store", agent_ref.revision_id)
+                    }
                 };
                 anyhow::ensure!(
                     rev.agent_id == agent_ref.agent_id,
@@ -254,9 +256,9 @@ impl AgentRepository {
             }
 
             // Try short ID resolution: target is like "agent_id@rev_abc12345"
-            let at_pos = target.find('@').ok_or_else(|| {
-                anyhow::anyhow!("Invalid target '{}': must contain '@'", target)
-            })?;
+            let at_pos = target
+                .find('@')
+                .ok_or_else(|| anyhow::anyhow!("Invalid target '{}': must contain '@'", target))?;
             let agent_id_part = &target[..at_pos];
             let rev_part = &target[at_pos + 1..];
 
@@ -327,10 +329,27 @@ impl AgentRepository {
         gateway_store: Option<&GatewayStore>,
         home_node_id: &str,
     ) -> anyhow::Result<(AgentRef, AgentRevisionRecord, SessionAgentBinding)> {
+        if let Some(gs) = gateway_store {
+            if let Some(existing) = gs.get_session_agent_binding(session_id)? {
+                let rev = gs
+                    .get_agent_revision(&existing.revision_id)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Session '{}' is pinned to missing revision '{}'",
+                            session_id,
+                            existing.revision_id
+                        )
+                    })?;
+                let agent_ref =
+                    AgentRef::new(existing.agent_id.clone(), existing.revision_id.clone());
+                return Ok((agent_ref, rev, existing));
+            }
+        }
+
         let (agent_ref, rev) = self.resolve_agent(target, gateway_store)?;
 
-        // Determine alias_id: if target was a plain agent_id, that's the alias
-        let alias_id = if AgentRef::parse(target).is_some() {
+        // Determine alias_id: explicit refs (full or short) bypass aliases.
+        let alias_id = if target.contains('@') {
             None // explicit ref, no alias involved
         } else {
             Some(target.to_string())
@@ -605,7 +624,10 @@ Test instructions.
         let repo = AgentRepository::new(agents_dir);
         let result = repo.resolve_agent("planner.default", None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("GatewayStore is required"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("GatewayStore is required"));
     }
 
     #[test]
@@ -625,7 +647,8 @@ Test instructions.
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("Invalid agent_ref"),
-            "Should reject invalid @ targets, got: {}", err
+            "Should reject invalid @ targets, got: {}",
+            err
         );
     }
 
@@ -642,7 +665,9 @@ Test instructions.
 
         // Insert a revision for "other-agent"
         let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
-            revision_id: "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
+            revision_id:
+                "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+                    .to_string(),
             agent_id: "other-agent".to_string(),
             base_revision_id: None,
             artifact_id: None,
@@ -660,7 +685,9 @@ Test instructions.
             metadata_json: serde_json::Value::Null,
             short_id: "abcd1234".to_string(),
         };
-        store.insert_agent_revision(&rev).expect("should insert revision");
+        store
+            .insert_agent_revision(&rev)
+            .expect("should insert revision");
 
         // Try to resolve with wrong agent_id prefix
         let result = repo.resolve_agent(
@@ -686,6 +713,8 @@ Test instructions.
         let result = repo.resolve_agent("planner.default", Some(&store));
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Create a revision and promote it first"));
+        assert!(err
+            .to_string()
+            .contains("Create a revision and promote it first"));
     }
 }

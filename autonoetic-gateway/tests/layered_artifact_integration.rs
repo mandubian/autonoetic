@@ -61,7 +61,12 @@ fn test_artifact_build_with_layers() {
     }];
 
     let bundle = artifact_store
-        .build(&["main.py".to_string(), "requirements.txt".to_string()], Some(&["main.py".to_string()]), Some(&layers), session_id)
+        .build(
+            &["main.py".to_string(), "requirements.txt".to_string()],
+            Some(&["main.py".to_string()]),
+            Some(&layers),
+            session_id,
+        )
         .unwrap();
 
     // Verify artifact was built
@@ -98,7 +103,12 @@ fn test_artifact_build_without_layers() {
 
     // Build artifact without layers (backward compatible)
     let bundle = artifact_store
-        .build(&["main.py".to_string()], Some(&["main.py".to_string()]), None, session_id)
+        .build(
+            &["main.py".to_string()],
+            Some(&["main.py".to_string()]),
+            None,
+            session_id,
+        )
         .unwrap();
 
     // Verify artifact was built with empty layers
@@ -133,11 +143,7 @@ fn test_artifact_with_different_layers_has_different_id() {
     // Create layer 1
     let layer1_dir = td.path().join("venv1");
     fs::create_dir_all(layer1_dir.join("lib/httpx")).unwrap();
-    fs::write(
-        layer1_dir.join("lib/httpx/__init__.py"),
-        b"# httpx v1",
-    )
-    .unwrap();
+    fs::write(layer1_dir.join("lib/httpx/__init__.py"), b"# httpx v1").unwrap();
     let captured1 = layer_store
         .create_from_dir(&layer1_dir, "python-deps", "/opt/venv")
         .unwrap();
@@ -156,11 +162,7 @@ fn test_artifact_with_different_layers_has_different_id() {
     // Create layer 2 (different content)
     let layer2_dir = td.path().join("venv2");
     fs::create_dir_all(layer2_dir.join("lib/httpx")).unwrap();
-    fs::write(
-        layer2_dir.join("lib/httpx/__init__.py"),
-        b"# httpx v2",
-    )
-    .unwrap();
+    fs::write(layer2_dir.join("lib/httpx/__init__.py"), b"# httpx v2").unwrap();
     let captured2 = layer_store
         .create_from_dir(&layer2_dir, "python-deps", "/opt/venv")
         .unwrap();
@@ -180,4 +182,3 @@ fn test_artifact_with_different_layers_has_different_id() {
     assert_ne!(bundle1.artifact_id, bundle2.artifact_id);
     assert_ne!(captured1.digest, captured2.digest);
 }
-

@@ -7,7 +7,10 @@ use support::{EnvGuard, TestWorkspace};
 
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
-fn install_deterministic_reply_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
+fn install_deterministic_reply_agent(
+    agent_dir: &std::path::Path,
+    agent_id: &str,
+) -> anyhow::Result<()> {
     std::fs::create_dir_all(agent_dir)?;
     std::fs::write(
         agent_dir.join("skip_hook.py"),
@@ -74,7 +77,8 @@ async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<(
         .expect_err("spawn should fail when required promotion record is missing");
 
     assert!(
-        err.to_string().contains("completed without a matching promotion.record within"),
+        err.to_string()
+            .contains("completed without a matching promotion.record within"),
         "unexpected error: {err}"
     );
 
@@ -120,7 +124,10 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
         )
         .await?;
 
-    assert_eq!(result.assistant_reply.as_deref(), Some("deterministic reply"));
+    assert_eq!(
+        result.assistant_reply.as_deref(),
+        Some("deterministic reply")
+    );
 
     Ok(())
 }

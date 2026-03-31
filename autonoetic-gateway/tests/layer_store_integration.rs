@@ -129,10 +129,7 @@ fn test_layer_not_found() {
 
     let result = store.inspect("layer_does_not_exist");
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("not found"));
+    assert!(result.unwrap_err().to_string().contains("not found"));
 }
 
 #[test]

@@ -112,9 +112,8 @@ capabilities: []
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    )?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let driver = Arc::new(AnnotateThenStopDriver {
         calls: AtomicUsize::new(0),

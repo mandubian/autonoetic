@@ -11,8 +11,7 @@ use autonoetic_gateway::scheduler::workflow_store::{
     save_task_run, save_workflow_run,
 };
 use autonoetic_types::background::{
-    ApprovalRequest, ScheduledAction, UserInteraction, UserInteractionKind,
-    UserInteractionStatus,
+    ApprovalRequest, ScheduledAction, UserInteraction, UserInteractionKind, UserInteractionStatus,
 };
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use chrono::Utc;
@@ -138,8 +137,7 @@ async fn emergency_stop_aborts_tasks_cancels_interaction_and_checkpoint() -> any
     let stop_id = out["stop_id"].as_str().expect("stop_id");
     assert!(stop_id.starts_with("estop-"));
 
-    let run = load_workflow_run(&config, Some(store.as_ref()), &wf.workflow_id)?
-        .expect("workflow");
+    let run = load_workflow_run(&config, Some(store.as_ref()), &wf.workflow_id)?.expect("workflow");
     assert_eq!(run.status, WorkflowRunStatus::EmergencyStopped);
 
     let tasks = list_task_runs_for_workflow(&config, Some(store.as_ref()), &wf.workflow_id)?;
@@ -366,7 +364,11 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
     // The status field in the JSON is "cancelled", which does not map to Approved/Rejected,
     // so it stays None in the deserialized struct. The decided_by field proves cancellation.
     assert!(
-        approval.decided_by.as_deref().unwrap_or("").contains(stop_id),
+        approval
+            .decided_by
+            .as_deref()
+            .unwrap_or("")
+            .contains(stop_id),
         "approval decided_by should reference stop_id, got: {:?}",
         approval.decided_by
     );
@@ -477,18 +479,39 @@ async fn restart_reconciles_stale_active_executions() -> anyhow::Result<()> {
     let execs = store_after.list_active_executions_for_root_sqlite(root_session)?;
 
     // Stale execution (running) should be marked "lost"
-    let stale1 = execs.iter().find(|e| e.execution_id == "exec-stale-1").expect("stale-1");
-    assert_eq!(stale1.status, "lost", "stale running exec should be marked lost");
-    assert!(stale1.stopped_at.is_some(), "stale exec should have stopped_at");
+    let stale1 = execs
+        .iter()
+        .find(|e| e.execution_id == "exec-stale-1")
+        .expect("stale-1");
+    assert_eq!(
+        stale1.status, "lost",
+        "stale running exec should be marked lost"
+    );
+    assert!(
+        stale1.stopped_at.is_some(),
+        "stale exec should have stopped_at"
+    );
 
     // Stale execution (stop_requested) should be marked "lost"
-    let stale2 = execs.iter().find(|e| e.execution_id == "exec-stale-2").expect("stale-2");
-    assert_eq!(stale2.status, "lost", "stale stop_requested exec should be marked lost");
+    let stale2 = execs
+        .iter()
+        .find(|e| e.execution_id == "exec-stale-2")
+        .expect("stale-2");
+    assert_eq!(
+        stale2.status, "lost",
+        "stale stop_requested exec should be marked lost"
+    );
     assert!(stale2.stopped_at.is_some());
 
     // Fresh execution should remain "running"
-    let fresh = execs.iter().find(|e| e.execution_id == "exec-fresh").expect("fresh");
-    assert_eq!(fresh.status, "running", "fresh exec should still be running");
+    let fresh = execs
+        .iter()
+        .find(|e| e.execution_id == "exec-fresh")
+        .expect("fresh");
+    assert_eq!(
+        fresh.status, "running",
+        "fresh exec should still be running"
+    );
 
     Ok(())
 }
@@ -634,7 +657,11 @@ async fn emergency_stop_authorization_matrix() -> anyhow::Result<()> {
             None,
         )
         .await;
-    assert!(out_user.is_ok(), "user call should succeed: {:?}", out_user.err());
+    assert!(
+        out_user.is_ok(),
+        "user call should succeed: {:?}",
+        out_user.err()
+    );
 
     // 2. Gateway self-protection call — should succeed
     let gw_root = format!("{root_session}-gateway");
@@ -716,10 +743,7 @@ async fn emergency_stop_authorization_matrix() -> anyhow::Result<()> {
             Some("does-not-exist"),
         )
         .await;
-    assert!(
-        out_agent_missing.is_err(),
-        "non-existent agent should fail"
-    );
+    assert!(out_agent_missing.is_err(), "non-existent agent should fail");
 
     Ok(())
 }

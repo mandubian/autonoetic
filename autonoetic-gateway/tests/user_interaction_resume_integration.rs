@@ -403,8 +403,15 @@ async fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
         "freeform answer should appear in persisted session_history (digest / replay source)"
     );
 
-    let traces =
-        store.search_execution_traces(Some("user.ask"), None, None, None, Some(agent_id), None, 50)?;
+    let traces = store.search_execution_traces(
+        Some("user.ask"),
+        None,
+        None,
+        None,
+        Some(agent_id),
+        None,
+        50,
+    )?;
     assert!(
         !traces.is_empty(),
         "initial user.ask dispatch should write execution_traces"

@@ -193,7 +193,9 @@ pub async fn handle_gateway_approvals(
             );
             for approval in approvals {
                 let details = match &approval.action {
-                    autonoetic_types::background::ScheduledAction::SandboxExec { command, .. } => {
+                    autonoetic_types::background::ScheduledAction::SandboxExec {
+                        command, ..
+                    } => {
                         let truncated = if command.len() > 50 {
                             format!("{}...", &command[..50])
                         } else {
@@ -201,7 +203,11 @@ pub async fn handle_gateway_approvals(
                         };
                         format!("exec: {}", truncated)
                     }
-                    autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, summary, .. } => {
+                    autonoetic_types::background::ScheduledAction::AgentInstall {
+                        agent_id,
+                        summary,
+                        ..
+                    } => {
                         format!("install: {} ({})", agent_id, summary)
                     }
                     other => format!("{}", other.kind()),
@@ -279,10 +285,8 @@ async fn run_interactive_approvals(
     };
     use std::io;
 
-    let approvals = autonoetic_gateway::scheduler::load_approval_requests(
-        config,
-        Some(gateway_store),
-    )?;
+    let approvals =
+        autonoetic_gateway::scheduler::load_approval_requests(config, Some(gateway_store))?;
 
     if approvals.is_empty() {
         println!("No pending approval requests.");
@@ -584,7 +588,8 @@ async fn run_interactive_approvals(
                                     status_msg = "No more pending approvals.".to_string();
                                 } else {
                                     state.select(Some(0));
-                                    status_msg = format!("Refreshed: {} pending approval(s)", items.len());
+                                    status_msg =
+                                        format!("Refreshed: {} pending approval(s)", items.len());
                                 }
                             }
                             Err(e) => {
@@ -599,10 +604,7 @@ async fn run_interactive_approvals(
     }
 
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     if !status_msg.is_empty() {
