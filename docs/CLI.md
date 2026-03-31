@@ -229,6 +229,22 @@ Notes:
 - Use `--promotion-id` in integration tests when deterministic promotion lineage identifiers are required.
 - Activation is explicit: `artifact -> revision create -> promote` (or `agent seed` for controlled seeding).
 
+### `autonoetic agent revision create`
+
+Create an immutable revision from an `agent_bundle` artifact.
+
+```bash
+autonoetic agent revision create <agent_id> <artifact_id> [--base-revision-id <REV>] [--summary <TEXT>] [--json]
+```
+
+### `autonoetic agent revision promote`
+
+Promote a revision to the active alias target.
+
+```bash
+autonoetic agent revision promote <agent_id> <revision_id> [--reason <TEXT>] [--required-eval-run-id <RUN>] [--json]
+```
+
 ### `autonoetic agent alias list`
 
 List alias bindings and currently active revision targets.

@@ -117,6 +117,9 @@ async fn main() -> anyhow::Result<()> {
                     *json,
                 )?;
             }
+            cli::common::AgentCommands::Revision { command } => {
+                cli::agent::handle_agent_revision(&config_path, command)?;
+            }
             cli::common::AgentCommands::PromotionHistory { agent_id, json } => {
                 cli::agent::handle_agent_promotion_history(&config_path, agent_id.as_deref(), *json)?;
             }
