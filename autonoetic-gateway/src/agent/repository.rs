@@ -220,19 +220,28 @@ impl AgentRepository {
     }
 
     /// Load an agent from the revision store via GatewayStore alias resolution.
-    /// Falls back to get_sync only if gateway_store is None.
+    /// Fails if GatewayStore is unavailable or no alias exists for the agent.
     pub fn get_sync_from_store(
         &self,
         agent_id: &str,
         gateway_dir: &Path,
         gateway_store: Option<&GatewayStore>,
     ) -> anyhow::Result<LoadedAgent> {
-        if let Some(gs) = gateway_store {
-            if let Some(alias) = gs.get_agent_alias(agent_id)? {
-                return self.load_from_revision_dir(gateway_dir, &alias.agent_id, &alias.revision_id);
-            }
-        }
-        self.get_sync(agent_id)
+        let Some(gs) = gateway_store else {
+            anyhow::bail!(
+                "GatewayStore is required to load agent '{}'. \
+                 The gateway must be running with a gateway store.",
+                agent_id
+            );
+        };
+        let Some(alias) = gs.get_agent_alias(agent_id)? else {
+            anyhow::bail!(
+                "No alias found for agent '{}'. \
+                 The agent must be seeded (artifact -> revision -> promote) before use.",
+                agent_id
+            );
+        };
+        self.load_from_revision_dir(gateway_dir, &alias.agent_id, &alias.revision_id)
     }
 
     /// Resolve an agent target string to a concrete revision.
