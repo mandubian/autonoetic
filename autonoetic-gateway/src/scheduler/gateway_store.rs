@@ -2731,6 +2731,56 @@ impl GatewayStore {
         Ok(results.pop())
     }
 
+    pub fn list_agent_aliases(&self, filter: Option<&str>) -> Result<Vec<AgentAliasRecord>> {
+        let conn = self.conn.lock().unwrap();
+        if let Some(value) = filter {
+            let mut stmt = conn.prepare(
+                "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
+                 FROM agent_aliases
+                 WHERE agent_id = ?1 OR alias_id = ?1
+                 ORDER BY agent_id ASC, alias_id ASC",
+            )?;
+            let rows = stmt.query_map(params![value], |row| {
+                Ok(AgentAliasRecord {
+                    alias_id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    revision_id: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    updated_by_type: row.get(4)?,
+                    updated_by_id: row.get(5)?,
+                    reason: row.get(6)?,
+                })
+            })?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            return Ok(results);
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
+                 FROM agent_aliases
+                 ORDER BY agent_id ASC, alias_id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(AgentAliasRecord {
+                    alias_id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    revision_id: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    updated_by_type: row.get(4)?,
+                    updated_by_id: row.get(5)?,
+                    reason: row.get(6)?,
+                })
+            })?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            return Ok(results);
+        }
+    }
+
     // --- Session Agent Bindings ---
 
     pub fn upsert_session_agent_binding(&self, binding: &SessionAgentBinding) -> Result<()> {

@@ -98,6 +98,12 @@ async fn main() -> anyhow::Result<()> {
             cli::common::AgentCommands::Bootstrap { from, overwrite } => {
                 cli::agent::handle_agent_bootstrap(&config_path, from.as_deref(), *overwrite)?;
             }
+            cli::common::AgentCommands::Alias { command } => {
+                cli::agent::handle_agent_alias(&config_path, command)?;
+            }
+            cli::common::AgentCommands::PromotionHistory { agent_id, json } => {
+                cli::agent::handle_agent_promotion_history(&config_path, agent_id.as_deref(), *json)?;
+            }
         },
 
         Commands::Chat(args) => {
