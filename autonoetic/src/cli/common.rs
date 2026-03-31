@@ -251,6 +251,22 @@ pub enum AgentCommands {
         #[command(subcommand)]
         command: AgentAliasCommands,
     },
+    /// Deterministically seed alias activation to a specific revision
+    Seed {
+        /// Logical agent ID / alias ID to activate
+        agent_id: String,
+        /// Target immutable revision ID
+        revision_id: String,
+        /// Optional explicit promotion record ID (useful for deterministic tests)
+        #[arg(long)]
+        promotion_id: Option<String>,
+        /// Optional reason attached to promotion history
+        #[arg(long)]
+        reason: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect durable promote/rollback history
     PromotionHistory {
         /// Filter by logical agent ID

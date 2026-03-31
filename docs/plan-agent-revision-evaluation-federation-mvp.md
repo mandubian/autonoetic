@@ -157,7 +157,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 - [x] Add a deliberate seed flow: artifact -> revision create -> promote.
 - [ ] Document that seeding is the only path to activate a new logical agent.
-- [ ] Provide a test helper or admin command for deterministic seeding in integration tests.
+- [x] Provide a test helper or admin command for deterministic seeding in integration tests.
 - [ ] Replace CLI `agent.install` entrypoints with revision create plus promote flow.
 - [x] Defer legacy data migration runbooks in this phase; fresh environments are the supported operating mode for now.
 
