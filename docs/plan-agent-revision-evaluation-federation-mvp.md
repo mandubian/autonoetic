@@ -167,8 +167,8 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 - [x] Duplicate revision creation reuses the same revision identity.
 - [x] Explicit `agent_ref` resolution bypasses alias lookup.
 - [x] Malformed targets containing `@` fail validation without alias fallback.
-- [ ] Candidate revision can run without an alias.
-- [ ] Changing pinned layer mounts changes revision identity even when agent files do not.
+- [x] Candidate revision can run without an alias.
+- [x] Changing pinned layer mounts changes revision identity even when agent files do not.
 - [x] Session resume reloads from stored binding state.
 - [x] Fresh databases pass ordered migration bootstrap (upgrade compatibility is intentionally out of scope for now).
 

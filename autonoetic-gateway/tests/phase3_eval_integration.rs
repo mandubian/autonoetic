@@ -1006,6 +1006,257 @@ fn test_revision_directory_materialization_on_create() {
 }
 
 #[test]
+fn test_candidate_revision_runs_without_alias_via_explicit_agent_ref() {
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_gateway::runtime::content_store::ContentStore;
+
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let session_id = "test-session";
+
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+
+    let skill_md = r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "candidate.noalias"
+  name: "Candidate No Alias"
+  description: "Candidate without alias"
+---
+# Candidate No Alias
+"#;
+    let runtime_lock = r#"gateway:
+  artifact: "gateway"
+  version: "0.1.0"
+  sha256: "sha256:gateway"
+sdk:
+  version: "0.1.0"
+sandbox:
+  backend: "bubblewrap"
+dependencies: []
+artifacts: []
+layers: []
+"#;
+
+    for (name, content) in [
+        ("SKILL.md", skill_md.as_bytes()),
+        ("runtime.lock", runtime_lock.as_bytes()),
+        ("main.py", b"print('hello')".as_ref()),
+    ] {
+        let handle = content_store.write(content).unwrap();
+        content_store.register_name(session_id, name, &handle).unwrap();
+    }
+    let bundle = artifact_store
+        .build(
+            &[
+                "SKILL.md".to_string(),
+                "runtime.lock".to_string(),
+                "main.py".to_string(),
+            ],
+            Some(&["main.py".to_string()]),
+            None,
+            session_id,
+        )
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["candidate.noalias*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let create_tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateTool;
+    let created_json = create_tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &json!({
+                "agent_id": "candidate.noalias",
+                "artifact_id": bundle.artifact_id,
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_str(&created_json).unwrap();
+    let revision_id = created["revision_id"].as_str().unwrap().to_string();
+    let agent_ref = format!("candidate.noalias@{}", revision_id);
+
+    assert!(
+        store.resolve_alias("candidate.noalias").unwrap().is_none(),
+        "candidate should be runnable without alias"
+    );
+
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir: tmp.path().join("agents"),
+        ..Default::default()
+    };
+    let repo = autonoetic_gateway::agent::repository::AgentRepository::from_config(&config);
+    let (resolved_ref, _, binding) = repo
+        .resolve_and_pin_session(
+            "session-candidate-noalias",
+            "session-candidate-noalias",
+            &agent_ref,
+            Some(store.as_ref()),
+            "host:test",
+        )
+        .unwrap();
+    assert_eq!(resolved_ref.revision_id, revision_id);
+    assert_eq!(binding.alias_id, None);
+}
+
+#[test]
+fn test_changing_pinned_layer_mounts_changes_revision_identity() {
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_gateway::layer_store::{LayerLimits, LayerStore};
+    use autonoetic_gateway::runtime::content_store::ContentStore;
+    use autonoetic_types::layer::ArtifactLayer;
+
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+    let layer_store = LayerStore::new(&gateway_dir, LayerLimits::default()).unwrap();
+
+    let layer_src = tmp.path().join("layer-src");
+    std::fs::create_dir_all(layer_src.join("pkg")).unwrap();
+    std::fs::write(layer_src.join("pkg/__init__.py"), b"# package").unwrap();
+    let captured = layer_store
+        .create_from_dir(&layer_src, "deps", "/opt/deps")
+        .unwrap();
+
+    let skill_md = r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "layer.identity"
+  name: "Layer Identity"
+  description: "Layer identity test"
+---
+# Layer Identity
+"#;
+    let main_py = b"print('same app')";
+    let runtime_lock_a = format!(
+        "gateway:\n  artifact: \"gateway\"\n  version: \"0.1.0\"\n  sha256: \"sha256:gateway\"\nsdk:\n  version: \"0.1.0\"\nsandbox:\n  backend: \"bubblewrap\"\ndependencies: []\nartifacts: []\nlayers:\n  - layer_id: \"{}\"\n    digest: \"{}\"\n    mount_path: \"/opt/deps-a\"\n",
+        captured.layer_id, captured.digest
+    );
+    let runtime_lock_b = format!(
+        "gateway:\n  artifact: \"gateway\"\n  version: \"0.1.0\"\n  sha256: \"sha256:gateway\"\nsdk:\n  version: \"0.1.0\"\nsandbox:\n  backend: \"bubblewrap\"\ndependencies: []\nartifacts: []\nlayers:\n  - layer_id: \"{}\"\n    digest: \"{}\"\n    mount_path: \"/opt/deps-b\"\n",
+        captured.layer_id, captured.digest
+    );
+
+    let build_bundle = |session_id: &str, runtime_lock_content: &str, mount_path: &str| -> String {
+        let entries = vec![
+            ("SKILL.md".to_string(), skill_md.as_bytes().to_vec()),
+            (
+                "runtime.lock".to_string(),
+                runtime_lock_content.as_bytes().to_vec(),
+            ),
+            ("main.py".to_string(), main_py.to_vec()),
+        ];
+        for (name, bytes) in entries {
+            let handle = content_store.write(&bytes).unwrap();
+            content_store.register_name(session_id, &name, &handle).unwrap();
+        }
+        let layers = vec![ArtifactLayer {
+            layer_id: captured.layer_id.clone(),
+            name: captured.name.clone(),
+            mount_path: mount_path.to_string(),
+            digest: captured.digest.clone(),
+        }];
+        artifact_store
+            .build(
+                &[
+                    "SKILL.md".to_string(),
+                    "runtime.lock".to_string(),
+                    "main.py".to_string(),
+                ],
+                Some(&["main.py".to_string()]),
+                Some(&layers),
+                session_id,
+            )
+            .unwrap()
+            .artifact_id
+    };
+
+    assert_ne!(runtime_lock_a, runtime_lock_b);
+    let artifact_a = build_bundle("test-session-a", &runtime_lock_a, "/opt/deps-a");
+    let artifact_b = build_bundle("test-session-b", &runtime_lock_b, "/opt/deps-b");
+    assert_ne!(artifact_a, artifact_b, "artifacts should differ when runtime.lock differs");
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["layer.identity*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let create_tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateTool;
+
+    let created_a: serde_json::Value = serde_json::from_str(
+        &create_tool
+            .execute(
+                &manifest,
+                &policy,
+                Path::new("/tmp"),
+                Some(gateway_dir.as_path()),
+                &json!({"agent_id": "layer.identity", "artifact_id": artifact_a}).to_string(),
+                None,
+                None,
+                None,
+                Some(store.clone()),
+                None,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let created_b: serde_json::Value = serde_json::from_str(
+        &create_tool
+            .execute(
+                &manifest,
+                &policy,
+                Path::new("/tmp"),
+                Some(gateway_dir.as_path()),
+                &json!({"agent_id": "layer.identity", "artifact_id": artifact_b}).to_string(),
+                None,
+                None,
+                None,
+                Some(store.clone()),
+                None,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(created_a["status"], json!("already_exists"));
+    assert_ne!(created_b["status"], json!("already_exists"));
+
+    assert_ne!(
+        created_a["revision_id"].as_str().unwrap(),
+        created_b["revision_id"].as_str().unwrap(),
+        "changing pinned layer mounts must change revision identity"
+    );
+}
+
+#[test]
 fn test_load_from_revision_dir_fails_when_missing() {
     let tmp = TempDir::new().unwrap();
     let agents_dir = tmp.path().join("agents");
