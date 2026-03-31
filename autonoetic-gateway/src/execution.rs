@@ -584,7 +584,7 @@ impl GatewayExecutionService {
         session_id: &str,
         source_agent_id: Option<&str>,
         is_message: bool,
-        ingest_event_type: Option<&str>,
+        _ingest_event_type: Option<&str>,
         metadata: Option<&serde_json::Value>,
         // Workflow / task context for turn continuation saves on approval suspension.
         workflow_id: Option<&str>,
@@ -651,31 +651,29 @@ impl GatewayExecutionService {
             // Revision-based resolution (Phase 1d+): sessions execute from
             // pinned immutable revision directories only.
             // ─────────────────────────────────────────────────────────────
-            let loaded = if let Some(ref gs) = self.gateway_store {
-                let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session(
-                    session_id,
-                    session_id, // root_session_id = session_id for single sessions
-                    agent_id,
-                    Some(gs.as_ref()),
-                    &default_gateway_host_id(),
-                )?;
-                tracing::info!(
-                    agent_id = %agent_ref.agent_id,
-                    revision_id = %agent_ref.revision_id,
-                    session_id = session_id,
-                    "Resolved session to pinned revision"
+            let Some(ref gs) = self.gateway_store else {
+                anyhow::bail!(
+                    "GatewayStore is required for session resolution. \
+                     Agent '{}' cannot be loaded without a gateway store.",
+                    agent_id
                 );
-                let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-                repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?
-            } else {
-                tracing::warn!(
-                    target: "execution",
-                    session_id = session_id,
-                    requested_target = agent_id,
-                    "GatewayStore unavailable; falling back to mutable directory resolution"
-                );
-                repo.get_sync(agent_id)?
             };
+            let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session(
+                session_id,
+                session_id, // root_session_id = session_id for single sessions
+                agent_id,
+                Some(gs.as_ref()),
+                &default_gateway_host_id(),
+            )?;
+            tracing::info!(
+                agent_id = %agent_ref.agent_id,
+                revision_id = %agent_ref.revision_id,
+                session_id = session_id,
+                "Resolved session to pinned revision"
+            );
+            let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+            let loaded =
+                repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?;
 
             // Validate spawn input against target agent's accepts schema (informational only)
             if let Some(ref io_schema) = loaded.manifest.io {
@@ -704,23 +702,12 @@ impl GatewayExecutionService {
                     }
                 }
             }
-            // Determine if background signaling is needed
-            let should_signal_background = ingest_event_type.is_some()
-                && loaded
-                    .manifest
-                    .background
-                    .as_ref()
-                    .map(|bg| bg.enabled && bg.wake_predicates.new_messages)
-                    .unwrap_or(false);
-            // Signal inbox for background scheduler if this is an event.ingest call
+            // Background signaling is handled by the notification processor
+            let should_signal_background = false;
+            // Signal notifications for background scheduler if this is an event.ingest call
             if should_signal_background {
-                let event_type = ingest_event_type.unwrap();
-                let _ = crate::scheduler::append_inbox_event(
-                    &self.config,
-                    agent_id,
-                    crate::router::ingress_wake_signal_internal(event_type, session_id),
-                    Some(session_id),
-                );
+                // Signals are now delivered through GatewayStore notifications
+                // The scheduler will pick them up on its next poll
             }
 
             // --- Fast path for script-only agents ---
@@ -1898,7 +1885,32 @@ impl GatewayExecutionService {
         }
 
         let repo = AgentRepository::from_config(&self.config);
-        let loaded = repo.get_sync(agent_id)?;
+        let loaded = if let Some(ref gs) = self.gateway_store {
+            if let Some(binding) = gs.get_session_agent_binding(session_id)? {
+                let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+                repo.load_from_revision_dir(&gateway_dir, &binding.agent_id, &binding.revision_id)?
+            } else {
+                tracing::warn!(
+                    session_id = session_id,
+                    "No session binding found for checkpoint respawn; falling back to alias resolution"
+                );
+                let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session(
+                    session_id,
+                    session_id,
+                    agent_id,
+                    Some(gs.as_ref()),
+                    &default_gateway_host_id(),
+                )?;
+                let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+                repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?
+            }
+        } else {
+            anyhow::bail!(
+                "GatewayStore is required for checkpoint respawn. \
+                 Agent '{}' cannot be respawned without a gateway store.",
+                agent_id
+            );
+        };
 
         let llm_config = loaded
             .manifest

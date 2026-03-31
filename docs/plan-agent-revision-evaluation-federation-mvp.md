@@ -17,30 +17,30 @@ It assumes:
 
 Landed work so far covers a subset of Phase 0, most of the Phase 1 registry and resolver scaffolding, and the core Phase 2 promote/rollback commands.
 
-- Phase 0 simplification landed for explicit ingress targeting, config cleanup, role-gate removal, and binary disclosure classes.
+- Phase 0 simplification landed for explicit ingress targeting, config cleanup, wake model collapse, generic approval queue adoption, role-gate removal, and binary disclosure classes.
 - Phase 1a landed for revision and eval Rust types, `SessionAgentBinding` shape, `LockedLayerMount`, and `ArtifactKind::AgentBundle`.
 - Phase 1b-1e landed for revision, alias, session-binding, promotion, and eval tables; alias-backed resolver behavior; short revision refs; revision create/list/inspect; and first-pass session pinning on spawn.
-- Follow-up hardening landed for ordered migration metadata (`schema_migrations`), canonical runtime lock hashing, revision directory materialization, and binding-first session resolution.
+- Follow-up hardening landed for ordered migration metadata (`schema_migrations`), canonical runtime lock hashing, revision directory materialization, binding-first session resolution, and removal of the non-store session-resolution fallback.
 - Phase 2 landed for transactional promote/rollback commands with same-agent validation, default rollback-to-previous behavior, durable promotion history, and optional eval-run gating.
 - Phase 3.5 landed for `agent.revision.diff` and `eval.compare` on top of the existing eval/report pipeline.
 - Runtime `agent.install` is removed from active native tool exposure; activation is revision + promote (or operator seed).
 
-## Cross-Cutting Epic Tracker (Remaining)
+## Cross-Cutting Epic Tracker
 
 - [x] Full retirement of non-alias activation path (`agent.install` runtime path removed; activation only via revision + alias movement). See [P1-T09 Seeding flow](#p1-t09-seeding-flow), [Phase 2 exit checklist](#phase-2-exit-checklist), and [Final Definition of Done](#final-definition-of-done).
-- [ ] Generic approval queue primitives in place and promotion governance routed through that queue. See [P0-T04 Generic approval queue](#p0-t04-generic-approval-queue) and [P2-T04 Policy enforcement](#p2-t04-policy-enforcement).
-- [ ] Background scheduler simplification complete (wake reasons reduced to timer + named signal only). See [P0-T03 Wake model collapse](#p0-t03-wake-model-collapse) and [Phase 0 exit checklist](#phase-0-exit-checklist).
-- [ ] Disclosure simplification complete (no source-path taxonomy; filtering driven by tool metadata/policy). See [P0-T06 Disclosure collapse](#p0-t06-disclosure-collapse) and [Phase 0 exit checklist](#phase-0-exit-checklist).
+- [x] Generic approval queue primitives in place (create, list, resolve, cancel). See [P0-T04 Generic approval queue](#p0-t04-generic-approval-queue) and [P2-T04 Policy enforcement](#p2-t04-policy-enforcement).
+- [x] Background scheduler simplification complete (wake reasons reduced to `Timer` + `ApprovalResolved` only). See [P0-T03 Wake model collapse](#p0-t03-wake-model-collapse) and [Phase 0 exit checklist](#phase-0-exit-checklist).
+- [x] Disclosure simplification complete (no source-path taxonomy; filtering driven by tool metadata/policy). See [P0-T06 Disclosure collapse](#p0-t06-disclosure-collapse) and [Phase 0 exit checklist](#phase-0-exit-checklist).
 - [x] Runtime no longer depends on authoring-directory scans for activation/execution behavior. See [P1-T07 Resolver contract](#p1-t07-resolver-contract) and [Phase 1 exit checklist](#phase-1-exit-checklist).
-- [ ] Final invariant enforced: activation only through `artifact -> revision -> promote`. See [Global Invariants](#global-invariants), [Phase 2 exit checklist](#phase-2-exit-checklist), and [Final Definition of Done](#final-definition-of-done).
+- [x] Final invariant enforced: activation only through `artifact -> revision -> promote`. Checkpoint respawn now resolves through session binding + revision store. See [Global Invariants](#global-invariants), [Phase 2 exit checklist](#phase-2-exit-checklist), and [Final Definition of Done](#final-definition-of-done).
 
 ## Global Invariants
 
 These invariants must hold after every phase:
 
-- [ ] Runtime execution never resolves directly from mutable authoring directories (remaining gap: runtime fallback path still exists when `GatewayStore` is unavailable).
+- [x] Runtime execution never resolves directly from mutable authoring directories. Checkpoint respawn now uses session binding + revision store.
 - [x] A session always runs from a pinned revision directory plus pinned runtime closure.
-- [ ] Alias movement is the only way to change default active behavior (remaining gap: non-store runtime fallback path bypasses alias resolution).
+- [x] Alias movement is the only way to change default active behavior.
 - [x] Eval execution consumes the same global runtime permits as ordinary sessions.
 - [x] Layer mounts are pinned in `runtime.lock`, not rediscovered dynamically.
 - [x] Promotion never mutates revision bytes in place.
@@ -73,15 +73,17 @@ Goal: remove gateway semantics that conflict with immutable revisions and generi
 
 ### P0-T03 Wake model collapse
 
-- [ ] Reduce background wake reasons to timer and named signal.
+- [x] Reduce background wake reasons to `Timer` and `ApprovalResolved`.
+- [x] Remove retired `NewMessage`, `TaskCompletion`, and `QueuedWork` wake variants.
 - [x] Remove semantic wake heuristics such as stale-goal or retryable-failure inference.
-- [ ] Remove scheduler branches that directly interpret prior tool output as a wake reason.
+- [x] Remove scheduler branches that directly interpret prior tool output as a wake reason.
+- [x] Remove inbox-event and task-board scanning branches from `decision.rs` that were feeding raw tool output into wake decisions.
 
 ### P0-T04 Generic approval queue
 
-- [ ] Introduce generic approval request, list, resolve, and cancel primitives.
-- [ ] Route promotion-related gating through the generic approval queue.
-- [ ] Ensure approval continuations resume against pinned session bindings rather than re-resolving targets.
+- [x] Introduce generic approval request, list, resolve, and cancel primitives.
+- [x] Route promotion-related gating through the generic approval queue.
+- [x] Ensure approval continuations resume against pinned session bindings rather than re-resolving targets.
 
 ### P0-T05 Role-specific gate removal
 
@@ -92,8 +94,9 @@ Goal: remove gateway semantics that conflict with immutable revisions and generi
 ### P0-T06 Disclosure collapse
 
 - [x] Reduce disclosure handling to restricted vs non-restricted output policy.
-- [ ] Stop classifying disclosure by source path taxonomy.
-- [ ] Ensure tool metadata drives output filtering decisions.
+- [x] Stop classifying disclosure by source path taxonomy.
+- [x] Rename `SecretStoreDirective.source_path` to `json_path` to avoid confusion with disclosure policy `path_pattern`.
+- [x] Ensure tool metadata drives output filtering decisions.
 - [x] Map legacy manifest disclosure classes to the binary restricted flag during migration.
 - [x] Keep reply filtering deterministic with one restricted-output redaction marker.
 
@@ -102,9 +105,9 @@ Goal: remove gateway semantics that conflict with immutable revisions and generi
 - [x] `event.ingest` without `target` fails validation.
 - [x] Malformed targets containing `@` fail validation before alias lookup.
 - [x] No gateway behavior depends on specific built-in agent ids.
-- [ ] Scheduler wake logic only uses timer and named signal.
-- [ ] Disclosure filtering no longer depends on multi-class path taxonomy.
-- [ ] Approval continuation still works after the simplification.
+- [x] Scheduler wake logic only uses `Timer` and `ApprovalResolved`.
+- [x] Disclosure filtering no longer depends on multi-class path taxonomy.
+- [x] Approval continuation still works after the simplification.
 
 ## Phase 1: Revision Registry and Resolver
 
@@ -216,7 +219,7 @@ Goal: make alias movement the only activation and rollback mechanism.
 ### P2-T04 Policy enforcement
 
 - [x] Gate promote and rollback through capability checks.
-- [ ] Route any governance requirement through the generic approval queue.
+- [x] Route any governance requirement through the generic approval queue.
 - [x] Keep policy independent from agent names or roles.
 
 ### P2-T05 Inspection surfaces
@@ -235,7 +238,7 @@ Goal: make alias movement the only activation and rollback mechanism.
 
 ### Phase 2 exit checklist
 
-- [ ] Alias movement is the only activation path.
+- [x] Alias movement is the only activation path.
 - [x] Promotion history is durable and auditable.
 - [x] Running sessions remain stable during promote and rollback.
 
@@ -394,7 +397,7 @@ This section is intentionally classification, not delivery scope. Only work that
 
 ## Final Definition of Done
 
-- [ ] A new logical agent is activated only through artifact -> revision -> promote.
+- [x] A new logical agent is activated only through artifact -> revision -> promote.
 - [x] A running session is fully determined by its stored binding.
 - [x] A candidate revision can be evaluated before activation.
 - [x] Alias movement is auditable and reversible.

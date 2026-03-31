@@ -1,6 +1,6 @@
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::scheduler::{
-    append_inbox_event, background_state_path, gateway_store::GatewayStore, run_scheduler_tick,
+    background_state_path, gateway_store::GatewayStore, run_scheduler_tick,
 };
 use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
@@ -147,14 +147,14 @@ async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Re
         ..GatewayConfig::default()
     };
     let agent_id = "idle-public-agent";
-    let authoring = write_background_agent(
+    let agent_dir = write_background_agent(
         &agents_dir,
         agent_id,
-        "    timer: true\n    new_messages: false\n    task_completions: false\n    queued_work: false\n    stale_goals: false\n    retryable_failures: false\n    approval_resolved: false\n",
+        "    timer: true\n    approval_resolved: false\n",
     )?;
     let revision_id =
         "rev_sha256:1111111111111111111111111111111111111111111111111111111111111111";
-    register_revision_mirror(&config, store.as_ref(), agent_id, &authoring, revision_id)?;
+    register_revision_mirror(&config, store.as_ref(), agent_id, &agent_dir, revision_id)?;
 
     let session_id = background_session(agent_id);
     write_background_state(
@@ -184,57 +184,6 @@ async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn test_background_scheduler_wake_on_new_work_through_public_api() -> anyhow::Result<()> {
-    let temp = tempdir()?;
-    let agents_dir = temp.path().join("agents");
-    let gateway_dir = agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
-    let config = GatewayConfig {
-        agents_dir: agents_dir.clone(),
-        background_scheduler_enabled: true,
-        ..GatewayConfig::default()
-    };
-    let agent_id = "new-work-public-agent";
-    let agent_dir = write_background_agent(
-        &agents_dir,
-        agent_id,
-        "    timer: false\n    new_messages: true\n    task_completions: false\n    queued_work: false\n    stale_goals: false\n    retryable_failures: false\n    approval_resolved: false\n",
-    )?;
-    write_reevaluation_state(
-        &agent_dir,
-        &ReevaluationState {
-            pending_scheduled_action: Some(ScheduledAction::WriteFile {
-                path: "skills/from_public_inbox.md".to_string(),
-                content: "processed via public tick".to_string(),
-                requires_approval: false,
-                evidence_ref: None,
-            }),
-            ..ReevaluationState::default()
-        },
-    )?;
-    let revision_id =
-        "rev_sha256:2222222222222222222222222222222222222222222222222222222222222222";
-    register_revision_mirror(&config, store.as_ref(), agent_id, &agent_dir, revision_id)?;
-    let rev_dir = gateway_dir
-        .join("revisions")
-        .join("agents")
-        .join(agent_id)
-        .join(revision_id);
-    append_inbox_event(&config, agent_id, "hello", Some("public-msg"))?;
-
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store)));
-    run_scheduler_tick(execution).await?;
-
-    assert!(rev_dir.join("skills").join("from_public_inbox.md").exists());
-    let state: BackgroundState = serde_json::from_str(&std::fs::read_to_string(
-        background_state_path(&config, agent_id),
-    )?)?;
-    assert_eq!(state.last_result.as_deref(), Some("executed"));
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
@@ -250,7 +199,7 @@ async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result
     let agent_dir = write_background_agent(
         &agents_dir,
         agent_id,
-        "    timer: true\n    new_messages: false\n    task_completions: false\n    queued_work: false\n    stale_goals: false\n    retryable_failures: false\n    approval_resolved: false\n",
+        "    timer: true\n    approval_resolved: false\n",
     )?;
     write_reevaluation_state(
         &agent_dir,
@@ -332,7 +281,7 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
     let agent_dir = write_background_agent(
         &agents_dir,
         agent_id,
-        "    timer: false\n    new_messages: false\n    task_completions: false\n    queued_work: false\n    stale_goals: true\n    retryable_failures: false\n    approval_resolved: true\n",
+        "    timer: false\n    approval_resolved: true\n",
     )?;
     write_reevaluation_state(
         &agent_dir,

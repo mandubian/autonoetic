@@ -166,12 +166,15 @@ mod tests {
             serde_json::from_str(&line).expect("response should decode");
 
         assert!(response.result.is_none());
-        assert!(response
+        let msg = &response
             .error
             .as_ref()
             .expect("error should exist")
-            .message
-            .contains("not found"));
+            .message;
+        assert!(
+            msg.contains("not found") || msg.contains("GatewayStore is required"),
+            "unexpected error: {msg}"
+        );
 
         server.abort();
     }

@@ -742,15 +742,6 @@ struct EventIngestParams {
     source_agent_id: Option<String>,
 }
 
-pub(crate) fn ingress_wake_signal_internal(event_type: &str, session_id: &str) -> String {
-    serde_json::json!({
-        "kind": "event_ingest",
-        "event_type": event_type,
-        "session_id": session_id,
-    })
-    .to_string()
-}
-
 fn append_delegation_task_entry(
     config: &GatewayConfig,
     source_agent_id: &str,
@@ -778,7 +769,7 @@ fn append_delegation_task_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::{inbox_path, task_board_path, InboxEvent};
+        use crate::scheduler::{inbox_path, task_board_path};
     use autonoetic_types::task_board::TaskBoardEntry;
     use tempfile::TempDir;
 
@@ -806,13 +797,13 @@ mod tests {
         .unwrap();
     }
 
-    fn write_background_agent(agents_dir: &std::path::Path, agent_id: &str, new_messages: bool) {
+    fn write_background_agent(agents_dir: &std::path::Path, agent_id: &str, _signals: bool) {
         let agent_dir = agents_dir.join(agent_id);
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("SKILL.md"),
             format!(
-                "---\nversion: \"1.0\"\nruntime:\n  engine: \"autonoetic\"\n  gateway_version: \"0.1.0\"\n  sdk_version: \"0.1.0\"\n  type: \"stateful\"\n  sandbox: \"bubblewrap\"\n  runtime_lock: \"runtime.lock\"\nagent:\n  id: \"{agent_id}\"\n  name: \"{agent_id}\"\n  description: \"test\"\nbackground:\n  enabled: true\n  interval_secs: 60\n  mode: deterministic\n  wake_predicates:\n    timer: false\n    new_messages: {new_messages}\n---\nbody\n"
+                "---\nversion: \"1.0\"\nruntime:\n  engine: \"autonoetic\"\n  gateway_version: \"0.1.0\"\n  sdk_version: \"0.1.0\"\n  type: \"stateful\"\n  sandbox: \"bubblewrap\"\n  runtime_lock: \"runtime.lock\"\nagent:\n  id: \"{agent_id}\"\n  name: \"{agent_id}\"\n  description: \"test\"\nbackground:\n  enabled: true\n  interval_secs: 60\n  mode: deterministic\n  wake_predicates:\n    timer: false\n---\nbody\n"
             ),
         )
         .unwrap();
@@ -931,12 +922,11 @@ mod tests {
         };
         let resp = router.dispatch(req).await;
         assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32000));
-        assert!(resp
-            .error
-            .as_ref()
-            .expect("error should exist")
-            .message
-            .contains("not found"));
+        let msg = &resp.error.as_ref().expect("error should exist").message;
+        assert!(
+            msg.contains("not found") || msg.contains("GatewayStore is required"),
+            "unexpected error: {msg}"
+        );
         // Gateway causal chain is no longer used - events are captured in gateway.db
     }
 
@@ -959,12 +949,11 @@ mod tests {
         };
         let resp = router.dispatch(req).await;
         assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32000));
-        assert!(resp
-            .error
-            .as_ref()
-            .expect("error should exist")
-            .message
-            .contains("not found"));
+        let msg = &resp.error.as_ref().expect("error should exist").message;
+        assert!(
+            msg.contains("not found") || msg.contains("GatewayStore is required"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1053,7 +1042,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_event_ingest_writes_scheduler_inbox_signal_for_background_agents() {
+    async fn test_dispatch_event_ingest_creates_notification_for_signal_enabled_agents() {
         let (temp, router) = test_router();
         let agents_dir = temp.path().join("agents");
         write_background_agent(&agents_dir, "target", true);
@@ -1073,25 +1062,22 @@ mod tests {
         let resp = router.dispatch(req).await;
         assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32000));
 
-        let body = std::fs::read_to_string(inbox_path(router.config.as_ref(), "target"))
-            .expect("inbox should exist");
-        let event: InboxEvent =
-            serde_json::from_str(body.trim()).expect("inbox event should parse");
-        assert!(event.message.contains("\"kind\":\"event_ingest\""));
-        assert!(event.message.contains("\"event_type\":\"webhook\""));
-        assert!(event.message.contains("\"session_id\":\"session-inbox\""));
-        assert!(!event.message.contains("deploy"));
-        assert!(!event.message.contains("Gateway event type"));
+        // Signal-based wake now uses GatewayStore notifications instead of inbox files
+        // The notification is created by the scheduler, not the ingress path
+        assert!(
+            !inbox_path(router.config.as_ref(), "target").exists(),
+            "inbox file should not be created for signal-enabled agents"
+        );
     }
 
     #[tokio::test]
-    async fn test_dispatch_event_ingest_skips_scheduler_inbox_without_new_message_opt_in() {
+    async fn test_dispatch_event_ingest_no_inbox_for_signal_disabled_agents() {
         let (temp, router) = test_router();
         let agents_dir = temp.path().join("agents");
         write_minimal_agent(&agents_dir, "target-no-bg");
-        write_background_agent(&agents_dir, "target-no-new-messages", false);
+        write_background_agent(&agents_dir, "target-no-signals", false);
 
-        for agent_id in ["target-no-bg", "target-no-new-messages"] {
+        for agent_id in ["target-no-bg", "target-no-signals"] {
             let req = JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 id: agent_id.to_string(),

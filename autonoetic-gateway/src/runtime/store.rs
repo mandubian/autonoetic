@@ -11,7 +11,7 @@ const VAULT_PATH_ENV: &str = "AUTONOETIC_VAULT_PATH";
 
 #[derive(Debug, Clone)]
 pub struct SecretStoreDirective {
-    source_path: Vec<String>,
+    json_path: Vec<String>,
     secret_name: String,
 }
 
@@ -51,10 +51,10 @@ impl SecretStoreRuntime {
         let mut extracted_secrets = Vec::new();
 
         for d in &self.directives {
-            if let Some(secret_val) = extract_json_path_as_string(&value, &d.source_path) {
+            if let Some(secret_val) = extract_json_path_as_string(&value, &d.json_path) {
                 extracted_secrets.push(secret_val.clone());
                 self.vault.set_secret(&d.secret_name, secret_val);
-                redact_json_path(&mut value, &d.source_path, "[REDACTED]");
+                redact_json_path(&mut value, &d.json_path, "[REDACTED]");
                 changed = true;
             }
         }
@@ -82,13 +82,13 @@ fn parse_secret_store_directives(markdown: &str) -> Vec<SecretStoreDirective> {
         if !from.starts_with("response.") || !to.starts_with("secret:") {
             continue;
         }
-        let source_path = from
+        let json_path = from
             .trim_start_matches("response.")
             .split('.')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
-        if source_path.is_empty() {
+        if json_path.is_empty() {
             continue;
         }
         let secret_name = to.trim_start_matches("secret:").trim().to_string();
@@ -96,7 +96,7 @@ fn parse_secret_store_directives(markdown: &str) -> Vec<SecretStoreDirective> {
             continue;
         }
         out.push(SecretStoreDirective {
-            source_path,
+            json_path,
             secret_name,
         });
     }
@@ -164,7 +164,7 @@ mod tests {
         let directives = parse_secret_store_directives(md);
         assert_eq!(directives.len(), 1);
         assert_eq!(directives[0].secret_name, "MOLTBOOK_SECRET");
-        assert_eq!(directives[0].source_path, vec!["secret".to_string()]);
+        assert_eq!(directives[0].json_path, vec!["secret".to_string()]);
     }
 
     #[test]

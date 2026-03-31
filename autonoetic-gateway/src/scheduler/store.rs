@@ -59,13 +59,6 @@ pub fn save_background_state(path: &Path, state: &BackgroundState) -> anyhow::Re
     write_json_file(path, state)
 }
 
-pub fn load_inbox_events(
-    config: &GatewayConfig,
-    agent_id: &str,
-) -> anyhow::Result<Vec<super::InboxEvent>> {
-    load_jsonl_file(&inbox_path(config, agent_id))
-}
-
 pub fn load_task_board_entries(config: &GatewayConfig) -> anyhow::Result<Vec<TaskBoardEntry>> {
     load_jsonl_file(&task_board_path(config))
 }

@@ -5,7 +5,7 @@ mod support;
 
 use support::agents::install_outbound_reply_agent;
 use support::{
-    read_causal_entries, spawn_gateway_server, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace,
+    read_causal_entries, seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace,
 };
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
@@ -35,11 +35,16 @@ async fn test_event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
     let _base_url = EnvGuard::set(LLM_BASE_URL_OVERRIDE_ENV, stub.completion_url());
     let _api_key = EnvGuard::set(LLM_API_KEY_OVERRIDE_ENV, "test-key");
 
-    let (jsonrpc_addr, server) = spawn_gateway_server(autonoetic_types::config::GatewayConfig {
+    let config = autonoetic_types::config::GatewayConfig {
         agents_dir: agents_dir.clone(),
         ..workspace.gateway_config()
-    })
-    .await?;
+    };
+    let (jsonrpc_addr, store, server) = spawn_gateway_server_with_store(config.clone()).await?;
+
+    // Seed the agent as a revision + alias
+    let agent_dir = agents_dir.join(target_agent_id);
+    let revision_id = seed_agent_revision(&store, &config, target_agent_id, &agent_dir)?;
+
     let mut client = JsonRpcClient::connect(jsonrpc_addr).await?;
 
     let session_id = "session-e2e-ingress";
@@ -84,13 +89,16 @@ async fn test_event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
     assert!(joined_messages.contains("Incoming deployment event"));
 
     // Gateway-wide causal_chain.jsonl is no longer written (events go to gateway.db).
-    // This test still verifies per-session agent causal traces under the agent directory.
+    // This test still verifies per-session agent causal traces under the revision directory.
 
+    let gateway_dir = agents_dir.join(".gateway");
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(target_agent_id)
+        .join(&revision_id);
     let agent_entries = read_causal_entries(
-        &agents_dir
-            .join(target_agent_id)
-            .join("history")
-            .join("causal_chain.jsonl"),
+        &rev_dir.join("history").join("causal_chain.jsonl"),
     )?;
 
     // Per-turn correlation: agent entries should match session AND turn

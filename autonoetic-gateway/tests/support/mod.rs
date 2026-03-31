@@ -3,7 +3,8 @@
 pub mod agents;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcResponse, JsonRpcRouter};
-use autonoetic_gateway::scheduler::{approve_request, load_approval_requests, run_scheduler_tick};
+use autonoetic_gateway::scheduler::{approve_request, gateway_store::GatewayStore, load_approval_requests, run_scheduler_tick};
+use autonoetic_types::agent_revision::{AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus};
 use autonoetic_gateway::server::jsonrpc::start_jsonrpc_server;
 use autonoetic_gateway::GatewayExecutionService;
 use autonoetic_types::background::{ApprovalDecision, ApprovalRequest};
@@ -210,10 +211,109 @@ pub async fn spawn_gateway_server(
     let addr = listener.local_addr()?;
     drop(listener);
     config.port = addr.port();
-    let router = JsonRpcRouter::new(config, None);
+
+    let gateway_dir = config.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let router = JsonRpcRouter::new(config, Some(store));
     let handle = tokio::spawn(async move { start_jsonrpc_server(addr, router).await });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     Ok((addr, handle))
+}
+
+pub async fn spawn_gateway_server_with_store(
+    mut config: GatewayConfig,
+) -> anyhow::Result<(SocketAddr, Arc<GatewayStore>, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    drop(listener);
+    config.port = addr.port();
+
+    let gateway_dir = config.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let router = JsonRpcRouter::new(config, Some(store.clone()));
+    let handle = tokio::spawn(async move { start_jsonrpc_server(addr, router).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    Ok((addr, store, handle))
+}
+
+pub fn seed_agent_revision(
+    store: &GatewayStore,
+    config: &GatewayConfig,
+    agent_id: &str,
+    agent_dir: &Path,
+) -> anyhow::Result<String> {
+    let gateway_dir = config.agents_dir.join(".gateway");
+    let revision_id = format!("rev_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(agent_id)
+        .join(&revision_id);
+    if rev_dir.exists() {
+        std::fs::remove_dir_all(&rev_dir)?;
+    }
+    std::fs::create_dir_all(&rev_dir)?;
+    for entry in std::fs::read_dir(agent_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        if path.is_dir() {
+            let _ = copy_dir_all_test(&path, &rev_dir.join(file_name));
+        } else {
+            std::fs::copy(&path, rev_dir.join(file_name))?;
+        }
+    }
+
+    let rec = AgentRevisionRecord {
+        revision_id: revision_id.clone(),
+        agent_id: agent_id.to_string(),
+        base_revision_id: None,
+        artifact_id: None,
+        content_digest: format!("sha256:seed-{agent_id}"),
+        runtime_lock_hash: "sha256:seed-lock".to_string(),
+        manifest_hash: "sha256:seed-manifest".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "support".to_string(),
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: AgentRevisionStatus::Ready,
+        metadata_json: serde_json::json!({}),
+        short_id: String::new(),
+    };
+    store.insert_agent_revision(&rec)?;
+    let alias = AgentAliasRecord {
+        alias_id: agent_id.to_string(),
+        agent_id: agent_id.to_string(),
+        revision_id: revision_id.clone(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        updated_by_type: "test".to_string(),
+        updated_by_id: "support".to_string(),
+        reason: Some("test seed".to_string()),
+    };
+    store.upsert_agent_alias(&alias)?;
+    Ok(revision_id)
+}
+
+fn copy_dir_all_test(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        if path.is_dir() {
+            copy_dir_all_test(&path, &dst.join(file_name))?;
+        } else {
+            std::fs::copy(&path, dst.join(file_name))?;
+        }
+    }
+    Ok(())
 }
 
 pub struct JsonRpcClient {

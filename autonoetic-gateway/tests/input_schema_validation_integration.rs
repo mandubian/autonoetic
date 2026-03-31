@@ -1,7 +1,8 @@
 mod support;
 
 use autonoetic_gateway::GatewayExecutionService;
-use support::{EnvGuard, OpenAiStub, TestWorkspace};
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use support::{seed_agent_revision, EnvGuard, OpenAiStub, TestWorkspace};
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
@@ -58,9 +59,13 @@ Always return deterministic output.
 
 #[tokio::test]
 async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> anyhow::Result<()> {
-    let workspace = TestWorkspace::new()?;
+    // Use a short temp path to avoid Unix socket path length limits (SUN_LEN = 108)
+    let base_dir = std::env::temp_dir().join(format!("at-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let agents_dir = base_dir.join("a");
+    std::fs::create_dir_all(&agents_dir)?;
     let target_agent_id = "schema-test";
-    install_schema_validation_agent(&workspace.agents_dir.join(target_agent_id), target_agent_id)?;
+    install_schema_validation_agent(&agents_dir.join(target_agent_id), target_agent_id)?;
 
     let stub = OpenAiStub::spawn(|_, _| async move {
         serde_json::json!({
@@ -78,7 +83,16 @@ async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> any
     let _base_url = EnvGuard::set(LLM_BASE_URL_OVERRIDE_ENV, stub.completion_url());
     let _api_key = EnvGuard::set(LLM_API_KEY_OVERRIDE_ENV, "test-key");
 
-    let execution = GatewayExecutionService::new(workspace.gateway_config(), None);
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let gateway_dir = config.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(&store, &config, target_agent_id, &agents_dir.join(target_agent_id))?;
+
+    let execution = GatewayExecutionService::new(config, Some(store));
     let mismatched_session_id = "session-schema-mismatch";
     let valid_session_id = "session-schema-valid";
 

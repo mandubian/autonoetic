@@ -7,7 +7,6 @@ use autonoetic_types::background::{
     BackgroundPolicy, BackgroundState, ReevaluationState, WakeReason,
 };
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::task_board::TaskStatus;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 
@@ -24,8 +23,8 @@ pub fn effective_interval_secs(
 }
 
 pub fn should_wake(
-    config: &GatewayConfig,
-    agent_id: &str,
+    _config: &GatewayConfig,
+    _agent_id: &str,
     session_id: &str,
     background: &BackgroundPolicy,
     state: &BackgroundState,
@@ -74,52 +73,6 @@ pub fn should_wake(
         }
     }
 
-    if background.wake_predicates.new_messages {
-        for event in crate::scheduler::store::load_inbox_events(config, agent_id)? {
-            if !state.processed_inbox_event_ids.contains(&event.event_id) {
-                return Ok(Some(WakeReason::NewMessage {
-                    event_id: event.event_id,
-                    message: event.message,
-                }));
-            }
-        }
-    }
-
-    if background.wake_predicates.task_completions || background.wake_predicates.queued_work {
-        for task in crate::scheduler::store::load_task_board_entries(config)? {
-            if task.assignee_id.as_deref() != Some(agent_id) {
-                continue;
-            }
-            let task_status = match &task.status {
-                TaskStatus::Pending => "pending",
-                TaskStatus::Claimed => "claimed",
-                TaskStatus::Completed => "completed",
-                TaskStatus::Failed => "failed",
-            };
-            let task_key = format!("{}:{}", task.task_id, task_status);
-            if state.processed_task_keys.contains(&task_key) {
-                continue;
-            }
-            match &task.status {
-                TaskStatus::Completed if background.wake_predicates.task_completions => {
-                    return Ok(Some(WakeReason::TaskCompletion {
-                        task_id: task.task_id,
-                        status: "completed".to_string(),
-                    }));
-                }
-                TaskStatus::Pending | TaskStatus::Claimed
-                    if background.wake_predicates.queued_work =>
-                {
-                    return Ok(Some(WakeReason::QueuedWork {
-                        task_id: task.task_id,
-                        status: format!("{:?}", task.status).to_ascii_lowercase(),
-                    }));
-                }
-                _ => {}
-            }
-        }
-    }
-
     if let Some(next_due) = &state.next_due_at {
         let due = parse_timestamp(next_due)?;
         if due <= now {
@@ -163,19 +116,6 @@ pub fn log_should_wake(
 
 pub fn mark_reason_processed(state: &mut BackgroundState, reason: &WakeReason) {
     match reason {
-        WakeReason::NewMessage { event_id, .. } => {
-            state.processed_inbox_event_ids.push(event_id.clone());
-        }
-        WakeReason::TaskCompletion { task_id, .. } => {
-            state
-                .processed_task_keys
-                .push(format!("{}:completed", task_id));
-        }
-        WakeReason::QueuedWork { task_id, status } => {
-            state
-                .processed_task_keys
-                .push(format!("{}:{}", task_id, status));
-        }
         WakeReason::ApprovalResolved { request_id } => {
             state
                 .processed_approval_request_ids
@@ -189,11 +129,6 @@ pub fn wake_fingerprint(agent_id: &str, session_id: &str, reason: &WakeReason) -
     match reason {
         WakeReason::Timer { due_bucket } => {
             format!("timer:{agent_id}:{session_id}:{due_bucket}")
-        }
-        WakeReason::NewMessage { event_id, .. } => format!("message:{event_id}"),
-        WakeReason::TaskCompletion { task_id, status }
-        | WakeReason::QueuedWork { task_id, status } => {
-            format!("task:{task_id}:{status}")
         }
         WakeReason::ApprovalResolved { request_id } => format!("approval:{request_id}"),
     }

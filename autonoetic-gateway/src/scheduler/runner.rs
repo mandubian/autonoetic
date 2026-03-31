@@ -41,11 +41,6 @@ pub fn clear_reevaluation_after_success(
             WakeReason::Timer { .. } => {
                 // Keep timer actions armed so deterministic scheduled workers remain recurring.
             }
-            WakeReason::NewMessage { .. }
-            | WakeReason::TaskCompletion { .. }
-            | WakeReason::QueuedWork { .. } => {
-                state.pending_scheduled_action = None;
-            }
         }
     })?;
     Ok(())
