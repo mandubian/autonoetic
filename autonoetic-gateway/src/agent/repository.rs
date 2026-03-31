@@ -219,6 +219,22 @@ impl AgentRepository {
         })
     }
 
+    /// Load an agent from the revision store via GatewayStore alias resolution.
+    /// Falls back to get_sync only if gateway_store is None.
+    pub fn get_sync_from_store(
+        &self,
+        agent_id: &str,
+        gateway_dir: &Path,
+        gateway_store: Option<&GatewayStore>,
+    ) -> anyhow::Result<LoadedAgent> {
+        if let Some(gs) = gateway_store {
+            if let Some(alias) = gs.get_agent_alias(agent_id, agent_id)? {
+                return self.load_from_revision_dir(gateway_dir, &alias.agent_id, &alias.revision_id);
+            }
+        }
+        self.get_sync(agent_id)
+    }
+
     /// Resolve an agent target string to a concrete revision.
     ///
     /// The target can be:

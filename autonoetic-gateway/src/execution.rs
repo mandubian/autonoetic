@@ -396,7 +396,8 @@ impl GatewayExecutionService {
 
         if let Some(aid) = source_agent_id {
             let repo = AgentRepository::from_config(self.config.as_ref());
-            let loaded = repo.get_sync(aid)?;
+            let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+            let loaded = repo.get_sync_from_store(aid, &gateway_dir, self.gateway_store.as_deref())?;
             let policy = crate::policy::PolicyEngine::new(loaded.manifest);
             anyhow::ensure!(
                 policy.can_request_emergency_stop(),
@@ -608,7 +609,8 @@ impl GatewayExecutionService {
 
             if let Some(source_id) = source_agent_id {
                 if source_id != agent_id {
-                    let source_loaded = repo.get_sync(source_id)?;
+                    let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+                    let source_loaded = repo.get_sync_from_store(source_id, &gateway_dir, self.gateway_store.as_deref())?;
                     let source_policy = crate::policy::PolicyEngine::new(source_loaded.manifest);
 
                     if is_message {
@@ -1355,8 +1357,9 @@ impl GatewayExecutionService {
             // Resolve effective contract: caller-supplied metadata first, then manifest default.
             let manifest_contract: Option<serde_json::Value> =
                 if metadata.and_then(|m| m.get("response_contract")).is_none() {
-                    AgentRepository::from_config(&self.config)
-                        .get_sync(agent_id)
+                    let repo = AgentRepository::from_config(&self.config);
+                    let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+                    repo.get_sync_from_store(agent_id, &gateway_dir, self.gateway_store.as_deref())
                         .ok()
                         .and_then(|loaded| loaded.manifest.response_contract)
                 } else {
@@ -1886,24 +1889,14 @@ impl GatewayExecutionService {
 
         let repo = AgentRepository::from_config(&self.config);
         let loaded = if let Some(ref gs) = self.gateway_store {
-            if let Some(binding) = gs.get_session_agent_binding(session_id)? {
-                let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-                repo.load_from_revision_dir(&gateway_dir, &binding.agent_id, &binding.revision_id)?
-            } else {
-                tracing::warn!(
-                    session_id = session_id,
-                    "No session binding found for checkpoint respawn; falling back to alias resolution"
-                );
-                let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session(
-                    session_id,
-                    session_id,
-                    agent_id,
-                    Some(gs.as_ref()),
-                    &default_gateway_host_id(),
-                )?;
-                let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-                repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?
-            }
+            let binding = gs.get_session_agent_binding(session_id)?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "No session binding found for checkpoint respawn of session '{}'. \
+                     The session may have been started before binding was introduced.",
+                    session_id
+                ))?;
+            let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+            repo.load_from_revision_dir(&gateway_dir, &binding.agent_id, &binding.revision_id)?
         } else {
             anyhow::bail!(
                 "GatewayStore is required for checkpoint respawn. \
@@ -2084,7 +2077,8 @@ impl GatewayExecutionService {
         agent_id: &str,
     ) -> anyhow::Result<(AgentManifest, std::path::PathBuf)> {
         let repo = AgentRepository::from_config(&self.config);
-        let loaded = repo.get_sync(agent_id)?;
+        let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+        let loaded = repo.get_sync_from_store(agent_id, &gateway_dir, self.gateway_store.as_deref())?;
         Ok((loaded.manifest, loaded.dir))
     }
 
