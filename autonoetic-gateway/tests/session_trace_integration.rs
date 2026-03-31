@@ -3,7 +3,7 @@
 mod support;
 
 use support::{
-    read_causal_entries, spawn_gateway_server, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace,
+    read_causal_entries, seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace,
 };
 
 fn install_parent_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
@@ -79,6 +79,7 @@ Reply with "Child completed task: <input>".
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
 
     let parent_id = "parent-agent";
     let child_id = "child-agent";
@@ -139,7 +140,9 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
     let _env = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let (server_addr, shutdown) = spawn_gateway_server(workspace.gateway_config()).await?;
+    let (server_addr, store, shutdown) = spawn_gateway_server_with_store(config.clone()).await?;
+    let parent_rev = seed_agent_revision(&store, &config, parent_id, &workspace.agents_dir.join(parent_id))?;
+    let child_rev = seed_agent_revision(&store, &config, child_id, &workspace.agents_dir.join(child_id))?;
     let mut client = JsonRpcClient::connect(server_addr).await?;
 
     let session_id = "session-multi-agent-test";
@@ -159,17 +162,21 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let gateway_causal_path = workspace
-        .agents_dir
-        .join(".gateway/history/causal_chain.jsonl");
-    let parent_causal_path = workspace
-        .agents_dir
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    let parent_rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
         .join(parent_id)
-        .join("history/causal_chain.jsonl");
-    let child_causal_path = workspace
-        .agents_dir
+        .join(&parent_rev);
+    let child_rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
         .join(child_id)
-        .join("history/causal_chain.jsonl");
+        .join(&child_rev);
+
+    let gateway_causal_path = gateway_dir.join("history/causal_chain.jsonl");
+    let parent_causal_path = parent_rev_dir.join("history/causal_chain.jsonl");
+    let child_causal_path = child_rev_dir.join("history/causal_chain.jsonl");
 
     let mut all_events: Vec<(String, String)> = Vec::new();
 
@@ -229,6 +236,7 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_session_trace_deterministic_ordering() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
 
     let agent_id = "simple-agent";
 
@@ -279,7 +287,8 @@ Reply with "Done".
     let _env = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let (server_addr, _shutdown) = spawn_gateway_server(workspace.gateway_config()).await?;
+    let (server_addr, store, _shutdown) = spawn_gateway_server_with_store(config.clone()).await?;
+    let rev_id = seed_agent_revision(&store, &config, agent_id, &workspace.agents_dir.join(agent_id))?;
     let mut client = JsonRpcClient::connect(server_addr).await?;
 
     let session_id = "session-deterministic-1";
@@ -297,10 +306,14 @@ Reply with "Done".
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let agent_causal_path = workspace
+    let rev_dir = workspace
         .agents_dir
+        .join(".gateway")
+        .join("revisions")
+        .join("agents")
         .join(agent_id)
-        .join("history/causal_chain.jsonl");
+        .join(&rev_id);
+    let agent_causal_path = rev_dir.join("history/causal_chain.jsonl");
 
     let entries = read_causal_entries(&agent_causal_path)?;
     let session_entries: Vec<_> = entries
