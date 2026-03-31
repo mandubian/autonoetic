@@ -20,12 +20,6 @@ pub struct WakePredicates {
     #[serde(default = "default_true")]
     pub timer: bool,
     #[serde(default)]
-    pub new_messages: bool,
-    #[serde(default)]
-    pub task_completions: bool,
-    #[serde(default)]
-    pub queued_work: bool,
-    #[serde(default)]
     pub approval_resolved: bool,
 }
 
@@ -33,9 +27,6 @@ impl Default for WakePredicates {
     fn default() -> Self {
         Self {
             timer: true,
-            new_messages: false,
-            task_completions: false,
-            queued_work: false,
             approval_resolved: false,
         }
     }
@@ -172,9 +163,6 @@ pub struct ReevaluationState {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WakeReason {
     Timer { due_bucket: String },
-    NewMessage { event_id: String, message: String },
-    TaskCompletion { task_id: String, status: String },
-    QueuedWork { task_id: String, status: String },
     ApprovalResolved { request_id: String },
 }
 
@@ -202,10 +190,6 @@ pub struct BackgroundState {
     pub approval_blocked: bool,
     #[serde(default)]
     pub pending_approval_request_ids: Vec<String>,
-    #[serde(default)]
-    pub processed_inbox_event_ids: Vec<String>,
-    #[serde(default)]
-    pub processed_task_keys: Vec<String>,
     #[serde(default)]
     pub processed_approval_request_ids: Vec<String>,
 }
@@ -274,6 +258,7 @@ impl ApprovalRequest {
 pub enum ApprovalStatus {
     Approved,
     Rejected,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -162,6 +162,126 @@ pub fn reject_request(
     Ok(decision)
 }
 
+pub fn cancel_request(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    request_id: &str,
+    cancelled_by: &str,
+    reason: Option<String>,
+) -> anyhow::Result<ApprovalDecision> {
+    let decision =
+        cancel_approval_request(config, gateway_store, request_id, cancelled_by, reason)?;
+
+    // Notify waiting session of cancellation
+    if should_resume_waiting_session(&decision) {
+        resume_session_after_approval(config, gateway_store, &decision)?;
+    }
+
+    // Unblock workflow task if bound
+    unblock_task_on_approval(config, gateway_store, &decision);
+
+    Ok(decision)
+}
+
+fn cancel_approval_request(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    request_id: &str,
+    cancelled_by: &str,
+    reason: Option<String>,
+) -> anyhow::Result<ApprovalDecision> {
+    let request = if let Some(store) = gateway_store {
+        store
+            .get_approval(request_id)?
+            .ok_or_else(|| anyhow::anyhow!("Approval request not found in store: {}", request_id))?
+    } else {
+        anyhow::bail!("GatewayStore is required to cancel approvals");
+    };
+
+    // Idempotency guard
+    if let Some(ref current_status) = request.status {
+        let status_str = match current_status {
+            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Rejected => "rejected",
+            ApprovalStatus::Cancelled => "cancelled",
+        };
+        anyhow::bail!(
+            "Approval {} already decided as '{}' (by {})",
+            request_id,
+            status_str,
+            request.decided_by.as_deref().unwrap_or("unknown")
+        );
+    }
+
+    let decided_at = chrono::Utc::now().to_rfc3339();
+
+    // Persist cancellation
+    if let Some(store) = gateway_store {
+        store.cancel_approval(request_id, cancelled_by, &decided_at)?;
+    }
+
+    let decision = ApprovalDecision {
+        request_id: request.request_id,
+        agent_id: request.agent_id,
+        session_id: request.session_id,
+        action: request.action,
+        status: ApprovalStatus::Cancelled,
+        decided_at,
+        decided_by: cancelled_by.to_string(),
+        reason,
+        root_session_id: request.root_session_id.clone(),
+        workflow_id: request.workflow_id.clone(),
+        task_id: request.task_id.clone(),
+    };
+
+    // Clean up reevaluation state
+    let agent_dir = config.agents_dir.join(&decision.agent_id);
+    let _ = crate::runtime::reevaluation_state::persist_reevaluation_state(&agent_dir, |state| {
+        state
+            .open_approval_request_ids
+            .retain(|existing| existing != &decision.request_id);
+        state.pending_scheduled_action = None;
+        state.last_outcome = Some("approval_cancelled".to_string());
+    });
+
+    let state_path = crate::scheduler::store::background_state_path(config, &decision.agent_id);
+    if let Ok(mut background_state) = crate::scheduler::store::load_background_state(
+        &state_path,
+        &decision.agent_id,
+        &crate::scheduler::decision::background_session_id(&decision.agent_id),
+    ) {
+        background_state.approval_blocked = false;
+        background_state
+            .pending_approval_request_ids
+            .retain(|existing| existing != &decision.request_id);
+        background_state
+            .processed_approval_request_ids
+            .push(decision.request_id.clone());
+        let _ = crate::scheduler::store::save_background_state(&state_path, &background_state);
+    }
+
+    // Log to gateway causal chain
+    let causal_logger = init_gateway_causal_logger(config)?;
+    let mut trace_session = TraceSession::create_with_session_id(
+        SessionId::from_string(decision.session_id.clone()),
+        Arc::new(causal_logger),
+        gateway_actor_id(),
+        EventScope::Session,
+    );
+    let _ = trace_session.log_completed(
+        "background.approval",
+        Some("cancelled"),
+        Some(serde_json::json!({
+            "agent_id": decision.agent_id,
+            "request_id": decision.request_id,
+            "cancelled_by": decision.decided_by,
+            "action_kind": decision.action.kind()
+        })),
+    );
+
+    Ok(decision)
+}
+
 /// Queue durable session notifications after approval/rejection.
 ///
 /// This function persists approval-resolution signals that are consumed by
@@ -210,35 +330,42 @@ fn resume_session_after_approval(
     let status_str = match decision.status {
         ApprovalStatus::Approved => "approved",
         ApprovalStatus::Rejected => "rejected",
+        ApprovalStatus::Cancelled => "cancelled",
     };
 
     // Extract agent_id and build status message based on action type
     let (agent_id, status_message) = match &decision.action {
         autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, .. } => {
-            let msg = if decision.status == ApprovalStatus::Approved {
-                format!(
+            let msg = match decision.status {
+                ApprovalStatus::Approved => format!(
                     "approval_resumed:install:{}:{}",
                     decision.request_id, agent_id
-                )
-            } else {
-                format!(
+                ),
+                ApprovalStatus::Rejected => format!(
                     "approval_rejected:install:{}:{}",
                     decision.request_id, agent_id
-                )
+                ),
+                ApprovalStatus::Cancelled => format!(
+                    "approval_cancelled:install:{}:{}",
+                    decision.request_id, agent_id
+                ),
             };
             (agent_id.clone(), msg)
         }
         autonoetic_types::background::ScheduledAction::SandboxExec { .. } => {
-            let msg = if decision.status == ApprovalStatus::Approved {
-                format!(
+            let msg = match decision.status {
+                ApprovalStatus::Approved => format!(
                     "approval_resumed:sandbox_exec:{}:approved",
                     decision.request_id
-                )
-            } else {
-                format!(
+                ),
+                ApprovalStatus::Rejected => format!(
                     "approval_rejected:sandbox_exec:{}:rejected",
                     decision.request_id
-                )
+                ),
+                ApprovalStatus::Cancelled => format!(
+                    "approval_cancelled:sandbox_exec:{}:cancelled",
+                    decision.request_id
+                ),
             };
             (decision.agent_id.clone(), msg)
         }
@@ -365,6 +492,10 @@ fn unblock_task_on_approval(
             autonoetic_types::workflow::TaskRunStatus::Failed,
             "task.rejected",
         ),
+        ApprovalStatus::Cancelled => (
+            autonoetic_types::workflow::TaskRunStatus::Failed,
+            "task.cancelled",
+        ),
     };
 
     // Emit the approval decision event before updating status so chat CLI sees it.
@@ -382,6 +513,7 @@ fn unblock_task_on_approval(
                 "status": match decision.status {
                     ApprovalStatus::Approved => "approved",
                     ApprovalStatus::Rejected => "rejected",
+                    ApprovalStatus::Cancelled => "cancelled",
                 },
             }),
             occurred_at: decision.decided_at.clone(),
@@ -493,6 +625,7 @@ fn decide_request(
         let status_str = match current_status {
             ApprovalStatus::Approved => "approved",
             ApprovalStatus::Rejected => "rejected",
+            ApprovalStatus::Cancelled => "cancelled",
         };
         anyhow::bail!(
             "Approval {} already decided as '{}' (by {})",
@@ -522,6 +655,7 @@ fn decide_request(
             match decision.status {
                 ApprovalStatus::Approved => "approved",
                 ApprovalStatus::Rejected => "rejected",
+                ApprovalStatus::Cancelled => "cancelled",
             },
             &decision.decided_by,
             &decision.decided_at,
@@ -574,10 +708,12 @@ fn decide_request(
     let action = match status {
         ApprovalStatus::Approved => "background.approval",
         ApprovalStatus::Rejected => "background.approval",
+        ApprovalStatus::Cancelled => "background.approval",
     };
     let status_str = match status {
         ApprovalStatus::Approved => "approved",
         ApprovalStatus::Rejected => "rejected",
+        ApprovalStatus::Cancelled => "cancelled",
     };
     let _ = trace_session.log_completed(
         action,

@@ -6,7 +6,7 @@
 mod support;
 
 use support::agents::install_content_agent;
-use support::{spawn_gateway_server, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
+use support::{seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
 
 /// Test: Coder generates files via content.write tool calls.
 /// This verifies the tool execution is properly integrated into the agent lifecycle.
@@ -93,7 +93,11 @@ async fn test_coder_content_write_via_tool_calls() {
         ..Default::default()
     };
 
-    let (listen_addr, server_task) = spawn_gateway_server(config).await.unwrap();
+    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone()).await.unwrap();
+
+    // Seed the agent as a revision + alias
+    let revision_id = seed_agent_revision(&store, &config, agent_id, &agent_dir).unwrap();
+
     let mut client = JsonRpcClient::connect(listen_addr).await.unwrap();
 
     let session_id = "session-coder-content-test";
@@ -121,10 +125,14 @@ async fn test_coder_content_write_via_tool_calls() {
     );
 
     // Verify causal chain has content.write entry
-    let agent_history_file = agents_dir
+    // The causal chain is written to the revision directory, not the authoring directory
+    let gateway_dir = agents_dir.join(".gateway");
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
         .join(agent_id)
-        .join("history")
-        .join("causal_chain.jsonl");
+        .join(&revision_id);
+    let agent_history_file = rev_dir.join("history").join("causal_chain.jsonl");
     let agent_history = std::fs::read_to_string(&agent_history_file).unwrap();
 
     let mut content_write_count = 0;
@@ -268,7 +276,11 @@ async fn test_coder_multiple_tool_calls_single_turn() {
         ..Default::default()
     };
 
-    let (listen_addr, server_task) = spawn_gateway_server(config).await.unwrap();
+    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone()).await.unwrap();
+
+    // Seed the agent as a revision + alias
+    let revision_id = seed_agent_revision(&store, &config, agent_id, &agent_dir).unwrap();
+
     let mut client = JsonRpcClient::connect(listen_addr).await.unwrap();
 
     let session_id = "session-multi-tool-test";
@@ -288,10 +300,14 @@ async fn test_coder_multiple_tool_calls_single_turn() {
     assert!(resp.error.is_none(), "Request failed: {:?}", resp.error);
 
     // Verify multiple content.write calls were made
-    let agent_history_file = agents_dir
+    // The causal chain is written to the revision directory, not the authoring directory
+    let gateway_dir = agents_dir.join(".gateway");
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
         .join(agent_id)
-        .join("history")
-        .join("causal_chain.jsonl");
+        .join(&revision_id);
+    let agent_history_file = rev_dir.join("history").join("causal_chain.jsonl");
     let agent_history = std::fs::read_to_string(&agent_history_file).unwrap();
 
     let mut content_write_count = 0;

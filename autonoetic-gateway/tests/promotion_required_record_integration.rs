@@ -1,9 +1,10 @@
 mod support;
 
 use autonoetic_gateway::runtime::promotion_store::PromotionStore;
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::GatewayExecutionService;
 use autonoetic_types::promotion::PromotionRole;
-use support::{EnvGuard, TestWorkspace};
+use support::{seed_agent_revision, EnvGuard, TestWorkspace};
 
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
@@ -54,9 +55,16 @@ async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<(
     let workspace = TestWorkspace::new()?;
     let _api_key = EnvGuard::set(OPENAI_API_KEY_ENV, "test-key");
     let agent_id = "evaluator.default";
-    install_deterministic_reply_agent(&workspace.agents_dir.join(agent_id), agent_id)?;
+    let agent_dir = workspace.agents_dir.join(agent_id);
+    install_deterministic_reply_agent(&agent_dir, agent_id)?;
 
-    let execution = GatewayExecutionService::new(workspace.gateway_config(), None);
+    let config = workspace.gateway_config();
+    let gateway_dir = config.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(&store, &config, agent_id, &agent_dir)?;
+
+    let execution = GatewayExecutionService::new(config, Some(store));
     let err = execution
         .spawn_agent_once(
             agent_id,
@@ -91,7 +99,8 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
     let _api_key = EnvGuard::set(OPENAI_API_KEY_ENV, "test-key");
     let agent_id = "evaluator.default";
     let artifact_id = "art_contract_present";
-    install_deterministic_reply_agent(&workspace.agents_dir.join(agent_id), agent_id)?;
+    let agent_dir = workspace.agents_dir.join(agent_id);
+    install_deterministic_reply_agent(&agent_dir, agent_id)?;
 
     let gateway_dir = workspace.agents_dir.join(".gateway");
     let store = PromotionStore::new(&gateway_dir)?;
@@ -105,7 +114,11 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
         Some("pre-recorded evaluator pass".to_string()),
     )?;
 
-    let execution = GatewayExecutionService::new(workspace.gateway_config(), None);
+    let config = workspace.gateway_config();
+    let gw_store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(&gw_store, &config, agent_id, &agent_dir)?;
+
+    let execution = GatewayExecutionService::new(config, Some(gw_store));
     let result = execution
         .spawn_agent_once(
             agent_id,

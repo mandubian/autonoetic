@@ -4,7 +4,7 @@ use autonoetic_types::config::GatewayConfig;
 mod support;
 
 use support::agents::install_content_agent;
-use support::{spawn_gateway_server, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
+use support::{seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
 
 #[tokio::test]
 async fn test_loopback_content_audit_and_negatives() {
@@ -146,7 +146,11 @@ async fn test_loopback_content_audit_and_negatives() {
         ..Default::default()
     };
 
-    let (listen_addr, server_task) = spawn_gateway_server(config).await.unwrap();
+    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone()).await.unwrap();
+
+    // Seed the agent as a revision + alias
+    let revision_id = seed_agent_revision(&store, &config, agent_id, &agent_dir).unwrap();
+
     let mut client = JsonRpcClient::connect(listen_addr).await.unwrap();
 
     let session_id = "test-session-123";
@@ -258,8 +262,14 @@ async fn test_loopback_content_audit_and_negatives() {
     assert!(resp4.error.is_none());
 
     // --- Causal Lineage Auditing ---
-    // Agent-local log
-    let agent_history_file = agent_dir.join("history").join("causal_chain.jsonl");
+    // Agent-local log (now in revision directory, not authoring directory)
+    let gateway_dir = agents_dir.join(".gateway");
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(agent_id)
+        .join(&revision_id);
+    let agent_history_file = rev_dir.join("history").join("causal_chain.jsonl");
     let agent_history = std::fs::read_to_string(&agent_history_file).unwrap();
 
     let mut agent_content_writes = 0;

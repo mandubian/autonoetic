@@ -290,90 +290,538 @@ pub struct ContextState {
 
 **Autonoetic constraints:**
 - Multiple LLM providers per agent (primary + fallback already in config, unused)
-- Budget constraints per session
+- Budget constraints per session (dollar and potentially energy)
 - Approval gates for expensive operations (model switches)
 - Distributed nodes with different LLM availability
 - Script agents that need no LLM at all
 - External approval entities may gate model upgrades
+- Different routing strategies may be appropriate for different deployments
 
-**Design — policy-driven routing, not dynamic guessing:**
+#### Design principle: pluggable strategy, not hard-wired heuristics
+
+The gateway should not commit to one routing approach. Different deployments need different trade-offs:
+
+- A cost-sensitive deployment wants deterministic budget-aware routing with no LLM overhead.
+- A quality-sensitive deployment wants an LLM to evaluate task complexity before choosing.
+- A pragmatic deployment wants heuristics first, LLM classification only for ambiguous cases.
+
+The architecture separates three concerns:
+
+1. **Routing context** — the multi-dimensional input signal (budget, complexity, time, energy)
+2. **Model catalog** — what's available and what each option costs
+3. **Router strategy** — pluggable logic that maps context + catalog → model selection
 
 ```
-Task → Complexity estimate → Policy decision → Model selection
+RoutingContext  ─┐
+                 ├──▶  ModelRouter (trait)  ──▶  SelectedModel
+ModelCatalog   ──┘
 ```
 
-**Complexity classification (heuristic, no LLM needed):**
+#### Routing context: the multi-dimensional input
+
+Each routing decision receives a `RoutingContext` that captures the current state across four dimensions:
+
 ```rust
-fn estimate_complexity(message: &str, tools: &[ToolRef]) -> ComplexityClass {
-    match (msg_len, tool_count, has_code, delegation_depth) {
-        (short, 0..=1, false, 0) => Simple,
-        (medium, 2..=4, maybe, 0..=1) => Moderate,
-        _ => Complex,
-    }
+/// Immutable snapshot of routing-relevant state at decision time.
+#[derive(Debug, Clone)]
+pub struct RoutingContext {
+    // --- Budget dimension ---
+    pub budget: BudgetState,
+
+    // --- Complexity dimension ---
+    pub complexity: ComplexitySignals,
+
+    // --- Time dimension ---
+    pub time: TimeSignals,
+
+    // --- Agent identity (for per-agent policy overrides) ---
+    pub agent_id: String,
+    pub session_id: String,
+    pub turn_number: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct BudgetState {
+    /// Remaining dollar budget for this session (None = unlimited).
+    pub remaining_usd: Option<f64>,
+    /// Fraction of session budget consumed so far (0.0–1.0).
+    pub consumed_fraction: Option<f64>,
+    /// Remaining energy budget in kWh (None = not tracked).
+    pub remaining_energy_kwh: Option<f64>,
+    /// Per-agent monthly token budget remaining (from ResourceLimits).
+    pub remaining_monthly_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComplexitySignals {
+    /// Number of tools available to the agent.
+    pub tool_count: usize,
+    /// Number of tool calls in the current turn so far.
+    pub tool_calls_this_turn: usize,
+    /// Whether the current message or goal involves code generation.
+    pub involves_code: bool,
+    /// Delegation depth (0 = root session).
+    pub delegation_depth: u32,
+    /// Number of prior failed turns in this session (retry indicator).
+    pub prior_failures: u32,
+    /// Approximate input token count for this request.
+    pub input_tokens_estimate: u64,
+    /// Whether the current task involves multi-step planning.
+    pub multi_step: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TimeSignals {
+    /// Whether a user is actively waiting for a response.
+    pub interactive: bool,
+    /// Optional deadline (e.g., workflow task timeout).
+    pub deadline: Option<std::time::Instant>,
+    /// Whether this is a background task (eval run, scheduled tick).
+    pub background: bool,
+    /// Elapsed wall-clock time in this session so far.
+    pub session_elapsed: std::time::Duration,
 }
 ```
 
-**Three routing modes:**
+The gateway assembles the `RoutingContext` from state it already tracks — token usage from `LlmExchangeUsage` (which already has `estimated_cost_usd`), tool availability from the manifest, session metadata from `SessionAgentBinding`, and turn counters from `AgentExecutor`. No new data collection infrastructure needed.
 
-| Mode | How it works | Who decides |
-|---|---|---|
-| **Manual** | Agent manifest declares `llm_config` per role | User/admin (current behavior) |
-| **Policy-driven** | `llm_preset_mapping` maps complexity classes to presets | Gateway policy engine |
-| **Budget-aware** | Auto-downgrades when session budget depletes | Gateway (deterministic) |
+#### Model catalog: what's available
 
-**Config (fields already exist, just need wiring):**
+The catalog describes each available model's properties. This is configuration, not runtime inference.
+
+```rust
+/// A model option known to the gateway.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEntry {
+    pub preset_name: String,          // "fast", "default", "strong"
+    pub provider: String,
+    pub model: String,
+    pub capability_tier: CapabilityTier,
+    pub cost: ModelCost,
+    pub latency: ModelLatency,
+    /// Whether this model is currently available (provider reachable, not rate-limited).
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CapabilityTier {
+    Fast,       // Simple Q&A, summarization, formatting
+    Standard,   // Code generation, analysis, multi-step reasoning
+    Strong,     // Complex planning, architecture, novel problem-solving
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCost {
+    pub input_per_mtok_usd: f64,      // $/million input tokens
+    pub output_per_mtok_usd: f64,     // $/million output tokens
+    pub energy_per_mtok_kwh: Option<f64>,  // kWh/million tokens (when provider reports it)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelLatency {
+    pub median_ttft_ms: u64,          // time to first token (median)
+    pub median_tps: u64,              // tokens per second (median)
+}
+```
+
+Config-driven, loaded at startup from `gateway.yaml`:
+
 ```yaml
 llm_presets:
   fast:
     provider: "openai"
     model: "gpt-4o-mini"
+    capability_tier: "fast"
+    cost:
+      input_per_mtok_usd: 0.15
+      output_per_mtok_usd: 0.60
+    latency:
+      median_ttft_ms: 200
+      median_tps: 120
   default:
     provider: "anthropic"
     model: "claude-sonnet-4-20250514"
+    capability_tier: "standard"
+    cost:
+      input_per_mtok_usd: 3.0
+      output_per_mtok_usd: 15.0
+    latency:
+      median_ttft_ms: 400
+      median_tps: 80
   strong:
     provider: "anthropic"
     model: "claude-opus-4-20250514"
-
-llm_preset_mapping:
-  planner.default: "strong"
-  coder.default: "default"
-  researcher.default: "default"
-
-llm_routing:
-  enabled: true
-  complexity_presets:
-    simple: "fast"
-    moderate: "default"
-    complex: "strong"
-  budget_downgrade:
-    enabled: true
-    threshold: 0.8
-    downgrade_to: "fast"
-  approval_required:
-    - model_change
-    - strong_model_use
+    capability_tier: "strong"
+    cost:
+      input_per_mtok_usd: 15.0
+      output_per_mtok_usd: 75.0
+    latency:
+      median_ttft_ms: 800
+      median_tps: 40
 ```
 
-**Fallback chain (fixing existing dead code):**
+#### The `ModelRouter` trait: pluggable strategy
+
+The core abstraction is a trait that the gateway calls at each LLM invocation:
+
 ```rust
-async fn complete_with_fallback(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
-    match self.primary.complete(request).await {
-        Ok(response) => return Ok(response),
-        Err(RateLimit | ProviderError) => {}
-    }
-    if let Some(fallback) = &self.config.fallback_provider {
-        return self.build_driver(fallback).complete(request).await;
-    }
-    if self.budget.remaining_pct() < 0.5 {
-        return self.complete_with_preset("fast", request).await;
-    }
-    Err(NoAvailableProvider)
+/// Pluggable model routing strategy.
+///
+/// The gateway calls `select()` before each LLM completion. Implementations
+/// receive the full routing context and model catalog, and return a model
+/// selection with an auditable rationale.
+#[async_trait::async_trait]
+pub trait ModelRouter: Send + Sync {
+    /// Choose a model given the current context and available options.
+    async fn select(
+        &self,
+        context: &RoutingContext,
+        catalog: &[ModelEntry],
+    ) -> RoutingDecision;
+
+    /// Human-readable name for causal chain logging.
+    fn strategy_name(&self) -> &str;
+}
+
+/// The output of a routing decision — always logged to the causal chain.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoutingDecision {
+    pub selected_preset: String,
+    pub provider: String,
+    pub model: String,
+    pub rationale: String,           // human-readable explanation
+    pub signals_used: Vec<String>,   // which context dimensions influenced the decision
+    pub fallback_chain: Vec<String>, // ordered presets to try if selected fails
 }
 ```
 
-**Distributed LLM routing (future):** peer nodes advertise available providers/models. `execution.lease.request` carries `required_llm: "strong"` constraint. Cross-node model call uses the remote node's driver.
+The trait is `async` so LLM-based strategies can call a cheap model without blocking. Deterministic strategies return immediately.
 
-**Complexity:** ~480 lines Rust. Low-moderate risk — the data model already exists, just needs wiring. Main risk is budget downgrade triggering unexpectedly.
+#### Three built-in strategies
+
+**Strategy 1: `DeterministicRouter`** — no LLM call, pure function of context signals.
+
+```rust
+pub struct DeterministicRouter {
+    config: DeterministicRoutingConfig,
+}
+
+impl DeterministicRouter {
+    async fn select(&self, ctx: &RoutingContext, catalog: &[ModelEntry]) -> RoutingDecision {
+        // 1. Filter: remove models that would exceed remaining budget
+        let feasible: Vec<_> = catalog.iter()
+            .filter(|m| m.available)
+            .filter(|m| self.within_budget(m, ctx))
+            .collect();
+
+        // 2. Determine minimum capability tier from complexity signals
+        let min_tier = self.required_tier(ctx);
+
+        // 3. Among feasible models meeting the tier floor,
+        //    prefer lower latency if interactive, lower cost if background
+        let scored: Vec<_> = feasible.iter()
+            .filter(|m| m.capability_tier >= min_tier)
+            .map(|m| (m, self.score(m, ctx)))
+            .collect();
+
+        // 4. Select highest-scoring, build fallback chain from remaining
+        let best = scored.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        // ...
+    }
+
+    fn required_tier(&self, ctx: &RoutingContext) -> CapabilityTier {
+        if ctx.complexity.delegation_depth > 1
+            || ctx.complexity.multi_step
+            || ctx.complexity.prior_failures > 2 {
+            CapabilityTier::Strong
+        } else if ctx.complexity.involves_code
+            || ctx.complexity.tool_count > 4 {
+            CapabilityTier::Standard
+        } else {
+            CapabilityTier::Fast
+        }
+    }
+
+    fn score(&self, model: &ModelEntry, ctx: &RoutingContext) -> f64 {
+        let cost_weight = if ctx.time.background { 0.7 } else { 0.3 };
+        let latency_weight = if ctx.time.interactive { 0.7 } else { 0.3 };
+
+        let cost_score = 1.0 / (1.0 + model.cost.input_per_mtok_usd);
+        let latency_score = 1.0 / (1.0 + model.latency.median_ttft_ms as f64 / 1000.0);
+
+        cost_score * cost_weight + latency_score * latency_weight
+    }
+}
+```
+
+Pros: zero overhead, fully auditable, no circular token spend.
+Cons: fixed heuristics may misjudge novel task types.
+
+**Strategy 2: `LlmClassifierRouter`** — asks a cheap model to assess task complexity.
+
+```rust
+pub struct LlmClassifierRouter {
+    classifier_driver: Arc<dyn LlmDriver>,  // always a fast/cheap model
+    classifier_model: String,
+    deterministic_fallback: DeterministicRouter,  // used when classifier fails or times out
+}
+
+impl LlmClassifierRouter {
+    async fn select(&self, ctx: &RoutingContext, catalog: &[ModelEntry]) -> RoutingDecision {
+        // 1. Budget guard: if classifier call itself would exceed budget, fall back
+        if self.classifier_too_expensive(ctx) {
+            return self.deterministic_fallback.select(ctx, catalog).await;
+        }
+
+        // 2. Build a short classification prompt from context signals
+        let prompt = self.build_classification_prompt(ctx);
+
+        // 3. Call the cheap classifier with a tight timeout
+        let classification = tokio::time::timeout(
+            Duration::from_millis(2000),
+            self.classify(&prompt),
+        ).await;
+
+        match classification {
+            Ok(Ok(tier)) => {
+                // Use the LLM-determined tier, but still respect budget/time constraints
+                self.select_with_tier(tier, ctx, catalog)
+            }
+            _ => {
+                // Timeout or error: deterministic fallback
+                self.deterministic_fallback.select(ctx, catalog).await
+            }
+        }
+    }
+
+    fn build_classification_prompt(&self, ctx: &RoutingContext) -> String {
+        // Structured prompt: "Given these signals, classify as fast/standard/strong"
+        // Includes: tool count, code involvement, delegation depth, prior failures
+        // Does NOT include the actual user message (privacy + token savings)
+        format!(
+            "Classify task complexity as fast, standard, or strong.\n\
+             Tools available: {}\n\
+             Involves code: {}\n\
+             Delegation depth: {}\n\
+             Prior failures this session: {}\n\
+             Multi-step planning: {}\n\
+             Reply with one word: fast, standard, or strong.",
+            ctx.complexity.tool_count,
+            ctx.complexity.involves_code,
+            ctx.complexity.delegation_depth,
+            ctx.complexity.prior_failures,
+            ctx.complexity.multi_step,
+        )
+    }
+}
+```
+
+Pros: adapts to novel task types better than fixed heuristics.
+Cons: adds latency (1 cheap LLM call), costs tokens, classifier model must be reliable.
+
+**Strategy 3: `HybridRouter`** — deterministic first, LLM only when ambiguous.
+
+```rust
+pub struct HybridRouter {
+    deterministic: DeterministicRouter,
+    llm_classifier: LlmClassifierRouter,
+    ambiguity_threshold: f64,  // 0.0–1.0 confidence threshold
+}
+
+impl HybridRouter {
+    async fn select(&self, ctx: &RoutingContext, catalog: &[ModelEntry]) -> RoutingDecision {
+        // 1. Run deterministic analysis first (free)
+        let det_decision = self.deterministic.select(ctx, catalog).await;
+        let confidence = self.deterministic.confidence(ctx);
+
+        // 2. If deterministic is confident, use it
+        if confidence >= self.ambiguity_threshold {
+            return det_decision;
+        }
+
+        // 3. Ambiguous case: consult LLM classifier
+        //    (e.g., moderate tool count + code + first turn = unclear)
+        let llm_decision = self.llm_classifier.select(ctx, catalog).await;
+
+        // 4. Log both decisions for observability
+        RoutingDecision {
+            rationale: format!(
+                "Hybrid: deterministic suggested '{}' (confidence {:.0}%), \
+                 LLM classifier chose '{}'",
+                det_decision.selected_preset,
+                confidence * 100.0,
+                llm_decision.selected_preset,
+            ),
+            ..llm_decision
+        }
+    }
+}
+```
+
+Pros: best of both — fast in clear cases, adaptive in ambiguous ones. Most LLM calls are avoided.
+Cons: slightly more complex to reason about; ambiguity threshold needs tuning.
+
+#### Strategy selection is configuration, not code
+
+The gateway config declares which strategy to use. Changing strategy requires no code changes.
+
+```yaml
+llm_routing:
+  strategy: "deterministic"  # or "llm_classifier" or "hybrid"
+
+  # Deterministic strategy config
+  deterministic:
+    budget_pressure_threshold: 0.7    # fraction consumed before downgrading
+    energy_pressure_threshold: 0.8
+    interactive_latency_bias: 0.7     # weight toward fast models for interactive sessions
+    background_cost_bias: 0.7         # weight toward cheap models for background tasks
+
+  # LLM classifier config (used by "llm_classifier" and "hybrid" strategies)
+  llm_classifier:
+    classifier_preset: "fast"         # always use the cheapest model for classification
+    timeout_ms: 2000
+    max_classifier_cost_usd: 0.001   # skip classifier if it would cost more than this
+
+  # Hybrid config
+  hybrid:
+    ambiguity_threshold: 0.75         # confidence below this triggers LLM classification
+
+  # Per-agent overrides (optional)
+  agent_overrides:
+    planner.default:
+      min_capability_tier: "strong"   # planner always gets a strong model
+    coder.default:
+      min_capability_tier: "standard"
+
+  # Approval gates
+  approval_required:
+    - strong_model_first_use          # first time a session uses a strong model
+    - budget_threshold_crossed        # crossing 80% of session budget
+```
+
+#### Budget and energy tracking
+
+Budget tracking extends the existing `LlmExchangeUsage` (which already has `estimated_cost_usd` in `autonoetic-types/src/agent.rs:65`) with session-level accumulation:
+
+```rust
+/// Tracks cumulative resource consumption for a session.
+#[derive(Debug, Clone, Default)]
+pub struct SessionBudget {
+    pub total_cost_usd: f64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_energy_kwh: f64,
+    pub limit_usd: Option<f64>,       // from session or agent config
+    pub limit_energy_kwh: Option<f64>,
+    pub routing_decisions: u32,       // number of model selections made
+}
+
+impl SessionBudget {
+    /// Update after each LLM completion.
+    pub fn record(&mut self, usage: &LlmExchangeUsage, model: &ModelEntry) {
+        self.total_input_tokens += usage.input_tokens;
+        self.total_output_tokens += usage.output_tokens;
+        if let Some(cost) = usage.estimated_cost_usd {
+            self.total_cost_usd += cost;
+        }
+        if let Some(energy_rate) = model.cost.energy_per_mtok_kwh {
+            let total_tokens = usage.input_tokens + usage.output_tokens;
+            self.total_energy_kwh += (total_tokens as f64 / 1_000_000.0) * energy_rate;
+        }
+    }
+
+    pub fn consumed_fraction(&self) -> Option<f64> {
+        self.limit_usd.map(|limit| (self.total_cost_usd / limit).min(1.0))
+    }
+}
+```
+
+Budget declarations can come from three sources (highest priority wins):
+
+1. Session-level: `event.ingest` metadata carries `budget_usd` and `budget_energy_kwh`
+2. Agent-level: SKILL.md manifest `limits.session_budget_usd`
+3. Gateway-level: `gateway.yaml` default budget
+
+#### Fallback chain (fixing existing dead code)
+
+The fallback chain integrates with routing decisions. When the selected model fails (rate limit, provider down), the gateway tries the next model in `RoutingDecision.fallback_chain` without re-running the router:
+
+```rust
+async fn complete_with_routing(
+    &self,
+    request: &CompletionRequest,
+    ctx: &RoutingContext,
+) -> Result<(CompletionResponse, RoutingDecision)> {
+    let decision = self.router.select(ctx, &self.catalog).await;
+
+    // Log routing decision to causal chain
+    self.tracer.log_routing_decision(&decision);
+
+    // Try selected model first
+    let driver = self.build_driver(&decision.provider, &decision.model)?;
+    match driver.complete(request).await {
+        Ok(response) => return Ok((response, decision)),
+        Err(e) if is_retryable(&e) => {
+            self.tracer.log_routing_fallback(&decision, &e);
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Walk the fallback chain
+    for preset in &decision.fallback_chain {
+        if let Some(entry) = self.catalog.iter().find(|m| m.preset_name == *preset) {
+            let driver = self.build_driver(&entry.provider, &entry.model)?;
+            match driver.complete(request).await {
+                Ok(response) => return Ok((response, decision)),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("No available provider in fallback chain"))
+}
+```
+
+#### Causal chain integration
+
+Every routing decision is logged to the causal chain, making the routing history fully auditable:
+
+```rust
+// In session_tracer.rs:
+pub fn log_routing_decision(&mut self, decision: &RoutingDecision) {
+    self.log_event(
+        "routing",
+        "model.select",
+        EntryStatus::Success,
+        Some(&decision.selected_preset),
+        Some(&serde_json::to_string(decision).unwrap_or_default()),
+    );
+}
+```
+
+This means you can later query: "Why did session X use the strong model?" or "How much did routing overhead add to session cost?" — which neither Hermes nor any other framework currently supports.
+
+#### Distributed LLM routing (future)
+
+Peer nodes advertise their model catalog via `peer.describe()`. The local router's catalog merges local + peer entries. `execution.lease.request` carries the `RoutingDecision` as a constraint. Cross-node model calls use OFP transport to the remote node's driver. The `ModelRouter` trait is unchanged — it just sees a larger catalog.
+
+#### Complexity breakdown
+
+| Component | Lines (est.) | Risk |
+|---|---|---|
+| `RoutingContext` + `ModelCatalog` types | ~150 | Low — pure data types |
+| `ModelRouter` trait + `RoutingDecision` | ~60 | Low — trait definition |
+| `DeterministicRouter` | ~180 | Low — pure functions |
+| `LlmClassifierRouter` | ~200 | Medium — cheap LLM call + timeout handling |
+| `HybridRouter` | ~100 | Low — composition of above two |
+| `SessionBudget` tracking | ~80 | Low — extends existing `LlmExchangeUsage` |
+| Config parsing + strategy factory | ~120 | Low — follows existing config patterns |
+| Causal chain logging | ~40 | Low — extends existing tracer |
+| Fallback chain wiring | ~100 | Low-Medium — replaces dead `fallback_provider` code |
+| Tests | ~200 | Low |
+| **Total** | **~1230** | **Low-Medium overall** |
+
+The increase from the original ~480 estimate reflects the pluggable architecture and multi-strategy support. However, an MVP could ship the `DeterministicRouter` alone (~600 lines) and add the LLM and hybrid strategies later — the trait boundary makes this safe.
 
 ---
 
@@ -388,69 +836,271 @@ async fn complete_with_fallback(&self, request: &CompletionRequest) -> Result<Co
 - Causal chain (structured events) + session transcripts (conversation) are separate
 - Execution traces already searchable via `execution.search` — this adds conversation content
 
-**Design — FTS5 on `gateway.db` with ACL enforcement at query time:**
+#### Current state of conversation storage
+
+Autonoetic already stores three kinds of session data — but none of it is searchable as conversation content:
+
+| Data | Where stored | Searchable? | What it covers |
+|---|---|---|---|
+| **Conversation history** | Content store (SHA-256 blobs) via `persist_history_to_content_store()` in `lifecycle.rs` | ❌ No — blob-addressed, requires exact `session_id` to retrieve | Full message array (user/assistant/tool turns), merged across runs, redacted, bounded to 400 messages |
+| **Execution traces** | `execution_traces` table in `gateway.db` | ✅ Yes, via `execution.search` tool | Structured tool execution records: command, stdout, stderr, exit code, duration, error type |
+| **Causal chain** | JSONL files (`causal_chain-*.jsonl`) + `causal_events` table in `gateway.db` | ❌ Not directly — table queryable by `session_id`/`agent_id` but no text search tool exposed | Hash-chained event entries: tool invocations, approvals, turn boundaries, status changes |
+
+**Key gap: conversation history is only persisted at hibernate/suspend points, not at session end.** The `persist_history_to_content_store()` function (lifecycle.rs:2123–2206) is called at line 1149 inside the hibernation yield branch only. The `close_session()` method (lifecycle.rs:313) does _not_ persist history — it only writes reevaluation state and a session summary. Normal sessions that complete without hibernating may never have their conversation stored.
+
+Even when stored, the content store is content-addressed (SHA-256 blobs). Retrieving a session's history requires `store.read_by_name(session_id, "session_history")` with the exact session ID. There is no FTS5 index, no SQL table with searchable conversation text, and no tool that queries across session histories.
+
+#### Prerequisite fix: always persist conversation history
+
+Before FTS can work, conversation history must be persisted unconditionally at session end. This is a ~10-line change in `lifecycle.rs`:
+
+```rust
+// In close_session(), add before tracer.log_session_end():
+if let Some(gateway_dir) = self.gateway_dir.as_ref() {
+    // Build a minimal history from the current session state.
+    // For sessions that already hibernated, merged history exists;
+    // for sessions that completed normally, this is the first persist.
+    if let Err(e) = persist_history_to_content_store(
+        &self.agent_dir,
+        &session_id,
+        &[], // empty slice — function merges with any existing persisted history
+        gateway_dir,
+        &mut tracer,
+        &disclosure_state,
+    ) {
+        tracing::warn!("Failed to persist history at session close: {}", e);
+    }
+}
+```
+
+Note: `persist_history_to_content_store` already handles the merge-with-existing case (lifecycle.rs:2139–2155): it reads any previously persisted `"session_history"` from the content store and appends new messages. Passing an empty slice triggers a "seal" — persisting whatever was accumulated during hibernation points, or acting as a no-op if no history was captured at all. A more complete fix would thread the final `history` slice through `close_session()` so the complete conversation is always captured, even for sessions that never hibernated.
+
+#### Design — two-layer storage: metadata in `gateway.db`, full transcript in content store
+
+Rather than storing the entire transcript JSON in a SQL column (which can grow very large — 400 messages × multi-KB each), split storage into:
+
+1. **Metadata + searchable excerpt** → `session_transcripts` table in `gateway.db`, FTS5-indexed
+2. **Full transcript blob** → existing content store, referenced by `transcript_handle`
+
+This keeps `gateway.db` manageable while enabling full-text search. The existing content store already handles SHA-256 blobs, deduplication, and session-scoped naming — no new infrastructure needed for the blob side.
 
 ```sql
+-- Schema migration (follows existing ordered migration pattern in gateway_store.rs)
 CREATE TABLE session_transcripts (
     session_id TEXT PRIMARY KEY,
     root_session_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
-    agent_revision TEXT NOT NULL,
+    revision_id TEXT NOT NULL,          -- from session_agent_bindings
     user_id TEXT,
     started_at TEXT NOT NULL,
     ended_at TEXT,
-    status TEXT NOT NULL,
-    turn_count INTEGER NOT NULL,
-    transcript_json TEXT
+    status TEXT NOT NULL DEFAULT 'active',    -- active, completed, suspended, failed
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    transcript_handle TEXT,             -- SHA-256 handle in content store for full transcript
+    excerpt TEXT NOT NULL DEFAULT '',   -- bounded plaintext extract for FTS (≤ 8KB)
+    origin_node_id TEXT NOT NULL        -- federation provenance
 );
 
+CREATE INDEX idx_session_transcripts_agent ON session_transcripts(agent_id, started_at DESC);
+CREATE INDEX idx_session_transcripts_root ON session_transcripts(root_session_id);
+CREATE INDEX idx_session_transcripts_user ON session_transcripts(user_id, started_at DESC);
+
+-- FTS5 content-sync table: only indexes excerpt, agent_id, and user_id
+-- session_id is UNINDEXED (used for joining, not for text search)
 CREATE VIRTUAL TABLE session_transcripts_fts USING fts5(
-    transcript_json,
+    excerpt,
     agent_id,
     user_id,
     session_id UNINDEXED,
-    content='session_transcripts'
+    content='session_transcripts',
+    content_rowid='rowid'
 );
+
+-- Triggers to keep FTS in sync (standard FTS5 content-sync pattern)
+CREATE TRIGGER session_transcripts_ai AFTER INSERT ON session_transcripts BEGIN
+    INSERT INTO session_transcripts_fts(rowid, excerpt, agent_id, user_id, session_id)
+    VALUES (new.rowid, new.excerpt, new.agent_id, new.user_id, new.session_id);
+END;
+
+CREATE TRIGGER session_transcripts_ad AFTER DELETE ON session_transcripts BEGIN
+    INSERT INTO session_transcripts_fts(session_transcripts_fts, rowid, excerpt, agent_id, user_id, session_id)
+    VALUES ('delete', old.rowid, old.excerpt, old.agent_id, old.user_id, old.session_id);
+END;
+
+CREATE TRIGGER session_transcripts_au AFTER UPDATE ON session_transcripts BEGIN
+    INSERT INTO session_transcripts_fts(session_transcripts_fts, rowid, excerpt, agent_id, user_id, session_id)
+    VALUES ('delete', old.rowid, old.excerpt, old.agent_id, old.user_id, old.session_id);
+    INSERT INTO session_transcripts_fts(rowid, excerpt, agent_id, user_id, session_id)
+    VALUES (new.rowid, new.excerpt, new.agent_id, new.user_id, new.session_id);
+END;
 ```
 
-**Tool:**
-```
-session.search(
-    query: string,
-    agent_id?: string,
-    user_id?: string,        -- defaults to caller's user
-    session_id?: string,
-    status?: string,
-    since?: string,
-    limit?: number
-) → [{ session_id, agent_id, agent_rev, user_id, started_at,
-       turn_count, status, excerpt, score, transcript_handle }]
-```
+**Excerpt extraction** converts the message array into a bounded plaintext string for FTS indexing:
 
-**ACL enforcement (query-time filter):**
 ```rust
-fn enforce_search_acl(caller: &AgentIdentity, results: &[SessionSearchResult], store: &GatewayStore)
-    -> Vec<SessionSearchResult>
-{
-    results.iter().filter(|r| {
-        r.user_id == caller.user_id
-            || store.is_child_session(r.session_id, caller.session_id)
-            || store.is_shared_with(r.session_id, caller.agent_id)
-    }).collect()
+fn extract_searchable_excerpt(messages: &[Message], max_bytes: usize) -> String {
+    let mut buf = String::with_capacity(max_bytes);
+    for msg in messages {
+        if matches!(msg.role, Role::System) { continue; }
+        let prefix = match msg.role {
+            Role::User => "U: ",
+            Role::Assistant => "A: ",
+            _ => "",
+        };
+        if buf.len() + prefix.len() + msg.content.len() + 1 > max_bytes {
+            let remaining = max_bytes.saturating_sub(buf.len() + prefix.len() + 1);
+            buf.push_str(prefix);
+            buf.push_str(&msg.content[..remaining.min(msg.content.len())]);
+            break;
+        }
+        buf.push_str(prefix);
+        buf.push_str(&msg.content);
+        buf.push('\n');
+    }
+    buf
 }
 ```
 
-**LLM summarization (optional, separate tool):**
+#### Integration point: wiring into session lifecycle
+
+The transcript capture hooks into the existing `persist_history_to_content_store()` flow (lifecycle.rs:2123). After writing the full transcript to the content store, the same function (or a companion) upserts the `session_transcripts` row:
+
+```rust
+// After: store.register_name(session_id, "session_history", &history_handle)?;
+// Add:
+if let Some(gs) = gateway_store {
+    let excerpt = extract_searchable_excerpt(&merged_history, 8192);
+    gs.upsert_session_transcript(&SessionTranscriptRecord {
+        session_id: session_id.to_string(),
+        root_session_id: root_session_id(session_id).to_string(),
+        agent_id: agent_id.to_string(),
+        revision_id: revision_id.to_string(),  // from session_agent_bindings
+        user_id: user_id.map(String::from),
+        started_at: started_at.to_string(),
+        ended_at: None,  // set at close_session
+        status: "active".to_string(),
+        turn_count: merged_history.len() as i64,
+        transcript_handle: Some(history_handle.clone()),
+        excerpt,
+        origin_node_id: origin_node_id.to_string(),
+    })?;
+}
+```
+
+This means the FTS index updates incrementally at every hibernate point and at session close. No batch job needed.
+
+#### `session.search` tool
+
+Follows the same native tool pattern as `execution.search` (tools.rs:2991–3125) — the implementation structure is nearly identical.
+
+```
+session.search(
+    query: string,              -- FTS5 query (supports AND/OR/NOT/phrase)
+    agent_id?: string,          -- filter by agent
+    user_id?: string,           -- defaults to caller's bound user
+    session_id?: string,        -- exact session or prefix match
+    root_session_id?: string,   -- search across a workflow's sessions
+    status?: string,            -- active, completed, suspended, failed
+    since?: string,             -- RFC3339 cutoff
+    limit?: number              -- default 10, max 100
+) → {
+    ok: true,
+    results: [{
+        session_id, root_session_id, agent_id, revision_id,
+        user_id, started_at, ended_at, turn_count, status,
+        excerpt,                -- matching text snippet from FTS5
+        score,                  -- FTS5 rank score
+        transcript_handle       -- content store handle for full transcript
+    }],
+    count: number
+}
+```
+
+The query uses FTS5 `MATCH` with `bm25()` ranking:
+
+```sql
+SELECT t.session_id, t.root_session_id, t.agent_id, t.revision_id,
+       t.user_id, t.started_at, t.ended_at, t.turn_count, t.status,
+       snippet(session_transcripts_fts, 0, '[', ']', '...', 32) AS excerpt,
+       bm25(session_transcripts_fts) AS score,
+       t.transcript_handle
+FROM session_transcripts t
+JOIN session_transcripts_fts fts ON fts.session_id = t.session_id
+WHERE session_transcripts_fts MATCH ?1
+  AND (?2 IS NULL OR t.agent_id = ?2)
+  AND (?3 IS NULL OR t.user_id = ?3)
+  AND (?4 IS NULL OR t.started_at >= ?4)
+  AND (?5 IS NULL OR t.status = ?5)
+ORDER BY score
+LIMIT ?6
+```
+
+#### ACL enforcement (query-time filter)
+
+Follows the same capability-check pattern used by `execution.search` and `knowledge.search_by_tags`. The key constraint: agents should only see sessions they participated in, their child sessions, or sessions explicitly shared with them.
+
+```rust
+fn enforce_search_acl(
+    caller_agent_id: &str,
+    caller_session_id: Option<&str>,
+    results: &[SessionSearchResult],
+    store: &GatewayStore,
+) -> Vec<SessionSearchResult> {
+    results.iter().filter(|r| {
+        // Agent can see its own sessions
+        r.agent_id == caller_agent_id
+            // Agent can see child sessions of its current root session
+            || caller_session_id.map_or(false, |sid| {
+                let root = root_session_id(sid);
+                r.root_session_id == root
+            })
+            // Future: explicit sharing via user_agent_bindings
+    }).cloned().collect()
+}
+```
+
+#### `session.summarize` (optional, separate tool)
+
+Post-processing step on search results. Uses a cheap model to summarize multiple sessions. Not part of FTS5.
+
 ```
 session.summarize(session_ids: [string]) → {
     summary, common_themes, decisions, open_items
 }
 ```
-Uses a cheap model to summarize multiple session transcripts. Post-processing step on search results, not part of FTS5.
 
-**Distributed search (future):** each node has its own FTS5 index. `peer.search(query, constraints)` broadcasts to peers. Results merged with node origin metadata. No cross-node FTS index — query fan-out + merge.
+For each session ID, reads the full transcript from the content store via `transcript_handle`, then sends to the configured compression model. This reuses the same cheap-model infrastructure proposed in the context compression design.
 
-**Complexity:** ~680 lines Rust + 80 lines SQL. Low risk — FTS5 is battle-tested SQLite. Main work is wiring transcript capture into existing session lifecycle (which already saves to causal chain and content store).
+#### Relationship to existing search tools
+
+After this feature, autonoetic has three complementary search surfaces:
+
+| Tool | What it searches | Data source | Use case |
+|---|---|---|---|
+| `execution.search` | Tool execution records (commands, stdout, errors) | `execution_traces` table | "What commands failed?" "How did we fix that build error?" |
+| `knowledge.search_by_tags` | Durable facts stored by agents | Tier 2 memory (per-agent SQLite) | "What API patterns did we learn?" "What user preferences exist?" |
+| `session.search` (**new**) | Conversation content across sessions | `session_transcripts` + FTS5 | "When did we discuss the caching strategy?" "Find sessions where we debugged timeouts" |
+
+The post-session digest (`post_session_digest.rs`) bridges conversation → knowledge: it extracts structured memories from conversation content and stores them as Tier 2 knowledge. `session.search` provides the raw conversation search that complements those extracted memories.
+
+#### Distributed search (future)
+
+Each node has its own FTS5 index. `peer.search(query, constraints)` broadcasts to peers. Results merged with `origin_node_id` metadata. No cross-node FTS index — query fan-out + merge. The `origin_node_id` on `session_transcripts` already enables this.
+
+#### Complexity breakdown
+
+| Component | Lines (est.) | Risk |
+|---|---|---|
+| Schema migration (SQL + Rust migration entry) | ~80 | Low — follows existing `schema_migrations` pattern |
+| `extract_searchable_excerpt()` + transcript persistence | ~120 | Low — extends existing `persist_history_to_content_store()` |
+| `close_session()` fix (always persist history) | ~15 | Low — critical prerequisite |
+| `GatewayStore` methods (upsert, search, ACL) | ~200 | Low — mirrors `search_execution_traces()` pattern |
+| `SessionSearchTool` native tool | ~180 | Low — mirrors `ExecutionSearchTool` structure |
+| `SessionSummarizeTool` (optional) | ~120 | Medium — requires LLM call integration |
+| Tests | ~200 | Low |
+| **Total** | **~915** | **Low overall** |
+
+Main risk is not the FTS5 implementation (battle-tested SQLite) but ensuring the excerpt extraction and ACL filtering are correct. The bulk of the work is wiring into the existing session lifecycle, which is well-understood from the existing `persist_history_to_content_store()` and `execution_traces` patterns.
 
 ---
 
@@ -460,8 +1110,8 @@ Uses a cheap model to summarize multiple session transcripts. Post-processing st
 |---|---|---|---|---|
 | **User modeling** | ~500 | Medium | None | Yes |
 | **Context compression** | ~600 | Medium-High | Checkpoint system (exists) | Yes |
-| **Smart model routing** | ~480 | Low-Medium | `llm_preset_mapping` config (exists, unused) | Yes |
-| **FTS session search** | ~680 | Medium | Session lifecycle (exists) | Yes |
+| **Smart model routing** | ~1230 (~600 MVP) | Low-Medium | `LlmExchangeUsage.estimated_cost_usd`, `fallback_provider` config, `LlmDriver` trait | Yes (MVP ships `DeterministicRouter` only) |
+| **FTS session search** | ~915 | Medium | Session lifecycle (exists), `persist_history_to_content_store()` fix | Yes (prerequisite fix is internal) |
 
 All four are **independent** — no ordering dependency. Lowest-risk starting point: **smart model routing** (config fields already exist, mostly wiring). Highest-value: **FTS session search** (unlocks learning tools with actual conversation content, complementing existing `execution.search` and `knowledge.search_by_tags`).
 

@@ -1192,6 +1192,7 @@ impl GatewayStore {
                 let status = status_str.and_then(|s| match s.as_str() {
                     "approved" => Some(autonoetic_types::background::ApprovalStatus::Approved),
                     "rejected" => Some(autonoetic_types::background::ApprovalStatus::Rejected),
+                    "cancelled" => Some(autonoetic_types::background::ApprovalStatus::Cancelled),
                     _ => None,
                 });
                 let action = serde_json::from_str(&action_payload).map_err(|e| {
@@ -1232,6 +1233,26 @@ impl GatewayStore {
         let rows = conn.execute(
             "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3 WHERE request_id = ?4 AND status = 'pending'",
             params![status, decided_by, decided_at, request_id],
+        )?;
+        if rows == 0 {
+            anyhow::bail!(
+                "Approval {} is no longer pending (already decided or not found)",
+                request_id
+            );
+        }
+        Ok(())
+    }
+
+    pub fn cancel_approval(
+        &self,
+        request_id: &str,
+        cancelled_by: &str,
+        cancelled_at: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE approvals SET status = 'cancelled', decided_by = ?1, decided_at = ?2 WHERE request_id = ?3 AND status = 'pending'",
+            params![cancelled_by, cancelled_at, request_id],
         )?;
         if rows == 0 {
             anyhow::bail!(
@@ -2482,9 +2503,8 @@ impl GatewayStore {
         let tx = conn.transaction()?;
 
         let short = if rev.short_id.trim().is_empty() {
-            let mut stmt = tx.prepare(
-                "SELECT revision_id FROM agent_revisions WHERE revision_id != ?1",
-            )?;
+            let mut stmt =
+                tx.prepare("SELECT revision_id FROM agent_revisions WHERE revision_id != ?1")?;
             let rows = stmt.query_map(params![&rev.revision_id], |row| row.get::<_, String>(0))?;
             let mut existing = Vec::new();
             for row in rows {

@@ -4528,6 +4528,7 @@ impl NativeTool for ApprovalStatusTool {
                     Some(s) => match s {
                         autonoetic_types::background::ApprovalStatus::Approved => "approved",
                         autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
+                        autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
                     },
                     None => "pending",
                 }

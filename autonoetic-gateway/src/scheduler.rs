@@ -9,7 +9,6 @@
 //! The main entry points remain in this file for backwards compatibility.
 
 use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub mod approval;
@@ -30,16 +29,6 @@ pub use signal::*;
 pub use store::*;
 pub use workflow_causal::*;
 pub use workflow_store::*;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxEvent {
-    pub event_id: String,
-    pub message: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-}
 
 pub async fn start_background_scheduler(
     execution: Arc<crate::execution::GatewayExecutionService>,
@@ -893,22 +882,6 @@ pub async fn process_runnable_workflow_tasks(
     }
 
     Ok(())
-}
-
-pub fn append_inbox_event(
-    config: &autonoetic_types::config::GatewayConfig,
-    agent_id: &str,
-    message: impl Into<String>,
-    session_id: Option<&str>,
-) -> anyhow::Result<InboxEvent> {
-    let event = InboxEvent {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        message: message.into(),
-        session_id: session_id.map(|value| value.to_string()),
-        created_at: Some(Utc::now().to_rfc3339()),
-    };
-    store::append_jsonl_record(&store::inbox_path(config, agent_id), &event)?;
-    Ok(event)
 }
 
 pub fn append_task_board_entry(
