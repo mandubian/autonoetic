@@ -463,6 +463,9 @@ mod tests {
         let resp = parse_response(&j);
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "content.write");
-        assert_eq!(resp.tool_calls[0].arguments, r#"{"content":"hello","name":"test.py"}"#);
+        assert_eq!(
+            resp.tool_calls[0].arguments,
+            r#"{"content":"hello","name":"test.py"}"#
+        );
     }
 }

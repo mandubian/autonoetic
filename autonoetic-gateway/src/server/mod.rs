@@ -26,10 +26,10 @@ impl GatewayServer {
 
     /// Run the main event loop for the Gateway daemon.
     pub async fn run(&self) -> anyhow::Result<()> {
-        let node_id = std::env::var("AUTONOETIC_NODE_ID")
-            .unwrap_or_else(|_| self.config.node_id.clone());
-        let node_name = std::env::var("AUTONOETIC_NODE_NAME")
-            .unwrap_or_else(|_| self.config.node_name.clone());
+        let node_id =
+            std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| self.config.node_id.clone());
+        let node_name =
+            std::env::var("AUTONOETIC_NODE_NAME").unwrap_or_else(|_| self.config.node_name.clone());
 
         // Propagate resolved identity to env so runtime helpers (gateway_actor_id, etc.) pick it up.
         std::env::set_var("AUTONOETIC_NODE_ID", &node_id);
@@ -38,8 +38,9 @@ impl GatewayServer {
         // Initialize sandbox config (env vars override config values at point of use).
         crate::sandbox::init_sandbox_config(&self.config.sandbox);
 
-        let shared_secret = std::env::var("AUTONOETIC_SHARED_SECRET")
-            .map_err(|_| anyhow::anyhow!("Missing required environment variable AUTONOETIC_SHARED_SECRET"))?;
+        let shared_secret = std::env::var("AUTONOETIC_SHARED_SECRET").map_err(|_| {
+            anyhow::anyhow!("Missing required environment variable AUTONOETIC_SHARED_SECRET")
+        })?;
         let jsonrpc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.config.port);
         let ofp_addr: SocketAddr = format!("0.0.0.0:{}", self.config.ofp_port)
             .parse()

@@ -5,11 +5,13 @@ use crate::causal_chain::CausalLogger;
 use crate::llm::{build_driver, Message};
 use crate::runtime::active_execution_registry::ActiveExecutionRegistry;
 use crate::runtime::lifecycle::AgentExecutor;
+use crate::runtime::live_digest::{
+    append_repair_attempt_best_effort, append_repair_passed_best_effort, base_session_id,
+};
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
-use crate::runtime::live_digest::{base_session_id, append_repair_attempt_best_effort, append_repair_passed_best_effort};
 use crate::scheduler::gateway_store::default_gateway_host_id;
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
 use autonoetic_types::background::{ScheduledAction, UserInteraction, UserInteractionStatus};
@@ -376,7 +378,9 @@ impl GatewayExecutionService {
         trigger_kind: &str,
         source_agent_id: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
-        use crate::runtime::checkpoint::{load_latest_checkpoint, save_checkpoint, SessionCheckpoint, YieldReason};
+        use crate::runtime::checkpoint::{
+            load_latest_checkpoint, save_checkpoint, SessionCheckpoint, YieldReason,
+        };
         use crate::runtime::guard::LoopGuardState;
         use crate::scheduler::gateway_store::EmergencyStopRecord;
 
@@ -384,7 +388,10 @@ impl GatewayExecutionService {
             .gateway_store()
             .ok_or_else(|| anyhow::anyhow!("gateway store required for emergency stop"))?;
         let root_session_id = root_session_id.trim();
-        anyhow::ensure!(!root_session_id.is_empty(), "root_session_id must not be empty");
+        anyhow::ensure!(
+            !root_session_id.is_empty(),
+            "root_session_id must not be empty"
+        );
         anyhow::ensure!(!reason.trim().is_empty(), "reason must not be empty");
 
         if let Some(aid) = source_agent_id {
@@ -641,52 +648,32 @@ impl GatewayExecutionService {
             }
 
             // ─────────────────────────────────────────────────────────────
-            // Revision-based resolution (Phase 1d): try revision path first,
-            // fall back to directory loading for dev/testing compatibility.
+            // Revision-based resolution (Phase 1d+): sessions execute from
+            // pinned immutable revision directories only.
             // ─────────────────────────────────────────────────────────────
             let loaded = if let Some(ref gs) = self.gateway_store {
-                match repo.resolve_and_pin_session(
+                let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session(
                     session_id,
                     session_id, // root_session_id = session_id for single sessions
                     agent_id,
                     Some(gs.as_ref()),
                     &default_gateway_host_id(),
-                ) {
-                    Ok((agent_ref, _rev, _binding)) => {
-                        tracing::info!(
-                            agent_id = %agent_ref.agent_id,
-                            revision_id = %agent_ref.revision_id,
-                            session_id = session_id,
-                            "Resolved session to revision"
-                        );
-                        // If target was an explicit agent_ref (contains @), load from revision directory.
-                        // Otherwise fall back to directory loading for alias-based resolution.
-                        if agent_id.contains('@') {
-                            let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-                            repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?
-                        } else {
-                            repo.get_sync(&agent_ref.agent_id)?
-                        }
-                    }
-                    Err(e) => {
-                        // Check if it's a "not found" error → fall back to directory
-                        let err_str = e.to_string();
-                        if err_str.contains("No alias") || err_str.contains("not found") || err_str.contains("GatewayStore") {
-                            tracing::debug!(
-                                agent_id = agent_id,
-                                session_id = session_id,
-                                error = %e,
-                                "Revision resolution failed, falling back to directory loading"
-                            );
-                            // Extract plain agent_id from target if it contains @
-                            let plain_agent_id = agent_id.split('@').next().unwrap_or(agent_id);
-                            repo.get_sync(plain_agent_id)?
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
+                )?;
+                tracing::info!(
+                    agent_id = %agent_ref.agent_id,
+                    revision_id = %agent_ref.revision_id,
+                    session_id = session_id,
+                    "Resolved session to pinned revision"
+                );
+                let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+                repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?
             } else {
+                tracing::warn!(
+                    target: "execution",
+                    session_id = session_id,
+                    requested_target = agent_id,
+                    "GatewayStore unavailable; falling back to mutable directory resolution"
+                );
                 repo.get_sync(agent_id)?
             };
 
@@ -1379,25 +1366,21 @@ impl GatewayExecutionService {
         // Validation is skipped for suspended sessions (they haven't finished producing output).
         if self.config.response_validation.enabled && result.suspended_for_approval.is_none() {
             // Resolve effective contract: caller-supplied metadata first, then manifest default.
-            let manifest_contract: Option<serde_json::Value> = if metadata
-                .and_then(|m| m.get("response_contract"))
-                .is_none()
-            {
-                AgentRepository::from_config(&self.config)
-                    .get_sync(agent_id)
-                    .ok()
-                    .and_then(|loaded| loaded.manifest.response_contract)
-            } else {
-                None
-            };
+            let manifest_contract: Option<serde_json::Value> =
+                if metadata.and_then(|m| m.get("response_contract")).is_none() {
+                    AgentRepository::from_config(&self.config)
+                        .get_sync(agent_id)
+                        .ok()
+                        .and_then(|loaded| loaded.manifest.response_contract)
+                } else {
+                    None
+                };
             let effective_metadata: Option<serde_json::Value> = if manifest_contract.is_some() {
                 Some(serde_json::json!({ "response_contract": manifest_contract }))
             } else {
                 None
             };
-            let metadata_ref: Option<&serde_json::Value> = effective_metadata
-                .as_ref()
-                .or(metadata);
+            let metadata_ref: Option<&serde_json::Value> = effective_metadata.as_ref().or(metadata);
             match crate::runtime::response_validation::parse_response_contract(metadata_ref) {
                 Ok(Some(contract)) => {
                     result = self
@@ -1460,19 +1443,20 @@ impl GatewayExecutionService {
                     // missing record is repairable if repair is enabled
                     if is_missing && repair_enabled {
                         let max_repair_rounds: usize = 2;
-                        let deadline = std::time::Instant::now()
-                            + std::time::Duration::from_millis(5000);
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_millis(5000);
 
                         for attempt in 1..=max_repair_rounds {
                             if std::time::Instant::now() >= deadline {
                                 break;
                             }
 
-                            let repair_msg = crate::runtime::response_validation::build_repair_prompt(
-                                &promotion_violations,
-                                attempt,
-                                max_repair_rounds,
-                            );
+                            let repair_msg =
+                                crate::runtime::response_validation::build_repair_prompt(
+                                    &promotion_violations,
+                                    attempt,
+                                    max_repair_rounds,
+                                );
 
                             tracing::info!(
                                 target: "promotion_validation",
@@ -1509,11 +1493,12 @@ impl GatewayExecutionService {
                                 break;
                             }
 
-                            let remaining = crate::runtime::response_validation::validate_promotion_record(
-                                Some(&gateway_dir),
-                                promotion_artifact_id,
-                                promotion_role,
-                            );
+                            let remaining =
+                                crate::runtime::response_validation::validate_promotion_record(
+                                    Some(&gateway_dir),
+                                    promotion_artifact_id,
+                                    promotion_role,
+                                );
                             result = repaired;
 
                             if remaining.is_empty() {
@@ -1528,7 +1513,10 @@ impl GatewayExecutionService {
                             }
 
                             // If the agent recorded pass=false, stop repairing
-                            if remaining.iter().any(|v| v.rule == "promotion_record_failed") {
+                            if remaining
+                                .iter()
+                                .any(|v| v.rule == "promotion_record_failed")
+                            {
                                 break;
                             }
                         }
@@ -1586,8 +1574,8 @@ impl GatewayExecutionService {
 
         let max_loops = (contract.validation_max_loops as usize).max(1);
         let max_duration_ms = contract.validation_max_duration_ms;
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(max_duration_ms as u64);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(max_duration_ms as u64);
         let repair_enabled = self.config.response_validation.repair_enabled;
 
         // Initial validation.
@@ -1638,7 +1626,11 @@ impl GatewayExecutionService {
                     attempt = attempt,
                     "response.repair.exhausted: deadline reached"
                 );
-                return Err(violations_to_final_error(&violations, &result.session_id, true));
+                return Err(violations_to_final_error(
+                    &violations,
+                    &result.session_id,
+                    true,
+                ));
             }
 
             let repair_msg = build_repair_prompt(&violations, attempt, max_repair_rounds);
@@ -1685,7 +1677,11 @@ impl GatewayExecutionService {
                         error = %e,
                         "response.repair.error: respawn failed"
                     );
-                    return Err(violations_to_final_error(&violations, &result.session_id, true));
+                    return Err(violations_to_final_error(
+                        &violations,
+                        &result.session_id,
+                        true,
+                    ));
                 }
             };
 
@@ -1705,9 +1701,10 @@ impl GatewayExecutionService {
 
             // Check if the agent ended with a user interaction (user.ask) suspension.
             // If the latest checkpoint is UserInputRequired (not yet answered), abort repair.
-            if let Ok(Some(cp)) =
-                crate::runtime::checkpoint::load_latest_checkpoint(&self.config, &repaired.session_id)
-            {
+            if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(
+                &self.config,
+                &repaired.session_id,
+            ) {
                 if matches!(
                     cp.yield_reason,
                     crate::runtime::checkpoint::YieldReason::UserInputRequired { .. }
@@ -1733,7 +1730,11 @@ impl GatewayExecutionService {
                     attempt = attempt,
                     "response.repair.exhausted: deadline reached after respawn"
                 );
-                return Err(violations_to_final_error(&violations, &result.session_id, true));
+                return Err(violations_to_final_error(
+                    &violations,
+                    &result.session_id,
+                    true,
+                ));
             }
 
             // Re-validate against the fresh state returned by respawn_from_checkpoint.
@@ -1775,7 +1776,11 @@ impl GatewayExecutionService {
             agent_id = %agent_id,
             "response.repair.exhausted: max_loops reached"
         );
-        Err(violations_to_final_error(&violations, &result.session_id, true))
+        Err(violations_to_final_error(
+            &violations,
+            &result.session_id,
+            true,
+        ))
     }
 
     /// Resume execution after a `user.ask` interaction was answered in the gateway store.
@@ -1947,9 +1952,7 @@ impl GatewayExecutionService {
                 approval_request_id,
                 ..
             } => (None, Some(approval_request_id), false),
-            TurnOutcome::SuspendedUserInput { interaction_id: _ } => {
-                (None, None, true)
-            }
+            TurnOutcome::SuspendedUserInput { interaction_id: _ } => (None, None, true),
         };
 
         let initial_msg = history
@@ -2523,7 +2526,10 @@ fn build_initial_history(
     response_contract: Option<&serde_json::Value>,
 ) -> Vec<Message> {
     let mut history = vec![Message::system(
-        crate::runtime::lifecycle::compose_system_instructions_with_metadata(instructions, response_contract)
+        crate::runtime::lifecycle::compose_system_instructions_with_metadata(
+            instructions,
+            response_contract,
+        ),
     )];
     match SessionContext::load(agent_dir, session_id).and_then(|context| {
         Ok(context
@@ -2842,12 +2848,10 @@ async fn execute_script_in_sandbox(
             .map_err(|e| anyhow::anyhow!("Failed to write to script stdin: {}", e))?;
     }
 
-    let output = tokio::task::spawn_blocking(move || {
-        runner.process.wait_with_output()
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
-    .map_err(|e| anyhow::anyhow!("Failed to execute script: {}", e))?;
+    let output = tokio::task::spawn_blocking(move || runner.process.wait_with_output())
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+        .map_err(|e| anyhow::anyhow!("Failed to execute script: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

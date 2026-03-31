@@ -9,8 +9,8 @@ use autonoetic_gateway::runtime::post_session_digest::{
 };
 use autonoetic_gateway::runtime::tools::{DigestQueryTool, NativeTool};
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
-use autonoetic_types::causal_chain::ExecutionTraceRecord;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::causal_chain::ExecutionTraceRecord;
 use autonoetic_types::memory::{MemoryObject, MemorySourceType, MemoryVisibility};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -92,9 +92,8 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
 
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    )?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let session_id = "digest-int-session";
     let base_dir = gateway_dir.join("sessions").join(session_id);
@@ -177,19 +176,14 @@ fn digest_query_returns_narrative_via_content_handle() -> anyhow::Result<()> {
     let agents_dir = temp.path().join("agents");
     std::fs::create_dir_all(&agents_dir)?;
     let gateway_dir = agents_dir.join(".gateway");
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    )?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let session_id = "digest-query-handle-session";
     let cs = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
     let body = b"Narrative reachable via digest.query narrative_handle.";
     let handle = cs.write(body)?;
-    cs.register_name(
-        session_id,
-        POST_SESSION_NARRATIVE_CONTENT_NAME,
-        &handle,
-    )?;
+    cs.register_name(session_id, POST_SESSION_NARRATIVE_CONTENT_NAME, &handle)?;
 
     let mut mem = MemoryObject::new(
         "mem-dq-1".to_string(),

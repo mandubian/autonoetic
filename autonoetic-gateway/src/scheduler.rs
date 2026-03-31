@@ -488,8 +488,7 @@ pub async fn process_queued_workflow_tasks(
                 }
                 impl Drop for Unreg {
                     fn drop(&mut self) {
-                        self.reg
-                            .unregister_workflow_task(&self.wf, &self.tid);
+                        self.reg.unregister_workflow_task(&self.wf, &self.tid);
                     }
                 }
                 let _unreg = Unreg {
@@ -503,7 +502,11 @@ pub async fn process_queued_workflow_tasks(
                 .await;
             }
         });
-        reg.register_workflow_task(&queued_task.workflow_id, &queued_task.task_id, join.abort_handle());
+        reg.register_workflow_task(
+            &queued_task.workflow_id,
+            &queued_task.task_id,
+            join.abort_handle(),
+        );
     }
 
     Ok(())
@@ -558,7 +561,11 @@ async fn spawn_task_execution(
         checkpoint_context,
     );
 
-    let execution_id = format!("exec-wf-{}-{}", t_id, &uuid::Uuid::new_v4().to_string()[..8]);
+    let execution_id = format!(
+        "exec-wf-{}-{}",
+        t_id,
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
     let workflow_run = match workflow_store::load_workflow_run(&cfg, store, &wf_id) {
         Ok(Some(r)) => r,
         Ok(None) => {

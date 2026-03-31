@@ -504,10 +504,8 @@ fn append_new_pending_user_interaction_prompts(
         app.seen_user_interaction_prompts
             .insert(interaction.interaction_id.clone());
         let card = format_user_interaction_prompt(&interaction);
-        app.session_overview.latest_signal = Some(format!(
-            "user.ask {}",
-            interaction.interaction_id
-        ));
+        app.session_overview.latest_signal =
+            Some(format!("user.ask {}", interaction.interaction_id));
         app.add_message(MessageRole::Signal, card);
         added += 1;
     }
@@ -553,9 +551,15 @@ fn format_workflow_event_card(
                 .get("target_agent_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or(agent_id);
-            Some(format!("🚀 [{}] Task spawned: {} → {}", ts_short, task, target))
+            Some(format!(
+                "🚀 [{}] Task spawned: {} → {}",
+                ts_short, task, target
+            ))
         }
-        "task.queued" => Some(format!("📥 [{}] Task queued: {}{}", ts_short, task, agent_suffix)),
+        "task.queued" => Some(format!(
+            "📥 [{}] Task queued: {}{}",
+            ts_short, task, agent_suffix
+        )),
         "task.awaiting_approval" => {
             // Show what kind of approval is needed
             let kind = if approval.contains("sandbox") {
@@ -593,7 +597,10 @@ fn format_workflow_event_card(
                 ts_short, task, kind, apr_suffix
             ))
         }
-        "task.approved" => Some(format!("✅ [{}] Approval granted — resuming: {}", ts_short, task)),
+        "task.approved" => Some(format!(
+            "✅ [{}] Approval granted — resuming: {}",
+            ts_short, task
+        )),
         "task.rejected" => Some(format!("❌ [{}] Approval rejected: {}", ts_short, task)),
         "task.approval_timeout" => {
             let reason = event
@@ -638,19 +645,36 @@ fn format_workflow_event_card(
                 ts_short, target, urgency
             ))
         }
-        "task.started" => Some(format!("▶ [{}] Task started: {}{}", ts_short, task, agent_suffix)),
-        "task.completed" => Some(format!("✅ [{}] Task completed: {}{}", ts_short, task, agent_suffix)),
-        "task.failed" => Some(format!("❌ [{}] Task failed: {}{}", ts_short, task, agent_suffix)),
-        "task.cancelled" => Some(format!("🚫 [{}] Task cancelled: {}{}", ts_short, task, agent_suffix)),
-        "task.paused" => Some(format!("⏸ [{}] Task paused: {}{}", ts_short, task, agent_suffix)),
+        "task.started" => Some(format!(
+            "▶ [{}] Task started: {}{}",
+            ts_short, task, agent_suffix
+        )),
+        "task.completed" => Some(format!(
+            "✅ [{}] Task completed: {}{}",
+            ts_short, task, agent_suffix
+        )),
+        "task.failed" => Some(format!(
+            "❌ [{}] Task failed: {}{}",
+            ts_short, task, agent_suffix
+        )),
+        "task.cancelled" => Some(format!(
+            "🚫 [{}] Task cancelled: {}{}",
+            ts_short, task, agent_suffix
+        )),
+        "task.paused" => Some(format!(
+            "⏸ [{}] Task paused: {}{}",
+            ts_short, task, agent_suffix
+        )),
         "workflow.join.satisfied" => Some(format!("✅ [{}] Workflow join satisfied", ts_short)),
         "workflow.checkpoint.saved" => Some(format!("💾 [{}] Workflow checkpoint saved", ts_short)),
-        "task.checkpoint.saved" => {
-            Some(format!("💾 [{}] Task checkpoint saved: {}{}", ts_short, task, agent_suffix))
-        }
-        "task.updated" if status == "runnable" => {
-            Some(format!("🔁 [{}] Resumed after approval: {}{}", ts_short, task, agent_suffix))
-        }
+        "task.checkpoint.saved" => Some(format!(
+            "💾 [{}] Task checkpoint saved: {}{}",
+            ts_short, task, agent_suffix
+        )),
+        "task.updated" if status == "runnable" => Some(format!(
+            "🔁 [{}] Resumed after approval: {}{}",
+            ts_short, task, agent_suffix
+        )),
         "task.updated" => Some(format!(
             "🔄 [{}] Task updated: {}{} ({})",
             ts_short, task, agent_suffix, status
@@ -1113,11 +1137,12 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
 
     // Show compact session info
     let root_session = autonoetic_gateway::runtime::content_store::root_session_id(&session_id);
-    let wf_hint = autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(&config, root_session)
-        .ok()
-        .flatten()
-        .map(|wf_id| format!(" · wf:{}", &wf_id[..8.min(wf_id.len())]))
-        .unwrap_or_default();
+    let wf_hint =
+        autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(&config, root_session)
+            .ok()
+            .flatten()
+            .map(|wf_id| format!(" · wf:{}", &wf_id[..8.min(wf_id.len())]))
+            .unwrap_or_default();
     app.add_message(
         MessageRole::System,
         format!("{}{}", &session_id[..20.min(session_id.len())], wf_hint),
@@ -1135,19 +1160,28 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
 
     // Open gateway store for approvals and signals (same path as gateway daemon)
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config.as_ref());
-    let gateway_store =
-        match autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir) {
-            Ok(store) => Some(store),
-            Err(e) => {
-                tracing::debug!(target: "chat", error = %e, "Gateway store unavailable, continuing without workflow events");
-                None
-            }
-        };
+    let gateway_store = match autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
+        &gateway_dir,
+    ) {
+        Ok(store) => Some(store),
+        Err(e) => {
+            tracing::debug!(target: "chat", error = %e, "Gateway store unavailable, continuing without workflow events");
+            None
+        }
+    };
 
     if let Some(ref store) = gateway_store {
-        if let Ok(snapshot) = poll_session_snapshot(config.as_ref(), Some(store), &session_id, app.session_overview.latest_signal.clone()) {
+        if let Ok(snapshot) = poll_session_snapshot(
+            config.as_ref(),
+            Some(store),
+            &session_id,
+            app.session_overview.latest_signal.clone(),
+        ) {
             app.session_overview = snapshot.overview.clone();
-            let _ = append_new_pending_user_interaction_prompts(&mut app, &snapshot.pending_interactions);
+            let _ = append_new_pending_user_interaction_prompts(
+                &mut app,
+                &snapshot.pending_interactions,
+            );
         }
     }
 
@@ -1236,9 +1270,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
         if needs_redraw {
             let area = terminal.size()?;
             let messages_height = area.height.saturating_sub(5) as usize;
-            app.last_max_scroll_offset = app
-                .content_line_count()
-                .saturating_sub(messages_height);
+            app.last_max_scroll_offset = app.content_line_count().saturating_sub(messages_height);
             if app.follow_output {
                 app.scroll_offset = app.last_max_scroll_offset;
             } else {
@@ -1624,7 +1656,10 @@ async fn check_signals(
         if curr_is_active && (prev_is_na || app.current_workflow_id.is_none()) {
             app.add_message(
                 MessageRole::System,
-                format!("🔗 Workflow connected: {}", app.session_overview.status_line()),
+                format!(
+                    "🔗 Workflow connected: {}",
+                    app.session_overview.status_line()
+                ),
             );
             processed_any = true;
         }
@@ -1751,7 +1786,8 @@ async fn check_signals(
         }
     }
 
-    let new_prompts = append_new_pending_user_interaction_prompts(app, &snapshot.pending_interactions);
+    let new_prompts =
+        append_new_pending_user_interaction_prompts(app, &snapshot.pending_interactions);
     if new_prompts > 0 {
         processed_any = true;
     }

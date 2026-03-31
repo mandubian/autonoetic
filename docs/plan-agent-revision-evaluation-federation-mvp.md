@@ -20,7 +20,9 @@ Landed work so far covers a subset of Phase 0, most of the Phase 1 registry and 
 - Phase 0 simplification landed for explicit ingress targeting, config cleanup, role-gate removal, and binary disclosure classes.
 - Phase 1a landed for revision and eval Rust types, `SessionAgentBinding` shape, `LockedLayerMount`, and `ArtifactKind::AgentBundle`.
 - Phase 1b-1e landed for revision, alias, session-binding, promotion, and eval tables; alias-backed resolver behavior; short revision refs; revision create/list/inspect; and first-pass session pinning on spawn.
+- Follow-up hardening landed for ordered migration metadata (`schema_migrations`), canonical runtime lock hashing, revision directory materialization, and binding-first session resolution.
 - Phase 2 landed for transactional promote/rollback commands with same-agent validation, default rollback-to-previous behavior, durable promotion history, and optional eval-run gating.
+- Phase 3.5 landed for `agent.revision.diff` and `eval.compare` on top of the existing eval/report pipeline.
 - `agent.install` still exists in the current codebase as a transitional path, so the plan assumptions remain the target architecture rather than the fully completed current state.
 
 ## Global Invariants
@@ -40,7 +42,8 @@ These invariants must hold after every phase:
 2. Phase 1 depends on Phase 0.
 3. Phase 2 depends on Phase 1.
 4. Phase 3 depends on Phases 1 and 2.
-5. Phase 4 depends on the data models from Phases 1 to 3.
+5. Phase 3.5 depends on Phase 3.
+6. Phase 4 depends on the data models from Phases 1 to 3.5.
 
 ## Phase 0: Gateway Contract Simplification
 
@@ -107,8 +110,8 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 ### P1-T02 Gateway schema migration
 
-- [ ] Replace ad hoc `CREATE TABLE IF NOT EXISTS` bootstrap with ordered schema migrations.
-- [ ] Add `schema_migrations` metadata and startup version checks.
+- [x] Replace ad hoc `CREATE TABLE IF NOT EXISTS` bootstrap with ordered schema migrations.
+- [x] Add `schema_migrations` metadata and startup version checks.
 - [x] Create tables for revisions, aliases, session bindings, and promotion history.
 - [x] Add uniqueness constraints for `(agent_id, content_digest)` and single alias per agent.
 - [x] Make session binding nullable for `alias_id` and required for `requested_target`.
@@ -116,21 +119,21 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 ### P1-T03 Runtime closure model
 
 - [x] Extend `runtime.lock` with pinned layer mounts.
-- [ ] Define lock hashing over the normalized serialized runtime closure.
-- [ ] Reject revision creation if artifact layers and lock layers do not agree.
-- [ ] Write the normalized `runtime.lock` form into revision materialization.
+- [x] Define lock hashing over the normalized serialized runtime closure.
+- [x] Reject revision creation if artifact layers and lock layers do not agree.
+- [x] Write the normalized `runtime.lock` form into revision materialization.
 
 ### P1-T04 Agent bundle artifact kind
 
 - [x] Add an explicit `AgentBundle` artifact kind.
 - [ ] Validate that revision creation only accepts `AgentBundle` artifacts.
-- [ ] Validate `SKILL.md`, manifest identity, and runtime lock presence before materialization.
+- [x] Validate `SKILL.md`, manifest identity, and runtime lock presence before materialization.
 
 ### P1-T05 Revision materialization
 
-- [ ] Materialize immutable revision directories under the revision store.
+- [x] Materialize immutable revision directories under the revision store.
 - [ ] Write revision metadata and status in one transactional flow.
-- [ ] Ensure revision materialization is idempotent for the same content digest.
+- [x] Ensure revision materialization is idempotent for the same content digest.
 
 ### P1-T06 Alias registry
 
@@ -148,7 +151,7 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 - [x] Create session bindings before the first executable turn.
 - [x] Persist `requested_target`, nullable `alias_id`, revision id, and runtime lock hash.
-- [ ] Ensure approval resume, checkpoint resume, and retry paths always reload from binding state.
+- [x] Ensure approval resume, checkpoint resume, and retry paths always reload from binding state.
 
 ### P1-T09 Seeding flow
 
@@ -160,21 +163,21 @@ Goal: make immutable revisions plus explicit runtime closure the only execution 
 
 ### P1-T10 Phase 1 tests
 
-- [ ] Revision creation from an `AgentBundle` artifact succeeds.
-- [ ] Duplicate revision creation reuses the same revision identity.
+- [x] Revision creation from an `AgentBundle` artifact succeeds.
+- [x] Duplicate revision creation reuses the same revision identity.
 - [x] Explicit `agent_ref` resolution bypasses alias lookup.
 - [x] Malformed targets containing `@` fail validation without alias fallback.
 - [ ] Candidate revision can run without an alias.
 - [ ] Changing pinned layer mounts changes revision identity even when agent files do not.
-- [ ] Session resume reloads from stored binding state.
+- [x] Session resume reloads from stored binding state.
 - [ ] Fresh and upgraded databases both pass ordered migration bootstrap.
 
 ### Phase 1 exit checklist
 
-- [ ] New sessions execute only from revision directories.
+- [x] New sessions execute only from revision directories.
 - [ ] No runtime path depends on scanning authoring directories.
-- [ ] Runtime closure is explicit and hashed.
-- [ ] Ordered schema migrations replace ad hoc schema bootstrap.
+- [x] Runtime closure is explicit and hashed.
+- [x] Ordered schema migrations replace ad hoc schema bootstrap.
 - [ ] Candidate revisions are runnable by explicit `agent_ref`.
 - [ ] Existing tests and operator seeding paths no longer depend on direct runtime directory loading.
 
@@ -202,7 +205,7 @@ Goal: make alias movement the only activation and rollback mechanism.
 
 ### P2-T04 Policy enforcement
 
-- [ ] Gate promote and rollback through capability checks.
+- [x] Gate promote and rollback through capability checks.
 - [ ] Route any governance requirement through the generic approval queue.
 - [ ] Keep policy independent from agent names or roles.
 
@@ -295,6 +298,28 @@ Goal: add measurable evidence before alias movement.
 - [x] Promotion can be gated by passed evidence.
 - [x] Eval execution obeys ordinary runtime limits.
 
+## Phase 3.5: Differential Revision and Eval Comparison
+
+Goal: provide first-class "what changed" and "did it improve" tooling on top of immutable revisions and eval records.
+
+### P3.5-T01 `agent.revision.diff`
+
+- [x] Add `agent.revision.diff` for deterministic file-level comparison between two refs.
+- [x] Resolve both `from_ref` and `to_ref` through registry-backed `agent_ref` resolution.
+- [x] Report added, removed, and modified files with per-file digest and size metadata.
+
+### P3.5-T02 `eval.compare`
+
+- [x] Add `eval.compare` for baseline/candidate comparison on the same suite.
+- [x] Reuse latest completed runs when available for each revision.
+- [x] Queue missing eval runs when no completed run exists and return a queued status.
+- [x] Return regression/improvement deltas once both baseline and candidate runs are complete.
+
+### P3.5-T03 Tests
+
+- [x] Add integration coverage for `agent.revision.diff`.
+- [x] Add integration coverage for completed-path `eval.compare`.
+
 ## Phase 4: Federation-Ready Provenance
 
 Goal: make single-gateway behavior forward-compatible with exchange and import.
@@ -354,7 +379,8 @@ This section is intentionally classification, not delivery scope. Only work that
 6. Phase 2 promote plus rollback.
 7. Phase 3 eval schema plus queue.
 8. Phase 3 assertion engine plus report flow.
-9. Phase 4 provenance plus capsule planning.
+9. Phase 3.5 revision diff plus eval compare.
+10. Phase 4 provenance plus capsule planning.
 
 ## Final Definition of Done
 

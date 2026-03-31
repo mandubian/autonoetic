@@ -323,17 +323,15 @@ fn test_tier2_memory_search_by_tags_cross_agent_shared() {
         "session:x:turn:1".into(),
         "Never block the runtime thread.".into(),
     );
-    memory.tags = vec![
-        "type:error_lesson".to_string(),
-        "domain:async".to_string(),
-    ];
+    memory.tags = vec!["type:error_lesson".to_string(), "domain:async".to_string()];
     writer.save_memory(&memory).unwrap();
 
     writer
         .share_with("tagged_fact", vec!["reader-agent".to_string()])
         .unwrap();
 
-    let reader = autonoetic_gateway::runtime::memory::Tier2Memory::with_store(store, "reader-agent");
+    let reader =
+        autonoetic_gateway::runtime::memory::Tier2Memory::with_store(store, "reader-agent");
     let found = reader
         .search_by_tags(
             "lessons",
@@ -346,7 +344,12 @@ fn test_tier2_memory_search_by_tags_cross_agent_shared() {
     assert_eq!(found[0].memory_id, "tagged_fact");
 
     let not_found = reader
-        .search_by_tags("lessons", &["type:error_lesson".to_string(), "missing".to_string()], None, 10)
+        .search_by_tags(
+            "lessons",
+            &["type:error_lesson".to_string(), "missing".to_string()],
+            None,
+            10,
+        )
         .unwrap();
     assert!(not_found.is_empty());
 }

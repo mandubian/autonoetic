@@ -12,7 +12,10 @@
 mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
-use autonoetic_gateway::runtime::tools::{NativeTool, EvalSuitePublishTool, EvalRunTool, EvalReportTool, validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+use autonoetic_gateway::runtime::tools::{
+    validate_suite_spec, AgentRevisionDiffTool, EvalCompareTool, EvalReportTool, EvalRunTool,
+    EvalSuiteCaseSpec, EvalSuitePublishTool, EvalSuiteSpec, NativeTool,
+};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use serde_json::json;
@@ -59,7 +62,10 @@ fn test_validate_suite_spec_rejects_empty_cases() {
     let spec = EvalSuiteSpec { cases: vec![] };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("at least one case"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("at least one case"));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -68,7 +74,7 @@ fn test_validate_suite_spec_rejects_empty_cases() {
 
 #[test]
 fn test_evaluate_assertions_all_types_combined() {
-    use autonoetic_gateway::scheduler::eval_runner::{EvalAssertions, evaluate_assertions};
+    use autonoetic_gateway::scheduler::eval_runner::{evaluate_assertions, EvalAssertions};
 
     // All assertions pass
     let assertions = EvalAssertions {
@@ -103,7 +109,11 @@ fn test_evaluate_assertions_all_types_combined() {
         artifacts_max: None,
     };
     assert!(evaluate_assertions(&assertions_chars, "Short", 0));
-    assert!(!evaluate_assertions(&assertions_chars, "This is way too long", 0));
+    assert!(!evaluate_assertions(
+        &assertions_chars,
+        "This is way too long",
+        0
+    ));
 }
 
 #[test]
@@ -137,52 +147,74 @@ fn test_eval_runner_report_generation_from_store() {
     store.insert_eval_run(&run).unwrap();
 
     // Insert mixed case results (2 passed, 1 failed)
-    store.insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
-        eval_run_id: eval_run_id.to_string(),
-        case_id: "case_pass_1".into(),
-        status: "passed".into(),
-        score: Some(1.0),
-        session_id: Some("session-1".into()),
-        notes: None,
-        output_json: json!({ "reply_length": 50 }),
-    }).unwrap();
+    store
+        .insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+            eval_run_id: eval_run_id.to_string(),
+            case_id: "case_pass_1".into(),
+            status: "passed".into(),
+            score: Some(1.0),
+            session_id: Some("session-1".into()),
+            notes: None,
+            output_json: json!({ "reply_length": 50 }),
+        })
+        .unwrap();
 
-    store.insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
-        eval_run_id: eval_run_id.to_string(),
-        case_id: "case_fail".into(),
-        status: "failed".into(),
-        score: None,
-        session_id: Some("session-2".into()),
-        notes: Some("reply_max_chars failed".into()),
-        output_json: json!({ "reply_length": 5000 }),
-    }).unwrap();
+    store
+        .insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+            eval_run_id: eval_run_id.to_string(),
+            case_id: "case_fail".into(),
+            status: "failed".into(),
+            score: None,
+            session_id: Some("session-2".into()),
+            notes: Some("reply_max_chars failed".into()),
+            output_json: json!({ "reply_length": 5000 }),
+        })
+        .unwrap();
 
-    store.insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
-        eval_run_id: eval_run_id.to_string(),
-        case_id: "case_pass_2".into(),
-        status: "passed".into(),
-        score: Some(0.8),
-        session_id: Some("session-3".into()),
-        notes: None,
-        output_json: json!({ "reply_length": 100 }),
-    }).unwrap();
+    store
+        .insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+            eval_run_id: eval_run_id.to_string(),
+            case_id: "case_pass_2".into(),
+            status: "passed".into(),
+            score: Some(0.8),
+            session_id: Some("session-3".into()),
+            notes: None,
+            output_json: json!({ "reply_length": 100 }),
+        })
+        .unwrap();
 
     // Verify the run and all case results are retrievable
     let retrieved_run = store.get_eval_run(eval_run_id).unwrap().unwrap();
-    assert_eq!(retrieved_run.status, autonoetic_types::evaluation::EvalRunStatus::Failed);
-    assert_eq!(retrieved_run.report_handle, Some("sha256:generated_report_abc123".to_string()));
+    assert_eq!(
+        retrieved_run.status,
+        autonoetic_types::evaluation::EvalRunStatus::Failed
+    );
+    assert_eq!(
+        retrieved_run.report_handle,
+        Some("sha256:generated_report_abc123".to_string())
+    );
 
     let case_results = store.list_eval_case_results(eval_run_id).unwrap();
     assert_eq!(case_results.len(), 3);
 
-    let passed: Vec<_> = case_results.iter().filter(|c| c.status == "passed").collect();
-    let failed: Vec<_> = case_results.iter().filter(|c| c.status == "failed").collect();
+    let passed: Vec<_> = case_results
+        .iter()
+        .filter(|c| c.status == "passed")
+        .collect();
+    let failed: Vec<_> = case_results
+        .iter()
+        .filter(|c| c.status == "failed")
+        .collect();
     assert_eq!(passed.len(), 2);
     assert_eq!(failed.len(), 1);
 
     // Verify the failed case has notes
     let failed_case = &failed[0];
-    assert!(failed_case.notes.as_ref().unwrap().contains("reply_max_chars"));
+    assert!(failed_case
+        .notes
+        .as_ref()
+        .unwrap()
+        .contains("reply_max_chars"));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -280,7 +312,10 @@ fn test_eval_run_persists_with_real_revision() {
     let run = store.get_eval_run(eval_run_id).unwrap().unwrap();
     assert_eq!(run.subject_agent_id, "test-agent");
     assert_eq!(run.subject_revision_id, revision_id);
-    assert_eq!(run.status, autonoetic_types::evaluation::EvalRunStatus::Queued);
+    assert_eq!(
+        run.status,
+        autonoetic_types::evaluation::EvalRunStatus::Queued
+    );
     assert!(run.report_handle.is_none());
 }
 
@@ -355,8 +390,233 @@ fn test_eval_report_returns_persisted_data() {
     assert_eq!(response["run"]["status"], "Passed");
     assert_eq!(response["run"]["report_handle"], "sha256:report123");
     assert_eq!(response["case_count"], 1);
-    assert_eq!(response["case_results"].as_array().unwrap()[0]["case_id"], "case_a");
-    assert_eq!(response["case_results"].as_array().unwrap()[0]["status"], "passed");
+    assert_eq!(
+        response["case_results"].as_array().unwrap()[0]["case_id"],
+        "case_a"
+    );
+    assert_eq!(
+        response["case_results"].as_array().unwrap()[0]["status"],
+        "passed"
+    );
+}
+
+#[test]
+fn test_agent_revision_diff_reports_modified_files() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let rev_a = "rev_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let rev_b = "rev_sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    for (revision_id, content_digest, runtime_lock_hash, manifest_hash) in [
+        (rev_a, "sha256:a", "sha256:lock-a", "sha256:manifest-a"),
+        (rev_b, "sha256:b", "sha256:lock-b", "sha256:manifest-b"),
+    ] {
+        let rec = autonoetic_types::agent_revision::AgentRevisionRecord {
+            revision_id: revision_id.to_string(),
+            agent_id: "test-agent".to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: content_digest.to_string(),
+            runtime_lock_hash: runtime_lock_hash.to_string(),
+            manifest_hash: manifest_hash.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            created_by_type: "test".to_string(),
+            created_by_id: "test".to_string(),
+            source_kind: "test".to_string(),
+            source_ref: None,
+            origin_node_id: "test".to_string(),
+            trust_domain: "local".to_string(),
+            status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+            metadata_json: json!({}),
+            short_id: "testshort".to_string(),
+        };
+        store.insert_agent_revision(&rec).unwrap();
+    }
+
+    let rev_dir_a = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join("test-agent")
+        .join(rev_a);
+    let rev_dir_b = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join("test-agent")
+        .join(rev_b);
+    std::fs::create_dir_all(&rev_dir_a).unwrap();
+    std::fs::create_dir_all(&rev_dir_b).unwrap();
+    std::fs::write(rev_dir_a.join("SKILL.md"), "one").unwrap();
+    std::fs::write(rev_dir_b.join("SKILL.md"), "two").unwrap();
+    std::fs::write(rev_dir_a.join("runtime.lock"), "{}").unwrap();
+    std::fs::write(rev_dir_b.join("runtime.lock"), "{}").unwrap();
+    std::fs::write(rev_dir_a.join("file.txt"), "alpha").unwrap();
+    std::fs::write(rev_dir_b.join("file.txt"), "beta").unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["test-agent*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let tool = AgentRevisionDiffTool;
+    let args = json!({
+        "from_ref": format!("test-agent@{}", rev_a),
+        "to_ref": format!("test-agent@{}", rev_b),
+    });
+
+    let out = tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &args.to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["changed"], true);
+    assert!(parsed["summary"]["modified"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn test_eval_compare_builds_completed_comparison_report() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let baseline_rev =
+        "rev_sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let candidate_rev =
+        "rev_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    for revision_id in [baseline_rev, candidate_rev] {
+        let rec = autonoetic_types::agent_revision::AgentRevisionRecord {
+            revision_id: revision_id.to_string(),
+            agent_id: "test-agent".to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: format!("sha256:{}", &revision_id[11..19]),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            manifest_hash: "sha256:manifest".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            created_by_type: "test".to_string(),
+            created_by_id: "test".to_string(),
+            source_kind: "test".to_string(),
+            source_ref: None,
+            origin_node_id: "test".to_string(),
+            trust_domain: "local".to_string(),
+            status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+            metadata_json: json!({}),
+            short_id: "cmp".to_string(),
+        };
+        store.insert_agent_revision(&rec).unwrap();
+    }
+
+    let suite = autonoetic_types::evaluation::EvalSuiteRecord {
+        suite_id: "suite-compare".to_string(),
+        name: "Compare Suite".to_string(),
+        description: "desc".to_string(),
+        spec_json: json!({"cases":[{"case_id":"c1","message":"m","assertions":{"reply_max_chars":10}}]}),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "test".to_string(),
+        origin_node_id: "test".to_string(),
+    };
+    store.insert_eval_suite(&suite).unwrap();
+
+    let baseline_run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: "eval-baseline".to_string(),
+        suite_id: suite.suite_id.clone(),
+        subject_agent_id: "test-agent".to_string(),
+        subject_revision_id: baseline_rev.to_string(),
+        baseline_revision_id: None,
+        status: autonoetic_types::evaluation::EvalRunStatus::Passed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({"passed":1,"failed":0}),
+        report_handle: Some("sha256:base-report".to_string()),
+        origin_node_id: "test".to_string(),
+    };
+    let candidate_run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: "eval-candidate".to_string(),
+        suite_id: suite.suite_id.clone(),
+        subject_agent_id: "test-agent".to_string(),
+        subject_revision_id: candidate_rev.to_string(),
+        baseline_revision_id: Some(baseline_rev.to_string()),
+        status: autonoetic_types::evaluation::EvalRunStatus::Failed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({"passed":0,"failed":1}),
+        report_handle: Some("sha256:candidate-report".to_string()),
+        origin_node_id: "test".to_string(),
+    };
+    store.insert_eval_run(&baseline_run).unwrap();
+    store.insert_eval_run(&candidate_run).unwrap();
+
+    store
+        .insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+            eval_run_id: baseline_run.eval_run_id.clone(),
+            case_id: "c1".to_string(),
+            status: "passed".to_string(),
+            score: Some(1.0),
+            session_id: None,
+            notes: None,
+            output_json: json!({}),
+        })
+        .unwrap();
+    store
+        .insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+            eval_run_id: candidate_run.eval_run_id.clone(),
+            case_id: "c1".to_string(),
+            status: "failed".to_string(),
+            score: Some(0.0),
+            session_id: None,
+            notes: Some("regression".to_string()),
+            output_json: json!({}),
+        })
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["suite-*".into(), "test-agent*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir: tmp.path().join("agents"),
+        ..Default::default()
+    };
+
+    let tool = EvalCompareTool;
+    let args = json!({
+        "suite_id": "suite-compare",
+        "baseline_ref": format!("test-agent@{}", baseline_rev),
+        "candidate_ref": format!("test-agent@{}", candidate_rev),
+    });
+    let out = tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &args.to_string(),
+            None,
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["status"], "completed");
+    assert_eq!(parsed["summary"]["regression_count"], 1);
 }
 
 #[test]
@@ -364,7 +624,11 @@ fn test_load_from_revision_dir_succeeds_with_materialized_revision() {
     let tmp = TempDir::new().unwrap();
     let agents_dir = tmp.path().join("agents");
     let gateway_dir = tmp.path().join(".gateway");
-    let rev_dir = gateway_dir.join("revisions").join("agents").join("test-agent").join("rev_test123");
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join("test-agent")
+        .join("rev_test123");
     std::fs::create_dir_all(&rev_dir).unwrap();
 
     // Materialize a revision directory with SKILL.md
@@ -398,7 +662,9 @@ You are a test agent.
     };
     let repo = autonoetic_gateway::agent::repository::AgentRepository::from_config(&config);
 
-    let loaded = repo.load_from_revision_dir(&gateway_dir, "test-agent", "rev_test123").unwrap();
+    let loaded = repo
+        .load_from_revision_dir(&gateway_dir, "test-agent", "rev_test123")
+        .unwrap();
     assert_eq!(loaded.manifest.agent.id, "test-agent");
     assert_eq!(loaded.manifest.agent.name, "Test Agent");
 }
@@ -488,7 +754,10 @@ fn test_eval_run_creates_queued_record() {
         None,
     );
 
-    assert!(result.is_err(), "Should fail because revision doesn't exist");
+    assert!(
+        result.is_err(),
+        "Should fail because revision doesn't exist"
+    );
 }
 
 #[test]
@@ -552,13 +821,19 @@ fn test_eval_run_validates_revision_belongs_to_agent() {
         None,
     );
 
-    assert!(result.is_err(), "Should fail because revision belongs to different agent");
+    assert!(
+        result.is_err(),
+        "Should fail because revision belongs to different agent"
+    );
     let err_msg = result.unwrap_err().to_string();
     // The error should be either "not found" (revision doesn't exist for planner)
     // or "belongs to agent" (revision exists but belongs to different agent)
     assert!(
-        err_msg.contains("belongs to agent") || err_msg.contains("not found") || err_msg.contains("Revision"),
-        "Error should mention agent mismatch or revision issue, got: {}", err_msg
+        err_msg.contains("belongs to agent")
+            || err_msg.contains("not found")
+            || err_msg.contains("Revision"),
+        "Error should mention agent mismatch or revision issue, got: {}",
+        err_msg
     );
 }
 
@@ -650,7 +925,9 @@ fn test_load_from_revision_dir_fails_when_missing() {
 
 #[test]
 fn test_validate_suite_spec_rejects_duplicate_case_ids() {
-    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
 
     let spec = EvalSuiteSpec {
         cases: vec![
@@ -668,12 +945,17 @@ fn test_validate_suite_spec_rejects_duplicate_case_ids() {
     };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Duplicate case_id"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Duplicate case_id"));
 }
 
 #[test]
 fn test_validate_suite_spec_rejects_empty_case_id() {
-    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
 
     let spec = EvalSuiteSpec {
         cases: vec![EvalSuiteCaseSpec {
@@ -684,12 +966,17 @@ fn test_validate_suite_spec_rejects_empty_case_id() {
     };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("must not be empty"));
 }
 
 #[test]
 fn test_validate_suite_spec_rejects_empty_message() {
-    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
 
     let spec = EvalSuiteSpec {
         cases: vec![EvalSuiteCaseSpec {
@@ -700,12 +987,17 @@ fn test_validate_suite_spec_rejects_empty_message() {
     };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("message must not be empty"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("message must not be empty"));
 }
 
 #[test]
 fn test_validate_suite_spec_rejects_non_object_assertions() {
-    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
 
     let spec = EvalSuiteSpec {
         cases: vec![EvalSuiteCaseSpec {
@@ -716,12 +1008,17 @@ fn test_validate_suite_spec_rejects_non_object_assertions() {
     };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("must be an object"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("must be an object"));
 }
 
 #[test]
 fn test_validate_suite_spec_rejects_unknown_assertion_type() {
-    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
 
     let spec = EvalSuiteSpec {
         cases: vec![EvalSuiteCaseSpec {
@@ -732,12 +1029,17 @@ fn test_validate_suite_spec_rejects_unknown_assertion_type() {
     };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("unknown assertion type"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("unknown assertion type"));
 }
 
 #[test]
 fn test_validate_suite_spec_rejects_vacuous_case_no_assertions() {
-    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
 
     let spec = EvalSuiteSpec {
         cases: vec![EvalSuiteCaseSpec {
@@ -748,12 +1050,17 @@ fn test_validate_suite_spec_rejects_vacuous_case_no_assertions() {
     };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("must have at least one assertion"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("must have at least one assertion"));
 }
 
 #[test]
 fn test_validate_suite_spec_rejects_empty_contains_all() {
-    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
 
     let spec = EvalSuiteSpec {
         cases: vec![EvalSuiteCaseSpec {
@@ -764,12 +1071,17 @@ fn test_validate_suite_spec_rejects_empty_contains_all() {
     };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("at least one substring"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("at least one substring"));
 }
 
 #[test]
 fn test_validate_suite_spec_accepts_valid_suite() {
-    use autonoetic_gateway::runtime::tools::{validate_suite_spec, EvalSuiteSpec, EvalSuiteCaseSpec};
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
 
     let spec = EvalSuiteSpec {
         cases: vec![
@@ -789,7 +1101,11 @@ fn test_validate_suite_spec_accepts_valid_suite() {
         ],
     };
     let result = validate_suite_spec(&spec);
-    assert!(result.is_ok(), "Valid suite should pass validation: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Valid suite should pass validation: {:?}",
+        result.err()
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -857,17 +1173,21 @@ fn test_assertion_reply_contains_all() {
         artifacts_max: None,
     };
 
-    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "Here is the task summary",
-        0
-    ));
+    assert!(
+        autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+            &assertions,
+            "Here is the task summary",
+            0
+        )
+    );
 
-    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "Here is the task",
-        0
-    ));
+    assert!(
+        !autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+            &assertions,
+            "Here is the task",
+            0
+        )
+    );
 }
 
 #[test]
@@ -880,17 +1200,21 @@ fn test_assertion_reply_contains_none() {
         artifacts_max: None,
     };
 
-    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "Success! All tests passed.",
-        0
-    ));
+    assert!(
+        autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+            &assertions,
+            "Success! All tests passed.",
+            0
+        )
+    );
 
-    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "The operation failed with an error",
-        0
-    ));
+    assert!(
+        !autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+            &assertions,
+            "The operation failed with an error",
+            0
+        )
+    );
 }
 
 #[test]
@@ -903,17 +1227,21 @@ fn test_assertion_reply_max_chars() {
         artifacts_max: None,
     };
 
-    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "Short text",
-        0
-    ));
+    assert!(
+        autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+            &assertions,
+            "Short text",
+            0
+        )
+    );
 
-    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "This is a much longer text",
-        0
-    ));
+    assert!(
+        !autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+            &assertions,
+            "This is a much longer text",
+            0
+        )
+    );
 }
 
 #[test]
@@ -926,17 +1254,9 @@ fn test_assertion_artifacts_min() {
         artifacts_max: None,
     };
 
-    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "",
-        3
-    ));
+    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(&assertions, "", 3));
 
-    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "",
-        1
-    ));
+    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(&assertions, "", 1));
 }
 
 #[test]
@@ -949,17 +1269,9 @@ fn test_assertion_artifacts_max() {
         artifacts_max: Some(5),
     };
 
-    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "",
-        3
-    ));
+    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(&assertions, "", 3));
 
-    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "",
-        10
-    ));
+    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(&assertions, "", 10));
 }
 
 #[test]
@@ -972,11 +1284,9 @@ fn test_assertion_combined_all_pass() {
         artifacts_max: None,
     };
 
-    assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "OK, done",
-        2
-    ));
+    assert!(
+        autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(&assertions, "OK, done", 2)
+    );
 }
 
 #[test]
@@ -989,11 +1299,13 @@ fn test_assertion_combined_partial_fail() {
         artifacts_max: None,
     };
 
-    assert!(!autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
-        &assertions,
-        "OK, this is a very long response that exceeds the limit",
-        0
-    ));
+    assert!(
+        !autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(
+            &assertions,
+            "OK, this is a very long response that exceeds the limit",
+            0
+        )
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1037,7 +1349,10 @@ fn test_eval_suite_publish_tool_execution() {
     );
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("GatewayStore is required"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("GatewayStore is required"));
 }
 
 #[test]
@@ -1067,7 +1382,9 @@ fn test_eval_report_tool_requires_capability() {
 
 #[test]
 fn test_eval_tools_available_with_evaluation_capability() {
-    let caps = vec![Capability::Evaluation { patterns: vec!["*".into()] }];
+    let caps = vec![Capability::Evaluation {
+        patterns: vec!["*".into()],
+    }];
     let manifest = manifest_with_capabilities(caps);
 
     assert!(EvalSuitePublishTool.is_available(&manifest));
@@ -1089,7 +1406,11 @@ fn test_validate_suite_spec_accepts_multiple_assertions_per_case() {
         }],
     };
     let result = validate_suite_spec(&spec);
-    assert!(result.is_ok(), "Multiple assertions per case should be valid: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Multiple assertions per case should be valid: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -1103,5 +1424,8 @@ fn test_validate_suite_spec_rejects_empty_reply_contains_none() {
     };
     let result = validate_suite_spec(&spec);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("at least one substring"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("at least one substring"));
 }

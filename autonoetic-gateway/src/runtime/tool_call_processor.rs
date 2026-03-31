@@ -103,7 +103,11 @@ impl<'a> ToolCallProcessor<'a> {
                 Ok(res) => {
                     self.record_execution_trace(tc, &res, started_at.elapsed(), None)?;
                     self.log_memory_tool_event(tracer, &tc.name, &res);
-                    tracer.log_tool_completed_with_approval(&tc.name, &res, approval_ref.as_deref())?;
+                    tracer.log_tool_completed_with_approval(
+                        &tc.name,
+                        &res,
+                        approval_ref.as_deref(),
+                    )?;
                     had_any_success = true;
                     res
                 }
@@ -124,7 +128,11 @@ impl<'a> ToolCallProcessor<'a> {
                             tool_error.message
                         ));
                     }
-                    tracer.log_tool_completed_with_approval(&tc.name, &error_json, approval_ref.as_deref())?;
+                    tracer.log_tool_completed_with_approval(
+                        &tc.name,
+                        &error_json,
+                        approval_ref.as_deref(),
+                    )?;
                     error_json
                 }
             };

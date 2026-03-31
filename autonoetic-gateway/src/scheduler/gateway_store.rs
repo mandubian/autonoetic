@@ -158,6 +158,8 @@ pub struct GatewayStore {
     conn: std::sync::Mutex<Connection>,
 }
 
+const SCHEMA_VERSION_LATEST: i64 = 1;
+
 impl GatewayStore {
     pub fn open(gateway_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(gateway_dir).map_err(|e| {
@@ -255,8 +257,34 @@ impl GatewayStore {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );",
+        )?;
+
+        let current_version: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+
+        anyhow::ensure!(
+            current_version <= SCHEMA_VERSION_LATEST,
+            "gateway.db schema version ({}) is newer than this binary supports ({})",
+            current_version,
+            SCHEMA_VERSION_LATEST
+        );
+
+        if current_version >= SCHEMA_VERSION_LATEST {
+            return Ok(());
+        }
+
+        let tx = conn.transaction()?;
+        tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS approvals (
                 request_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
@@ -631,7 +659,7 @@ impl GatewayStore {
 
         // Short ID index for LLM-friendly revision references
         // Populated automatically when revisions are inserted.
-        conn.execute_batch(
+        tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS short_id_index (
                 short_id TEXT PRIMARY KEY,
                 revision_id TEXT NOT NULL,
@@ -640,6 +668,16 @@ impl GatewayStore {
             CREATE INDEX IF NOT EXISTS idx_short_id_index_revision ON short_id_index(revision_id);
             ",
         )?;
+
+        tx.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+            params![
+                SCHEMA_VERSION_LATEST,
+                "initial_schema",
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        tx.commit()?;
 
         Ok(())
     }
@@ -713,7 +751,7 @@ impl GatewayStore {
         let allowed_agents_json = serde_json::to_string(&memory.allowed_agents)?;
 
         let mut conn = self.conn.lock().unwrap();
-        let mut tx = conn.transaction()?;
+        let tx = conn.transaction()?;
         tx.execute(
             "INSERT OR REPLACE INTO memories (
                 memory_id, scope, owner_agent_id, writer_agent_id, source_type, source_ref,
@@ -2537,7 +2575,7 @@ impl GatewayStore {
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
              FROM agent_revisions WHERE agent_id = ?1 ORDER BY created_at DESC",
         )?;
-        let mut rows = stmt.query_map(params![agent_id], |row| {
+        let rows = stmt.query_map(params![agent_id], |row| {
             let status_str: String = row.get(14)?;
             let status = match status_str.as_str() {
                 "Candidate" => AgentRevisionStatus::Candidate,
@@ -2586,7 +2624,7 @@ impl GatewayStore {
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
              FROM agent_revisions ORDER BY created_at DESC",
         )?;
-        let mut rows = stmt.query_map(params![], |row| {
+        let rows = stmt.query_map(params![], |row| {
             let status_str: String = row.get(14)?;
             let status = match status_str.as_str() {
                 "Candidate" => AgentRevisionStatus::Candidate,
@@ -2788,7 +2826,7 @@ impl GatewayStore {
         source_eval_run_id: Option<&str>,
     ) -> Result<Option<String>> {
         let mut conn = self.conn.lock().unwrap();
-        let mut tx = conn.transaction()?;
+        let tx = conn.transaction()?;
 
         // Get current alias
         let previous_revision_id: Option<String> = tx
@@ -2891,7 +2929,7 @@ impl GatewayStore {
         reason: Option<&str>,
     ) -> Result<Option<String>> {
         let mut conn = self.conn.lock().unwrap();
-        let mut tx = conn.transaction()?;
+        let tx = conn.transaction()?;
 
         // Get current alias
         let current_revision_id: Option<String> = tx
@@ -3067,6 +3105,17 @@ impl GatewayStore {
 
     // --- Eval Runs ---
 
+    fn parse_eval_run_status(status_str: &str) -> EvalRunStatus {
+        match status_str {
+            "Queued" => EvalRunStatus::Queued,
+            "Running" => EvalRunStatus::Running,
+            "Passed" => EvalRunStatus::Passed,
+            "Failed" => EvalRunStatus::Failed,
+            "Cancelled" => EvalRunStatus::Cancelled,
+            _ => EvalRunStatus::Queued,
+        }
+    }
+
     pub fn insert_eval_run(&self, run: &EvalRunRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let summary_json = serde_json::to_string(&run.summary_json)?;
@@ -3133,14 +3182,7 @@ impl GatewayStore {
         )?;
         let rows = stmt.query_map(params![eval_run_id], |row| {
             let status_str: String = row.get(5)?;
-            let status = match status_str.as_str() {
-                "Queued" => EvalRunStatus::Queued,
-                "Running" => EvalRunStatus::Running,
-                "Passed" => EvalRunStatus::Passed,
-                "Failed" => EvalRunStatus::Failed,
-                "Cancelled" => EvalRunStatus::Cancelled,
-                _ => EvalRunStatus::Queued,
-            };
+            let status = Self::parse_eval_run_status(status_str.as_str());
             let summary_json: String = row.get(9)?;
             let summary_json =
                 serde_json::from_str(&summary_json).unwrap_or(serde_json::Value::Null);
@@ -3164,6 +3206,49 @@ impl GatewayStore {
             results.push(r?);
         }
         Ok(results.pop())
+    }
+
+    pub fn find_latest_completed_eval_run(
+        &self,
+        suite_id: &str,
+        subject_revision_id: &str,
+    ) -> Result<Option<EvalRunRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT eval_run_id, suite_id, subject_agent_id, subject_revision_id,
+                    baseline_revision_id, status, queued_at, started_at, completed_at,
+                    summary_json, report_handle, origin_node_id
+             FROM eval_runs
+             WHERE suite_id = ?1
+               AND subject_revision_id = ?2
+               AND status IN ('Passed', 'Failed', 'Cancelled')
+             ORDER BY COALESCE(completed_at, queued_at) DESC
+             LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row(params![suite_id, subject_revision_id], |row| {
+                let status_str: String = row.get(5)?;
+                let status = Self::parse_eval_run_status(status_str.as_str());
+                let summary_json: String = row.get(9)?;
+                let summary_json =
+                    serde_json::from_str(&summary_json).unwrap_or(serde_json::Value::Null);
+                Ok(EvalRunRecord {
+                    eval_run_id: row.get(0)?,
+                    suite_id: row.get(1)?,
+                    subject_agent_id: row.get(2)?,
+                    subject_revision_id: row.get(3)?,
+                    baseline_revision_id: row.get(4)?,
+                    status,
+                    queued_at: row.get(6)?,
+                    started_at: row.get(7)?,
+                    completed_at: row.get(8)?,
+                    summary_json,
+                    report_handle: row.get(10)?,
+                    origin_node_id: row.get(11)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
     }
 
     // --- Eval Case Results ---
@@ -3224,14 +3309,7 @@ impl GatewayStore {
         )?;
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(5)?;
-            let status = match status_str.as_str() {
-                "Queued" => EvalRunStatus::Queued,
-                "Running" => EvalRunStatus::Running,
-                "Passed" => EvalRunStatus::Passed,
-                "Failed" => EvalRunStatus::Failed,
-                "Cancelled" => EvalRunStatus::Cancelled,
-                _ => EvalRunStatus::Queued,
-            };
+            let status = Self::parse_eval_run_status(status_str.as_str());
             let summary_json: String = row.get(9)?;
             let summary_json =
                 serde_json::from_str(&summary_json).unwrap_or(serde_json::Value::Null);

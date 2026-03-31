@@ -441,12 +441,16 @@ pub fn handle_trace_digest(
     session_id: &str,
     json_output: bool,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(!session_id.trim().is_empty(), "session_id must not be empty");
+    anyhow::ensure!(
+        !session_id.trim().is_empty(),
+        "session_id must not be empty"
+    );
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let gateway_dir = config.agents_dir.join(".gateway");
     let base = autonoetic_gateway::runtime::live_digest::base_session_id(session_id.trim());
     let cs = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
-    let name = autonoetic_gateway::runtime::post_session_digest::POST_SESSION_NARRATIVE_CONTENT_NAME;
+    let name =
+        autonoetic_gateway::runtime::post_session_digest::POST_SESSION_NARRATIVE_CONTENT_NAME;
     let bytes = cs
         .read_by_name(base, name)
         .map_err(|_| {
@@ -1381,13 +1385,18 @@ pub async fn handle_trace_fork(
     // Fork from the latest checkpoint of the source session
     let fork = if let Some(turn) = at_turn {
         // Fork from a specific turn's checkpoint
-        let checkpoint =
-            autonoetic_gateway::runtime::checkpoint::load_checkpoint(
-                &config,
+        let checkpoint = autonoetic_gateway::runtime::checkpoint::load_checkpoint(
+            &config,
+            source_session_id,
+            &format!("turn-{:04}", turn),
+        )?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No checkpoint found for session '{}' at turn {}",
                 source_session_id,
-                &format!("turn-{:04}", turn),
-            )?
-            .ok_or_else(|| anyhow::anyhow!("No checkpoint found for session '{}' at turn {}", source_session_id, turn))?;
+                turn
+            )
+        })?;
         autonoetic_gateway::runtime::checkpoint::SessionFork::fork_from_checkpoint(
             &config,
             &checkpoint,

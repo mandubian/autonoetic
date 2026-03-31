@@ -171,9 +171,13 @@ impl Tier2Memory {
             "limit must be between 1 and 100 inclusive"
         );
 
-        let ids = self
-            .store
-            .memory_list_ids_matching_tags(scope, &self.current_agent_id, tags, text, limit as i64)?;
+        let ids = self.store.memory_list_ids_matching_tags(
+            scope,
+            &self.current_agent_id,
+            tags,
+            text,
+            limit as i64,
+        )?;
 
         let mut results = Vec::new();
         for memory_id in ids {
@@ -494,12 +498,7 @@ mod tests {
         mem.save_memory(&m2).unwrap();
 
         let found = mem
-            .search_by_tags(
-                "lessons",
-                &["type:error_lesson".to_string()],
-                None,
-                10,
-            )
+            .search_by_tags("lessons", &["type:error_lesson".to_string()], None, 10)
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].memory_id, "m1");

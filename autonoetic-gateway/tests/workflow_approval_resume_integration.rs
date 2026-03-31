@@ -104,7 +104,9 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
 
     // The refreshed message should be a canonical continuation string
     assert!(
-        queued_after[0].message.starts_with("approval_resumed:sandbox_exec:apr-resume1234:approved"),
+        queued_after[0]
+            .message
+            .starts_with("approval_resumed:sandbox_exec:apr-resume1234:approved"),
         "Queued message should be canonical continuation format, got: {}",
         queued_after[0].message
     );

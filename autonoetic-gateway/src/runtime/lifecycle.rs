@@ -66,9 +66,7 @@ pub enum TurnOutcome {
     /// The checkpoint has already been saved by `execute_with_history`;
     /// the caller should record this outcome so the session is visible
     /// as blocked on user input (not "completed empty").
-    SuspendedUserInput {
-        interaction_id: String,
-    },
+    SuspendedUserInput { interaction_id: String },
 }
 
 /// Build the system prompt given agent instructions and (optionally) raw agent
@@ -199,7 +197,8 @@ pub struct AgentExecutor {
     /// SHA-256 of runtime.lock content, captured at session start for reproducibility.
     pub runtime_lock_hash: Option<String>,
     /// Emergency-stop hooks (sandbox PIDs, etc.); same registry as [`crate::execution::GatewayExecutionService`].
-    pub active_executions: Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
+    pub active_executions:
+        Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
     /// Shared live digest (`digest.md`) when `gateway_dir` is set.
     pub live_digest: Option<Arc<std::sync::Mutex<crate::runtime::live_digest::LiveDigestWriter>>>,
 }
@@ -324,8 +323,7 @@ impl AgentExecutor {
                 let _ = g.write_session_summary(reason);
             }
         }
-        let mut tracer =
-            SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?;
+        let mut tracer = SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?;
         tracer.log_session_end(reason);
         self.session_started = false;
         self.session_id = None;
@@ -446,12 +444,8 @@ impl AgentExecutor {
                     max_turns = cfg.max_session_turns,
                     "Session reached max turns limit"
                 );
-                let cp = self.build_checkpoint(
-                    history,
-                    &turn_id,
-                    YieldReason::MaxTurnsReached,
-                    None,
-                );
+                let cp =
+                    self.build_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached, None);
                 self.save_checkpoint_if_possible(&cp);
                 return Ok(TurnOutcome::Completed(None));
             }
@@ -460,7 +454,8 @@ impl AgentExecutor {
         if let Some(gw) = self.gateway_dir.as_ref() {
             if self.live_digest.is_none() {
                 let agent_id = &self.manifest.agent.id;
-                match crate::runtime::live_digest::LiveDigestWriter::open(gw, &session_id, agent_id) {
+                match crate::runtime::live_digest::LiveDigestWriter::open(gw, &session_id, agent_id)
+                {
                     Ok(w) => {
                         self.live_digest = Some(Arc::new(std::sync::Mutex::new(w)));
                     }
@@ -1099,7 +1094,10 @@ impl AgentExecutor {
                                     first.content.push_str("\n\n[workflow status] ");
                                     first.content.push_str(&summary);
                                 } else {
-                                    history.insert(0, Message::system(format!("[workflow status] {}", summary)));
+                                    history.insert(
+                                        0,
+                                        Message::system(format!("[workflow status] {}", summary)),
+                                    );
                                 }
                             }
                             tracing::info!(

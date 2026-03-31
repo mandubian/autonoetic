@@ -1,8 +1,7 @@
 //! Internal JSON-RPC 2.0 Router.
 
 use crate::execution::{
-    gateway_actor_id, init_gateway_causal_logger, sha256_hex,
-    GatewayExecutionService, SpawnResult,
+    gateway_actor_id, init_gateway_causal_logger, sha256_hex, GatewayExecutionService, SpawnResult,
 };
 use crate::scheduler::append_task_board_entry;
 use crate::tracing::{EventScope, SessionId, TraceSession};

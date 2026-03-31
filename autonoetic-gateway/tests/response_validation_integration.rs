@@ -273,7 +273,8 @@ async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<(
 
 #[serial_test::serial]
 #[tokio::test]
-async fn test_response_validation_fails_on_non_json_reply_when_schema_declared() -> anyhow::Result<()> {
+async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
+) -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -321,15 +322,24 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared()
         .unwrap_err();
 
     let msg = err.to_string();
-    assert!(msg.contains("output_schema"), "error should mention output_schema, got: {}", msg);
-    assert!(msg.contains("valid JSON"), "error should mention JSON requirement, got: {}", msg);
+    assert!(
+        msg.contains("output_schema"),
+        "error should mention output_schema, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("valid JSON"),
+        "error should mention JSON requirement, got: {}",
+        msg
+    );
 
     Ok(())
 }
 
 #[serial_test::serial]
 #[tokio::test]
-async fn test_response_validation_fails_when_artifact_build_evidence_missing() -> anyhow::Result<()> {
+async fn test_response_validation_fails_when_artifact_build_evidence_missing() -> anyhow::Result<()>
+{
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -522,8 +532,7 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
 /// exhausted with session context in the error.  The LLM call count confirms two rounds.
 #[serial_test::serial]
 #[tokio::test]
-async fn test_response_validation_repair_loop_exhausted_after_two_attempts(
-) -> anyhow::Result<()> {
+async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -707,7 +716,10 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
 
     // The result will still fail since our mock doesn't actually create artifacts,
     // but we've proven that the repair loop ran (LLM was called at least twice with different prompts)
-    assert!(result.is_err(), "result should be Err since artifact isn't really created");
+    assert!(
+        result.is_err(),
+        "result should be Err since artifact isn't really created"
+    );
 
     Ok(())
 }

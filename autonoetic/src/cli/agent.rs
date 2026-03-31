@@ -600,8 +600,8 @@ fn apply_llm_preset_to_skill(
     {
         // Even if model/provider match, check chat_only and base_url
         let chat_only_match = !llm.chat_only || content.contains("chat_only");
-        let base_url_match = llm.base_url.is_none()
-            || llm.base_url.as_ref().map_or(true, |u| content.contains(u));
+        let base_url_match =
+            llm.base_url.is_none() || llm.base_url.as_ref().map_or(true, |u| content.contains(u));
         if chat_only_match && base_url_match {
             return None; // Already correct
         }
@@ -641,7 +641,9 @@ fn apply_llm_preset_to_skill(
         let re_base_url = regex::Regex::new(r#"(base_url:\s*)"[^"]*""#).ok();
         if let Some(re) = re_base_url {
             if updated.contains("base_url:") {
-                updated = re.replace(&updated, format!("${{1}}\"{}\"", url)).to_string();
+                updated = re
+                    .replace(&updated, format!("${{1}}\"{}\"", url))
+                    .to_string();
             } else {
                 // Add base_url after chat_only or temperature line
                 let insert_after = if updated.contains("chat_only") {
@@ -932,7 +934,10 @@ pub async fn run_agent_with_runtime_with_driver(
             runtime.close_session("headless_suspended")?;
         }
         Ok(TurnOutcome::SuspendedUserInput { interaction_id }) => {
-            println!("[Turn suspended pending user interaction: {}]", interaction_id);
+            println!(
+                "[Turn suspended pending user interaction: {}]",
+                interaction_id
+            );
             runtime.close_session("headless_suspended_user_input")?;
         }
         Err(e) => {
@@ -991,8 +996,11 @@ pub async fn run_interactive_session(
             Ok(TurnOutcome::SuspendedUserInput { interaction_id }) => {
                 stdout
                     .write_all(
-                        format!("[Turn suspended pending user interaction: {}]\n", interaction_id)
-                            .as_bytes(),
+                        format!(
+                            "[Turn suspended pending user interaction: {}]\n",
+                            interaction_id
+                        )
+                        .as_bytes(),
                     )
                     .await?;
                 stdout.flush().await?;
@@ -1052,8 +1060,11 @@ pub async fn run_interactive_session(
             Ok(TurnOutcome::SuspendedUserInput { interaction_id }) => {
                 stdout
                     .write_all(
-                        format!("[Turn suspended pending user interaction: {}]\n", interaction_id)
-                            .as_bytes(),
+                        format!(
+                            "[Turn suspended pending user interaction: {}]\n",
+                            interaction_id
+                        )
+                        .as_bytes(),
                     )
                     .await?;
                 stdout.flush().await?;

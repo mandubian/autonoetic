@@ -87,8 +87,10 @@ The MVP tool surface is limited to:
 - `agent.revision.inspect`
 - `agent.revision.promote`
 - `agent.revision.rollback`
+- `agent.revision.diff`
 - `eval.suite.publish`
 - `eval.run`
+- `eval.compare`
 - `eval.report`
 
 Registry-backed inspection surfaces such as alias listing or promotion history may still exist as CLI or admin HTTP operations in MVP, but they are not required native tools.
@@ -821,6 +823,54 @@ Input:
 
 Output includes summary fields and `report_handle`.
 
+### 10.9 `agent.revision.diff`
+
+Input:
+
+```json
+{
+  "from_ref": "planner.default@rev_sha256:...",
+  "to_ref": "planner.default@rev_sha256:..."
+}
+```
+
+Output includes:
+
+- `changed` boolean;
+- summary counts (`added`, `removed`, `modified`);
+- `added` and `removed` file lists;
+- `modified` entries with per-file digest and size changes.
+
+Rules:
+
+- both refs resolve through the same registry-backed resolver as other revision tools;
+- diff operates on immutable materialized revision directories only;
+- output ordering must be deterministic.
+
+### 10.10 `eval.compare`
+
+Input:
+
+```json
+{
+  "suite_id": "suite-abc123",
+  "baseline_ref": "planner.default@rev_sha256:...",
+  "candidate_ref": "planner.default@rev_sha256:...",
+  "queue_if_missing": true
+}
+```
+
+Output:
+
+- `status = "completed"` when both baseline and candidate runs are available, with regression/improvement summary and changed case statuses;
+- `status = "queued"` when one or both runs are missing and were queued for execution.
+
+Rules:
+
+- baseline and candidate refs must resolve to the same logical agent in MVP;
+- if completed runs already exist for each revision and suite, reuse them;
+- when missing runs are queued, return queued run ids and require a later `eval.compare` call to obtain the completed report.
+
 ## 11. Capability Model Changes
 
 Add the following capability variants to the capability model:
@@ -836,7 +886,7 @@ Notes:
 
 - `patterns` follow the same pattern semantics as the rest of the capability model;
 - `AgentRevision.patterns` match logical agent ids, alias ids, or full `agent_ref` prefixes;
-- `Evaluation.patterns` match suite names for publish operations, and match suite ids or subject agent ids for run/report operations;
+- `Evaluation.patterns` match suite names for publish operations, and match suite ids or subject agent ids for run/report/compare operations;
 - `ApprovalQueue.scopes` are exact scope names, not free-form globs;
 - `SchedulerSignal.patterns` match named signal channels only;
 - `ApprovalQueue` and `SchedulerSignal` are prerequisites from the simplification work;
@@ -1086,7 +1136,7 @@ Minimum test coverage required:
 
 These extend the same data model and do not require redesign if MVP is implemented as specified:
 
-- `eval.compare`, `eval.shadow`, `eval.canary`;
+- `eval.shadow`, `eval.canary`;
 - `trajectory.*` and `dataset.*` built on eval and revision lineage;
 - `training.*` and `model.revision.*` using the same promotion model;
 - a portable autonomous agent export format that packages revision bytes, canonical runtime closure, included layers, and provenance for remote execution, distinct from `AgentBundle`;

@@ -324,7 +324,8 @@ fn test_session_snapshot_fork() {
         "original-session",
         Some("forked-session"),
         Some("Try a different approach"),
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(fork.new_session_id, "forked-session");
     assert_eq!(fork.source_session_id, "original-session");

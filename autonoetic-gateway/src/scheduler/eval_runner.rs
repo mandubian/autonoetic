@@ -14,9 +14,7 @@ use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-pub async fn start_eval_runner(
-    execution: Arc<GatewayExecutionService>,
-) -> anyhow::Result<()> {
+pub async fn start_eval_runner(execution: Arc<GatewayExecutionService>) -> anyhow::Result<()> {
     let config = execution.config();
     let gateway_dir = crate::execution::gateway_root_dir(&config);
 
@@ -37,14 +35,7 @@ pub async fn start_eval_runner(
         };
 
         for run in queued {
-            if let Err(e) = process_eval_run(
-                execution.clone(),
-                &gateway_dir,
-                &store,
-                &run,
-            )
-            .await
-            {
+            if let Err(e) = process_eval_run(execution.clone(), &gateway_dir, &store, &run).await {
                 tracing::warn!(
                     eval_run_id = %run.eval_run_id,
                     error = %e,
@@ -78,13 +69,7 @@ async fn process_eval_run(
     let mut case_results = Vec::new();
 
     for case in &cases {
-        let result = execute_case(
-            execution.clone(),
-            &run,
-            case,
-            &content_store,
-        )
-        .await;
+        let result = execute_case(execution.clone(), &run, case, &content_store).await;
 
         match &result {
             Ok(r) => {
@@ -236,10 +221,7 @@ async fn execute_case(
 
     let (reply, artifacts_count) = match &result {
         Ok(spawn) => {
-            let reply = spawn
-                .assistant_reply
-                .clone()
-                .unwrap_or_default();
+            let reply = spawn.assistant_reply.clone().unwrap_or_default();
             let artifacts = spawn.artifacts.len() as usize;
             (reply, artifacts)
         }
@@ -267,7 +249,10 @@ async fn execute_case(
         assertions.reply_max_chars.is_some(),
         assertions.artifacts_min.is_some(),
         assertions.artifacts_max.is_some(),
-    ].iter().filter(|&&b| b).count();
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
 
     if let Some(ref substrings) = assertions.reply_contains_all {
         if !substrings.iter().all(|s| reply.contains(s)) {
@@ -330,7 +315,11 @@ async fn execute_case(
     })
 }
 
-pub fn evaluate_assertions(assertions: &EvalAssertions, reply: &str, artifacts_count: usize) -> bool {
+pub fn evaluate_assertions(
+    assertions: &EvalAssertions,
+    reply: &str,
+    artifacts_count: usize,
+) -> bool {
     if let Some(ref substrings) = assertions.reply_contains_all {
         if !substrings.iter().all(|s| reply.contains(s)) {
             return false;
