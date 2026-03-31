@@ -228,7 +228,7 @@ impl AgentRepository {
         gateway_store: Option<&GatewayStore>,
     ) -> anyhow::Result<LoadedAgent> {
         if let Some(gs) = gateway_store {
-            if let Some(alias) = gs.get_agent_alias(agent_id, agent_id)? {
+            if let Some(alias) = gs.get_agent_alias(agent_id)? {
                 return self.load_from_revision_dir(gateway_dir, &alias.agent_id, &alias.revision_id);
             }
         }
