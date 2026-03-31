@@ -2,7 +2,7 @@
 
 **Triggered by:** [plan-agent-revision-evaluation-federation-mvp.md](plan-agent-revision-evaluation-federation-mvp.md) — "Keep gateway tooling modularization as a post-MVP maintenance task. Split `autonoetic-gateway/src/runtime/tools.rs` into smaller topic-focused modules once the MVP tool surface stabilizes."
 
-**Current state:** `autonoetic-gateway/src/runtime/tools.rs` — 9,214 lines, 37 tools + helpers + registry in one file. `tools_promotion.rs` (250 lines, 2 tools) already split out as precedent.
+**Current state:** `autonoetic-gateway/src/runtime/tools.rs` — 8,863 lines, 36 tools + helpers + registry in one file. `tools_promotion.rs` (250 lines, 2 tools) already split out as precedent.
 
 **Goal:** Split into topic-focused, pluggable modules with no behavior or policy changes, so tools can be added/removed independently while preserving current runtime contracts.
 
@@ -32,22 +32,24 @@ autonoetic-gateway/src/runtime/
 
 ## 2. Module Sizes
 
+Line counts measured from the current monolith (struct definition through end of impl + private helpers that sit above the struct):
+
 | Module | Tools | Lines | Notes |
 |--------|-------|-------|-------|
 | `mod.rs` | Trait, registry, shared helpers | ~300 | Core interface |
-| `sandbox.rs` | `sandbox.exec` | ~1,035 | Largest single tool, many private helpers |
-| `agent.rs` | 3 agent tools | ~1,759 | Largest module; candidate for further split |
-| `agent_revision.rs` | 6 revision tools + helpers | ~1,023 | Revision materialization, diff logic |
-| `workflow.rs` | 4 workflow tools | ~1,008 | Task polling, approval status |
-| `web.rs` | 2 web tools + HTTP helpers | ~916 | Provider fallback, caching |
-| `knowledge.rs` | 6 knowledge/digest tools | ~681 | Tier-2 memory access |
-| `eval.rs` | 4 eval tools + helpers | ~690 | Suite validation, assertion engine |
-| `artifact.rs` | 3 artifact tools | ~462 | Build, inspect, resolve |
-| `user_interaction.rs` | 2 user tools | ~476 | Human-in-the-loop |
-| `content.rs` | 2 content tools | ~256 | Simple CRUD |
-| `session.rs` | `session.escalate` | ~184 | Single tool |
-| `execution.rs` | `execution.search` | ~142 | Single tool |
-| `digest.rs` | `digest.annotate` | ~95 | Single tool |
+| `sandbox.rs` | `sandbox.exec` | ~1,615 | Largest single tool; heavy sandbox plumbing |
+| `user_interaction.rs` | 2 user tools | ~1,303 | Largest multi-tool module; approval plumbing |
+| `agent_revision.rs` | 6 revision tools + helpers | ~906 | Revision materialization, diff logic |
+| `workflow.rs` | 4 workflow tools | ~916 | Task polling, approval status |
+| `eval.rs` | 4 eval tools + helpers | ~754 | Suite validation, assertion engine |
+| `knowledge.rs` | 6 knowledge/digest tools | ~685 | Tier-2 memory access |
+| `agent.rs` | 3 agent tools | ~857 | Agent lifecycle; no further split needed |
+| `artifact.rs` | 3 artifact tools | ~455 | Build, inspect, resolve |
+| `web.rs` | 2 web tools + HTTP helpers | ~344 | Provider fallback, caching |
+| `content.rs` | 2 content tools | ~266 | Simple CRUD |
+| `session.rs` | `session.escalate` | ~199 | Single tool |
+| `execution.rs` | `execution.search` | ~155 | Single tool |
+| `digest.rs` | `digest.annotate` | ~98 | Single tool |
 
 ## 3. Pluggable Registration
 
@@ -114,55 +116,56 @@ Helpers that move to `tools/mod.rs` (used across multiple modules):
 | `tier2_memory_for_native_tool()` | knowledge |
 | `capability_type_name()` | agent |
 | `resolve_target_to_agent_ref()` | agent_revision |
-| `extract_host()` | web |
+| `extract_host()` | sandbox, web |
 | `default_true()` | user_interaction |
 
 Everything else is module-local — each tool's `*Args` structs and private helpers stay with their tool.
 
 ## 6. Execution Order
 
-### Phase 1: Independent small modules (very low risk)
+The registry types must be extracted first so that every subsequent module move can import them from `tools/mod.rs` immediately, instead of importing from the old monolith and then switching later.
 
-1. `execution.rs` — 142 lines
-2. `digest.rs` — 95 lines
-3. `session.rs` — 184 lines
-4. `content.rs` — 256 lines
+### Phase 1: Extract registry and trait (medium risk)
+
+1. Create `tools/mod.rs` with `NativeTool` trait, `NativeToolRegistry` struct, and shared helpers
+2. Re-export from `tools.rs` so all existing call sites compile unchanged
+3. Verify `cargo test -p autonoetic-gateway` passes
+
+### Phase 2: Independent small modules (very low risk)
+
+4. `digest.rs` — 98 lines
+5. `execution.rs` — 155 lines
+6. `session.rs` — 199 lines
+7. `content.rs` — 266 lines
 
 Self-contained, no shared helpers beyond the trait.
 
-### Phase 2: Multi-tool modules with local helpers (low risk)
+### Phase 3: Multi-tool modules with local helpers (low risk)
 
-5. `artifact.rs` — 462 lines
-6. `user_interaction.rs` — 476 lines
-7. `knowledge.rs` — 681 lines
-8. `eval.rs` — 690 lines
-9. `web.rs` — 916 lines
+8. `web.rs` — 344 lines
+9. `artifact.rs` — 455 lines
+10. `knowledge.rs` — 685 lines
+11. `eval.rs` — 754 lines
 
 Module-local helpers, no cross-module dependencies.
 
-### Phase 3: Large modules with shared helpers (medium risk)
+### Phase 4: Large modules with shared helpers (medium risk)
 
-10. `agent_revision.rs` — 1,023 lines
-11. `workflow.rs` — 1,008 lines
-12. `sandbox.rs` — 1,035 lines
-13. `agent.rs` — 1,759 lines
+12. `agent.rs` — 857 lines
+13. `agent_revision.rs` — 906 lines
+14. `workflow.rs` — 916 lines
+15. `user_interaction.rs` — 1,303 lines
+16. `sandbox.rs` — 1,615 lines
 
 Most internal complexity. Shared helpers need careful extraction into `mod.rs`.
 
-### Phase 4: Registry refactoring (medium risk)
+### Phase 5: Registry handoff and cleanup (low risk)
 
-14. Extract `NativeTool` trait, `NativeToolRegistry`, `default_registry()` into `tools/mod.rs`
-15. Add `register_tools()` to each module
-16. Keep `default_registry()` behavior equivalent to current runtime (same tool names and exposure semantics)
-17. Update call sites in execution engine
-18. Run compatibility pass for native-tool registration and availability tests
-
-### Phase 5: Cleanup (low risk)
-
-19. Delete old `tools.rs` monolith
-20. Merge or relocate `tools_promotion.rs`
-21. Update `runtime/mod.rs` declarations
-22. `cargo test -p autonoetic-gateway`
+17. Move `default_registry()` into `tools/mod.rs`, delegating to per-module `register_tools()`
+18. Delete old `tools.rs` monolith
+19. Merge or relocate `tools_promotion.rs`
+20. Update `runtime/mod.rs` declarations
+21. `cargo test -p autonoetic-gateway`
 
 ## 7. Testing Strategy
 
@@ -185,4 +188,3 @@ Key test files:
 - **No behavior changes** — purely code organization
 - **`agent.install`** is removed from the active native tool registry; activation path is revision create + promote (or operator seed).
 - **`tools_promotion.rs`** can merge into new `tools/promotion.rs` or stay as-is temporarily
-- **`agent.rs` at 1,759 lines** could be split further into `agent_spawn.rs` + `agent_discovery.rs` if desired, but keeping them together preserves the "agent lifecycle" cohesion

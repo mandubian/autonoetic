@@ -1,0 +1,147 @@
+use crate::llm::ToolDefinition;
+use crate::policy::PolicyEngine;
+use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::tools::{NativeTool, NativeToolRegistry};
+use autonoetic_types::agent::AgentManifest;
+use serde::Deserialize;
+use std::path::Path;
+
+pub fn register_tools(registry: &mut NativeToolRegistry) {
+    registry.register(Box::new(ExecutionSearchTool));
+}
+
+pub struct ExecutionSearchTool;
+
+impl NativeTool for ExecutionSearchTool {
+    fn name(&self) -> &'static str {
+        "execution.search"
+    }
+
+    fn is_available(&self, _manifest: &AgentManifest) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Search past execution traces to learn from previous sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns full execution details including stdout, stderr, exit codes, and duration. Available to all agents for cross-session learning.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Filter by tool name (e.g., 'sandbox.exec'). Optional."
+                    },
+                    "success": {
+                        "type": "boolean",
+                        "description": "Filter by success (true), failure (false), or both (null). Optional."
+                    },
+                    "error_type": {
+                        "type": "string",
+                        "enum": ["compilation", "runtime", "permission", "timeout", "validation", "resource"],
+                        "description": "Filter by error type. Optional."
+                    },
+                    "command_pattern": {
+                        "type": "string",
+                        "description": "Filter by command pattern (SQL LIKE). Optional."
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Filter by agent ID. Optional."
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Restrict to this session id and nested sessions (exact match or id/<suffix>). Optional."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default: 10)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default)]
+            tool_name: Option<String>,
+            #[serde(default)]
+            success: Option<bool>,
+            #[serde(default)]
+            error_type: Option<String>,
+            #[serde(default)]
+            command_pattern: Option<String>,
+            #[serde(default)]
+            agent_id: Option<String>,
+            #[serde(default)]
+            session_id: Option<String>,
+            #[serde(default)]
+            limit: Option<i64>,
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            anyhow::bail!("execution.search requires GatewayStore to be configured");
+        };
+
+        let limit = args.limit.unwrap_or(10).min(100) as i64;
+
+        let traces = store.search_execution_traces(
+            args.tool_name.as_deref(),
+            args.success,
+            args.error_type.as_deref(),
+            args.command_pattern.as_deref(),
+            args.agent_id.as_deref(),
+            args.session_id.as_deref(),
+            limit,
+        )?;
+
+        let items: Vec<serde_json::Value> = traces
+            .into_iter()
+            .map(|t| {
+                serde_json::json!({
+                    "trace_id": t.trace_id,
+                    "agent_id": t.agent_id,
+                    "session_id": t.session_id,
+                    "turn_id": t.turn_id,
+                    "timestamp": t.timestamp,
+                    "tool_name": t.tool_name,
+                    "command": t.command,
+                    "exit_code": t.exit_code,
+                    "stdout": t.stdout,
+                    "stderr": t.stderr,
+                    "duration_ms": t.duration_ms,
+                    "success": t.success == 1,
+                    "error_type": t.error_type,
+                    "error_summary": t.error_summary,
+                    "approval_required": t.approval_required == Some(1),
+                    "approval_request_id": t.approval_request_id,
+                })
+            })
+            .collect();
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "results": items,
+            "count": items.len(),
+        }))
+        .map_err(Into::into)
+    }
+}

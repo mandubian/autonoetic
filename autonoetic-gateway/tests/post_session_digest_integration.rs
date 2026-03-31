@@ -7,7 +7,8 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::post_session_digest::{
     run_post_session_digest_with_driver, POST_SESSION_NARRATIVE_CONTENT_NAME,
 };
-use autonoetic_gateway::runtime::tools::{DigestQueryTool, NativeTool};
+use autonoetic_gateway::runtime::tools::NativeTool;
+use autonoetic_gateway::runtime::tools_impl::DigestQueryTool;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::ExecutionTraceRecord;
