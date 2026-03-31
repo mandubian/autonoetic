@@ -2735,12 +2735,7 @@ impl GatewayStore {
         Ok(())
     }
 
-    pub fn get_agent_alias(
-        &self,
-        alias_id: &str,
-        _agent_id: &str,
-    ) -> Result<Option<AgentAliasRecord>> {
-        // alias_id is the sole primary key; agent_id parameter is ignored but kept for API compatibility
+    pub fn get_agent_alias(&self, alias_id: &str) -> Result<Option<AgentAliasRecord>> {
         self.resolve_alias(alias_id)
     }
 
