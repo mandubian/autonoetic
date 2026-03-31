@@ -103,20 +103,6 @@ async fn run_scheduler_tick_at(
         }
     }
 
-    if loaded_agents.is_empty() {
-        let agent_metas = repo.list().await?;
-        for agent_meta in agent_metas {
-            let loaded = repo.get_sync(&agent_meta.id).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to load agent '{}': {}. Fix or remove the agent directory.",
-                    agent_meta.id,
-                    e
-                )
-            })?;
-            loaded_agents.push(loaded);
-        }
-    }
-
     let mut admitted = 0usize;
 
     for loaded in loaded_agents {

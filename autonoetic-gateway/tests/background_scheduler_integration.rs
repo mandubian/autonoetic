@@ -1,6 +1,9 @@
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::scheduler::{
-    append_inbox_event, background_state_path, run_scheduler_tick,
+    append_inbox_event, background_state_path, gateway_store::GatewayStore, run_scheduler_tick,
+};
+use autonoetic_types::agent_revision::{
+    AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
 };
 use autonoetic_types::background::{
     BackgroundState, ReevaluationState, ScheduledAction, WakeReason,
@@ -57,21 +60,101 @@ fn background_session(agent_id: &str) -> String {
     format!("background::{agent_id}")
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ty = entry.file_type()?;
+        let dest = dst.join(entry.file_name());
+        if ty.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+            copy_dir_all(&path, &dest)?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&path, &dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Materialize a registry revision by copying the authoring agent directory, then upsert DB rows.
+fn register_revision_mirror(
+    config: &GatewayConfig,
+    store: &GatewayStore,
+    agent_id: &str,
+    authoring_agent_dir: &Path,
+    revision_id: &str,
+) -> anyhow::Result<()> {
+    let gateway_dir = config.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(agent_id)
+        .join(revision_id);
+    if rev_dir.exists() {
+        std::fs::remove_dir_all(&rev_dir)?;
+    }
+    std::fs::create_dir_all(&rev_dir)?;
+    copy_dir_all(authoring_agent_dir, &rev_dir)?;
+
+    let content_digest = format!("sha256:bg-{agent_id}");
+    let rec = AgentRevisionRecord {
+        revision_id: revision_id.to_string(),
+        agent_id: agent_id.to_string(),
+        base_revision_id: None,
+        artifact_id: None,
+        content_digest,
+        runtime_lock_hash: "sha256:bg-test".to_string(),
+        manifest_hash: "sha256:bg-manifest".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "background_scheduler_integration".to_string(),
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: AgentRevisionStatus::Ready,
+        metadata_json: serde_json::json!({}),
+        short_id: String::new(),
+    };
+    store.insert_agent_revision(&rec)?;
+    let alias = AgentAliasRecord {
+        alias_id: agent_id.to_string(),
+        agent_id: agent_id.to_string(),
+        revision_id: revision_id.to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        updated_by_type: "test".to_string(),
+        updated_by_id: "background_scheduler_integration".to_string(),
+        reason: Some("integration test seed".to_string()),
+    };
+    store.upsert_agent_alias(&alias)?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
         ..GatewayConfig::default()
     };
     let agent_id = "idle-public-agent";
-    write_background_agent(
+    let authoring = write_background_agent(
         &agents_dir,
         agent_id,
         "    timer: true\n    new_messages: false\n    task_completions: false\n    queued_work: false\n    stale_goals: false\n    retryable_failures: false\n    approval_resolved: false\n",
     )?;
+    let revision_id =
+        "rev_sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    register_revision_mirror(&config, store.as_ref(), agent_id, &authoring, revision_id)?;
 
     let session_id = background_session(agent_id);
     write_background_state(
@@ -85,7 +168,7 @@ async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Re
         },
     )?;
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), None));
+    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store)));
     run_scheduler_tick(execution).await?;
 
     let state: BackgroundState = serde_json::from_str(&std::fs::read_to_string(
@@ -104,6 +187,9 @@ async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Re
 async fn test_background_scheduler_wake_on_new_work_through_public_api() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
@@ -127,15 +213,20 @@ async fn test_background_scheduler_wake_on_new_work_through_public_api() -> anyh
             ..ReevaluationState::default()
         },
     )?;
+    let revision_id =
+        "rev_sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    register_revision_mirror(&config, store.as_ref(), agent_id, &agent_dir, revision_id)?;
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(agent_id)
+        .join(revision_id);
     append_inbox_event(&config, agent_id, "hello", Some("public-msg"))?;
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), None));
+    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store)));
     run_scheduler_tick(execution).await?;
 
-    assert!(agent_dir
-        .join("skills")
-        .join("from_public_inbox.md")
-        .exists());
+    assert!(rev_dir.join("skills").join("from_public_inbox.md").exists());
     let state: BackgroundState = serde_json::from_str(&std::fs::read_to_string(
         background_state_path(&config, agent_id),
     )?)?;
@@ -147,6 +238,9 @@ async fn test_background_scheduler_wake_on_new_work_through_public_api() -> anyh
 async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
         background_scheduler_enabled: true,
@@ -170,6 +264,14 @@ async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result
             ..ReevaluationState::default()
         },
     )?;
+    let revision_id =
+        "rev_sha256:3333333333333333333333333333333333333333333333333333333333333333";
+    register_revision_mirror(&config, store.as_ref(), agent_id, &agent_dir, revision_id)?;
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(agent_id)
+        .join(revision_id);
 
     let session_id = background_session(agent_id);
     write_background_state(
@@ -183,17 +285,14 @@ async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result
         },
     )?;
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), None));
+    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store)));
     run_scheduler_tick(execution.clone()).await?;
 
     let reevaluation_after_first: ReevaluationState = serde_json::from_str(
-        &std::fs::read_to_string(agent_dir.join("state").join("reevaluation.json"))?,
+        &std::fs::read_to_string(rev_dir.join("state").join("reevaluation.json"))?,
     )?;
     assert!(reevaluation_after_first.pending_scheduled_action.is_some());
-    assert!(agent_dir
-        .join("state")
-        .join("recurring_marker.txt")
-        .exists());
+    assert!(rev_dir.join("state").join("recurring_marker.txt").exists());
 
     // Force immediate due again to prove the same action remains armed for the next timer tick.
     let mut state_after_first: BackgroundState = serde_json::from_str(&std::fs::read_to_string(
@@ -228,9 +327,7 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
         background_scheduler_enabled: true,
         ..GatewayConfig::default()
     };
-    let store = std::sync::Arc::new(
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
-    );
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let agent_id = "evolution-public-agent";
     let agent_dir = write_background_agent(
         &agents_dir,
@@ -251,6 +348,14 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
             ..ReevaluationState::default()
         },
     )?;
+    let revision_id =
+        "rev_sha256:4444444444444444444444444444444444444444444444444444444444444444";
+    register_revision_mirror(&config, store.as_ref(), agent_id, &agent_dir, revision_id)?;
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(agent_id)
+        .join(revision_id);
 
     write_background_state(
         &config,
@@ -265,7 +370,7 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
 
     let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store)));
     let request = require_single_pending_approval(execution.clone(), &config).await?;
-    assert!(!agent_dir
+    assert!(!rev_dir
         .join("skills")
         .join("generated_public_skill.md")
         .exists());
@@ -274,7 +379,7 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
         approve_pending_request_and_tick(execution, &config, &request, "integration-test", None)
             .await?;
 
-    let generated = agent_dir.join("skills").join("generated_public_skill.md");
+    let generated = rev_dir.join("skills").join("generated_public_skill.md");
     assert!(generated.exists());
     assert_eq!(
         std::fs::read_to_string(generated)?,
@@ -282,7 +387,7 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
     );
 
     let reevaluation: ReevaluationState = serde_json::from_str(&std::fs::read_to_string(
-        agent_dir.join("state").join("reevaluation.json"),
+        rev_dir.join("state").join("reevaluation.json"),
     )?)?;
     assert!(reevaluation.pending_scheduled_action.is_none());
     assert!(reevaluation.open_approval_request_ids.is_empty());

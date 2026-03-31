@@ -2041,12 +2041,23 @@ impl GatewayExecutionService {
         agent_id: &str,
         _session_id: &str,
         action: &ScheduledAction,
+        agent_workspace_dir: &std::path::Path,
     ) -> anyhow::Result<String> {
         self.execute_with_reliability_controls(agent_id, || async move {
-            let (manifest, agent_dir) = self.load_agent_manifest(agent_id)?;
+            let skill_path = agent_workspace_dir.join("SKILL.md");
+            let skill_content = std::fs::read_to_string(&skill_path)?;
+            let (manifest, _instructions) =
+                crate::runtime::parser::SkillParser::parse(&skill_content)?;
+            anyhow::ensure!(
+                manifest.agent.id == agent_id,
+                "background workspace '{}' declares agent.id '{}' but scheduler invoked agent_id '{}'",
+                agent_workspace_dir.display(),
+                manifest.agent.id,
+                agent_id
+            );
             execute_scheduled_action(
                 &manifest,
-                &agent_dir,
+                agent_workspace_dir,
                 action,
                 &crate::runtime::tools::default_registry(),
                 Some(self.config.as_ref()),

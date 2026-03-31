@@ -4,8 +4,7 @@
 //! 1. Coder writes content → content_handle = sha256:...
 //! 2. Evaluator validates content → calls promotion.record(pass=true)
 //! 3. Auditor audits content → calls promotion.record(pass=true)
-//! 4. specialized_builder calls agent.install with source_content_handle
-//! 5. Gateway verifies promotion records and (for low-risk config) installs the agent
+//! 4. Builder creates an `AgentBundle` artifact and activates it via `agent.revision.create` + `agent.revision.promote`
 
 mod support;
 
@@ -13,54 +12,86 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_gateway::runtime::tools::default_registry;
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::artifact::ArtifactKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::promotion::PromotionRole;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 use tempfile::tempdir;
 
-fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, PathBuf) {
+fn build_agent_bundle_artifact(base_dir: &Path, main_py: &str) -> (String, std::path::PathBuf) {
     let gateway_dir = base_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let content_store = ContentStore::new(&gateway_dir).unwrap();
     let artifact_store =
         autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
     let session_id = "test-session";
-    let mut input_names = Vec::new();
-    for (path, content) in files {
-        let handle = content_store.write(content.as_bytes()).unwrap();
+
+    let skill_md = r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "promotion.test.agent"
+  name: "Promotion Test Agent"
+  description: "Tests content-linked promotion path"
+capabilities: []
+execution_mode: script
+script_entry: main.py
+---
+# Promotion Test Agent
+"#;
+
+    let runtime_lock = r#"gateway:
+  artifact: autonoetic-gateway
+  version: "0.1.0"
+  sha256: unmanaged
+  signature: null
+sdk:
+  version: "0.1.0"
+sandbox:
+  backend: bubblewrap
+dependencies: []
+artifacts: []
+layers: []
+"#;
+
+    for (path, content) in [
+        ("SKILL.md", skill_md.as_bytes()),
+        ("runtime.lock", runtime_lock.as_bytes()),
+        ("main.py", main_py.as_bytes()),
+    ] {
+        let handle = content_store.write(content).unwrap();
         content_store
             .register_name(session_id, path, &handle)
             .unwrap();
-        input_names.push(path.to_string());
     }
+
     let bundle = artifact_store
-        .build(&input_names, None, None, session_id)
+        .build_with_kind(
+            &[
+                "SKILL.md".to_string(),
+                "runtime.lock".to_string(),
+                "main.py".to_string(),
+            ],
+            Some(&["main.py".to_string()]),
+            None,
+            ArtifactKind::AgentBundle,
+            session_id,
+        )
         .unwrap();
-    let promotion_store = PromotionStore::new(&gateway_dir).unwrap();
-    let _ = promotion_store.record_promotion(
-        bundle.artifact_id.clone(),
-        Some(bundle.digest.clone()),
-        PromotionRole::Evaluator,
-        "evaluator.default",
-        true,
-        vec![],
-        Some("Test auto-pass".to_string()),
-    );
-    let _ = promotion_store.record_promotion(
-        bundle.artifact_id.clone(),
-        Some(bundle.digest.clone()),
-        PromotionRole::Auditor,
-        "auditor.default",
-        true,
-        vec![],
-        Some("Test auto-pass".to_string()),
-    );
     (bundle.artifact_id, gateway_dir)
 }
 
-fn evolution_manifest() -> AgentManifest {
+fn builder_manifest() -> AgentManifest {
     AgentManifest {
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
@@ -76,7 +107,12 @@ fn evolution_manifest() -> AgentManifest {
             name: "specialized_builder.default".to_string(),
             description: "Builder".to_string(),
         },
-        capabilities: vec![Capability::AgentSpawn { max_children: 10 }],
+        capabilities: vec![
+            Capability::AgentSpawn { max_children: 10 },
+            Capability::AgentRevision {
+                patterns: vec!["*".to_string()],
+            },
+        ],
         llm_config: None,
         limits: None,
         background: None,
@@ -160,38 +196,7 @@ fn auditor_manifest() -> AgentManifest {
     }
 }
 
-fn promotion_gate_with_evidence(
-    declared_capabilities: &[&str],
-    remote_access_detected: bool,
-    source_content_handle: Option<&str>,
-) -> serde_json::Value {
-    let mut gate = serde_json::json!({
-        "evaluator_pass": true,
-        "auditor_pass": true,
-        "security_analysis": {
-            "passed": true,
-            "threats_detected": [],
-            "remote_access_detected": remote_access_detected
-        },
-        "capability_analysis": {
-            "inferred_capabilities": declared_capabilities,
-            "missing_capabilities": [],
-            "declared_capabilities": declared_capabilities,
-            "analysis_passed": true
-        }
-    });
-    if let Some(handle) = source_content_handle {
-        gate["source_content_handle"] = serde_json::Value::String(handle.to_string());
-    }
-    gate
-}
-
-/// Full promotion flow:
-/// 1. Write content to content store (simulates coder producing files)
-/// 2. Evaluator records promotion (simulates evaluator.default calling promotion.record)
-/// 3. Auditor records promotion (simulates auditor.default calling promotion.record)
-/// 4. Specialized_builder installs agent with source_content_handle
-/// 5. Gateway verifies promotion records and installs the agent
+/// Full promotion flow through revision create + promote (no `agent.install`).
 #[tokio::test]
 async fn test_promotion_record_full_pass_flow() {
     let temp = tempdir().expect("tempdir should create");
@@ -199,24 +204,20 @@ async fn test_promotion_record_full_pass_flow() {
     let builder_dir = agents_dir.join("specialized_builder.default");
     std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
 
-    let script_content = b"import json\nprint(json.dumps({'temp': 22}))\n";
-    let (artifact_id, gateway_dir) = build_test_artifact(
-        temp.path(),
-        &[("main.py", &String::from_utf8_lossy(script_content))],
-    );
+    let script_content = "import json\nprint(json.dumps({'temp': 22}))\n";
+    let (artifact_id, gateway_dir) = build_agent_bundle_artifact(temp.path(), script_content);
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
         ..Default::default()
     };
 
-    // --- Step 1: Coder writes content to content store ---
-    let store = ContentStore::new(&gateway_dir).expect("content store should create");
-    let content_handle = store.write(script_content).expect("content should write");
+    let content_store = ContentStore::new(&gateway_dir).expect("content store should create");
+    let content_handle = content_store
+        .write(script_content.as_bytes())
+        .expect("content should write");
     assert!(content_handle.starts_with("sha256:"));
-    println!("Content handle: {}", content_handle);
 
-    // --- Step 2: Evaluator records promotion (pass=true) ---
     let eval_manifest = evaluator_manifest();
     let eval_policy = PolicyEngine::new(eval_manifest.clone());
     let registry = default_registry();
@@ -248,7 +249,6 @@ async fn test_promotion_record_full_pass_flow() {
     let eval_parsed: serde_json::Value = serde_json::from_str(&eval_result).unwrap();
     assert_eq!(eval_parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
 
-    // --- Step 3: Auditor records promotion (pass=true) ---
     let audit_manifest = auditor_manifest();
     let audit_policy = PolicyEngine::new(audit_manifest.clone());
 
@@ -279,81 +279,79 @@ async fn test_promotion_record_full_pass_flow() {
     let audit_parsed: serde_json::Value = serde_json::from_str(&audit_result).unwrap();
     assert_eq!(audit_parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
 
-    // --- Step 4: Verify promotion store has both records ---
-    let store = PromotionStore::new(&gateway_dir).expect("promotion store should create");
+    let promotion_store = PromotionStore::new(&gateway_dir).expect("promotion store should create");
     assert!(
-        store.has_passed(&artifact_id, &PromotionRole::Evaluator),
+        promotion_store.has_passed(&artifact_id, &PromotionRole::Evaluator),
         "evaluator should have passed"
     );
     assert!(
-        store.has_passed(&artifact_id, &PromotionRole::Auditor),
+        promotion_store.has_passed(&artifact_id, &PromotionRole::Auditor),
         "auditor should have passed"
     );
     assert!(
-        store.is_fully_promoted(&artifact_id),
+        promotion_store.is_fully_promoted(&artifact_id),
         "content should be fully promoted"
     );
 
-    // --- Step 5: specialized_builder installs agent with source_content_handle ---
-    let install_args = serde_json::json!({
-        "agent_id": "promotion.test.agent",
-        "name": "Promotion Test Agent",
-        "description": "Tests content-linked promotion install flow",
-        "instructions": "---\nname: promotion.test.agent\ndescription: Tests promotion-linked install\nexecution_mode: script\nscript_entry: main.py\n---\n# Promotion Test Agent\nUsed for promotion gate integration tests.",
-        "capabilities": [],
-        "artifact_id": artifact_id,
-        "source_content_handle": content_handle,
-        "promotion_gate": promotion_gate_with_evidence(
-            &[],
-            false,
-            Some(&content_handle),
-        )
-    });
+    let gw_store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let b_manifest = builder_manifest();
+    let b_policy = PolicyEngine::new(b_manifest.clone());
 
-    let install_result = registry
+    let create_args = serde_json::json!({
+        "agent_id": "promotion.test.agent",
+        "artifact_id": artifact_id,
+    });
+    let create_result = registry
         .execute(
-            "agent.install",
-            &evolution_manifest(),
-            &PolicyEngine::new(evolution_manifest()),
+            "agent.revision.create",
+            &b_manifest,
+            &b_policy,
             &builder_dir,
             Some(&gateway_dir),
-            &serde_json::to_string(&install_args).unwrap(),
-            Some("session-install-test"),
+            &serde_json::to_string(&create_args).unwrap(),
+            Some("session-rev-create"),
             None,
             Some(&config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
-        .expect("install should succeed with valid promotion records");
+        .expect("revision create should succeed");
 
-    let install_parsed: serde_json::Value = serde_json::from_str(&install_result).unwrap();
-    let approval_required = install_parsed
-        .get("approval_required")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if approval_required {
-        assert_eq!(install_parsed.get("ok").and_then(|v| v.as_bool()), Some(false));
-        assert!(
-            install_parsed.get("request_id").is_some(),
-            "approval_required response should include request_id"
-        );
-        return;
-    }
-    assert_eq!(
-        install_parsed.get("ok").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    assert_eq!(
-        install_parsed.get("status").and_then(|v| v.as_str()),
-        Some("agent_installed")
-    );
+    let created: serde_json::Value = serde_json::from_str(&create_result).unwrap();
+    let revision_id = created
+        .get("revision_id")
+        .and_then(|v| v.as_str())
+        .expect("revision_id in response");
 
-    // --- Step 6: Verify agent was installed ---
-    let agent_dir = agents_dir.join("promotion.test.agent");
-    assert!(
-        agent_dir.exists(),
-        "promotion.test.agent should be installed"
-    );
-    assert!(agent_dir.join("SKILL.md").exists(), "SKILL.md should exist");
-    assert!(agent_dir.join("main.py").exists(), "main.py should exist");
+    let promote_args = serde_json::json!({
+        "agent_id": "promotion.test.agent",
+        "revision_id": revision_id,
+        "reason": "integration test promote after promotion records",
+    });
+    let promote_result = registry
+        .execute(
+            "agent.revision.promote",
+            &b_manifest,
+            &b_policy,
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&promote_args).unwrap(),
+            Some("session-promote"),
+            None,
+            Some(&config),
+            Some(gw_store),
+            None,
+        )
+        .expect("promote should succeed");
+
+    let promoted: serde_json::Value = serde_json::from_str(&promote_result).unwrap();
+    assert_eq!(promoted.get("ok").and_then(|v| v.as_bool()), Some(true));
+
+    let rev_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join("promotion.test.agent")
+        .join(revision_id);
+    assert!(rev_dir.join("SKILL.md").exists(), "SKILL.md materialized");
+    assert!(rev_dir.join("main.py").exists(), "main.py materialized");
 }
