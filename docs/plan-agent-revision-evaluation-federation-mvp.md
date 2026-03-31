@@ -217,17 +217,17 @@ Goal: make alias movement the only activation and rollback mechanism.
 
 ### P2-T06 Phase 2 tests
 
-- [ ] Promote changes only future alias resolution.
-- [ ] Running sessions stay pinned to the old revision.
-- [ ] Explicit `agent_ref` sessions are unaffected by later promotion.
-- [ ] Rollback restores previous alias target.
-- [ ] Promotion fails for mismatched alias and agent.
+- [x] Promote changes only future alias resolution.
+- [x] Running sessions stay pinned to the old revision.
+- [x] Explicit `agent_ref` sessions are unaffected by later promotion.
+- [x] Rollback restores previous alias target.
+- [x] Promotion fails for mismatched alias and agent.
 
 ### Phase 2 exit checklist
 
 - [ ] Alias movement is the only activation path.
 - [x] Promotion history is durable and auditable.
-- [ ] Running sessions remain stable during promote and rollback.
+- [x] Running sessions remain stable during promote and rollback.
 
 ## Phase 3: Eval Suite MVP
 
