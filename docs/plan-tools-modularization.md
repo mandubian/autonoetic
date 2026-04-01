@@ -1,178 +1,146 @@
 # Plan: Tools Modularization
 
+**Status:** ✅ **COMPLETE** — Archived 2026-04-01
+
 **Triggered by:** [plan-agent-revision-evaluation-federation-mvp.md](plan-agent-revision-evaluation-federation-mvp.md) — "Keep gateway tooling modularization as a post-MVP maintenance task. Split `autonoetic-gateway/src/runtime/tools.rs` into smaller topic-focused modules once the MVP tool surface stabilizes."
 
-**Current state:** `autonoetic-gateway/src/runtime/tools.rs` — 8,863 lines, 36 tools + helpers + registry in one file. `tools_promotion.rs` (250 lines, 2 tools) already split out as precedent.
+**Before:** `autonoetic-gateway/src/runtime/tools.rs` — 8,863 lines, 36 tools + helpers + registry in one file.
+
+**After:** 13 topic-focused modules (avg ~400 lines each) + slim `tools_impl.rs` (~400 lines for `default_registry()` only). Committed as `19191ff`.
 
 **Goal:** Split into topic-focused, pluggable modules with no behavior or policy changes, so tools can be added/removed independently while preserving current runtime contracts.
 
 ---
 
-## 1. Target Structure
+## 1. Final Structure
 
 ```
 autonoetic-gateway/src/runtime/
   tools/
-    mod.rs                 # NativeTool trait, NativeToolRegistry, default_registry(), shared helpers
-    sandbox.rs             # sandbox.exec
-    web.rs                 # web.search, web.fetch
-    content.rs             # content.write, content.read
-    artifact.rs            # artifact.build, artifact.inspect, artifact.resolve_ref
-    execution.rs           # execution.search
-    knowledge.rs           # knowledge.store/.recall/.search/.search_by_tags/.share, digest.query
-    session.rs             # session.escalate
-    agent.rs               # agent.spawn, agent.exists, agent.discover
-    agent_revision.rs      # agent.revision.{create,list,inspect,promote,rollback,diff}
-    eval.rs                # eval.{suite.publish,run,compare,report}
-    workflow.rs            # approval.status, workflow.{wait,state,cancel_task}
-    user_interaction.rs    # user.ask, user.interaction.status
-    digest.rs              # digest.annotate
-  tools_promotion.rs       # promotion.record, promotion.query (already split, keep or merge later)
+    mod.rs                 # NativeTool trait, NativeToolRegistry, shared helpers (~390 lines)
+    sandbox.rs             # sandbox.exec (~1,050 lines)
+    web.rs                 # web.search, web.fetch (~340 lines)
+    content.rs             # content.write, content.read (~260 lines)
+    artifact.rs            # artifact.build, artifact.inspect, artifact.resolve_ref (~450 lines)
+    execution.rs           # execution.search (~147 lines)
+    knowledge.rs           # knowledge.store/.recall/.search/.search_by_tags/.share, digest.query (~680 lines)
+    session.rs             # session.escalate (~189 lines)
+    agent.rs               # agent.spawn, agent.exists, agent.discover (~450 lines)
+    agent_revision.rs      # agent.revision.{create,list,inspect,promote,rollback,diff} (~1,030 lines)
+    evaluation.rs          # eval.{suite.publish,run,compare,report} (~704 lines)
+    workflow.rs            # approval.status, workflow.{wait,state,cancel_task} (~900 lines)
+    user_interaction.rs    # user.ask, user.interaction.status (~350 lines)
+    digest.rs              # digest.annotate (~107 lines)
+  tools_impl.rs            # default_registry() + InstallAgentFile (~400 lines)
+  tools_promotion.rs       # promotion.record, promotion.query (unchanged, 250 lines)
 ```
 
-## 2. Module Sizes
-
-Line counts measured from the current monolith (struct definition through end of impl + private helpers that sit above the struct):
+## 2. Module Sizes (Actual)
 
 | Module | Tools | Lines | Notes |
 |--------|-------|-------|-------|
-| `mod.rs` | Trait, registry, shared helpers | ~300 | Core interface |
-| `sandbox.rs` | `sandbox.exec` | ~1,615 | Largest single tool; heavy sandbox plumbing |
-| `user_interaction.rs` | 2 user tools | ~1,303 | Largest multi-tool module; approval plumbing |
-| `agent_revision.rs` | 6 revision tools + helpers | ~906 | Revision materialization, diff logic |
-| `workflow.rs` | 4 workflow tools | ~916 | Task polling, approval status |
-| `eval.rs` | 4 eval tools + helpers | ~754 | Suite validation, assertion engine |
-| `knowledge.rs` | 6 knowledge/digest tools | ~685 | Tier-2 memory access |
-| `agent.rs` | 3 agent tools | ~857 | Agent lifecycle; no further split needed |
-| `artifact.rs` | 3 artifact tools | ~455 | Build, inspect, resolve |
-| `web.rs` | 2 web tools + HTTP helpers | ~344 | Provider fallback, caching |
-| `content.rs` | 2 content tools | ~266 | Simple CRUD |
-| `session.rs` | `session.escalate` | ~199 | Single tool |
-| `execution.rs` | `execution.search` | ~155 | Single tool |
-| `digest.rs` | `digest.annotate` | ~98 | Single tool |
+| `mod.rs` | Trait, registry, shared helpers | ~390 | Core interface + sandbox helper types |
+| `sandbox.rs` | `sandbox.exec` | ~1,050 | Heavy sandbox plumbing |
+| `agent_revision.rs` | 6 revision tools + helpers | ~1,030 | Revision materialization, diff logic |
+| `workflow.rs` | 4 workflow tools | ~900 | Task polling, approval status |
+| `evaluation.rs` | 4 eval tools + helpers | ~704 | Suite validation, assertion engine |
+| `knowledge.rs` | 6 knowledge/digest tools | ~680 | Tier-2 memory access |
+| `artifact.rs` | 3 artifact tools | ~450 | Build, inspect, resolve |
+| `agent.rs` | 3 agent tools | ~450 | Agent lifecycle |
+| `user_interaction.rs` | 2 user tools | ~350 | Approval plumbing |
+| `web.rs` | 2 web tools + HTTP helpers | ~340 | Provider fallback, caching |
+| `content.rs` | 2 content tools | ~260 | Simple CRUD |
+| `session.rs` | `session.escalate` | ~189 | Single tool |
+| `execution.rs` | `execution.search` | ~147 | Single tool |
+| `digest.rs` | `digest.annotate` | ~107 | Single tool |
+| `tools_impl.rs` | `default_registry()` | ~400 | Registry constructor + `InstallAgentFile` |
+
+**Total reduction:** 8,863 → ~400 lines in the monolith (95% reduction).
 
 ## 3. Pluggable Registration
 
-Each module exposes a `register_tools()` function:
-
-```rust
-// tools/sandbox.rs
-pub fn register_tools(registry: &mut NativeToolRegistry) {
-    registry.register(Box::new(SandboxExecTool));
-}
-
-// tools/eval.rs
-pub fn register_tools(registry: &mut NativeToolRegistry) {
-    registry.register(Box::new(EvalSuitePublishTool));
-    registry.register(Box::new(EvalRunTool));
-    registry.register(Box::new(EvalCompareTool));
-    registry.register(Box::new(EvalReportTool));
-}
-```
-
-`mod.rs` composes them:
+Each module exposes a `register_tools()` function. `default_registry()` in `tools_impl.rs` composes them all:
 
 ```rust
 pub fn default_registry() -> NativeToolRegistry {
-    let mut r = NativeToolRegistry::new();
-    sandbox::register_tools(&mut r);
-    web::register_tools(&mut r);
-    content::register_tools(&mut r);
-    artifact::register_tools(&mut r);
-    execution::register_tools(&mut r);
-    knowledge::register_tools(&mut r);
-    session::register_tools(&mut r);
-    agent::register_tools(&mut r);
-    agent_revision::register_tools(&mut r);
-    eval::register_tools(&mut r);
-    workflow::register_tools(&mut r);
-    user_interaction::register_tools(&mut r);
-    digest::register_tools(&mut r);
-    crate::runtime::tools_promotion::register_tools(&mut r);
-    r
+    let mut registry = NativeToolRegistry::new();
+    crate::runtime::tools::execution::register_tools(&mut registry);
+    crate::runtime::tools::digest::register_tools(&mut registry);
+    crate::runtime::tools::session::register_tools(&mut registry);
+    crate::runtime::tools::content::register_tools(&mut registry);
+    crate::runtime::tools::agent_revision::register_tools(&mut registry);
+    crate::runtime::tools::evaluation::register_tools(&mut registry);
+    crate::runtime::tools::web::register_tools(&mut registry);
+    crate::runtime::tools::artifact::register_tools(&mut registry);
+    crate::runtime::tools::knowledge::register_tools(&mut registry);
+    crate::runtime::tools::agent::register_tools(&mut registry);
+    crate::runtime::tools::sandbox::register_tools(&mut registry);
+    crate::runtime::tools::workflow::register_tools(&mut registry);
+    crate::runtime::tools::user_interaction::register_tools(&mut registry);
+    registry.register(Box::new(crate::runtime::tools_promotion::PromotionRecordTool));
+    registry.register(Box::new(crate::runtime::tools_promotion::PromotionQueryTool));
+    registry
 }
 ```
 
 Adding or removing a tool = edit one module's `register_tools()` — no touch to other modules.
 
-## 4. Out of Scope for This Plan (Deferred)
+## 4. Out of Scope (Deferred)
 
-The following are explicitly deferred to a separate follow-on plan because they change behavior/policy and are not part of pure modularization:
+The following remain deferred to a separate follow-on plan:
 
 - introducing tool privilege classes (for example `AdminOnly` vs `Standard`)
 - splitting runtime exposure into multiple registries with different tool visibility
 - changing policy-engine semantics beyond existing capability + approval-queue checks
-
-This modularization plan keeps a single functional registry behavior equivalent to today's runtime.
+- merging `tools_promotion.rs` into `tools/promotion.rs` (low priority, no functional benefit)
 
 ## 5. Shared Dependencies
 
-Helpers that move to `tools/mod.rs` (used across multiple modules):
+Helpers extracted to `tools/mod.rs` (used across multiple modules):
 
 | Helper | Used by |
 |--------|---------|
-| `validate_agent_id()` | agent, agent_revision, eval |
+| `validate_agent_id()` | agent, agent_revision, evaluation |
 | `validate_relative_agent_path()` | agent_revision |
 | `tier2_memory_for_native_tool()` | knowledge |
 | `capability_type_name()` | agent |
 | `resolve_target_to_agent_ref()` | agent_revision |
 | `extract_host()` | sandbox, web |
 | `default_true()` | user_interaction |
+| `build_approval_details()` | sandbox, workflow |
+| `load_session_content_mounts()` | sandbox |
+| `dependency_plan_from_args_or_lock()` | sandbox |
+| `block_on_http()` | web |
 
-Everything else is module-local — each tool's `*Args` structs and private helpers stay with their tool.
+Sandbox helper types (`SandboxExecArgs`, `SandboxExecDependencies`, `CapturePath`) also live in `mod.rs` for cross-module access.
 
-## 6. Execution Order
+## 6. Execution Summary
 
-The registry types must be extracted first so that every subsequent module move can import them from `tools/mod.rs` immediately, instead of importing from the old monolith and then switching later.
+### Phase 1: Extract registry and trait — ✅ DONE
+- Created `tools/mod.rs` with `NativeTool` trait, `NativeToolRegistry`, shared helpers
 
-### Phase 1: Extract registry and trait (medium risk) — ✅ DONE
+### Phase 2: Independent small modules — ✅ DONE
+- `digest.rs`, `execution.rs`, `session.rs`, `content.rs`
 
-1. Create `tools/mod.rs` with `NativeTool` trait, `NativeToolRegistry` struct, and shared helpers
-2. Re-export from `tools.rs` so all existing call sites compile unchanged
-3. Verify `cargo test -p autonoetic-gateway` passes
+### Phase 3: Multi-tool modules with local helpers — ✅ DONE
+- `web.rs`, `artifact.rs`, `knowledge.rs`, `evaluation.rs`
 
-### Phase 2: Independent small modules (very low risk) — ✅ DONE
+### Phase 4: Large modules with shared helpers — ✅ DONE
+- `agent.rs`, `agent_revision.rs`, `workflow.rs`, `user_interaction.rs`, `sandbox.rs`
 
-4. `digest.rs` — 98 lines
-5. `execution.rs` — 155 lines
-6. `session.rs` — 199 lines
-7. `content.rs` — 266 lines
-
-Self-contained, no shared helpers beyond the trait.
-
-### Phase 3: Multi-tool modules with local helpers (low risk) — 🔄 IN PROGRESS
-
-8. `web.rs` — 344 lines — ✅ DONE
-9. `artifact.rs` — 455 lines — ✅ DONE
-10. `knowledge.rs` — 685 lines — ⏳ NEXT
-11. `eval.rs` — 754 lines — ✅ DONE (as `evaluation.rs`)
-
-Module-local helpers, no cross-module dependencies.
-
-### Phase 4: Large modules with shared helpers (medium risk) — ✅ DONE
-
-12. `agent.rs` — 857 lines — ✅ DONE
-13. `agent_revision.rs` — 906 lines — ✅ DONE
-14. `workflow.rs` — 916 lines — ✅ DONE
-15. `user_interaction.rs` — 1,303 lines — ✅ DONE
-16. `sandbox.rs` — 1,615 lines — ✅ DONE
-
-Most internal complexity. Shared helpers need careful extraction into `mod.rs`.
-
-### Phase 5: Registry handoff and cleanup (low risk) — 🔄 IN PROGRESS
-
-17. Move `default_registry()` into `tools/mod.rs`, delegating to per-module `register_tools()` — ✅ DONE
-18. Delete old `tools.rs` monolith (renamed to `tools_impl.rs`, now slim — only `default_registry()` + `InstallAgentFile`)
-19. Merge or relocate `tools_promotion.rs` — ⏳ PENDING
-20. Update `runtime/mod.rs` declarations — ✅ DONE
-21. `cargo test -p autonoetic-gateway` — ✅ PASSING
+### Phase 5: Registry handoff and cleanup — ✅ DONE
+- `default_registry()` in `tools_impl.rs` delegates to per-module `register_tools()`
+- Monolith reduced from 8,863 → ~400 lines
+- `InstallAgentFile` type preserved in `tools_impl.rs` (used by `capability_inference.rs`)
+- `runtime/mod.rs` declarations updated
+- All 350+ tests pass
 
 ## 7. Testing Strategy
 
-Tests reference tools by name string through the registry, so they should work unchanged as long as the registry returns the same tools. After each phase:
+Tests reference tools by name string through the registry, so they work unchanged as long as the registry returns the same tools.
 
 ```bash
-cargo test -p autonoetic-gateway
+cargo test -p autonoetic-gateway  # 350+ tests, all passing
 ```
 
 Key test files:
@@ -186,5 +154,6 @@ Key test files:
 ## 8. Notes
 
 - **No behavior changes** — purely code organization
-- **`agent.install`** is removed from the active native tool registry; activation path is revision create + promote (or operator seed).
-- **`tools_promotion.rs`** can merge into new `tools/promotion.rs` or stay as-is temporarily
+- **`agent.install`** is removed from the active native tool registry; activation path is revision create + promote (or operator seed)
+- **`tools_promotion.rs`** stays at `runtime/tools_promotion.rs` — low priority to relocate
+- Commit: `19191ff refactor: extract native tools from monolith into modular structure`
