@@ -59,7 +59,7 @@ impl FileProvider for AnalyzableFile {
 }
 
 /// Implement FileProvider for InstallAgentFile.
-impl FileProvider for super::tools_impl::InstallAgentFile {
+impl FileProvider for super::tools::InstallAgentFile {
     fn path(&self) -> &str {
         &self.path
     }
