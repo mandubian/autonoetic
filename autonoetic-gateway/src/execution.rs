@@ -2709,6 +2709,7 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             response_contract: None,
+            allowed_tool_tiers: vec![],
         };
 
         let history = build_initial_history(

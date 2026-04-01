@@ -684,6 +684,7 @@ mod tests {
             gateway_token: None,
 
             response_contract: None,
+            allowed_tool_tiers: vec![],
         }
     }
 

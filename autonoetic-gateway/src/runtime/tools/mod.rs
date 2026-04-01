@@ -1,8 +1,9 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::prompt_budget::tool_tier;
 use crate::sandbox::{DependencyPlan, DependencyRuntime, SandboxMount};
-use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::background::ApprovalRequest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::tagged;
@@ -22,10 +23,91 @@ pub struct ToolMetadata {
     pub path: Option<String>,
 }
 
+/// Context for filtering tools by tier based on workflow state.
+///
+/// Allows progressive disclosure of tools based on the agent's current
+/// workflow phase. For example, during approval gates only Core tools
+/// may be exposed, while Specialized tools like web search are hidden.
+#[derive(Debug, Clone)]
+pub struct ToolTierFilter {
+    /// Tiers that are allowed. Empty means all tiers are allowed.
+    pub allowed_tiers: Vec<ToolTier>,
+    /// When true, always include tools needed for approval interactions
+    /// regardless of tier (e.g., approval.status, approval.answer).
+    pub always_include_approval_tools: bool,
+}
+
+impl ToolTierFilter {
+    /// Create a filter that allows only Core tier tools.
+    pub fn core_only() -> Self {
+        Self {
+            allowed_tiers: vec![ToolTier::Core],
+            always_include_approval_tools: false,
+        }
+    }
+
+    /// Create a filter that allows Core and Workflow tier tools.
+    pub fn core_and_workflow() -> Self {
+        Self {
+            allowed_tiers: vec![ToolTier::Core, ToolTier::Workflow],
+            always_include_approval_tools: false,
+        }
+    }
+
+    /// Create a filter that allows all tiers (no filtering).
+    pub fn all() -> Self {
+        Self {
+            allowed_tiers: vec![],
+            always_include_approval_tools: false,
+        }
+    }
+
+    /// Check if a tool with the given name passes this filter.
+    /// Derives tier from the tool name prefix.
+    /// Also respects always_include_approval_tools for approval-prefixed tools.
+    pub fn allows(&self, tool_name: &str) -> bool {
+        if self.allowed_tiers.is_empty() {
+            return true;
+        }
+        if self.always_include_approval_tools && tool_name.starts_with("approval.") {
+            return true;
+        }
+        self.allows_tier(tool_tier(tool_name))
+    }
+
+    /// Check if a tool with the given name and tier passes this filter.
+    /// Use this when the tier is already known (e.g. from NativeTool::tier()).
+    /// Also respects always_include_approval_tools for approval-prefixed tools.
+    pub fn allows_tool(&self, tool_name: &str, tier: ToolTier) -> bool {
+        if self.allowed_tiers.is_empty() {
+            return true;
+        }
+        if self.always_include_approval_tools && tool_name.starts_with("approval.") {
+            return true;
+        }
+        self.allows_tier(tier)
+    }
+
+    /// Check if a tool with the given tier passes this filter.
+    /// Note: this does not check always_include_approval_tools — use allows_tool() for that.
+    pub fn allows_tier(&self, tier: ToolTier) -> bool {
+        if self.allowed_tiers.is_empty() {
+            return true;
+        }
+        self.allowed_tiers.contains(&tier)
+    }
+}
+
 pub trait NativeTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn definition(&self) -> ToolDefinition;
     fn is_available(&self, manifest: &AgentManifest) -> bool;
+
+    /// The tier of this tool for progressive disclosure.
+    /// Defaults to deriving from the tool name prefix.
+    fn tier(&self) -> ToolTier {
+        tool_tier(self.name())
+    }
 
     fn execute(
         &self,
@@ -69,6 +151,25 @@ impl NativeToolRegistry {
 
     pub fn has_tool(&self, name: &str) -> bool {
         self.tools.iter().any(|t| t.name() == name)
+    }
+
+    /// Collect tool definitions with tier-based filtering based on workflow context.
+    /// When filter is None, returns all available tools (same as `available_definitions`).
+    pub fn available_definitions_filtered(
+        &self,
+        manifest: &AgentManifest,
+        filter: Option<&ToolTierFilter>,
+    ) -> Vec<ToolDefinition> {
+        self.tools
+            .iter()
+            .filter(|t| t.is_available(manifest))
+            .filter(|t| {
+                filter
+                    .map(|f| f.allows_tool(t.name(), t.tier()))
+                    .unwrap_or(true)
+            })
+            .map(|t| t.definition())
+            .collect()
     }
 
     pub fn execute(
@@ -418,4 +519,127 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::user_interaction::register_tools(&mut registry);
     crate::runtime::tools::promotion::register_tools(&mut registry);
     registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_tier_filter_allows_all_when_empty() {
+        let filter = ToolTierFilter::all();
+        assert!(filter.allows("content.write"));
+        assert!(filter.allows("web.search"));
+        assert!(filter.allows("agent.spawn"));
+    }
+
+    #[test]
+    fn test_tool_tier_filter_core_only() {
+        let filter = ToolTierFilter::core_only();
+        assert!(filter.allows("content.write"));
+        assert!(filter.allows("sandbox.exec"));
+        assert!(!filter.allows("web.search"));
+        assert!(!filter.allows("agent.spawn"));
+    }
+
+    #[test]
+    fn test_tool_tier_filter_core_and_workflow() {
+        let filter = ToolTierFilter::core_and_workflow();
+        assert!(filter.allows("content.write"));
+        assert!(filter.allows("agent.spawn"));
+        assert!(!filter.allows("web.search"));
+        assert!(!filter.allows("promotion.record"));
+    }
+
+    #[test]
+    fn test_tool_tier_filter_approval_exception() {
+        let filter = ToolTierFilter {
+            allowed_tiers: vec![ToolTier::Core],
+            always_include_approval_tools: true,
+        };
+        assert!(!filter.allows("web.search"));
+        assert!(filter.allows("approval.status"));
+        assert!(filter.allows("approval.answer"));
+    }
+
+    #[test]
+    fn test_available_definitions_filtered_no_filter_equals_all() {
+        let registry = default_registry();
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "test".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            gateway_url: None,
+            gateway_token: None,
+            response_contract: None,
+            allowed_tool_tiers: vec![],
+        };
+        let unfiltered = registry.available_definitions(&manifest);
+        let filtered = registry.available_definitions_filtered(&manifest, None);
+        assert_eq!(unfiltered.len(), filtered.len());
+    }
+
+    #[test]
+    fn test_available_definitions_filtered_core_only() {
+        let registry = default_registry();
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "test".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            gateway_url: None,
+            gateway_token: None,
+            response_contract: None,
+            allowed_tool_tiers: vec![],
+        };
+        let filter = ToolTierFilter::core_only();
+        let filtered = registry.available_definitions_filtered(&manifest, Some(&filter));
+        for def in &filtered {
+            assert_eq!(
+                tool_tier(&def.name),
+                ToolTier::Core,
+                "Core-only filter should exclude {}",
+                def.name
+            );
+        }
+    }
 }

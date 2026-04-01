@@ -216,7 +216,7 @@ fn is_retryable_empty_other_response(response: &crate::llm::CompletionResponse) 
         && response.text.trim().is_empty()
 }
 
-/// Apply prompt budget enforcement based on config.
+/// Apply prompt budget enforcement based on the configured strategy.
 ///
 /// Returns potentially modified tools and history after enforcement actions.
 fn apply_prompt_budget(
@@ -240,8 +240,20 @@ fn apply_prompt_budget(
         .unwrap_or(usize::MAX);
 
     let current_total = breakdown.total_tokens;
+    let within_total_budget = current_total <= effective_limit;
 
-    if current_total <= effective_limit {
+    // Check per-section caps. These apply regardless of whether the total
+    // budget is satisfied — a section cap is a hard constraint independent
+    // of the overall context window.
+    let section_cap_violation = {
+        let sys_exceeded = budget_config.system_prompt_max_tokens > 0
+            && breakdown.system_prompt_tokens > budget_config.system_prompt_max_tokens;
+        let tool_exceeded = budget_config.tool_definitions_max_tokens > 0
+            && breakdown.tool_definition_tokens > budget_config.tool_definitions_max_tokens;
+        sys_exceeded || tool_exceeded
+    };
+
+    if !section_cap_violation && within_total_budget {
         if let Some(pct) = breakdown.utilization_pct {
             if pct >= budget_config.warn_at_pct {
                 tracing::warn!(
@@ -265,91 +277,13 @@ fn apply_prompt_budget(
             "current_total": current_total,
             "effective_limit": effective_limit,
             "over_by": current_total.saturating_sub(effective_limit),
+            "section_cap_violation": section_cap_violation,
         })),
     );
 
-    match action {
-        autonoetic_types::config::PromptBudgetAction::Warn => {
-            tracing::warn!(
-                target: "autonoetic::prompt_budget",
-                current_total,
-                effective_limit,
-                "Prompt budget exceeded (warn mode, proceeding)"
-            );
-            Ok((tools, history))
-        }
-        autonoetic_types::config::PromptBudgetAction::TrimHistory => {
-            let non_system: Vec<_> = history
-                .iter()
-                .filter(|m| m.role != crate::llm::Role::System)
-                .cloned()
-                .collect();
-            let system: Vec<_> = history
-                .iter()
-                .filter(|m| m.role == crate::llm::Role::System)
-                .cloned()
-                .collect();
-
-            let mut trimmed = non_system;
-            let budget_for_conv = effective_limit
-                .saturating_sub(breakdown.system_prompt_tokens)
-                .saturating_sub(breakdown.tool_definition_tokens);
-
-            let mut current_conv_tokens: usize =
-                trimmed.iter().map(|m| crate::runtime::prompt_budget::estimate_tokens(&m.content)).sum();
-            while current_conv_tokens > budget_for_conv && trimmed.len() > 2 {
-                trimmed.remove(0);
-                current_conv_tokens =
-                    trimmed.iter().map(|m| crate::runtime::prompt_budget::estimate_tokens(&m.content)).sum();
-            }
-
-            if current_conv_tokens > budget_for_conv {
-                tracing::warn!(
-                    target: "autonoetic::prompt_budget",
-                    remaining_conv_tokens = current_conv_tokens,
-                    budget_for_conv,
-                    "Hit minimum message floor while still over budget"
-                );
-            }
-
-            let mut new_history = system;
-            new_history.extend(trimmed);
-
-            tracing::warn!(
-                target: "autonoetic::prompt_budget",
-                trimmed_messages = history.len() - new_history.len(),
-                "Trimmed conversation history to fit within prompt budget"
-            );
-
-            Ok((tools, new_history))
-        }
-        autonoetic_types::config::PromptBudgetAction::DemoteTools => {
-            use crate::runtime::prompt_budget::{filter_tools_by_tier, ToolTier};
-            let filtered = filter_tools_by_tier(tools, &[ToolTier::Core, ToolTier::Workflow]);
-            let removed_count = breakdown.tool_count - filtered.len();
-
-            tracing::warn!(
-                target: "autonoetic::prompt_budget",
-                removed_tools = removed_count,
-                "Demoted specialized tools to fit within prompt budget"
-            );
-
-            Ok((filtered, history))
-        }
-        autonoetic_types::config::PromptBudgetAction::Fail => {
-            anyhow::bail!(
-                "Prompt budget exceeded: {} tokens (limit: {} tokens). \
-                 System: {}, Conversation: {}, Tools: {} ({} definitions). \
-                 Configure a larger context window or reduce tool count.",
-                current_total,
-                effective_limit,
-                breakdown.system_prompt_tokens,
-                breakdown.conversation_tokens,
-                breakdown.tool_definition_tokens,
-                breakdown.tool_count,
-            )
-        }
-    }
+    let strategy = crate::runtime::prompt_budget::enforcement_strategy(*action);
+    let result = strategy.enforce(tools, history, breakdown, effective_limit, budget_config)?;
+    Ok((result.tools, result.history))
 }
 
 pub struct AgentExecutor {
@@ -779,26 +713,45 @@ impl AgentExecutor {
             history.insert(0, Message::system(&system_instructions));
 
             let tools: Vec<ToolDefinition> = {
+                let tier_filter = determine_tool_tier_filter(
+                    &self.manifest,
+                    self.workflow_id.as_deref(),
+                    self.task_id.as_deref(),
+                );
                 let mut t: Vec<ToolDefinition> = mcp_runtime
                     .tool_definitions()?
                     .into_iter()
                     .filter(|def| policy.can_invoke_tool(&def.name))
+                    .filter(|def| {
+                        tier_filter
+                            .as_ref()
+                            .map(|f| f.allows(&def.name))
+                            .unwrap_or(true)
+                    })
                     .collect();
-                t.extend(self.registry.available_definitions(&self.manifest));
+                t.extend(
+                    self.registry
+                        .available_definitions_filtered(&self.manifest, tier_filter.as_ref()),
+                );
                 let turn_index = self.turn_counter.saturating_sub(1);
-                crate::runtime::prompt_budget::compress_tool_definitions(t, turn_index as usize)
+                let should_compress = self
+                    .config
+                    .as_ref()
+                    .map(|c| c.prompt_budget.compress_tool_schemas_after_turn_0)
+                    .unwrap_or(false);
+                if should_compress {
+                    crate::runtime::prompt_budget::compress_tool_definitions(t, turn_index as usize)
+                } else {
+                    t
+                }
             };
 
             // --- Prompt Budget Transparency + Enforcement ---
-            let context_window = self
-                .openrouter_catalog
-                .as_ref()
-                .and_then(|cat| cat.context_window_tokens(&model));
             let budget_breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown::compute(
                 &system_instructions,
                 &history,
                 &tools,
-                context_window,
+                context_window_resolved.map(|w| w as usize),
             );
             tracing::info!(
                 target: "autonoetic::prompt_budget",
@@ -1703,6 +1656,26 @@ fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+/// Determine the tool tier filter based on agent manifest configuration.
+///
+/// Agents can declare `allowed_tool_tiers` in their manifest to restrict
+/// which tool tiers are exposed to them. When not declared (empty list),
+/// all tiers are available and the DemoteTools enforcement strategy handles
+/// runtime tier reduction when the prompt budget is exceeded.
+fn determine_tool_tier_filter(
+    manifest: &AgentManifest,
+    _workflow_id: Option<&str>,
+    _task_id: Option<&str>,
+) -> Option<crate::runtime::tools::ToolTierFilter> {
+    if manifest.allowed_tool_tiers.is_empty() {
+        return None;
+    }
+    Some(crate::runtime::tools::ToolTierFilter {
+        allowed_tiers: manifest.allowed_tool_tiers.clone(),
+        always_include_approval_tools: false,
+    })
+}
+
 /// Manifest/env first; if still unknown and provider is OpenRouter, use the public models API cache.
 async fn resolve_context_window_for_run(
     manifest: &AgentManifest,
@@ -1784,6 +1757,7 @@ mod tests {
             gateway_token: None,
 
             response_contract: None,
+            allowed_tool_tiers: vec![],
         }
     }
 
@@ -1845,14 +1819,21 @@ mod tests {
             },
         ];
         let history = vec![Message::user("Hello"), Message::assistant("Hi")];
+
+        // Use breakdown values consistent with the actual tool definitions.
+        // estimate_tool_definition for each tool ≈ 37-39 tokens, so 3 tools ≈ 117.
+        // total = 100 (system) + 12 (conv) + 117 (tools) = 229
+        // After demotion (remove web.search): 2 tools ≈ 78, total ≈ 190
+        // Set context_window = 200 so effective_limit = 200, total 229 > 200 triggers demotion,
+        // and filtered total ~190 < 200 succeeds.
         let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
             system_prompt_tokens: 100,
-            conversation_tokens: 50,
+            conversation_tokens: 12,
             tool_count: 3,
-            tool_definition_tokens: 90,
-            total_tokens: 240,
+            tool_definition_tokens: 117,
+            total_tokens: 229,
             context_window: Some(200),
-            utilization_pct: Some(120.0),
+            utilization_pct: Some(114.5),
         };
         let mut config = GatewayConfig::default();
         config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::DemoteTools;
@@ -1965,6 +1946,312 @@ mod tests {
         assert_eq!(result_tools.len(), tools.len());
         assert!(result_history.len() < 7);
         assert!(result_history.iter().any(|m| m.role == crate::llm::Role::System));
+    }
+
+    #[test]
+    fn test_apply_prompt_budget_trim_history_preserves_tool_call_groups() {
+        let tools = vec![ToolDefinition {
+            name: "content.write".to_string(),
+            description: "Write content".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let long_content = "x".repeat(200);
+
+        // Build history with tool-call exchanges that must stay together:
+        // [user, assistant+tool_calls(id="tc1"), tool_result(tc1), user, assistant+tool_calls(id="tc2"), tool_result(tc2), user_final]
+        let mut assistant_with_tc1 = Message::assistant(long_content.clone());
+        assistant_with_tc1.tool_calls = vec![ToolCall {
+            id: "tc1".to_string(),
+            name: "content.write".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        let mut assistant_with_tc2 = Message::assistant(long_content.clone());
+        assistant_with_tc2.tool_calls = vec![ToolCall {
+            id: "tc2".to_string(),
+            name: "content.write".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        let history = vec![
+            Message::system("System prompt".to_string()),
+            Message::user(long_content.clone()),
+            assistant_with_tc1,
+            Message::tool_result("tc1", "content.write", "ok".to_string()),
+            Message::user(long_content.clone()),
+            assistant_with_tc2,
+            Message::tool_result("tc2", "content.write", "ok".to_string()),
+            Message::user("Final question".to_string()),
+            Message::assistant("Final reply".to_string()),
+        ];
+
+        let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
+            system_prompt_tokens: 50,
+            conversation_tokens: 1200,
+            tool_count: 1,
+            tool_definition_tokens: 30,
+            total_tokens: 1280,
+            context_window: Some(300),
+            utilization_pct: Some(426.0),
+        };
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::TrimHistory;
+        config.prompt_budget.margin_tokens = 0;
+
+        let temp = tempdir().expect("tempdir should create");
+        let mut tracer = SessionTracer::new(temp.path(), "test-agent", "test-session")
+            .expect("tracer should create");
+        let (_result_tools, result_history) = apply_prompt_budget(
+            tools.clone(),
+            history,
+            &breakdown,
+            Some(&config),
+            "s1",
+            "t1",
+            &mut tracer,
+        )
+        .expect("trim history should not fail");
+
+        // Verify system message is preserved
+        assert!(result_history.iter().any(|m| m.role == crate::llm::Role::System));
+
+        // Verify no orphaned tool results: every tool result must have a preceding
+        // assistant message with a matching tool call ID
+        for msg in &result_history {
+            if msg.role == crate::llm::Role::Tool {
+                let tc_id = msg.tool_call_id.as_ref().expect("tool result must have call id");
+                let has_matching_assistant = result_history.iter().any(|m| {
+                    m.role == crate::llm::Role::Assistant
+                        && m.tool_calls.iter().any(|tc| &tc.id == tc_id)
+                });
+                assert!(
+                    has_matching_assistant,
+                    "Tool result for '{}' has no matching assistant tool call — group was split",
+                    tc_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_prompt_budget_section_cap_tool_definitions_triggers_demote_tools() {
+        let tools = vec![
+            ToolDefinition {
+                name: "content.write".to_string(),
+                description: "Write content".to_string(),
+                input_schema: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "web.search".to_string(),
+                description: "Search web".to_string(),
+                input_schema: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "agent.spawn".to_string(),
+                description: "Spawn agent".to_string(),
+                input_schema: serde_json::json!({}),
+            },
+        ];
+        let history = vec![Message::user("Hello"), Message::assistant("Hi")];
+
+        let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
+            system_prompt_tokens: 100,
+            conversation_tokens: 12,
+            tool_count: 3,
+            tool_definition_tokens: 117,
+            total_tokens: 229,
+            context_window: Some(10000),
+            utilization_pct: Some(2.3),
+        };
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::DemoteTools;
+        config.prompt_budget.tool_definitions_max_tokens = 100;
+        config.prompt_budget.margin_tokens = 0;
+
+        let temp = tempdir().expect("tempdir should create");
+        let mut tracer = SessionTracer::new(temp.path(), "test-agent", "test-session")
+            .expect("tracer should create");
+        let (result_tools, _result_history) = apply_prompt_budget(
+            tools,
+            history.clone(),
+            &breakdown,
+            Some(&config),
+            "s1",
+            "t1",
+            &mut tracer,
+        )
+        .expect("demote tools should succeed for section-cap violation");
+
+        assert_eq!(result_tools.len(), 2);
+        assert!(!result_tools.iter().any(|t| t.name == "web.search"));
+    }
+
+    #[test]
+    fn test_apply_prompt_budget_section_cap_system_prompt_fails_for_trim_history() {
+        let tools = vec![ToolDefinition {
+            name: "content.write".to_string(),
+            description: "Write content".to_string(),
+            input_schema: serde_json::json!({}),
+        }];
+        let history = vec![Message::user("Hello"), Message::assistant("Hi")];
+
+        let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
+            system_prompt_tokens: 500,
+            conversation_tokens: 12,
+            tool_count: 1,
+            tool_definition_tokens: 40,
+            total_tokens: 562,
+            context_window: Some(10000),
+            utilization_pct: Some(5.6),
+        };
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::TrimHistory;
+        config.prompt_budget.system_prompt_max_tokens = 200;
+        config.prompt_budget.margin_tokens = 0;
+
+        let temp = tempdir().expect("tempdir should create");
+        let mut tracer = SessionTracer::new(temp.path(), "test-agent", "test-session")
+            .expect("tracer should create");
+        let result = apply_prompt_budget(
+            tools,
+            history,
+            &breakdown,
+            Some(&config),
+            "s1",
+            "t1",
+            &mut tracer,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("System prompt exceeds configured limit"));
+    }
+
+    #[test]
+    fn test_enforcement_strategy_factory() {
+        use crate::runtime::prompt_budget::enforcement_strategy;
+        use autonoetic_types::config::PromptBudgetAction;
+
+        assert_eq!(enforcement_strategy(PromptBudgetAction::Warn).name(), "warn");
+        assert_eq!(enforcement_strategy(PromptBudgetAction::TrimHistory).name(), "trim_history");
+        assert_eq!(enforcement_strategy(PromptBudgetAction::DemoteTools).name(), "demote_tools");
+        assert_eq!(enforcement_strategy(PromptBudgetAction::Fail).name(), "fail");
+    }
+
+    #[test]
+    fn test_apply_prompt_budget_fail_on_section_cap_system_prompt() {
+        // When on_exceeded = Fail and only system_prompt_max_tokens is violated
+        // (total is under effective_limit), the error should mention the system
+        // prompt cap specifically, not the generic "prompt budget exceeded".
+        let tools = vec![ToolDefinition {
+            name: "content.write".to_string(),
+            description: "Write content".to_string(),
+            input_schema: serde_json::json!({}),
+        }];
+        let history = vec![Message::user("Hello"), Message::assistant("Hi")];
+
+        let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
+            system_prompt_tokens: 500,
+            conversation_tokens: 12,
+            tool_count: 1,
+            tool_definition_tokens: 40,
+            total_tokens: 562,
+            context_window: Some(10000),
+            utilization_pct: Some(5.6),
+        };
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::Fail;
+        config.prompt_budget.system_prompt_max_tokens = 200;
+        config.prompt_budget.margin_tokens = 0;
+
+        let temp = tempdir().expect("tempdir should create");
+        let mut tracer = SessionTracer::new(temp.path(), "test-agent", "test-session")
+            .expect("tracer should create");
+        let result = apply_prompt_budget(
+            tools,
+            history,
+            &breakdown,
+            Some(&config),
+            "s1",
+            "t1",
+            &mut tracer,
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("System prompt exceeds configured limit"),
+            "Expected section-cap error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_compose_foundation_core_always_present() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# Foundation Core"));
+    }
+
+    #[test]
+    fn test_compose_foundation_includes_workflow_for_reasoning_agents() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let mut manifest = manifest;
+        manifest.execution_mode = autonoetic_types::agent::ExecutionMode::Reasoning;
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# Foundation Core"));
+        assert!(foundation.contains("# Foundation Workflow"));
+    }
+
+    #[test]
+    fn test_compose_foundation_includes_script_for_script_mode() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let mut manifest = manifest;
+        manifest.execution_mode = autonoetic_types::agent::ExecutionMode::Script;
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# Foundation Script"));
+    }
+
+    #[test]
+    fn test_compose_foundation_includes_artifact_for_write_access() {
+        let manifest = manifest_with_capabilities(vec![Capability::WriteAccess {
+            scopes: vec!["skills/*".to_string()],
+        }]);
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# Foundation Artifact"));
+    }
+
+    #[test]
+    fn test_compose_foundation_includes_digest_for_digest_scope() {
+        let manifest = manifest_with_capabilities(vec![Capability::WriteAccess {
+            scopes: vec!["digest/*".to_string()],
+        }]);
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# Foundation Digest"));
+    }
+
+    #[test]
+    fn test_compose_foundation_includes_workflow_for_agent_spawn() {
+        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn {
+            max_children: 5,
+        }]);
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# Foundation Workflow"));
+    }
+
+    #[test]
+    fn test_compose_foundation_script_mode_excludes_workflow() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let mut manifest = manifest;
+        manifest.execution_mode = autonoetic_types::agent::ExecutionMode::Script;
+        let foundation = compose_foundation(&manifest);
+        assert!(!foundation.contains("# Foundation Workflow"));
+    }
+
+    #[test]
+    fn test_compose_foundation_no_caps_no_artifact() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let foundation = compose_foundation(&manifest);
+        assert!(!foundation.contains("# Foundation Artifact"));
     }
 
     #[test]

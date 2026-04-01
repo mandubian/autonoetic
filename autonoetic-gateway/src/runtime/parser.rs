@@ -49,6 +49,8 @@ struct AutonoeticMetadata {
     gateway_token: Option<String>,
     #[serde(default)]
     response_contract: Option<serde_json::Value>,
+    #[serde(default)]
+    allowed_tool_tiers: Option<Vec<autonoetic_types::agent::ToolTier>>,
 }
 
 /// Parser for `SKILL.md` files.
@@ -122,6 +124,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         gateway_url: meta.gateway_url,
         gateway_token: meta.gateway_token,
         response_contract: meta.response_contract,
+        allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
     }
 }
 

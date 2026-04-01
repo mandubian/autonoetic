@@ -5,6 +5,7 @@
 
 use crate::llm::{Message, ToolDefinition};
 use serde::Serialize;
+use std::collections::HashSet;
 
 /// Heuristic: ~4 characters per token (works across most models).
 const CHARS_PER_TOKEN: f64 = 4.0;
@@ -13,15 +14,7 @@ const CHARS_PER_TOKEN: f64 = 4.0;
 const TOOL_OVERHEAD_TOKENS: usize = 30;
 
 /// Tool tier for progressive disclosure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub enum ToolTier {
-    /// Always available: content, knowledge basics, artifact basics.
-    Core,
-    /// Workflow-dependent: agent, workflow, evaluation.
-    Workflow,
-    /// Specialized: web search, promotion, advanced revision ops.
-    Specialized,
-}
+pub type ToolTier = autonoetic_types::agent::ToolTier;
 
 /// Breakdown of the prompt budget before an LLM call.
 #[derive(Debug, Clone, Serialize)]
@@ -93,7 +86,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 }
 
 /// Estimate tokens for a single tool definition.
-fn estimate_tool_definition(tool: &ToolDefinition) -> usize {
+pub fn estimate_tool_definition(tool: &ToolDefinition) -> usize {
     let name_tokens = estimate_tokens(&tool.name);
     let desc_tokens = estimate_tokens(&tool.description);
     let schema_tokens =
@@ -109,8 +102,7 @@ pub fn tool_tier(tool_name: &str) -> ToolTier {
         n if n.starts_with("knowledge.recall") => ToolTier::Core,
         n if n.starts_with("knowledge.search_by_tags") => ToolTier::Core,
         n if n.starts_with("knowledge.search") => ToolTier::Core,
-        n if n.starts_with("artifact.build") => ToolTier::Core,
-        n if n.starts_with("artifact.inspect") => ToolTier::Core,
+        n if n.starts_with("artifact.") => ToolTier::Core,
         n if n.starts_with("sandbox.exec") => ToolTier::Core,
         n if n.starts_with("agent.spawn") => ToolTier::Workflow,
         n if n.starts_with("agent.exists") => ToolTier::Workflow,
@@ -162,6 +154,310 @@ pub fn compress_tool_definitions(
             input_schema: serde_json::json!({}),
         })
         .collect()
+}
+
+/// Result of applying a prompt budget enforcement strategy.
+#[derive(Debug)]
+pub struct EnforcementResult {
+    pub tools: Vec<ToolDefinition>,
+    pub history: Vec<Message>,
+    pub was_trimmed: bool,
+}
+
+/// Strategy for enforcing prompt budget limits when the total exceeds the effective limit.
+pub trait BudgetEnforcementStrategy: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+
+    fn enforce(
+        &self,
+        tools: Vec<ToolDefinition>,
+        history: Vec<Message>,
+        breakdown: &PromptBudgetBreakdown,
+        effective_limit: usize,
+        budget_config: &autonoetic_types::config::PromptBudgetConfig,
+    ) -> anyhow::Result<EnforcementResult>;
+}
+
+/// Warn-only strategy: logs a warning but makes no changes.
+#[derive(Debug, Clone, Copy)]
+pub struct WarnStrategy;
+
+impl BudgetEnforcementStrategy for WarnStrategy {
+    fn name(&self) -> &'static str {
+        "warn"
+    }
+
+    fn enforce(
+        &self,
+        tools: Vec<ToolDefinition>,
+        history: Vec<Message>,
+        breakdown: &PromptBudgetBreakdown,
+        effective_limit: usize,
+        _budget_config: &autonoetic_types::config::PromptBudgetConfig,
+    ) -> anyhow::Result<EnforcementResult> {
+        tracing::warn!(
+            target: "autonoetic::prompt_budget",
+            current_total = breakdown.total_tokens,
+            effective_limit,
+            "Prompt budget exceeded (warn mode, proceeding)"
+        );
+        Ok(EnforcementResult {
+            tools,
+            history,
+            was_trimmed: false,
+        })
+    }
+}
+
+fn check_section_caps(
+    breakdown: &PromptBudgetBreakdown,
+    budget_config: &autonoetic_types::config::PromptBudgetConfig,
+    can_fix_system: bool,
+    can_fix_tools: bool,
+) -> anyhow::Result<()> {
+    if budget_config.system_prompt_max_tokens > 0
+        && breakdown.system_prompt_tokens > budget_config.system_prompt_max_tokens
+    {
+        if !can_fix_system {
+            anyhow::bail!(
+                "System prompt exceeds configured limit: {} tokens (limit: {})",
+                breakdown.system_prompt_tokens,
+                budget_config.system_prompt_max_tokens,
+            );
+        }
+    }
+    if budget_config.tool_definitions_max_tokens > 0
+        && breakdown.tool_definition_tokens > budget_config.tool_definitions_max_tokens
+    {
+        if !can_fix_tools {
+            anyhow::bail!(
+                "Tool definitions exceed configured limit: {} tokens (limit: {})",
+                breakdown.tool_definition_tokens,
+                budget_config.tool_definitions_max_tokens,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Trim history strategy: removes oldest message groups to fit within budget.
+#[derive(Debug, Clone, Copy)]
+pub struct TrimHistoryStrategy;
+
+impl BudgetEnforcementStrategy for TrimHistoryStrategy {
+    fn name(&self) -> &'static str {
+        "trim_history"
+    }
+
+    fn enforce(
+        &self,
+        _tools: Vec<ToolDefinition>,
+        history: Vec<Message>,
+        breakdown: &PromptBudgetBreakdown,
+        effective_limit: usize,
+        budget_config: &autonoetic_types::config::PromptBudgetConfig,
+    ) -> anyhow::Result<EnforcementResult> {
+        check_section_caps(breakdown, budget_config, false, false)?;
+        let non_system: Vec<_> = history
+            .iter()
+            .filter(|m| m.role != crate::llm::Role::System)
+            .cloned()
+            .collect();
+        let system: Vec<_> = history
+            .iter()
+            .filter(|m| m.role == crate::llm::Role::System)
+            .cloned()
+            .collect();
+
+        let budget_for_conv = effective_limit
+            .saturating_sub(breakdown.system_prompt_tokens)
+            .saturating_sub(breakdown.tool_definition_tokens);
+
+        let mut groups: Vec<(Vec<Message>, usize)> = Vec::new();
+        let mut current_group: Vec<Message> = Vec::new();
+        let mut current_group_tokens: usize = 0;
+        let mut pending_tool_call_ids: HashSet<String> = HashSet::new();
+
+        for msg in non_system {
+            let msg_tokens = estimate_tokens(&msg.content);
+
+            if msg.role == crate::llm::Role::Tool {
+                current_group.push(msg);
+                current_group_tokens += msg_tokens;
+                if let Some(id) = pending_tool_call_ids.iter().next().cloned() {
+                    pending_tool_call_ids.remove(&id);
+                }
+                if pending_tool_call_ids.is_empty() && !current_group.is_empty() {
+                    groups.push((std::mem::take(&mut current_group), current_group_tokens));
+                    current_group_tokens = 0;
+                }
+            } else if msg.role == crate::llm::Role::Assistant && !msg.tool_calls.is_empty() {
+                pending_tool_call_ids = msg.tool_calls.iter().map(|tc| tc.id.clone()).collect();
+                current_group.push(msg);
+                current_group_tokens += msg_tokens;
+                if pending_tool_call_ids.is_empty() {
+                    groups.push((std::mem::take(&mut current_group), current_group_tokens));
+                    current_group_tokens = 0;
+                }
+            } else {
+                if !current_group.is_empty() {
+                    groups.push((std::mem::take(&mut current_group), current_group_tokens));
+                    current_group_tokens = 0;
+                }
+                groups.push((vec![msg], msg_tokens));
+            }
+        }
+        if !current_group.is_empty() {
+            groups.push((current_group, current_group_tokens));
+        }
+
+        let total_tokens: usize = groups.iter().map(|(_, t)| *t).sum();
+        let mut current_total = total_tokens;
+
+        let min_groups = 2.min(groups.len());
+
+        while current_total > budget_for_conv && groups.len() > min_groups {
+            let (_, group_tokens) = groups.remove(0);
+            current_total = current_total.saturating_sub(group_tokens);
+        }
+
+        if current_total > budget_for_conv {
+            anyhow::bail!(
+                "Cannot trim history to fit within prompt budget: {} tokens remaining (budget: {}), \
+                 hit message floor. Consider increasing the context window \
+                 or reducing system prompt/tool definition size.",
+                current_total,
+                budget_for_conv,
+            );
+        }
+
+        let mut new_history = system;
+        for (group, _) in groups {
+            new_history.extend(group);
+        }
+
+        tracing::warn!(
+            target: "autonoetic::prompt_budget",
+            trimmed_messages = history.len() - new_history.len(),
+            "Trimmed conversation history to fit within prompt budget"
+        );
+
+        Ok(EnforcementResult {
+            tools: _tools,
+            history: new_history,
+            was_trimmed: true,
+        })
+    }
+}
+
+/// Demote tools strategy: removes specialized-tier tools to reduce token usage.
+#[derive(Debug, Clone, Copy)]
+pub struct DemoteToolsStrategy;
+
+impl BudgetEnforcementStrategy for DemoteToolsStrategy {
+    fn name(&self) -> &'static str {
+        "demote_tools"
+    }
+
+    fn enforce(
+        &self,
+        tools: Vec<ToolDefinition>,
+        history: Vec<Message>,
+        breakdown: &PromptBudgetBreakdown,
+        effective_limit: usize,
+        budget_config: &autonoetic_types::config::PromptBudgetConfig,
+    ) -> anyhow::Result<EnforcementResult> {
+        check_section_caps(breakdown, budget_config, false, true)?;
+
+        let filtered = filter_tools_by_tier(tools, &[ToolTier::Core, ToolTier::Workflow]);
+        let removed_count = breakdown.tool_count - filtered.len();
+
+        let filtered_tool_tokens: usize = filtered.iter().map(estimate_tool_definition).sum();
+
+        if budget_config.tool_definitions_max_tokens > 0
+            && filtered_tool_tokens > budget_config.tool_definitions_max_tokens
+        {
+            anyhow::bail!(
+                "Tool definitions still exceed limit after demotion: {} tokens (limit: {}). \
+                 Core and workflow tools alone exceed the configured cap.",
+                filtered_tool_tokens,
+                budget_config.tool_definitions_max_tokens,
+            );
+        }
+
+        let filtered_total =
+            breakdown.total_tokens - breakdown.tool_definition_tokens + filtered_tool_tokens;
+        if filtered_total > effective_limit {
+            anyhow::bail!(
+                "Prompt budget still exceeded after tool demotion: {} tokens (limit: {}). \
+                 Removed {} specialized tools but core/workflow tools are still too large.",
+                filtered_total,
+                effective_limit,
+                removed_count,
+            );
+        }
+
+        tracing::warn!(
+            target: "autonoetic::prompt_budget",
+            removed_tools = removed_count,
+            tool_tokens_before = breakdown.tool_definition_tokens,
+            tool_tokens_after = filtered_tool_tokens,
+            "Demoted specialized tools to fit within prompt budget"
+        );
+
+        Ok(EnforcementResult {
+            tools: filtered,
+            history,
+            was_trimmed: false,
+        })
+    }
+}
+
+/// Fail strategy: rejects the turn with a descriptive error.
+#[derive(Debug, Clone, Copy)]
+pub struct FailStrategy;
+
+impl BudgetEnforcementStrategy for FailStrategy {
+    fn name(&self) -> &'static str {
+        "fail"
+    }
+
+    fn enforce(
+        &self,
+        _tools: Vec<ToolDefinition>,
+        _history: Vec<Message>,
+        breakdown: &PromptBudgetBreakdown,
+        effective_limit: usize,
+        budget_config: &autonoetic_types::config::PromptBudgetConfig,
+    ) -> anyhow::Result<EnforcementResult> {
+        // Check section caps first — report the specific violation if present.
+        check_section_caps(breakdown, budget_config, false, false)?;
+
+        anyhow::bail!(
+            "Prompt budget exceeded: {} tokens (limit: {} tokens). \
+             System: {}, Conversation: {}, Tools: {} ({} definitions). \
+             Configure a larger context window or reduce tool count.",
+            breakdown.total_tokens,
+            effective_limit,
+            breakdown.system_prompt_tokens,
+            breakdown.conversation_tokens,
+            breakdown.tool_definition_tokens,
+            breakdown.tool_count,
+        )
+    }
+}
+
+/// Resolve a `PromptBudgetAction` to its corresponding enforcement strategy.
+pub fn enforcement_strategy(
+    action: autonoetic_types::config::PromptBudgetAction,
+) -> Box<dyn BudgetEnforcementStrategy> {
+    use autonoetic_types::config::PromptBudgetAction;
+    match action {
+        PromptBudgetAction::Warn => Box::new(WarnStrategy),
+        PromptBudgetAction::TrimHistory => Box::new(TrimHistoryStrategy),
+        PromptBudgetAction::DemoteTools => Box::new(DemoteToolsStrategy),
+        PromptBudgetAction::Fail => Box::new(FailStrategy),
+    }
 }
 
 #[cfg(test)]

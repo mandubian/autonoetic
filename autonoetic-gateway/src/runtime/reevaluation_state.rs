@@ -154,6 +154,7 @@ mod tests {
             gateway_token: None,
 
             response_contract: None,
+            allowed_tool_tiers: vec![],
         }
     }
 
@@ -180,8 +181,7 @@ mod tests {
         let err = execute_scheduled_action(&manifest, agent_dir, &action, &registry, None, None)
             .expect_err("execute_scheduled_action(AgentInstall) must fail");
         assert!(
-            err.to_string().contains("no longer executable")
-                || err.to_string().contains("removed"),
+            err.to_string().contains("no longer executable") || err.to_string().contains("removed"),
             "unexpected error: {}",
             err
         );

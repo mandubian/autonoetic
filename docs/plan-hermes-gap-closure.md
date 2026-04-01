@@ -28,34 +28,46 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 **Key files:** `lifecycle.rs` (prompt assembly at line 584-612), `foundation_instructions.md`
 
+**Status (2026-04-01):** Fully implemented through commit range covering Features 1A–1E + strategy refactoring.
+- Completed: prompt budget breakdown, token estimation heuristic, pre-LLM logging, foundation layering (with layer-selection tests), prompt budget config parsing, strategy-pattern enforcement (Warn/TrimHistory/DemoteTools/Fail), tool schema compression gated by config (empirically validated with real LLMs), tool tiering with manifest-level filtering, per-section cap enforcement, tool-call group preservation during trimming, and unit coverage for all pieces.
+- Still open: workflow-state-aware tier filtering (Phase E).
+- **Documentation:** [prompt-budget.md](prompt-budget.md)
+
 ### Tasks
 
 #### Phase A — MVP: Observability + Tool Tiering (~200 lines)
 
-- [ ] **1A.1** Create `PromptBudgetBreakdown` struct (system prompt, tool definitions, conversation history, total, utilization %)
-- [ ] **1A.2** Add `estimate_tokens()` heuristic function (~4 chars/token)
-- [ ] **1A.3** Insert pre-LLM-call breakdown computation in `lifecycle.rs` (after tools assembled, before `CompletionRequest`)
-- [ ] **1A.4** Log breakdown to causal chain + `tracing::info!`
-- [ ] **1A.5** Add `ToolTier` enum (`Core`, `Workflow`, `Specialized`) as static property on each tool
-- [ ] **1A.6** Filter tool definitions by tier at collection time based on agent capabilities/workflow state
-- [ ] **1A.7** Tests for breakdown accuracy and tool tiering filter
+- [x] **1A.1** Create `PromptBudgetBreakdown` struct (system prompt, tool definitions, conversation history, total, utilization %)
+- [x] **1A.2** Add `estimate_tokens()` heuristic function (~4 chars/token)
+- [x] **1A.3** Insert pre-LLM-call breakdown computation in `lifecycle.rs` (after tools assembled, before `CompletionRequest`)
+- [x] **1A.4** Log breakdown to causal chain + `tracing::info!`
+- [x] **1A.5** Add `ToolTier` enum (`Core`, `Workflow`, `Specialized`) — tier derived from tool name prefix via central classifier; `NativeTool::tier()` provides override point
+- [x] **1A.6** Filter tool definitions by tier at collection time based on agent manifest (`allowed_tool_tiers` field)
+  - *Deferred: workflow-state-aware filtering (approval gates, active workflow phase)*
+- [x] **1A.7** Tests for breakdown accuracy and tool tiering filter
 
 #### Phase B — Progressive Foundation Instructions (~80 lines)
 
-- [ ] **1B.1** Split `foundation_instructions.md` into layers: `foundation_core.md`, `foundation_workflow.md`, `foundation_artifact.md`, `foundation_script.md`, `foundation_digest.md`
-- [ ] **1B.2** Add `compose_foundation()` that selects layers based on agent capabilities
-- [ ] **1B.3** Tests for layer selection
+- [x] **1B.1** Split `foundation_instructions.md` into layers: `foundation_core.md`, `foundation_workflow.md`, `foundation_artifact.md`, `foundation_script.md`, `foundation_digest.md`
+- [x] **1B.2** Add `compose_foundation()` that selects layers based on agent capabilities
+- [x] **1B.3** Tests for layer selection (8 tests covering core, workflow, artifact, script, digest layers)
 
 #### Phase C — Token Budget Enforcement (~150 lines)
 
-- [ ] **1C.1** Add `prompt_budget` config section in `gateway.yaml` (system_prompt_max_tokens, tool_definitions_max_tokens, warn_at_pct, margin_tokens)
-- [ ] **1C.2** Implement budget enforcement: warn, trim history, or demote tools when exceeded
-- [ ] **1C.3** Tests for enforcement behavior
+- [x] **1C.1** Add `prompt_budget` config section in `gateway.yaml` (system_prompt_max_tokens, tool_definitions_max_tokens, warn_at_pct, margin_tokens)
+- [x] **1C.2** Implement budget enforcement: warn, trim history (preserving tool-call groups), or demote tools (with verification) when exceeded — strategy pattern with `BudgetEnforcementStrategy` trait
+- [x] **1C.3** Tests for enforcement behavior (8 tests covering all strategies + section-cap violations)
 
 #### Phase D — Tool Definition Compression (~80 lines)
 
-- [ ] **1D.1** Implement turn-aware tool compression: full schemas on turn 0, minimal on subsequent turns
-- [ ] **1D.2** Empirical validation per model (needs testing with real models)
+- [x] **1D.1** Implement turn-aware tool compression: full schemas on turn 0, minimal on subsequent turns (gated by `compress_tool_schemas_after_turn_0` config)
+- [x] **1D.2** Empirical validation per model — `openrouter_integration::test_openrouter_tool_compression` validates compressed schemas still produce valid tool calls on turn > 0
+
+#### Phase E — Workflow-State-Aware Tier Filtering (~60 lines)
+
+- [ ] **1E.1** Approval gate restriction: when session has pending approvals, restrict to Core + Workflow tiers only
+- [ ] **1E.2** Child agent handoff narrowing: child sessions get Core-only tools unless parent explicitly requests more
+- [ ] **1E.3** Tests for workflow-state-aware filtering
 
 ---
 
