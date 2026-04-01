@@ -251,6 +251,10 @@ pub struct GatewayConfig {
     /// Acts as a circuit breaker for runaway loops. Default: 12.
     #[serde(default = "default_max_session_turns")]
     pub max_session_turns: u32,
+
+    /// Prompt budget transparency and enforcement configuration.
+    #[serde(default)]
+    pub prompt_budget: PromptBudgetConfig,
 }
 
 /// Configuration for evidence storage.
@@ -496,6 +500,72 @@ fn default_evidence_mode() -> String {
     "full".to_string()
 }
 
+/// Configuration for prompt budget transparency and enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptBudgetConfig {
+    /// Maximum tokens for the system prompt (foundation + agent instructions). 0 = unlimited.
+    #[serde(default)]
+    pub system_prompt_max_tokens: usize,
+
+    /// Maximum tokens for all tool definitions combined. 0 = unlimited.
+    #[serde(default)]
+    pub tool_definitions_max_tokens: usize,
+
+    /// Warn when total prompt utilization exceeds this percentage of context window.
+    #[serde(default = "default_prompt_budget_warn_pct")]
+    pub warn_at_pct: f64,
+
+    /// Reserve this many tokens at the end of the context window for LLM output.
+    #[serde(default = "default_prompt_budget_margin")]
+    pub margin_tokens: usize,
+
+    /// Action when budget exceeded: "warn" (log only), "trim_history" (remove oldest messages),
+    /// "demote_tools" (remove specialized tools), or "fail" (reject the turn).
+    #[serde(default)]
+    pub on_exceeded: PromptBudgetAction,
+
+    /// Strip tool JSON schemas to `{}` after the first turn to save tokens.
+    /// Some LLM providers require full schemas on every request — enable with caution.
+    #[serde(default)]
+    pub compress_tool_schemas_after_turn_0: bool,
+}
+
+/// Action to take when prompt budget is exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptBudgetAction {
+    /// Log a warning but proceed anyway.
+    #[default]
+    Warn,
+    /// Remove oldest non-system messages to fit within budget.
+    TrimHistory,
+    /// Remove specialized (Specialized tier) tool definitions.
+    DemoteTools,
+    /// Fail the turn with a budget exceeded error.
+    Fail,
+}
+
+fn default_prompt_budget_warn_pct() -> f64 {
+    80.0
+}
+
+fn default_prompt_budget_margin() -> usize {
+    4096
+}
+
+impl Default for PromptBudgetConfig {
+    fn default() -> Self {
+        Self {
+            system_prompt_max_tokens: 0,
+            tool_definitions_max_tokens: 0,
+            warn_at_pct: default_prompt_budget_warn_pct(),
+            margin_tokens: default_prompt_budget_margin(),
+            on_exceeded: PromptBudgetAction::Warn,
+            compress_tool_schemas_after_turn_0: false,
+        }
+    }
+}
+
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
@@ -523,6 +593,7 @@ impl Default for GatewayConfig {
             response_validation: ResponseValidationConfig::default(),
             sandbox: SandboxConfig::default(),
             max_session_turns: default_max_session_turns(),
+            prompt_budget: PromptBudgetConfig::default(),
         }
     }
 }
@@ -557,5 +628,32 @@ mod tests {
         assert_eq!(parsed.max_llm_tokens, Some(2_000_000));
         assert_eq!(parsed.max_wall_clock_secs, Some(7200));
         assert_eq!(parsed.extensions, vec!["future_org_limiter"]);
+    }
+
+    #[test]
+    fn prompt_budget_config_defaults() {
+        let config = GatewayConfig::default();
+        assert_eq!(config.prompt_budget.system_prompt_max_tokens, 0);
+        assert_eq!(config.prompt_budget.tool_definitions_max_tokens, 0);
+        assert_eq!(config.prompt_budget.warn_at_pct, 80.0);
+        assert_eq!(config.prompt_budget.margin_tokens, 4096);
+        assert_eq!(config.prompt_budget.on_exceeded, PromptBudgetAction::Warn);
+    }
+
+    #[test]
+    fn prompt_budget_config_json_roundtrip() {
+        let j = serde_json::json!({
+            "system_prompt_max_tokens": 8000,
+            "tool_definitions_max_tokens": 4000,
+            "warn_at_pct": 90.0,
+            "margin_tokens": 2048,
+            "on_exceeded": "demote_tools"
+        });
+        let parsed: PromptBudgetConfig = serde_json::from_value(j).expect("parse json");
+        assert_eq!(parsed.system_prompt_max_tokens, 8000);
+        assert_eq!(parsed.tool_definitions_max_tokens, 4000);
+        assert_eq!(parsed.warn_at_pct, 90.0);
+        assert_eq!(parsed.margin_tokens, 2048);
+        assert_eq!(parsed.on_exceeded, PromptBudgetAction::DemoteTools);
     }
 }

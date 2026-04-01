@@ -1110,7 +1110,7 @@ impl GatewayExecutionService {
                                 &runtime.instructions,
                                 &runtime.initial_user_message,
                                 session_id,
-                                runtime.manifest.response_contract.as_ref(),
+                                &runtime.manifest,
                             );
                             let outcome = runtime.execute_with_history(&mut history).await?;
                             (outcome, runtime.initial_user_message.clone(), None)
@@ -1121,7 +1121,7 @@ impl GatewayExecutionService {
                             &runtime.instructions,
                             &runtime.initial_user_message,
                             session_id,
-                            runtime.manifest.response_contract.as_ref(),
+                            &runtime.manifest,
                         );
                         let outcome = runtime.execute_with_history(&mut history).await?;
                         (outcome, runtime.initial_user_message.clone(), None)
@@ -1222,7 +1222,7 @@ impl GatewayExecutionService {
                             &runtime.instructions,
                             &runtime.initial_user_message,
                             session_id,
-                            runtime.manifest.response_contract.as_ref(),
+                            &runtime.manifest,
                         );
                         let outcome = runtime.execute_with_history(&mut history).await?;
                         (outcome, runtime.initial_user_message.clone(), None)
@@ -1233,7 +1233,7 @@ impl GatewayExecutionService {
                         &runtime.instructions,
                         &runtime.initial_user_message,
                         session_id,
-                        runtime.manifest.response_contract.as_ref(),
+                        &runtime.manifest,
                     );
                     let outcome = runtime.execute_with_history(&mut history).await?;
                     (outcome, runtime.initial_user_message.clone(), None)
@@ -2540,12 +2540,13 @@ fn build_initial_history(
     instructions: &str,
     user_message: &str,
     session_id: &str,
-    response_contract: Option<&serde_json::Value>,
+    manifest: &autonoetic_types::agent::AgentManifest,
 ) -> Vec<Message> {
     let mut history = vec![Message::system(
         crate::runtime::lifecycle::compose_system_instructions_with_metadata(
             instructions,
-            response_contract,
+            manifest,
+            manifest.response_contract.as_ref(),
         ),
     )];
     match SessionContext::load(agent_dir, session_id).and_then(|context| {
@@ -2681,12 +2682,41 @@ mod tests {
             .save(temp.path())
             .expect("session context should save");
 
+        let manifest = autonoetic_types::agent::AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "Test Agent".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            gateway_url: None,
+            gateway_token: None,
+            response_contract: None,
+        };
+
         let history = build_initial_history(
             temp.path(),
             "System prompt",
             "What did I ask you to remember?",
             "session-1",
-            None,
+            &manifest,
         );
 
         assert_eq!(history.len(), 3);
@@ -2694,7 +2724,7 @@ mod tests {
         assert_eq!(history[2].role.as_str(), "user");
         assert!(history[0]
             .content
-            .contains("Autonoetic Gateway Foundation Rules"));
+            .contains("Foundation Core"));
         assert!(history[0].content.contains("System prompt"));
         assert!(history[1]
             .content

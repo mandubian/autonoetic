@@ -28,9 +28,55 @@ use std::sync::Arc;
 // Foundation Instructions
 // ---------------------------------------------------------------------------
 
-const FOUNDATION_INSTRUCTIONS: &str = include_str!("foundation_instructions.md");
+const FOUNDATION_CORE: &str = include_str!("foundation_core.md");
+const FOUNDATION_WORKFLOW: &str = include_str!("foundation_workflow.md");
+const FOUNDATION_ARTIFACT: &str = include_str!("foundation_artifact.md");
+const FOUNDATION_SCRIPT: &str = include_str!("foundation_script.md");
+const FOUNDATION_DIGEST: &str = include_str!("foundation_digest.md");
 const LLM_OTHER_EMPTY_RETRY_ENV: &str = "AUTONOETIC_LLM_OTHER_EMPTY_RETRIES";
 const LLM_OTHER_EMPTY_RETRY_DEFAULT: usize = 1;
+
+/// Compose foundation instructions based on agent capabilities and execution mode.
+///
+/// Always includes core instructions. Adds workflow, artifact, script, and digest
+/// layers based on what the agent can actually do.
+fn compose_foundation(manifest: &AgentManifest) -> String {
+    let mut parts = Vec::new();
+    parts.push(FOUNDATION_CORE.trim());
+
+    let has_workflow_caps = manifest.capabilities.iter().any(|c| {
+        matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. })
+    });
+    let has_artifact_caps = manifest.capabilities.iter().any(|c| {
+        matches!(c, autonoetic_types::capability::Capability::WriteAccess { .. })
+    });
+    let is_script_mode = manifest.execution_mode == autonoetic_types::agent::ExecutionMode::Script;
+    let has_digest_cap = manifest.capabilities.iter().any(|c| {
+        if let autonoetic_types::capability::Capability::WriteAccess { scopes } = c {
+            scopes.iter().any(|s| s.starts_with("digest") || s == "*")
+        } else {
+            false
+        }
+    });
+
+    if has_workflow_caps || !is_script_mode {
+        parts.push(FOUNDATION_WORKFLOW.trim());
+    }
+
+    if has_artifact_caps {
+        parts.push(FOUNDATION_ARTIFACT.trim());
+    }
+
+    if is_script_mode {
+        parts.push(FOUNDATION_SCRIPT.trim());
+    }
+
+    if has_digest_cap {
+        parts.push(FOUNDATION_DIGEST.trim());
+    }
+
+    parts.join("\n\n---\n\n")
+}
 
 #[derive(Debug, Clone, Default)]
 struct SchemaValidation {
@@ -77,16 +123,18 @@ pub enum TurnOutcome {
 /// constraints the gateway will validate before returning its output to the caller.
 pub(crate) fn compose_system_instructions_with_metadata(
     agent_instructions: &str,
+    manifest: &AgentManifest,
     metadata: Option<&serde_json::Value>,
 ) -> String {
+    let foundation = compose_foundation(manifest);
     let base = {
         let trimmed = agent_instructions.trim();
         if trimmed.is_empty() {
-            FOUNDATION_INSTRUCTIONS.trim().to_string()
+            foundation
         } else {
             format!(
                 "{}\n\n---\n\nAgent-Specific Instructions\n\n{}",
-                FOUNDATION_INSTRUCTIONS.trim(),
+                foundation,
                 trimmed
             )
         }
@@ -166,6 +214,142 @@ fn is_retryable_empty_other_response(response: &crate::llm::CompletionResponse) 
     matches!(&response.stop_reason, StopReason::Other(s) if s.trim().is_empty())
         && response.tool_calls.is_empty()
         && response.text.trim().is_empty()
+}
+
+/// Apply prompt budget enforcement based on config.
+///
+/// Returns potentially modified tools and history after enforcement actions.
+fn apply_prompt_budget(
+    tools: Vec<ToolDefinition>,
+    history: Vec<Message>,
+    breakdown: &crate::runtime::prompt_budget::PromptBudgetBreakdown,
+    config: Option<&GatewayConfig>,
+    _session_id: &str,
+    _turn_id: &str,
+    tracer: &mut SessionTracer,
+) -> anyhow::Result<(Vec<ToolDefinition>, Vec<Message>)> {
+    let Some(config) = config else {
+        return Ok((tools, history));
+    };
+    let budget_config = &config.prompt_budget;
+    let action = &budget_config.on_exceeded;
+
+    let effective_limit = breakdown
+        .context_window
+        .map(|cw| cw.saturating_sub(budget_config.margin_tokens))
+        .unwrap_or(usize::MAX);
+
+    let current_total = breakdown.total_tokens;
+
+    if current_total <= effective_limit {
+        if let Some(pct) = breakdown.utilization_pct {
+            if pct >= budget_config.warn_at_pct {
+                tracing::warn!(
+                    target: "autonoetic::prompt_budget",
+                    utilization_pct = pct,
+                    warn_threshold = budget_config.warn_at_pct,
+                    total_tokens = current_total,
+                    "Prompt budget approaching limit"
+                );
+            }
+        }
+        return Ok((tools, history));
+    }
+
+    let _ = tracer.log_event(
+        "agent.process",
+        "prompt_budget_enforcement",
+        autonoetic_types::causal_chain::EntryStatus::Success,
+        Some(serde_json::json!({
+            "action": format!("{action:?}"),
+            "current_total": current_total,
+            "effective_limit": effective_limit,
+            "over_by": current_total.saturating_sub(effective_limit),
+        })),
+    );
+
+    match action {
+        autonoetic_types::config::PromptBudgetAction::Warn => {
+            tracing::warn!(
+                target: "autonoetic::prompt_budget",
+                current_total,
+                effective_limit,
+                "Prompt budget exceeded (warn mode, proceeding)"
+            );
+            Ok((tools, history))
+        }
+        autonoetic_types::config::PromptBudgetAction::TrimHistory => {
+            let non_system: Vec<_> = history
+                .iter()
+                .filter(|m| m.role != crate::llm::Role::System)
+                .cloned()
+                .collect();
+            let system: Vec<_> = history
+                .iter()
+                .filter(|m| m.role == crate::llm::Role::System)
+                .cloned()
+                .collect();
+
+            let mut trimmed = non_system;
+            let budget_for_conv = effective_limit
+                .saturating_sub(breakdown.system_prompt_tokens)
+                .saturating_sub(breakdown.tool_definition_tokens);
+
+            let mut current_conv_tokens: usize =
+                trimmed.iter().map(|m| crate::runtime::prompt_budget::estimate_tokens(&m.content)).sum();
+            while current_conv_tokens > budget_for_conv && trimmed.len() > 2 {
+                trimmed.remove(0);
+                current_conv_tokens =
+                    trimmed.iter().map(|m| crate::runtime::prompt_budget::estimate_tokens(&m.content)).sum();
+            }
+
+            if current_conv_tokens > budget_for_conv {
+                tracing::warn!(
+                    target: "autonoetic::prompt_budget",
+                    remaining_conv_tokens = current_conv_tokens,
+                    budget_for_conv,
+                    "Hit minimum message floor while still over budget"
+                );
+            }
+
+            let mut new_history = system;
+            new_history.extend(trimmed);
+
+            tracing::warn!(
+                target: "autonoetic::prompt_budget",
+                trimmed_messages = history.len() - new_history.len(),
+                "Trimmed conversation history to fit within prompt budget"
+            );
+
+            Ok((tools, new_history))
+        }
+        autonoetic_types::config::PromptBudgetAction::DemoteTools => {
+            use crate::runtime::prompt_budget::{filter_tools_by_tier, ToolTier};
+            let filtered = filter_tools_by_tier(tools, &[ToolTier::Core, ToolTier::Workflow]);
+            let removed_count = breakdown.tool_count - filtered.len();
+
+            tracing::warn!(
+                target: "autonoetic::prompt_budget",
+                removed_tools = removed_count,
+                "Demoted specialized tools to fit within prompt budget"
+            );
+
+            Ok((filtered, history))
+        }
+        autonoetic_types::config::PromptBudgetAction::Fail => {
+            anyhow::bail!(
+                "Prompt budget exceeded: {} tokens (limit: {} tokens). \
+                 System: {}, Conversation: {}, Tools: {} ({} definitions). \
+                 Configure a larger context window or reduce tool count.",
+                current_total,
+                effective_limit,
+                breakdown.system_prompt_tokens,
+                breakdown.conversation_tokens,
+                breakdown.tool_definition_tokens,
+                breakdown.tool_count,
+            )
+        }
+    }
 }
 
 pub struct AgentExecutor {
@@ -394,6 +578,7 @@ impl AgentExecutor {
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let system_instructions = compose_system_instructions_with_metadata(
             &self.instructions,
+            &self.manifest,
             self.manifest.response_contract.as_ref(),
         );
         let mut history: Vec<Message> = vec![
@@ -583,6 +768,7 @@ impl AgentExecutor {
             // Update system message — ensure exactly one system message at position 0
             let system_instructions = compose_system_instructions_with_metadata(
                 &self.instructions,
+                &self.manifest,
                 self.manifest.response_contract.as_ref(),
             );
 
@@ -590,7 +776,7 @@ impl AgentExecutor {
             history.retain(|m| !matches!(m.role, crate::llm::Role::System));
 
             // Insert fresh system message at the front
-            history.insert(0, Message::system(system_instructions));
+            history.insert(0, Message::system(&system_instructions));
 
             let tools: Vec<ToolDefinition> = {
                 let mut t: Vec<ToolDefinition> = mcp_runtime
@@ -599,8 +785,59 @@ impl AgentExecutor {
                     .filter(|def| policy.can_invoke_tool(&def.name))
                     .collect();
                 t.extend(self.registry.available_definitions(&self.manifest));
-                t
+                let turn_index = self.turn_counter.saturating_sub(1);
+                crate::runtime::prompt_budget::compress_tool_definitions(t, turn_index as usize)
             };
+
+            // --- Prompt Budget Transparency + Enforcement ---
+            let context_window = self
+                .openrouter_catalog
+                .as_ref()
+                .and_then(|cat| cat.context_window_tokens(&model));
+            let budget_breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown::compute(
+                &system_instructions,
+                &history,
+                &tools,
+                context_window,
+            );
+            tracing::info!(
+                target: "autonoetic::prompt_budget",
+                system_tokens = budget_breakdown.system_prompt_tokens,
+                conversation_tokens = budget_breakdown.conversation_tokens,
+                tool_count = budget_breakdown.tool_count,
+                tool_tokens = budget_breakdown.tool_definition_tokens,
+                total_tokens = budget_breakdown.total_tokens,
+                utilization_pct = ?budget_breakdown.utilization_pct,
+                model = %model,
+                "Prompt budget breakdown"
+            );
+            let _ = tracer.log_event(
+                "agent.process",
+                "prompt_budget",
+                autonoetic_types::causal_chain::EntryStatus::Success,
+                Some(serde_json::json!({
+                    "system_prompt_tokens": budget_breakdown.system_prompt_tokens,
+                    "conversation_tokens": budget_breakdown.conversation_tokens,
+                    "tool_count": budget_breakdown.tool_count,
+                    "tool_definition_tokens": budget_breakdown.tool_definition_tokens,
+                    "total_tokens": budget_breakdown.total_tokens,
+                    "context_window": budget_breakdown.context_window,
+                    "utilization_pct": budget_breakdown.utilization_pct,
+                    "model": model,
+                })),
+            );
+
+            // --- Budget Enforcement ---
+            let (tools, trimmed_history) = apply_prompt_budget(
+                tools,
+                history.clone(),
+                &budget_breakdown,
+                self.config.as_ref().map(|c| &**c),
+                &session_id,
+                &turn_id,
+                &mut tracer,
+            )?;
+            *history = trimmed_history;
 
             let req = CompletionRequest {
                 model: model.clone(),
@@ -1551,6 +1788,186 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_prompt_budget_warn_passes_through() {
+        let tools = vec![ToolDefinition {
+            name: "content.write".to_string(),
+            description: "Write content".to_string(),
+            input_schema: serde_json::json!({}),
+        }];
+        let history = vec![Message::user("Hello"), Message::assistant("Hi")];
+        let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
+            system_prompt_tokens: 100,
+            conversation_tokens: 50,
+            tool_count: 1,
+            tool_definition_tokens: 30,
+            total_tokens: 180,
+            context_window: Some(128_000),
+            utilization_pct: Some(0.14),
+        };
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::Warn;
+
+        let temp = tempdir().expect("tempdir should create");
+        let mut tracer = SessionTracer::new(temp.path(), "test-agent", "test-session")
+            .expect("tracer should create");
+        let (result_tools, result_history) = apply_prompt_budget(
+            tools.clone(),
+            history.clone(),
+            &breakdown,
+            Some(&config),
+            "s1",
+            "t1",
+            &mut tracer,
+        )
+        .expect("warn should not fail");
+
+        assert_eq!(result_tools.len(), tools.len());
+        assert_eq!(result_history.len(), history.len());
+    }
+
+    #[test]
+    fn test_apply_prompt_budget_demote_tools_removes_specialized() {
+        let tools = vec![
+            ToolDefinition {
+                name: "content.write".to_string(),
+                description: "Write content".to_string(),
+                input_schema: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "web.search".to_string(),
+                description: "Search web".to_string(),
+                input_schema: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "agent.spawn".to_string(),
+                description: "Spawn agent".to_string(),
+                input_schema: serde_json::json!({}),
+            },
+        ];
+        let history = vec![Message::user("Hello"), Message::assistant("Hi")];
+        let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
+            system_prompt_tokens: 100,
+            conversation_tokens: 50,
+            tool_count: 3,
+            tool_definition_tokens: 90,
+            total_tokens: 240,
+            context_window: Some(200),
+            utilization_pct: Some(120.0),
+        };
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::DemoteTools;
+        config.prompt_budget.margin_tokens = 0;
+
+        let temp = tempdir().expect("tempdir should create");
+        let mut tracer = SessionTracer::new(temp.path(), "test-agent", "test-session")
+            .expect("tracer should create");
+        let (result_tools, result_history) = apply_prompt_budget(
+            tools,
+            history.clone(),
+            &breakdown,
+            Some(&config),
+            "s1",
+            "t1",
+            &mut tracer,
+        )
+        .expect("demote tools should not fail");
+
+        assert_eq!(result_tools.len(), 2);
+        assert!(result_tools.iter().any(|t| t.name == "content.write"));
+        assert!(result_tools.iter().any(|t| t.name == "agent.spawn"));
+        assert!(!result_tools.iter().any(|t| t.name == "web.search"));
+        assert_eq!(result_history.len(), history.len());
+    }
+
+    #[test]
+    fn test_apply_prompt_budget_fail_returns_error() {
+        let tools = vec![ToolDefinition {
+            name: "content.write".to_string(),
+            description: "Write content".to_string(),
+            input_schema: serde_json::json!({}),
+        }];
+        let history = vec![Message::user("Hello"), Message::assistant("Hi")];
+        let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
+            system_prompt_tokens: 100,
+            conversation_tokens: 50,
+            tool_count: 1,
+            tool_definition_tokens: 30,
+            total_tokens: 180,
+            context_window: Some(100),
+            utilization_pct: Some(180.0),
+        };
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::Fail;
+        config.prompt_budget.margin_tokens = 0;
+
+        let temp = tempdir().expect("tempdir should create");
+        let mut tracer = SessionTracer::new(temp.path(), "test-agent", "test-session")
+            .expect("tracer should create");
+        let result = apply_prompt_budget(
+            tools,
+            history,
+            &breakdown,
+            Some(&config),
+            "s1",
+            "t1",
+            &mut tracer,
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Prompt budget exceeded"));
+    }
+
+    #[test]
+    fn test_apply_prompt_budget_trim_history_removes_oldest_messages() {
+        let tools = vec![ToolDefinition {
+            name: "content.write".to_string(),
+            description: "Write content".to_string(),
+            input_schema: serde_json::json!({}),
+        }];
+        let long_content = "x".repeat(200);
+        let history = vec![
+            Message::system("System"),
+            Message::user(long_content.clone()),
+            Message::assistant(long_content.clone()),
+            Message::user(long_content.clone()),
+            Message::assistant(long_content.clone()),
+            Message::user("Last turn".to_string()),
+            Message::assistant("Last reply".to_string()),
+        ];
+        let breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown {
+            system_prompt_tokens: 50,
+            conversation_tokens: 300,
+            tool_count: 1,
+            tool_definition_tokens: 30,
+            total_tokens: 380,
+            context_window: Some(200),
+            utilization_pct: Some(190.0),
+        };
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::TrimHistory;
+        config.prompt_budget.margin_tokens = 0;
+
+        let temp = tempdir().expect("tempdir should create");
+        let mut tracer = SessionTracer::new(temp.path(), "test-agent", "test-session")
+            .expect("tracer should create");
+        let (result_tools, result_history) = apply_prompt_budget(
+            tools.clone(),
+            history,
+            &breakdown,
+            Some(&config),
+            "s1",
+            "t1",
+            &mut tracer,
+        )
+        .expect("trim history should not fail");
+
+        assert_eq!(result_tools.len(), tools.len());
+        assert!(result_history.len() < 7);
+        assert!(result_history.iter().any(|m| m.role == crate::llm::Role::System));
+    }
+
+    #[test]
     fn test_execute_scheduled_write_file_action() {
         let manifest = manifest_with_capabilities(vec![Capability::WriteAccess {
             scopes: vec!["skills/*".to_string()],
@@ -1742,8 +2159,8 @@ mod tests {
             .expect("mutex should lock")
             .clone()
             .expect("system message should be captured");
-        assert!(system.contains("Autonoetic Gateway Foundation Rules"));
-        assert!(system.contains("Python sandbox code can import `autonoetic_sdk`"));
+        assert!(system.contains("Foundation Core"));
+        assert!(system.contains("content.write(name, content)"));
         assert!(system.contains("Agent local rules"));
     }
 
