@@ -125,13 +125,13 @@ Everything else is module-local — each tool's `*Args` structs and private help
 
 The registry types must be extracted first so that every subsequent module move can import them from `tools/mod.rs` immediately, instead of importing from the old monolith and then switching later.
 
-### Phase 1: Extract registry and trait (medium risk)
+### Phase 1: Extract registry and trait (medium risk) — ✅ DONE
 
 1. Create `tools/mod.rs` with `NativeTool` trait, `NativeToolRegistry` struct, and shared helpers
 2. Re-export from `tools.rs` so all existing call sites compile unchanged
 3. Verify `cargo test -p autonoetic-gateway` passes
 
-### Phase 2: Independent small modules (very low risk)
+### Phase 2: Independent small modules (very low risk) — ✅ DONE
 
 4. `digest.rs` — 98 lines
 5. `execution.rs` — 155 lines
@@ -140,32 +140,32 @@ The registry types must be extracted first so that every subsequent module move 
 
 Self-contained, no shared helpers beyond the trait.
 
-### Phase 3: Multi-tool modules with local helpers (low risk)
+### Phase 3: Multi-tool modules with local helpers (low risk) — 🔄 IN PROGRESS
 
-8. `web.rs` — 344 lines
-9. `artifact.rs` — 455 lines
-10. `knowledge.rs` — 685 lines
-11. `eval.rs` — 754 lines
+8. `web.rs` — 344 lines — ✅ DONE
+9. `artifact.rs` — 455 lines — ✅ DONE
+10. `knowledge.rs` — 685 lines — ⏳ NEXT
+11. `eval.rs` — 754 lines — ✅ DONE (as `evaluation.rs`)
 
 Module-local helpers, no cross-module dependencies.
 
-### Phase 4: Large modules with shared helpers (medium risk)
+### Phase 4: Large modules with shared helpers (medium risk) — ✅ DONE
 
-12. `agent.rs` — 857 lines
-13. `agent_revision.rs` — 906 lines
-14. `workflow.rs` — 916 lines
-15. `user_interaction.rs` — 1,303 lines
-16. `sandbox.rs` — 1,615 lines
+12. `agent.rs` — 857 lines — ✅ DONE
+13. `agent_revision.rs` — 906 lines — ✅ DONE
+14. `workflow.rs` — 916 lines — ✅ DONE
+15. `user_interaction.rs` — 1,303 lines — ✅ DONE
+16. `sandbox.rs` — 1,615 lines — ✅ DONE
 
 Most internal complexity. Shared helpers need careful extraction into `mod.rs`.
 
-### Phase 5: Registry handoff and cleanup (low risk)
+### Phase 5: Registry handoff and cleanup (low risk) — 🔄 IN PROGRESS
 
-17. Move `default_registry()` into `tools/mod.rs`, delegating to per-module `register_tools()`
-18. Delete old `tools.rs` monolith
-19. Merge or relocate `tools_promotion.rs`
-20. Update `runtime/mod.rs` declarations
-21. `cargo test -p autonoetic-gateway`
+17. Move `default_registry()` into `tools/mod.rs`, delegating to per-module `register_tools()` — ✅ DONE
+18. Delete old `tools.rs` monolith (renamed to `tools_impl.rs`, now slim — only `default_registry()` + `InstallAgentFile`)
+19. Merge or relocate `tools_promotion.rs` — ⏳ PENDING
+20. Update `runtime/mod.rs` declarations — ✅ DONE
+21. `cargo test -p autonoetic-gateway` — ✅ PASSING
 
 ## 7. Testing Strategy
 

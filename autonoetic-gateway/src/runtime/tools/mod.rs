@@ -1,11 +1,12 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
-use crate::sandbox::SandboxMount;
+use crate::sandbox::{DependencyPlan, DependencyRuntime, SandboxMount};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::ApprovalRequest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::tagged;
+use serde::Deserialize;
 
 use std::path::Path;
 
@@ -310,12 +311,78 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct SandboxExecDependencies {
+    pub runtime: String,
+    pub packages: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CapturePath {
+    pub path: String,
+    pub mount_as: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SandboxExecArgs {
+    pub command: String,
+    #[serde(default)]
+    pub dependencies: Option<SandboxExecDependencies>,
+    #[serde(default)]
+    pub approval_ref: Option<String>,
+    #[serde(default)]
+    pub artifact_id: Option<String>,
+    #[serde(default)]
+    pub capture_paths: Option<Vec<CapturePath>>,
+}
+
+fn parse_dependency_plan(runtime: &str, packages: Vec<String>) -> anyhow::Result<DependencyPlan> {
+    let runtime = match runtime.to_ascii_lowercase().as_str() {
+        "python" => DependencyRuntime::Python,
+        "nodejs" | "node" => DependencyRuntime::NodeJs,
+        other => anyhow::bail!("Unsupported dependency runtime '{}'", other),
+    };
+    Ok(DependencyPlan { runtime, packages })
+}
+
+pub(crate) fn dependency_plan_from_args_or_lock(
+    manifest: &AgentManifest,
+    agent_dir: &Path,
+    deps: Option<SandboxExecDependencies>,
+) -> anyhow::Result<Option<DependencyPlan>> {
+    if let Some(deps) = deps {
+        return parse_dependency_plan(deps.runtime.as_str(), deps.packages).map(Some);
+    }
+
+    let lock_path = agent_dir.join(&manifest.runtime.runtime_lock);
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+    let lock = crate::runtime_lock::resolve_runtime_lock(&lock_path)?;
+    if lock.dependencies.is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        lock.dependencies.len() == 1,
+        "runtime.lock currently supports exactly one dependency set"
+    );
+    let locked = &lock.dependencies[0];
+    parse_dependency_plan(locked.runtime.as_str(), locked.packages.clone()).map(Some)
+}
+
+pub mod agent;
 pub mod agent_revision;
+pub mod artifact;
 pub mod content;
 pub mod digest;
 pub mod evaluation;
 pub mod execution;
+pub mod knowledge;
+pub mod sandbox;
 pub mod session;
+pub mod user_interaction;
+pub mod web;
+pub mod workflow;
 
 pub use crate::runtime::tools::agent_revision::{
     AgentRevisionCreateTool, AgentRevisionDiffTool, AgentRevisionInspectTool,
