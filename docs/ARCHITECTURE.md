@@ -12,6 +12,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Security Model](#security-model)
 - [Execution Modes](#execution-modes)
 - [Memory Architecture](#memory-architecture)
+- [Revision & Activation Model](#revision--activation-model)
 - [Content Storage](#content-storage)
 - [Causal Chain](#causal-chain)
 - [Session Checkpoints, Continuations, and Forks](#session-checkpoints-continuations-and-forks)
@@ -77,7 +78,7 @@ The gateway is the security boundary and execution engine. It is NOT a rule engi
 | **Layer Store** | Content-addressed storage for compressed directory trees (artifact dependencies) |
 | **Content Store** | SHA-256 content-addressable storage for artifacts |
 | **Causal Chain** | Append-only JSONL audit log with hash-chain integrity |
-| **Scheduler** | Manages background reevaluation cadence and wake predicates |
+| **Scheduler** | Manages background reevaluation cadence; wake predicates: `Timer` and `ApprovalResolved` |
 | **Sandbox Runner** | Executes scripts via bubblewrap, docker, or microvm |
 | **Secret Vault** | Injects secrets ephemerally, never exposes to agents |
 | **HTTP API** | REST endpoints for remote agent content access |
@@ -110,16 +111,19 @@ The `autonoetic_sdk` package (Python/TypeScript) provides the agent's view of th
 
 ```
 1. User message arrives via JSON-RPC or HTTP
-2. Gateway resolves target agent (explicit → session lead → default lead)
-3. Gateway spawns agent session with context
-4. Agent reasoning loop:
+2. Gateway requires explicit target_agent_id — missing or malformed target fails immediately
+3. Gateway resolves target through alias registry → pinned revision directory
+   (explicit agent_ref bypasses alias lookup; runs that revision directly)
+4. Gateway creates a session binding: stores requested_target, alias_id, revision_id, runtime_lock_hash
+5. Gateway spawns agent session from the pinned revision directory + runtime closure
+6. Agent reasoning loop:
    a. LLM processes context + instructions
    b. LLM emits tool calls (content.write, agent.spawn, etc.)
    c. Gateway validates and executes tools
    d. Tool results returned to LLM
    e. Loop until EndTurn
-5. Agent response returned through ingress channel
-6. All actions logged to causal chain
+7. Agent response returned through ingress channel
+8. All actions logged to causal chain
 ```
 
 ### Content Storage Flow
@@ -333,6 +337,48 @@ Gateway-managed facts with provenance:
 
 ---
 
+## Revision & Activation Model
+
+Agents run from **immutable revisions**, not from mutable authoring directories. The activation path is always:
+
+```
+artifact.build()  →  agent.revision.create()  →  agent.revision.promote()
+      ↓                        ↓                           ↓
+  AgentBundle            revision stored,            alias moves to
+  artifact in            content-addressed,          new revision;
+  content store          status: candidate           status: ready
+```
+
+### Key Invariants
+
+- A session always executes from a **pinned revision directory** + a **pinned runtime closure** (hashed `runtime.lock`).
+- The **alias registry** is the sole source of truth for which revision is "active" for a logical agent.
+- `agent.revision.promote` is the only way to change what alias lookup resolves to.
+- Running sessions remain pinned to their revision; promotion does not affect them.
+- Candidate revisions are runnable via explicit `agent_ref` (e.g. for eval) without being promoted.
+- `agent.install` is **not** part of the runtime tool surface; seeding is always via revision + promote.
+
+### Revision Statuses
+
+| Status | Meaning |
+|--------|---------|
+| `candidate` | Created, not yet promoted; runnable by explicit ref |
+| `ready` | Promoted at least once; currently active or previously active |
+| `rejected` | Failed eval gate; cannot be promoted |
+| `archived` | Superseded; kept for rollback and audit |
+
+### Eval Gating
+
+Promotion can be gated by a passed eval run:
+
+```
+eval.suite.publish()  →  eval.run(suite, agent_ref)  →  agent.revision.promote(required_eval_run_id=...)
+```
+
+If the eval run's subject revision does not match the promote target, the promote is rejected.
+
+---
+
 ## Content Storage
 
 Content-addressable storage that works locally and remotely:
@@ -500,7 +546,7 @@ When a tool call requires operator approval, the turn is **suspended to disk** r
 
 #### Suspension Flow
 
-1. Agent requests a privileged tool call (e.g., `agent.install`, `sandbox.exec` on a new resource)
+1. Agent requests a privileged tool call (e.g., `agent.revision.promote`, `sandbox.exec` on a new resource)
 2. Gateway evaluates policy → approval required
 3. Gateway saves a `TurnContinuation` to `.gateway/continuations/{task_id}.json`
 4. Gateway checkpoints the session with `YieldReason::ApprovalRequired`
@@ -529,7 +575,7 @@ When a tool call requires operator approval, the turn is **suspended to disk** r
 
 1. Operator approves (or rejects) the approval request
 2. Gateway loads the continuation from disk
-3. Gateway executes the approved action (sandbox exec or agent install)
+3. Gateway executes the approved action (sandbox exec, revision promote, etc.)
 4. Gateway injects the real tool result into conversation history
 5. Gateway executes any remaining tool calls from the original batch
 6. Gateway reconstructs the full history and resumes the reasoning loop
@@ -641,7 +687,7 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 | Column | Description |
 |--------|-------------|
 | `trace_id` | UUID |
-| `tool_name` | sandbox.exec, agent.install... |
+| `tool_name` | sandbox.exec, agent.revision.promote... |
 | `command` | The executed command |
 | `exit_code` | Process exit code |
 | `stdout`, `stderr` | Full output (not truncated) |
@@ -715,18 +761,37 @@ All transactional state in a single SQLite database:
 
 ```
 .gateway/gateway.db
-├── workflow_runs          # Workflow orchestration
-├── task_runs              # Task execution state
-├── workflow_events        # Event log
+├── schema_migrations      # Ordered schema version tracking
+│
+│   ── Revision & Activation ──
+├── agent_revisions        # Immutable revision records (content_digest, status, materialization path)
+├── agent_aliases          # Mutable alias → revision pointer (one per logical agent)
+├── session_agent_bindings # Per-session pinned revision + runtime_lock_hash
+├── promotion_history      # Audit trail of alias movements (promote/rollback)
+│
+│   ── Evaluation ──
+├── eval_suites            # Published suite definitions with case specs
+├── eval_runs              # Queued/running/completed eval runs
+├── eval_case_results      # Per-case outputs, scores, and failure details
+│
+│   ── Workflow & Approval ──
 ├── approvals              # Approval gates
 ├── user_interactions      # user.ask questions/answers
-├── emergency_stops        # Circuit breaker audit
+├── workflow_events        # Workflow event log
+├── workflow_index         # Root session → workflow mapping
+│
+│   ── Execution & Audit ──
 ├── active_executions      # Running execution leases
-├── queued_tasks           # Scheduler queue
+├── emergency_stops        # Circuit breaker audit trail
+├── causal_events          # Queryable mirror of causal chain JSONL
+├── execution_traces       # Full execution results (stdout, stderr, exit_code)
+├── live_digest_events     # Real-time session digest events
+│
+│   ── Memory & Artifacts ──
 ├── memories               # Tier 2 durable memory
-├── causal_events          # Queryable event mirror
-├── execution_traces       # Full execution results
-└── artifact_refs          # Short ref → digest mapping
+├── memory_tags            # Tag index for knowledge.search_by_tags
+├── artifact_refs          # Short ref → digest mapping
+└── short_id_index         # LLM-friendly short IDs for revisions and runs
 ```
 
 ### Retention Policy

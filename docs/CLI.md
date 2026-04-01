@@ -59,7 +59,7 @@ autonoetic gateway status [--json]
 
 ### `autonoetic gateway approvals`
 
-Manage pending approval requests for `agent.install` and `sandbox.exec` actions.
+Manage pending approval requests for `agent.revision.promote` and `sandbox.exec` actions.
 
 ```bash
 autonoetic gateway approvals list [--json]
@@ -75,14 +75,14 @@ autonoetic gateway approvals reject <request_id> [--reason TEXT]
 |--------|-------------|
 | REQUEST ID | Short approval ID (`apr-xxxxxxxx`) |
 | AGENT | Agent that requested the approval |
-| KIND | Action type (`sandbox_exec` or `agent_install`) |
-| DETAILS | Command being executed (sandbox_exec) or agent being installed (agent_install) |
+| KIND | Action type (`sandbox_exec` or `revision_promote`) |
+| DETAILS | Command being executed (sandbox_exec) or revision being promoted (revision_promote) |
 
 Example:
 ```
-REQUEST ID                            AGENT                KIND           DETAILS
-apr-3458926a                          specialized_bui…   agent_install  install: weather.default (weather.default with NetworkAccess)
-apr-9e6420c1                          evaluator.defau…   sandbox_exec  exec: python3 -c "import requests; print(…
+REQUEST ID                            AGENT                KIND              DETAILS
+apr-3458926a                          specialized_bui…     revision_promote  promote: weather.default rev-abc123
+apr-9e6420c1                          evaluator.defau…     sandbox_exec      exec: python3 -c "import requests; print(…
 ```
 
 **Auto-execute:** After approval, the gateway automatically resumes the suspended session - no agent retry needed.
@@ -109,7 +109,7 @@ autonoetic gateway approvals interactive
 | `q` / `Esc` | Quit |
 
 The TUI displays:
-- **Top**: List of pending approvals with request ID, agent, kind, and details (command for sandbox_exec, agent_id for agent_install)
+- **Top**: List of pending approvals with request ID, agent, kind, and details (command for sandbox_exec, revision_id for revision_promote)
 - **Middle**: Detail panel showing the selected approval's full information (session, reason, command, dependencies, capabilities, detected hosts)
 - **Bottom**: Status bar showing the result of the last action
 
@@ -292,7 +292,7 @@ Options:
   --channel-id <ID>      Channel identifier (default: "terminal")
 ```
 
-**Implicit routing:** If `--agent` is omitted, routes through the session's bound lead agent (or `default_lead_agent_id`).
+**Explicit routing required:** `--agent` must specify a registered agent ID. The gateway requires an explicit `target_agent_id` and has no fallback lead.
 
 **Session persistence:** `--session-id` enables multi-turn conversations with context retention.
 
@@ -472,7 +472,7 @@ autonoetic trace follow session-abc123
 autonoetic trace event causal-log-42 --json
 ```
 
-### Approve Agent Install
+### Approve Revision Promotion
 
 ```bash
 # List pending approvals
@@ -480,7 +480,7 @@ autonoetic gateway approvals list
 
 # Approve a specific request
 autonoetic gateway approvals approve c19a8a50-d6c8-4c5f-aa3c-6ba119751b11 \
-  --reason "Weather agent looks safe"
+  --reason "Weather agent revision looks safe"
 ```
 
 ### Fork and Explore
@@ -498,7 +498,6 @@ autonoetic trace fork session-abc123 --at-turn 5 \
 cat > gateway.toml << 'EOF'
 port = 8080
 agents_dir = "./agents"
-default_lead_agent_id = "planner.default"
 EOF
 
 # Bootstrap all reference bundles

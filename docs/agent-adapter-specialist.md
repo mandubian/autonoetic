@@ -23,7 +23,7 @@ input/output remapping middleware where needed.
 2. Read base `SKILL.md` and extract base manifest/schema metadata.
 3. Run `schema_diff.py` to detect compatibility and mapping needs.
 4. Run `generate_wrapper.py` to produce wrapper artifacts.
-5. Register wrapper via `agent.install`.
+5. Register wrapper via `artifact.build` → `agent.revision.create` → `agent.revision.promote`.
 6. Return wrapper id and mapping summary.
 
 ## Files in Adapter Bundle

@@ -52,9 +52,14 @@ This index links to all documentation under `docs/` and marks what is stable ref
 - [`spec-build-layers-dependency-resolution.md`](./spec-build-layers-dependency-resolution.md) - Build-layer dependency spec.
 - [`plan-capability-driven-sandbox-isolation.md`](./plan-capability-driven-sandbox-isolation.md) - Capability-driven sandbox plan.
 - [`spec-capability-driven-sandbox-isolation.md`](./spec-capability-driven-sandbox-isolation.md) - Capability-driven sandbox spec.
-- [`spec-implicit-artifacts-agent-evolution.md`](./spec-implicit-artifacts-agent-evolution.md) - Implicit artifact and evolution design.
-- [`tool-skill-repository-design.md`](./tool-skill-repository-design.md) - Tool/skill repository design.
-- [`comparison-hermes-agent.md`](./comparison-hermes-agent.md) - Comparative notes against Hermes-style agents.
+- [`spec-implicit-artifacts-agent-evolution.md`](./spec-implicit-artifacts-agent-evolution.md) - Implicit artifact and evolution design (Part 1 implemented; Part 2 not yet).
+- [`comparison-hermes-agent.md`](./comparison-hermes-agent.md) - Comparative analysis against Hermes-Agent: feature gaps, design proposals.
+- [`plan-hermes-gap-closure.md`](./plan-hermes-gap-closure.md) - Implementation plan for closing capability gaps identified in the Hermes comparison (7 independent features).
+
+## Completed Plans (Archived)
+
+- [`plan-agent-revision-evaluation-federation-mvp.md`](./plan-agent-revision-evaluation-federation-mvp.md) - ✅ DONE — Immutable revision model, alias-based activation, eval suite, federation provenance.
+- [`plan-tools-modularization.md`](./plan-tools-modularization.md) - ✅ DONE — Split monolithic tools.rs (8,863 lines) into 14 topic-focused modules.
 
 ## Design Subdirectory
 
@@ -76,3 +81,5 @@ These are preserved for history and should not be treated as current source-of-t
 - [`archived/plan_approval_response_details.md`](./archived/plan_approval_response_details.md) - Archived approval response details.
 - [`archived/plan_adapt.md`](./archived/plan_adapt.md) - Archived adaptation planning notes.
 - [`archived/promotion-strategy.md`](./archived/promotion-strategy.md) - Archived promotion strategy.
+- [`archived/spec-agent-revision-evaluation-federation-mvp.md`](./archived/spec-agent-revision-evaluation-federation-mvp.md) - Design spec for the completed revision/eval/federation MVP.
+- [`archived/tool-skill-repository-design.md`](./archived/tool-skill-repository-design.md) - Aspirational tool/skill repository design (not yet implemented).

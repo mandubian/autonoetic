@@ -44,7 +44,7 @@ Agent (low-privilege):           Gateway (high-privilege):
 
 Approval-gated tool calls are a concrete example of separation-of-powers:
 
-1. **Agent proposes** a privileged action (for example `sandbox.exec` with remote access, or `agent.install`).
+1. **Agent proposes** a privileged action (for example `sandbox.exec` with remote access, or `agent.revision.promote`).
 2. **Gateway enforces** the approval gate and records a pending request.
 3. **Operator decides** approve/reject.
 4. **Gateway executes** the approved action for workflow-bound continuations and returns the real tool result to the resumed turn.

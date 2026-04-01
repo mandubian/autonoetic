@@ -1,9 +1,9 @@
 # Quickstart: Planner to Specialist Chat
 
-This quickstart verifies the full implicit-routing flow:
+This quickstart verifies the full routing flow:
 
-1. terminal chat ingress with no explicit agent target
-2. gateway routes to `planner.default`
+1. terminal chat ingress with an explicit `target_agent_id: "planner.default"`
+2. gateway resolves target through alias registry to the active revision
 3. planner delegates to a specialist via `agent.spawn`
 4. specialist result returns in the same session
 
@@ -43,7 +43,6 @@ agents_dir: "/tmp/autonoetic-demo/agents"
 port: 4000
 ofp_port: 4200
 tls: false
-default_lead_agent_id: "planner.default"
 node_id: "demo"
 node_name: "demo"
 max_concurrent_spawns: 8
@@ -422,9 +421,9 @@ Then verify only canonical specialist IDs are present before testing:
 ls -1 /tmp/autonoetic-demo/agents
 ```
 
-## Approvals (agent.install and scheduled actions)
+## Approvals (revision promotion and scheduled actions)
 
-When `agent_install_approval_policy` is `always` or `risk_based` and an install is high-risk, `agent.install` returns `approval_required: true` and a `request_id` (short ID format like `apr-db51b7ad`). The install does not proceed until an operator approves.
+When a privileged operation such as `agent.revision.promote` triggers an approval gate, the tool returns `approval_required: true` and a `request_id` (short ID format like `apr-db51b7ad`). The operation does not proceed until an operator approves.
 
 **List pending approval requests:**
 
@@ -435,34 +434,29 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway app
 **Approve or reject a request:**
 
 ```bash
-# Approve - gateway auto-completes install actions when applicable
-cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals approve apr-db51b7ad --reason "Reviewed; OK to install"
+# Approve — gateway auto-resumes the suspended turn
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals approve apr-db51b7ad --reason “Reviewed; OK to promote”
 
 # Reject
-cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals reject apr-db51b7ad --reason "Out of scope"
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals reject apr-db51b7ad --reason “Out of scope”
 ```
 
 **Execution and notification flow (recommended):**
-1. `agent.install` returns `approval_required: true` with `request_id: "apr-db51b7ad"`
-2. Operator approves via CLI
-3. **Gateway automatically executes the install** using the stored payload
-4. Gateway persists an approval-resolution notification for the waiting session
-5. If terminal chat is open on that session, chat resumes automatically and displays the continuation
-6. If no consumer is connected, notification remains pending until acknowledged
+1. Tool returns `approval_required: true` with `request_id: “apr-db51b7ad”`
+2. Turn is suspended to disk (turn continuation)
+3. Operator approves via CLI
+4. **Gateway automatically resumes the turn** and executes the approved action with real tool results
+5. Gateway persists an approval-resolution notification for the waiting session
+6. If terminal chat is open on that session, chat resumes automatically and displays the continuation
+7. If no consumer is connected, notification remains pending until acknowledged
 
 You should not need to type manual prompts like `continue` or `done` after approval in the normal chat path.
 
 **Delivery semantics (current model):**
-- Approval-resolution messages use a structured payload (`type: "approval_resolved"` with `request_id`, `status`, `agent_id`, `install_completed`, `message`).
+- Approval-resolution messages use a structured payload (`type: “approval_resolved”` with `request_id`, `status`, `message`).
 - The gateway owns background polling/delivery; CLI approval commands only record the decision.
 - Chat acknowledges notification consumption only after successful resume/render.
 - Pending notifications are durable in the `GatewayStore` SQLite database until consumed.
-
-**Payload storage details:**
-- Stored directly in the `GatewayStore` SQLite `approvals` table.
-- Persists across gateway restarts natively.
-- Cleaned up or marked completed automatically after successful install.
-- Enables deterministic execution even if LLM output differs
 
 **Rejected requests** are not retried; the caller sees the rejection and should report to the user.
 
@@ -475,17 +469,17 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway app
 ```
 For architecture details, see `docs/approval-notification-delivery.md`.
 
-## Troubleshooting: agent.install and memory writes
+## Troubleshooting: capability errors and memory writes
 
-**"memory write denied by policy" / "scheduled file write denied by MemoryWrite policy"**
+**”memory write denied by policy” / “scheduled file write denied by WriteAccess policy”**
 
-- The agent (or the child being installed) has a `MemoryWrite` capability with `scopes` that do not include the path you are writing to.
-- **Fix:** In the agent’s SKILL (or in `agent.install` `capabilities` for the child), add a `MemoryWrite` with `scopes` that cover the path, e.g. `["skills/*", "state/*"]`. Paths must be under the agent (or child) directory; do not use absolute or `..` paths. For installed agents, prefer putting files under `skills/*` (e.g. `skills/helper.md`, `skills/script.py`) so they are clearly in scope.
+- The agent has a `WriteAccess` capability with `scopes` that do not cover the path being written to.
+- **Fix:** Add a `WriteAccess` with `scopes` that cover the path, e.g. `[“skills/*”, “state/*”]`. Paths must be under the agent directory; do not use absolute or `..` paths. Prefer putting files under `skills/*` (e.g. `skills/helper.md`, `skills/script.py`) so they are clearly in scope.
 
-**"Invalid JSON arguments for 'agent.install'" / capabilities validation errors**
+**”AgentRevision capability required” / revision tool errors**
 
-- The `agent.install` payload has invalid or missing fields. Common causes: `capabilities` entries without a `type` field, or with wrong field names (e.g. `capability` instead of `type`, or missing `hosts` for `NetConnect`, `scopes` for `MemoryWrite`).
-- **Fix:** The tool error includes a `repair_hint`. Use it to correct the payload: each capability must have `type` and the required fields for that type (see specialized_builder SKILL “Capability shapes”). Then retry `agent.install` with the corrected payload. Do not switch to writing files at the planner/coder root as a workaround; keep using specialized_builder and fix the payload.
+- The agent calling `agent.revision.create` or `agent.revision.promote` does not have the `AgentRevision` capability.
+- **Fix:** Only `specialized_builder.default` (or `evolution-steward.default`) should call revision tools. Ensure the correct agent is being delegated to. The capability must declare `patterns` matching the target agent ID.
 
 ## Shell Execution Safety Policy (sandbox.exec)
 

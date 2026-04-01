@@ -1,9 +1,13 @@
 # Spec: Implicit Artifacts and Agent Evolution
 
-**Status:** Draft
+**Status:** Partially implemented — see implementation notes below
 **Author:** Architecture Review
 **Date:** 2026-03-23
 **Updated:** 2026-03-28 — Added `workflow.state` for structured resume; clarified implicit-vs-explicit boundary
+
+> **Implementation status (as of 2026-04-01):**
+> - **Part 1 (sections 1–3): Implicit artifacts, content visibility model, structured escalation** — ✅ Implemented. `content.write` visibility, session-rooted content resolution, and clarification escalation are live.
+> - **Part 2 (sections 4–6): Agent evolution hooks, autonomous skill creation, composition primitives** — ❌ Not yet implemented. The evolution agents (`specialized_builder`, `evolution-steward`) exist as static bundles but the closed-loop automation (trigger → create → improve cycle) described in these sections has not been built. See [plan-hermes-gap-closure.md](plan-hermes-gap-closure.md) for the roadmap.
 
 ---
 
