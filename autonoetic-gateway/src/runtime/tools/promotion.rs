@@ -1,13 +1,8 @@
-//! Promotion Registry Tools.
-//!
-//! Provides tools for recording and querying artifact promotion status
-//! (evaluator/auditor validation) per artifact ID.
-
 use crate::causal_chain::CausalLogger;
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::promotion_store::PromotionStore;
-use crate::runtime::tools::NativeTool;
+use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::promotion::{
@@ -15,16 +10,17 @@ use autonoetic_types::promotion::{
 };
 use std::path::Path;
 
+pub fn register_tools(registry: &mut NativeToolRegistry) {
+    registry.register(Box::new(PromotionRecordTool));
+    registry.register(Box::new(PromotionQueryTool));
+}
+
 fn is_promotion_agent(manifest: &AgentManifest) -> bool {
     matches!(
         manifest.agent.id.as_str(),
         "evaluator.default" | "auditor.default"
     )
 }
-
-// ---------------------------------------------------------------------------
-// Promotion Record Tool
-// ---------------------------------------------------------------------------
 
 pub struct PromotionRecordTool;
 
@@ -125,7 +121,6 @@ impl NativeTool for PromotionRecordTool {
             args.summary.clone(),
         )?;
 
-        // Log to causal chain for tamper-evidence
         let causal_log_path = gw_dir.join("history").join("causal_chain.jsonl");
         if let Some(parent) = causal_log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -157,10 +152,6 @@ impl NativeTool for PromotionRecordTool {
         serde_json::to_string(&response).map_err(Into::into)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Promotion Query Tool
-// ---------------------------------------------------------------------------
 
 pub struct PromotionQueryTool;
 

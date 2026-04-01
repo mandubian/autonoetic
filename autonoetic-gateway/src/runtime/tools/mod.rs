@@ -10,6 +10,13 @@ use serde::Deserialize;
 
 use std::path::Path;
 
+/// A file to be installed as part of an agent.
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
+pub struct InstallAgentFile {
+    pub path: String,
+    pub content: String,
+}
+
 #[derive(Debug, Default)]
 pub struct ToolMetadata {
     pub path: Option<String>,
@@ -378,6 +385,7 @@ pub mod digest;
 pub mod evaluation;
 pub mod execution;
 pub mod knowledge;
+pub mod promotion;
 pub mod sandbox;
 pub mod session;
 pub mod user_interaction;
@@ -392,4 +400,22 @@ pub use crate::runtime::tools::evaluation::{
     validate_suite_spec, EvalCompareTool, EvalReportTool, EvalRunTool, EvalSuiteCaseSpec,
     EvalSuitePublishTool, EvalSuiteSpec,
 };
-pub use crate::runtime::tools_impl::default_registry;
+
+pub fn default_registry() -> NativeToolRegistry {
+    let mut registry = NativeToolRegistry::new();
+    crate::runtime::tools::execution::register_tools(&mut registry);
+    crate::runtime::tools::digest::register_tools(&mut registry);
+    crate::runtime::tools::session::register_tools(&mut registry);
+    crate::runtime::tools::content::register_tools(&mut registry);
+    crate::runtime::tools::agent_revision::register_tools(&mut registry);
+    crate::runtime::tools::evaluation::register_tools(&mut registry);
+    crate::runtime::tools::web::register_tools(&mut registry);
+    crate::runtime::tools::artifact::register_tools(&mut registry);
+    crate::runtime::tools::knowledge::register_tools(&mut registry);
+    crate::runtime::tools::agent::register_tools(&mut registry);
+    crate::runtime::tools::sandbox::register_tools(&mut registry);
+    crate::runtime::tools::workflow::register_tools(&mut registry);
+    crate::runtime::tools::user_interaction::register_tools(&mut registry);
+    crate::runtime::tools::promotion::register_tools(&mut registry);
+    registry
+}
