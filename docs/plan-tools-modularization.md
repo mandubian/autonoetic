@@ -6,9 +6,7 @@
 
 **Before:** `autonoetic-gateway/src/runtime/tools.rs` — 8,863 lines, 36 tools + helpers + registry in one file.
 
-**After:** 13 topic-focused modules (avg ~400 lines each) + slim `tools_impl.rs` (~400 lines for `default_registry()` only). Committed as `19191ff`.
-
-**Goal:** Split into topic-focused, pluggable modules with no behavior or policy changes, so tools can be added/removed independently while preserving current runtime contracts.
+**After:** 14 topic-focused modules + `default_registry()` in `tools/mod.rs`. Zero monolith files remain. Commits: `19191ff` (initial extraction), `e806994` (final cleanup).
 
 ---
 
@@ -17,7 +15,7 @@
 ```
 autonoetic-gateway/src/runtime/
   tools/
-    mod.rs                 # NativeTool trait, NativeToolRegistry, shared helpers (~390 lines)
+    mod.rs                 # NativeTool trait, NativeToolRegistry, default_registry(), shared helpers, InstallAgentFile (~420 lines)
     sandbox.rs             # sandbox.exec (~1,050 lines)
     web.rs                 # web.search, web.fetch (~340 lines)
     content.rs             # content.write, content.read (~260 lines)
@@ -31,15 +29,16 @@ autonoetic-gateway/src/runtime/
     workflow.rs            # approval.status, workflow.{wait,state,cancel_task} (~900 lines)
     user_interaction.rs    # user.ask, user.interaction.status (~350 lines)
     digest.rs              # digest.annotate (~107 lines)
-  tools_impl.rs            # default_registry() + InstallAgentFile (~400 lines)
-  tools_promotion.rs       # promotion.record, promotion.query (unchanged, 250 lines)
+    promotion.rs           # promotion.record, promotion.query (~250 lines)
+  tests/
+    native_tool_registry_tests.rs  # Registry availability, web.fetch/search, agent.spawn tests (~880 lines)
 ```
 
 ## 2. Module Sizes (Actual)
 
 | Module | Tools | Lines | Notes |
 |--------|-------|-------|-------|
-| `mod.rs` | Trait, registry, shared helpers | ~390 | Core interface + sandbox helper types |
+| `mod.rs` | Trait, registry, default_registry(), shared helpers | ~420 | Core interface + sandbox helper types |
 | `sandbox.rs` | `sandbox.exec` | ~1,050 | Heavy sandbox plumbing |
 | `agent_revision.rs` | 6 revision tools + helpers | ~1,030 | Revision materialization, diff logic |
 | `workflow.rs` | 4 workflow tools | ~900 | Task polling, approval status |
@@ -49,17 +48,17 @@ autonoetic-gateway/src/runtime/
 | `agent.rs` | 3 agent tools | ~450 | Agent lifecycle |
 | `user_interaction.rs` | 2 user tools | ~350 | Approval plumbing |
 | `web.rs` | 2 web tools + HTTP helpers | ~340 | Provider fallback, caching |
+| `promotion.rs` | 2 promotion tools | ~250 | Artifact promotion gating |
 | `content.rs` | 2 content tools | ~260 | Simple CRUD |
 | `session.rs` | `session.escalate` | ~189 | Single tool |
 | `execution.rs` | `execution.search` | ~147 | Single tool |
 | `digest.rs` | `digest.annotate` | ~107 | Single tool |
-| `tools_impl.rs` | `default_registry()` | ~400 | Registry constructor + `InstallAgentFile` |
 
-**Total reduction:** 8,863 → ~400 lines in the monolith (95% reduction).
+**Total reduction:** 8,863 → 0 lines in monolith (100% elimination).
 
 ## 3. Pluggable Registration
 
-Each module exposes a `register_tools()` function. `default_registry()` in `tools_impl.rs` composes them all:
+Each module exposes a `register_tools()` function. `default_registry()` in `tools/mod.rs` composes them all:
 
 ```rust
 pub fn default_registry() -> NativeToolRegistry {
@@ -77,8 +76,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::sandbox::register_tools(&mut registry);
     crate::runtime::tools::workflow::register_tools(&mut registry);
     crate::runtime::tools::user_interaction::register_tools(&mut registry);
-    registry.register(Box::new(crate::runtime::tools_promotion::PromotionRecordTool));
-    registry.register(Box::new(crate::runtime::tools_promotion::PromotionQueryTool));
+    crate::runtime::tools::promotion::register_tools(&mut registry);
     registry
 }
 ```
@@ -87,12 +85,7 @@ Adding or removing a tool = edit one module's `register_tools()` — no touch to
 
 ## 4. Out of Scope (Deferred)
 
-The following remain deferred to a separate follow-on plan:
-
-- introducing tool privilege classes (for example `AdminOnly` vs `Standard`)
-- splitting runtime exposure into multiple registries with different tool visibility
-- changing policy-engine semantics beyond existing capability + approval-queue checks
-- merging `tools_promotion.rs` into `tools/promotion.rs` (low priority, no functional benefit)
+All original scope items are now complete. No remaining deferred items from this plan.
 
 ## 5. Shared Dependencies
 
@@ -129,21 +122,24 @@ Sandbox helper types (`SandboxExecArgs`, `SandboxExecDependencies`, `CapturePath
 - `agent.rs`, `agent_revision.rs`, `workflow.rs`, `user_interaction.rs`, `sandbox.rs`
 
 ### Phase 5: Registry handoff and cleanup — ✅ DONE
-- `default_registry()` in `tools_impl.rs` delegates to per-module `register_tools()`
-- Monolith reduced from 8,863 → ~400 lines
-- `InstallAgentFile` type preserved in `tools_impl.rs` (used by `capability_inference.rs`)
-- `runtime/mod.rs` declarations updated
-- All 350+ tests pass
+- `default_registry()` moved to `tools/mod.rs`
+- `tools_promotion.rs` merged into `tools/promotion.rs`
+- `InstallAgentFile` moved to `tools/mod.rs`
+- Tests extracted to `tests/native_tool_registry_tests.rs`
+- `tools_impl.rs` deleted entirely
+- `runtime/mod.rs` declarations cleaned up
+- All 363 tests pass
 
 ## 7. Testing Strategy
 
 Tests reference tools by name string through the registry, so they work unchanged as long as the registry returns the same tools.
 
 ```bash
-cargo test -p autonoetic-gateway  # 350+ tests, all passing
+cargo test -p autonoetic-gateway  # 363 tests, all passing
 ```
 
 Key test files:
+- `tests/native_tool_registry_tests.rs` (registry availability, web tools, agent.spawn)
 - `tests/execution_search_integration.rs`
 - `tests/tier2_memory_integration.rs`
 - `tests/post_session_digest_integration.rs`
@@ -155,5 +151,4 @@ Key test files:
 
 - **No behavior changes** — purely code organization
 - **`agent.install`** is removed from the active native tool registry; activation path is revision create + promote (or operator seed)
-- **`tools_promotion.rs`** stays at `runtime/tools_promotion.rs` — low priority to relocate
-- Commit: `19191ff refactor: extract native tools from monolith into modular structure`
+- Commits: `19191ff` (extract tools into modules), `e806994` (delete monolith, merge promotion, move tests)
