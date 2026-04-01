@@ -10,7 +10,7 @@ The system has three distinct human-interaction mechanisms that serve different 
 
 | Mechanism | Purpose | Who Resolves | Session Behavior |
 |---|---|---|---|
-| **Approval** | Gate privileged operations (sandbox exec with network access, agent install) | Operator via `gateway approvals approve` | Suspends child session; Gateway auto-resumes on approval |
+| **Approval** | Gate privileged operations (sandbox exec with network access, agent revision promotion) | Operator via `gateway approvals approve` | Suspends child session; Gateway auto-resumes on approval |
 | **user.ask** | Ask human a question (clarification, preferences, choices) | Human via CLI/chat interaction | Suspends session; requires explicit `resume_from_user_interaction` |
 | **clarification_needed** | Child agent signals missing info to parent | Parent agent re-spawns child with clarified task | Child returns structured result; parent decides next action |
 
@@ -18,7 +18,7 @@ The system has three distinct human-interaction mechanisms that serve different 
 
 **When it triggers:**
 - `sandbox.exec` with remote network access detected (HTTP/HTTPS URLs, socket calls)
-- `agent.install` for evolution roles (specialized_builder)
+- `agent.revision.promote` for high-risk bundles (NetworkAccess, CodeExecution, broad WriteAccess)
 - Dangerous operations (sudo, rm -rf, dd, mkfs) — blocked by policy
 
 **How it works:**
@@ -34,8 +34,8 @@ The system has three distinct human-interaction mechanisms that serve different 
 - **Durable**: Approval requests persist to SQLite
 - **Auto-resume**: Gateway automatically resumes the session when approval is resolved
 - **Domain-level reuse**: For `sandbox.exec` with artifact-based analysis, once a domain (e.g., `api.open-meteo.com`) is approved at the root workflow level, other sessions under the same root can reuse the approval without re-asking
-- **Payload preservation**: For `agent.install`, the full install args are stored in the approval request and replayed on retry, preventing payload drift
-- **Deduplication**: Both `sandbox.exec` and `agent.install` prevent duplicate approval requests — if an approval is already pending (or recently approved) for the same operation, the existing request ID is returned instead of creating a new one
+- **Payload preservation**: For `agent.revision.promote`, the full promote args are stored in the approval request; on approval the gateway resumes the suspended turn with the real promotion result, preventing payload drift
+- **Deduplication**: Both `sandbox.exec` and `agent.revision.promote` prevent duplicate approval requests — if an approval is already pending (or recently approved) for the same operation, the existing request ID is returned instead of creating a new one
 
 ### user.ask
 
@@ -100,12 +100,13 @@ pub enum ScheduledAction {
         dependencies: Option<ScheduledActionDependencies>,
         requires_approval: bool,
     },
-    AgentInstall {
+    AgentRevisionPromote {
         agent_id: String,
+        revision_id: String,
         summary: String,
         requested_by_agent_id: String,
-        install_fingerprint: String,
-        payload: Option<serde_json::Value>,  // Stored for deterministic retry
+        promote_fingerprint: String,
+        payload: Option<serde_json::Value>,  // Stored for continuation replay
     },
     WriteFile { path: String, requires_approval: bool },
 }
@@ -137,28 +138,29 @@ pub enum ScheduledAction {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Approval Flow for agent.install
+### Approval Flow for agent.revision.promote
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 1. Specialized builder calls agent.install                      │
+│ 1. specialized_builder calls agent.revision.promote             │
 ├─────────────────────────────────────────────────────────────────┤
-│ 2. Resolve artifact files, run RemoteAccessAnalyzer             │
-│    → Extract detected network hosts from URL literals           │
-│    → Include hosts in approval card for operator visibility     │
+│ 2. Gateway checks AgentRevision capability + eval gating        │
+│    → Runs RemoteAccessAnalyzer on bundle artifact files         │
+│    → Extracts detected network hosts from URL literals          │
+│    → Includes hosts in approval card for operator visibility    │
 ├─────────────────────────────────────────────────────────────────┤
-│ 3. Store full install args as JSON payload in ApprovalRequest   │
-│    → Ensures deterministic retry (no payload drift)             │
+│ 3. Store full promote args as JSON payload in ApprovalRequest   │
+│    → Suspend turn with YieldReason::ApprovalRequired            │
+│    → Write continuation file to disk                            │
 ├─────────────────────────────────────────────────────────────────┤
-│ 4. Return approval_required with retry instructions             │
-│    → "Retry with promotion_gate.install_approval_ref = 'apr-xxx'"│
+│ 4. Return approval_required response                            │
+│    → "Approval apr-xxx is pending. No retry needed."            │
 ├─────────────────────────────────────────────────────────────────┤
-│ 5. Operator approves                                            │
+│ 5. Operator runs: gateway approvals approve apr-xxx             │
 ├─────────────────────────────────────────────────────────────────┤
-│ 6. Builder retries with install_approval_ref                    │
-│    → Gateway loads stored payload from approval request         │
-│    → Replaces args with stored payload (deterministic)          │
-│    → Proceeds with install                                      │
+│ 6. Gateway resumes suspended session automatically              │
+│    → Loads continuation file, executes approved promotion       │
+│    → Injects real promote result into conversation              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -185,16 +187,16 @@ When a `sandbox.exec` approval is resolved:
 5. Real output (stdout/stderr/exit_code) is injected into the LLM conversation
 6. LLM continues with actual results, not re-deriving what to do
 
-### Deterministic Retry (agent.install)
+### Continuation-Based Resume (agent.revision.promote)
 
-When an `agent.install` approval is resolved:
+When an `agent.revision.promote` approval is resolved:
 
-1. Builder retries with `promotion_gate.install_approval_ref = "apr-xxx"`
-2. Gateway looks up the approval request by ID
-3. Loads the stored JSON payload from the approval request
-4. Replaces the current args with the stored payload
-5. This ensures the install uses the EXACT same capabilities, instructions, etc.
-6. No payload drift between attempts
+1. Signal delivered via `event.ingest` with `approval_request_id` in metadata
+2. Router extracts `task_id` from the approval request
+3. `spawn_agent_once` finds the continuation file on disk
+4. `execute_approved_action` runs the approved promotion
+5. Real promotion result is injected into the LLM conversation
+6. Agent continues with actual result — no retry or payload re-submission needed
 
 ## Approval Deduplication
 
@@ -213,16 +215,16 @@ For `sandbox.exec`, deduplication is **session-scoped**:
 
  Session-scoped dedup ensures each session can be independently approved and resumed.
 
-### agent.install Deduplication (Root + Session Level)
+### agent.revision.promote Deduplication (Root + Session Level)
 
-For `agent.install`, deduplication is more aggressive:
-1. **Pending check** (root + session): Before creating a new approval, checks both the root-level and session-level pending approvals for an `AgentInstall` with the same `agent_id`. If found, returns the existing pending request.
+For `agent.revision.promote`, deduplication mirrors the sandbox pattern:
+1. **Pending check** (root + session): Before creating a new approval, checks both the root-level and session-level pending approvals for an `AgentRevisionPromote` with the same `revision_id`. If found, returns the existing pending request.
  Root-level check catches cases where the planner respawns the builder with a new sub-session ID.
- Session-level check catches retries within the same session.
+ Session-level check catches any redundant promote calls within the same session.
 
-2. **Approved check** (session-level): Even after approval is granted, if the builder retries without `install_approval_ref`, the gateway checks session-level for recently-approved `AgentInstall` approvals for the same `agent_id`. If found, returns the approved request ID with `already_approved: true` instead of creating a duplicate.
+2. **Approved check** (session-level): Since resume is continuation-based (no agent retry), this check exists for edge cases where the builder sends a second promote before the auto-resume arrives. Returns the approved request ID with `already_approved: true` instead of creating a duplicate.
 
-This two-layer approach prevents the bug where the builder's retry loop creates 4+ duplicate approvals (one per turn) after the operator already approved the first one.
+This prevents duplicate approvals when a workflow is restarted or the builder is re-spawned mid-flow.
 
 ### Approval Reason Field (Enhanced)
 
@@ -243,9 +245,9 @@ This gives operators immediate visibility into **what domains** the code will ac
 The `gateway approvals list` command now shows actionable details:
 
 ```
-REQUEST ID                            AGENT                KIND           DETAILS
-apr-3458926a                          specialized_bui…     agent_install  install: weather.default (weather.default with NetworkAccess)
-apr-9e6420c1                          evaluator.defau…     sandbox_exec  exec: cd /tmp && python3 -c "import requests; print(…
+REQUEST ID                            AGENT                KIND              DETAILS
+apr-3458926a                          specialized_bui…     revision_promote  promote: weather.default rev-abc123
+apr-9e6420c1                          evaluator.defau…     sandbox_exec      exec: cd /tmp && python3 -c "import requests; print(…
 ```
 
 ## Common Pitfalls
@@ -265,22 +267,21 @@ user.ask({"question": "Should I approve the network access?"})
 workflow.wait({"task_ids": ["task-xxx"], "timeout_secs": 300})
 ```
 
-### 2. Changing Payload Between Approval Retries
+### 2. Submitting a New Promote While One is Pending
 
 **Wrong:**
-```json
-// First attempt
-{"agent_id": "weather", "capabilities": [{"type": "NetworkAccess", "hosts": ["*"]}]}
-// Second attempt (CHANGED)
-{"agent_id": "weather", "capabilities": [{"type": "NetworkAccess", "hosts": ["*"]}, {"type": "WriteAccess", "scopes": ["self.*"]}]}
+```
+// Turn 1: agent calls agent.revision.promote → receives approval_required: apr-xxx
+// Turn 2: agent calls agent.revision.promote AGAIN while apr-xxx is still pending
 ```
 
+The continuation mechanism handles resume automatically. The agent should wait for the suspended turn to resume — not retry.
+
 **Right:**
-```json
-// First attempt
-{"agent_id": "weather", "capabilities": [{"type": "NetworkAccess", "hosts": ["api.open-meteo.com"]}]}
-// Second attempt (EXACT same + approval_ref)
-{"agent_id": "weather", "capabilities": [{"type": "NetworkAccess", "hosts": ["api.open-meteo.com"]}], "promotion_gate": {"install_approval_ref": "apr-xxx"}}
+```
+// Turn 1: agent calls agent.revision.promote → receives approval_required: apr-xxx
+// Agent reports to user: "Approval apr-xxx pending. Run: gateway approvals approve apr-xxx"
+// After operator approves → gateway auto-resumes the suspended turn with real result
 ```
 
 ### 3. Using hosts: ["*"] Instead of Detected Domains
@@ -295,7 +296,7 @@ workflow.wait({"task_ids": ["task-xxx"], "timeout_secs": 300})
 {"capabilities": [{"type": "NetworkAccess", "hosts": ["api.open-meteo.com", "geocoding-api.open-meteo.com"]}]}
 ```
 
-The `agent.install` tool now auto-detects domains from URL literals in the artifact and includes them in the approval card. Use the detected domains for precise, least-privilege capabilities.
+The `agent.revision.create` step auto-detects domains from URL literals in the artifact and includes them in the approval card. Use the detected domains for precise, least-privilege capabilities.
 
 ## CLI Commands
 
@@ -319,7 +320,8 @@ autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
 |---|---|
 | `autonoetic-gateway/src/scheduler/approval.rs` | Approval lifecycle, resume logic, signal delivery, pending approval queries (`pending_approval_requests_for_root`, `pending_approval_requests_for_session`, `pending_sandbox_exec_requests_for_session`) |
 | `autonoetic-gateway/src/scheduler/gateway_store.rs` | Approval persistence (SQLite), queries (`get_approved_approvals_for_root`, `get_approved_approvals_for_session`) |
-| `autonoetic-gateway/src/runtime/tools.rs` | Approval checks in `SandboxExecTool` and `AgentInstallTool`; deduplication logic for both tools |
+| `autonoetic-gateway/src/runtime/tools/sandbox.rs` | Approval checks in `SandboxExecTool`; sandbox deduplication logic |
+| `autonoetic-gateway/src/runtime/tools/agent.rs` | Approval checks in `AgentRevisionPromoteTool`; promote deduplication logic |
 | `autonoetic-gateway/src/runtime/remote_access.rs` | URL/domain extraction from code (`RemoteAccessAnalyzer`) |
 | `autonoetic-gateway/src/runtime/approved_exec_cache.rs` | Domain normalization (`normalize_targets`), fingerprinting |
 | `autonoetic-types/src/background.rs` | `ApprovalRequest`, `ScheduledAction`, `ApprovalStatus` types |

@@ -9,6 +9,7 @@
 - [SKILL.md Format](#skillmd-format)
 - [Capabilities System](#capabilities-system)
 - [Content and Memory Tools](#content-and-memory-tools)
+- [Agent, Revision, Eval, and Promotion Tools](#agent-tools)
 - [Agent Lifecycle](#agent-lifecycle)
 - [Script vs Reasoning Agents](#script-vs-reasoning-agents)
 - [Building New Agents](#building-new-agents)
@@ -41,10 +42,10 @@ An agent is a **SKILL.md manifest** + **instructions** that runs inside a sandbo
 
 When a message arrives at the gateway:
 
-1. **Explicit target**: Route to specified `target_agent_id`
-2. **Session affinity**: Route to session-bound lead agent
-3. **Default lead**: Route to `default_lead_agent_id` (typically `planner.default`)
-4. **Fail**: If no default lead configured, reject
+1. **Explicit target required**: `event.ingest` must carry an explicit `target_agent_id`; missing or empty target fails with an error — no default routing fallback.
+2. **Alias resolution**: The target is resolved through the alias registry to the currently promoted revision.
+3. **Explicit `agent_ref`**: A target with a pinned revision ref (e.g. `agent@rev-abc`) bypasses alias resolution and runs that specific revision directly.
+4. **Fail fast**: Malformed targets (e.g. containing `@` without a valid ref) are rejected before any lookup.
 
 ### Primary Roles
 
@@ -72,7 +73,7 @@ When a message arrives at the gateway:
 
 1. **Reuse first**: `agent.discover` → spawn existing match
 2. **Adapt**: `agent-adapter.default` → wrapper for I/O gaps
-3. **Install**: `specialized_builder.default` → new durable agent
+3. **Build**: `specialized_builder.default` → creates new agent via artifact → revision → promote
 4. **Delegate**: `agent.spawn` → one-shot specialist execution
 
 ### Delegation Contract
@@ -286,9 +287,35 @@ For facts with provenance across sessions:
 | Tool | Signature | Description |
 |------|-----------|-------------|
 | `agent.spawn` | `(agent_id: string, message: any, ...) → result` | Spawn child agent |
-| `agent.install` | `(agent_id: string, files: [...], ...) → result` | Install new agent |
 | `agent.exists` | `(agent_id: string) → bool` | Check if agent exists |
 | `agent.discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
+
+### Revision Tools
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `agent.revision.create` | `(artifact_id: string, agent_id: string, ...) → revision` | Create immutable revision from an AgentBundle artifact |
+| `agent.revision.list` | `(agent_id: string) → [revisions]` | List revisions for an agent |
+| `agent.revision.inspect` | `(agent_ref: string) → revision` | Inspect revision metadata and status |
+| `agent.revision.promote` | `(agent_ref: string, alias: string, ...) → promotion` | Move alias to a revision (activates it) |
+| `agent.revision.rollback` | `(alias: string, target_ref?: string) → promotion` | Roll alias back to previous or explicit revision |
+| `agent.revision.diff` | `(from_ref: string, to_ref: string) → diff` | File-level diff between two revisions |
+
+### Eval Tools
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `eval.suite.publish` | `(suite_id: string, cases: [...]) → suite` | Publish an evaluation suite |
+| `eval.run` | `(suite_id: string, agent_ref: string) → run` | Queue an eval run against a revision |
+| `eval.compare` | `(suite_id: string, baseline_ref: string, candidate_ref: string) → comparison` | Compare two revisions on a suite |
+| `eval.report` | `(run_id: string) → report` | Retrieve eval run report |
+
+### Promotion Tools
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `promotion.record` | `(artifact_id: string, ...) → record` | Record a successful tactic as a promotion candidate |
+| `promotion.query` | `(scope: string, ...) → [records]` | Query promotion records |
 
 ---
 
@@ -467,37 +494,47 @@ llm_config:
    version = "*"
    ```
 
-### Installing Agents
+### Activating Agents
+
+The only path to activate a new logical agent is: **artifact → revision → promote**.
 
 **Via CLI:**
 ```bash
-autonoetic agent install ./path/to/agent/
+# 1. Build an AgentBundle artifact (e.g. from a directory)
+autonoetic agent bundle ./path/to/agent/ --out agent.bundle
+
+# 2. Create an immutable revision from the artifact
+autonoetic agent revision create --artifact <artifact_id> --agent-id myagent.default
+
+# 3. Promote the revision (moves the alias, making it the active version)
+autonoetic agent revision promote <rev-id> --alias myagent.default
 ```
 
-**Via Planner → specialized_builder:**
+**Via specialized_builder agent:**
 ```
 Planner: "Create a weather agent"
   → Spawns specialized_builder
-  → specialized_builder calls agent.install
-  → Agent is registered and discoverable
+  → specialized_builder writes SKILL.md + code via content.write / artifact.build
+  → specialized_builder calls agent.revision.create (from artifact)
+  → specialized_builder calls agent.revision.promote
+  → Agent is active and discoverable
 ```
 
-**Via SDK (in code):**
-```python
-from autonoetic_sdk import Client
-sdk = Client()
-sdk.files.write("my_agent/SKILL.md", skill_content)
-# Agent install via agent.install tool
+**Rollback:**
+```bash
+autonoetic agent revision rollback myagent.default          # revert to previous
+autonoetic agent revision rollback myagent.default --to <rev-id>  # revert to specific revision
 ```
 
 ### Agent Validation
 
-Before installation, the system validates:
-1. `agent_id` matches directory name
-2. Required fields present (name, description, agent.id)
-3. For script mode: `script_entry` exists and is non-empty
-4. Capabilities are valid enum objects with correct fields
-5. For risk-based approval: classification of install risk
+Before revision creation, the system validates:
+1. Artifact is an `AgentBundle` kind
+2. `SKILL.md` is present with required fields (name, description, agent.id)
+3. `agent_id` in manifest matches the target agent id
+4. For script mode: `script_entry` exists and is non-empty
+5. `runtime.lock` is present and layers are consistent
+6. Content digest determines revision identity — identical content reuses an existing revision
 
 ### Discovery
 

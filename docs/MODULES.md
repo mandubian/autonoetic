@@ -89,7 +89,21 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | File | Responsibility |
 |------|---------------|
 | `lifecycle.rs` | Agent execution loop (LLM + tool dispatch) |
-| `tools.rs` | Native tool handlers (content.*, knowledge.*, agent.*, etc.) |
+| `tools/mod.rs` | NativeTool trait, NativeToolRegistry, default_registry(), shared helpers |
+| `tools/sandbox.rs` | `sandbox.exec` |
+| `tools/web.rs` | `web.search`, `web.fetch` |
+| `tools/knowledge.rs` | `knowledge.*`, `digest.query` |
+| `tools/agent.rs` | `agent.spawn`, `agent.exists`, `agent.discover` |
+| `tools/agent_revision.rs` | `agent.revision.*` |
+| `tools/evaluation.rs` | `eval.*` |
+| `tools/workflow.rs` | `workflow.*`, `approval.status` |
+| `tools/user_interaction.rs` | `user.ask`, `user.interaction.status` |
+| `tools/artifact.rs` | `artifact.*` |
+| `tools/content.rs` | `content.write`, `content.read` |
+| `tools/promotion.rs` | `promotion.record`, `promotion.query` |
+| `tools/session.rs` | `session.escalate` |
+| `tools/execution.rs` | `execution.search` |
+| `tools/digest.rs` | `digest.annotate` |
 | `content_store.rs` | SHA-256 content-addressable storage |
 | `session_snapshot.rs` | Session checkpointing and forking |
 | `tool_call_processor.rs` | Tool execution, disclosure tracking |
@@ -116,8 +130,9 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | Responsibility |
 |---------------|
 | JSON-RPC method dispatch (`event.ingest`, `agent.spawn`) |
-| Session affinity and lead binding |
-| Default lead resolution |
+| Explicit target validation (missing target fails immediately) |
+| Alias registry resolution (target → active revision) |
+| Session binding creation (pinned revision + runtime lock) |
 | Ingress reliability controls (concurrency, backpressure) |
 
 ### Causal Chain (`src/causal_chain/`)
@@ -357,7 +372,6 @@ Markdown body with natural language instructions.
 port = 8080
 ofp_port = 8081
 agents_dir = "/path/to/agents"
-default_lead_agent_id = "planner.default"
 
 # Reliability controls
 max_concurrent_spawns = 10
@@ -367,10 +381,9 @@ max_pending_spawns_per_agent = 3
 [schema_enforcement]
 mode = "deterministic"  # disabled, deterministic, or llm
 audit = true
-
-# Agent install approval
-agent_install_approval_policy = "risk_based"  # always, risk_based, never
 ```
+
+> **Note:** `default_lead_agent_id` and `agent_install_approval_policy` have been removed. Routing requires an explicit `target_agent_id`; agent activation is always via `agent.revision.promote`.
 
 Session-scoped LLM/tool/token/wall-clock/optional USD caps are configured in YAML as `session_budget` (see [session-budget.md](session-budget.md)).
 

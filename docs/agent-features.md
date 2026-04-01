@@ -249,7 +249,7 @@ background:
   mode: deterministic
   wake_predicates:
     timer: true
-    new_messages: true
+    approval_resolved: true
 ```
 
 ### Background Modes
@@ -261,15 +261,12 @@ background:
 
 ### Wake Predicates
 
+Only two wake predicates are active. All others have been removed.
+
 | Predicate | Description |
 |-----------|-------------|
 | `timer` | Wake on interval timer |
-| `new_messages` | Wake on new ingress messages |
-| `task_completions` | Wake when delegated tasks complete |
-| `queued_work` | Wake when work is queued |
-| `stale_goals` | Wake when goals become stale |
-| `retryable_failures` | Wake for retry after failures |
-| `approval_resolved` | Wake when approval is granted |
+| `approval_resolved` | Wake when a pending approval is granted or rejected |
 
 ---
 

@@ -87,9 +87,7 @@ The problem isn't the adapter pattern — it's the gateway accumulating domain-s
 
 ### 3. Implicit Ingress Routing
 
-**Current**: Gateway resolves `event.ingest` without `target_agent_id` to `default_lead_agent_id`, then the lead "chooses the best specialist."
-
-**Fix**: Require explicit `target_agent_id` on ingress. The routing intelligence belongs in agents, not in the gateway's request parsing.
+**Implemented**: `event.ingest` requires an explicit `target_agent_id`; missing target fails immediately. The routing intelligence belongs in agents, not in the gateway's request parsing.
 
 ### 4. Disclosure Policy Complexity
 

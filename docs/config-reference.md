@@ -21,7 +21,7 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `port` | u16 | `4000` | Port for the local JSON-RPC IPC listener (Unix socket on Linux, TCP fallback). |
 | `ofp_port` | u16 | `4200` | Open Fang Protocol federation port for gateway-to-gateway communication. |
 | `tls` | bool | `false` | Enable TLS on the OFP port. |
-| `default_lead_agent_id` | string | `"planner.default"` | Default lead agent for ambiguous ingress when no `target_agent_id` is specified. |
+| ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
 | `node_id` | string | `"gateway"` | Node identity for OFP federation and causal chain authorship. Overridable by `AUTONOETIC_NODE_ID` env var. |
 | `node_name` | string | `"gateway"` | Human-readable node name for OFP federation. Overridable by `AUTONOETIC_NODE_NAME` env var. |
 | `max_concurrent_spawns` | usize | `8` | Maximum agent runtime executions allowed concurrently across all sessions. |
@@ -87,13 +87,15 @@ See `docs/response-validation-gate.md` for implementation details and `docs/iter
 
 ---
 
-## Agent Install Approval
+## Revision Promotion Approval
 
-Controls when `agent.install` requires human approval before proceeding.
+Controls when `agent.revision.promote` requires human approval before proceeding. The gateway gates high-risk promotions (bundles with broad capabilities or detected remote access) the same way it previously gated `agent.install`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agent_install_approval_policy` | string | `"risk_based"` | `"always"`: every install needs approval. `"risk_based"`: only high-risk installs (broad capabilities, ShellExec, background reevaluation). `"never"`: no approval, rely on promotion gate only. |
+| `revision_promote_approval_policy` | string | `"risk_based"` | `"always"`: every promotion needs approval. `"risk_based"`: only high-risk promotions (NetworkAccess, CodeExecution, background reevaluation). `"never"`: no approval gate (not recommended for production). |
+
+> **Note:** The old `agent_install_approval_policy` field is **removed**. Update existing `config.yaml` files to use `revision_promote_approval_policy`.
 
 ---
 
@@ -123,14 +125,14 @@ See `docs/schema-enforcement-hook.md` for details.
 
 ## Code Analysis
 
-Controls how the gateway analyzes agent code during `agent.install` for capabilities and security.
+Controls how the gateway analyzes agent code during `agent.revision.create` for capabilities and security.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `code_analysis.capability_provider` | string | `"pattern"` | Provider for capability analysis: `"pattern"`, `"python_ast"`, `"llm"`, `"composite"`, `"none"`. |
 | `code_analysis.security_provider` | string | `"pattern"` | Provider for security analysis: `"pattern"`, `"python_ast"`, `"llm"`, `"composite"`, `"none"`. |
-| `code_analysis.require_capabilities` | bool | `true` | Reject installs that lack declared capabilities. |
-| `code_analysis.require_approval_for` | list | `["NetworkAccess", "CodeExecution"]` | Capability types that always require human approval when detected. |
+| `code_analysis.require_capabilities` | bool | `true` | Reject revision creation if code requires undeclared capabilities. |
+| `code_analysis.require_approval_for` | list | `["NetworkAccess", "CodeExecution"]` | Capability types that always require human approval when detected during revision creation. |
 
 ### LLM-based analysis (when provider is `"llm"` or `"composite"`)
 
@@ -275,7 +277,6 @@ agents_dir: "/home/user/autonoetic/agents"
 port: 4000
 ofp_port: 4200
 tls: false
-default_lead_agent_id: "planner.default"
 node_id: "gateway"
 node_name: "gateway"
 max_concurrent_spawns: 8
@@ -296,7 +297,7 @@ response_validation:
   enabled: true
   repair_enabled: true
 
-agent_install_approval_policy: risk_based
+revision_promote_approval_policy: risk_based
 
 schema_enforcement:
   mode: deterministic

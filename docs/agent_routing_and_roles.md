@@ -430,67 +430,60 @@ This section explains the durable-promotion path without requiring code reading.
 
 - `auditor` performs risk/governance review before durable promotion.
 - `evolution-steward` decides whether a candidate should be promoted to durable form.
-- `specialized_builder` executes the durable install using `agent.install`.
+- `specialized_builder` executes the revision create + promote sequence.
 - `planner` orchestrates the sequence and decides when to invoke the above roles.
 
 ### When promotion is required
 
 Treat the result as a promotion candidate when one or more apply:
 
-- a reusable specialist/worker will be installed durably
+- a reusable specialist/worker will be activated durably
 - new long-lived capability authority is introduced
 - background autonomous behavior is added
 - the output is intended to be reused across sessions or tasks
 
-### Required evidence gate for evolution installs
+### Activation path
 
-Runtime enforcement requires a promotion gate when `agent.install` is called by:
+The only way to activate a new logical agent or change which revision is active:
 
-- `specialized_builder.default`
-- `evolution-steward.default`
+```
+artifact.build()  →  agent.revision.create()  →  agent.revision.promote()
+```
 
-The install payload must include `promotion_gate` with either:
+There is no `agent.install`. `agent.revision.promote` is the sole alias-movement mechanism.
 
-1. `evaluator_pass: true` and `auditor_pass: true`, or
-2. a non-empty `override_approval_ref` (explicit human override reference)
+### Evidence gating via eval
 
-If neither condition is met, install is rejected.
+`agent.revision.promote` accepts an optional `required_eval_run_id`. When provided, the gateway validates that the eval run's subject revision matches the promote target — promotion fails if not.
 
 ### Canonical flow
 
 1. `planner` identifies durable-promotion intent.
-2. `evaluator` validates behavior and quality.
-3. `auditor` reports governance/risk outcome.
-4. `evolution-steward` decides promote/defer/rework.
-5. `specialized_builder` (or `evolution-steward`) calls `agent.install` with `promotion_gate` evidence.
-6. gateway accepts install only if the gate conditions above are satisfied.
+2. `coder` or `builder` produces the agent bundle via `artifact.build`.
+3. `evaluator` validates behavior via `eval.run`.
+4. `auditor` reports governance/risk outcome.
+5. `evolution-steward` decides promote/defer/rework.
+6. `specialized_builder` calls `agent.revision.create` (from artifact) then `agent.revision.promote` (optionally with `required_eval_run_id` from the eval run).
 
-### Example `agent.install` gate payloads
+### Example promote call
 
-Standard evidence-based gate:
+Standard evidence-gated promote:
 
 ```json
 {
-  "agent_id": "sec-filings.default",
-  "instructions": "# SEC Filings Worker\n...",
-  "promotion_gate": {
-    "evaluator_pass": true,
-    "auditor_pass": true
-  }
+  "agent_ref": "sec-filings.default@rev-abc123",
+  "alias": "sec-filings.default",
+  "required_eval_run_id": "eval-run-xyz456"
 }
 ```
 
-Explicit human override path:
+Human-override path — promote without a prior eval run using an explicit approval:
 
 ```json
 {
-  "agent_id": "sec-filings.default",
-  "instructions": "# SEC Filings Worker\n...",
-  "promotion_gate": {
-    "evaluator_pass": false,
-    "auditor_pass": false,
-    "override_approval_ref": "approval://governance/2026-03-10/42"
-  }
+  "agent_ref": "sec-filings.default@rev-abc123",
+  "alias": "sec-filings.default",
+  "approval_ref": "apr-db51b7ad"
 }
 ```
 
@@ -503,6 +496,6 @@ Current iteration status:
 - [x] add `web.search` provider auto-mode (`google` then `duckduckgo`) with bounded TTL response caching
 - [x] support structured `agent.spawn.metadata` delegation contracts in gateway/native spawn paths
 - [x] update `researcher.default` to prefer authorized MCP research tools over ad-hoc shell networking
-- [x] enforce evaluator+auditor evidence gates (or explicit override) before durable `agent.install` promotion in evolution roles
+- [x] enforce evaluator+auditor evidence gates (or explicit override) before durable promotion via `agent.revision.promote`
 - [ ] validate role-specific output schemas (research/evaluation/audit contracts)
 - [ ] close the loop on learned routing fitness with persisted success/cost/latency signals

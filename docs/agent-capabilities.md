@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the capability system used by CCOS agents. Capabilities define what tools and resources an agent can access.
+This document describes the capability system used by Autonoetic agents. Capabilities define what tools and resources an agent can access.
 
 ## Capability Types
 
@@ -35,9 +35,20 @@ This document describes the capability system used by CCOS agents. Capabilities 
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
 | `agent.spawn` | `AgentSpawn` | Spawn child agent sessions |
-| `agent.install` | `SandboxFunctions: ["agent."]` | Install new agents (evolution roles only) |
 | `agent.exists` | `SandboxFunctions: ["agent."]` | Check if agent exists |
 | `agent.discover` | `SandboxFunctions: ["agent."]` | Discover available agents |
+
+### Revision & Activation Tools
+| Tool | Requires Capability | Notes |
+|------|---------------------|-------|
+| `agent.revision.create` | `AgentRevision` | Create immutable revision from an AgentBundle artifact |
+| `agent.revision.list` | `AgentRevision` | List revisions for an agent |
+| `agent.revision.inspect` | `AgentRevision` | Inspect revision metadata and status |
+| `agent.revision.promote` | `AgentRevision` | Move alias to a revision (activates it) |
+| `agent.revision.rollback` | `AgentRevision` | Roll alias back to a prior revision |
+| `agent.revision.diff` | `AgentRevision` | File-level diff between two revisions |
+
+> **Note:** `agent.install` has been removed from the runtime tool surface. The only path to activate a new logical agent is: `artifact.build` → `agent.revision.create` → `agent.revision.promote`.
 
 ### Knowledge Tools
 | Tool | Requires Capability | Notes |
@@ -76,8 +87,8 @@ This document describes the capability system used by CCOS agents. Capabilities 
 
 ### Standard Agents
 
-| Agent | ReadAccess | WriteAccess | CodeExecution | NetworkAccess | AgentSpawn | Can Install Agents |
-|-------|------------|-------------|---------------|---------------|------------|-------------------|
+| Agent | ReadAccess | WriteAccess | CodeExecution | NetworkAccess | AgentSpawn | AgentRevision |
+|-------|------------|-------------|---------------|---------------|------------|--------------|
 | **planner.default** | ✅ | ✅ | ❌ | ❌ | ✅ (10) | ❌ Delegates to specialized_builder |
 | **specialized_builder.default** | ✅ | ✅ | ❌ | ❌ | ✅ (5) | ✅ **EXCLUSIVE** |
 | **coder.default** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
@@ -115,8 +126,10 @@ capabilities:
     max_children: 5
   - type: "WriteAccess"
     scopes: ["self.*", "skills/*", "agents/*"]
+  - type: "AgentRevision"
+    patterns: ["*"]
 ```
-- **Role**: **EXCLUSIVE** agent installer - only agent that can call `agent.install`
+- **Role**: **EXCLUSIVE** agent activator — only agent that calls `agent.revision.create` + `agent.revision.promote`
 - **Cannot**: Execute code, make HTTP requests
 
 #### coder.default
@@ -226,9 +239,9 @@ capabilities:
                 ▼                   ▼                   ▼
 ┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────────┐
 │  SPECIALIZED_BUILDER  │ │      CODER            │ │     RESEARCHER        │
-│  • Installs agents    │ │  • Writes code        │ │  • Gathers evidence   │
+│  • Creates revisions  │ │  • Writes code        │ │  • Gathers evidence   │
 │  • ONLY agent that    │ │  • Executes in sandbox│ │  • Has network access │
-│    can agent.install  │ │  • Tests before return│ │  • Cites sources      │
+│    can promote agents │ │  • Tests before return│ │  • Cites sources      │
 └───────────────────────┘ └───────────────────────┘ └───────────────────────┘
                                     │
                 ┌───────────────────┼───────────────────┐
@@ -279,15 +292,15 @@ capabilities:
    - Wrong: `{"type": "NetworkAccess", "description": "...", "hosts": [...]}`
    - Correct: `{"type": "NetworkAccess", "hosts": [...]}`
 
-3. **Planner calling agent.install directly**
-   - Wrong: Planner calls `agent.install`
+3. **Planner trying to activate an agent directly**
+   - Wrong: Planner calls `agent.revision.create` or `agent.revision.promote`
    - Correct: Planner delegates to `specialized_builder.default` via `agent.spawn`
 
-4. **Missing promotion_gate for specialized_builder**
-   - `agent.install` from evolution roles requires `{"evaluator_pass": true, "auditor_pass": true}`
+4. **Bypassing eval gating for promotion**
+   - `agent.revision.promote` can require a passed `required_eval_run_id`
+   - Pass `eval.run` output to `specialized_builder` so it can include it in the promote call
 
 ## See Also
 
-- [Capability Development Guide](file:///home/mandubian/workspaces/mandubian/ccos/autonoetic/docs/capability-development.md)
-- [Agent SKILL.md Files](/tmp/autonoetic-demo/agents/*/SKILL.md)
-- [CCOS Architecture](/home/mandubian/workspaces/mandubian/ccos/docs/ccos/specs/000-ccos-architecture.md)
+- [AGENTS.md](AGENTS.md) — agent model, lifecycle, tool surface
+- [ARCHITECTURE.md](ARCHITECTURE.md) — revision & activation model, gateway internals
