@@ -167,6 +167,18 @@ impl OpenRouterCatalog {
             .and_then(|m| m.context_length)
     }
 
+    /// Synchronous context window lookup (uses cached data only, no refresh).
+    pub fn context_window_tokens(&self, model_id: &str) -> Option<usize> {
+        if catalog_disabled() {
+            return None;
+        }
+        self.inner
+            .try_read()
+            .ok()
+            .and_then(|g| g.by_id.get(model_id).map(|m| m.context_length.map(|n| n as usize)))
+            .flatten()
+    }
+
     /// Estimated USD cost for this completion using OpenRouter `pricing` (prompt + completion per token).
     pub async fn estimate_cost_usd(
         &self,
