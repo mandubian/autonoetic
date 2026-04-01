@@ -108,6 +108,10 @@ pub struct AgentManifest {
     /// Authentication token for remote gateway (Bearer token).
     #[serde(default)]
     pub gateway_token: Option<String>,
+    /// Tool tiers this agent is allowed to use. Empty means all tiers.
+    /// When set, tools outside these tiers are excluded from the agent's tool set.
+    #[serde(default)]
+    pub allowed_tool_tiers: Vec<ToolTier>,
 }
 
 /// Middleware hooks declared in the agent's own manifest (replaces overlay-based hooks).
@@ -130,6 +134,18 @@ pub enum ExecutionMode {
     /// Default: full LLM-driven reasoning loop.
     #[default]
     Reasoning,
+}
+
+/// Tool tier for progressive disclosure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolTier {
+    /// Always available: content, knowledge basics, artifact basics, sandbox.
+    Core,
+    /// Workflow-dependent: agent, workflow, evaluation, approval.
+    Workflow,
+    /// Specialized: web search, promotion, advanced revision ops.
+    Specialized,
 }
 
 /// I/O schema contract for an agent.
