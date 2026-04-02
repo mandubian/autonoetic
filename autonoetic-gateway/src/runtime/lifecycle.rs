@@ -959,7 +959,7 @@ impl AgentExecutor {
             )?;
             *history = trimmed_history;
 
-            // --- Model Routing: select model based on budget/complexity signals ---
+           // --- Model Routing: select model based on budget/complexity signals ---
             let (routed_model, routing_decision_json, matched_entry) = if let Some(routing_cfg) =
                 self.config.as_ref().and_then(|c| c.llm_routing.as_ref())
             {
@@ -975,7 +975,7 @@ impl AgentExecutor {
                             })
                         })
                     }).unwrap_or_default();
-
+ 
                     let complexity = autonoetic_types::config::ComplexitySignals {
                         tool_count: Some(tools.len() as u32),
                         recent_tool_use_count: None,
@@ -983,7 +983,7 @@ impl AgentExecutor {
                         has_artifact_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::WriteAccess { .. })),
                         is_script_mode: self.manifest.execution_mode == autonoetic_types::agent::ExecutionMode::Script,
                     };
-
+ 
                     let ctx = autonoetic_types::config::RoutingContext {
                         agent_id: self.manifest.agent.id.clone(),
                         session_id: session_id.clone(),
@@ -995,20 +995,18 @@ impl AgentExecutor {
                             elapsed_secs: None,
                         },
                     };
-
+ 
                     let router = crate::runtime::model_router::create_router(routing_cfg.strategy);
                     let decision = router.route(&ctx, llm_cfg, routing_cfg).await;
-
-                    let decision_json = serde_json::to_value(&decision).ok();
-
+ 
                     let matched_entry = routing_cfg.models.iter().find(|m| {
                         m.provider == decision.provider && m.model == decision.model
                     });
-
+ 
                     let routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
                         &decision, llm_cfg, matched_entry,
                     );
-
+ 
                     // Only apply routing when the routed provider matches the original.
                     // Cross-provider routing requires rebuilding the LlmDriver, which
                     // is not supported in the current architecture.
@@ -1020,7 +1018,7 @@ impl AgentExecutor {
                             routed_model = %decision.model,
                             "Cross-provider routing requested but not supported — staying with original provider"
                         );
-                        (llm_cfg.model.clone(), decision_json, None)
+                        (llm_cfg.model.clone(), Some(decision), matched_entry)
                     } else {
                         if decision.model != llm_cfg.model {
                             tracing::info!(
@@ -1043,7 +1041,7 @@ impl AgentExecutor {
                                 "Model-specific base_url override cannot be applied — driver already built"
                             );
                         }
-                        (decision.model.clone(), decision_json, matched_entry)
+                        (decision.model.clone(), Some(decision), matched_entry)
                     }
                 } else {
                     (model.clone(), None, None)

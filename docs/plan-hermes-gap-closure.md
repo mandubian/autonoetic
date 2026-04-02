@@ -81,16 +81,16 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 #### Phase A — MVP: Types + Deterministic Router (~600 lines)
 
-- [ ] **2A.1** Define `RoutingContext` struct (BudgetState, ComplexitySignals, TimeSignals, agent_id, session_id, turn_number)
-- [ ] **2A.2** Define `ModelEntry`, `CapabilityTier`, `ModelCost`, `ModelLatency` types
-- [ ] **2A.3** Define `ModelRouter` trait + `RoutingDecision` struct (async, with strategy_name, rationale, fallback_chain)
-- [ ] **2A.4** Implement `DeterministicRouter` (budget filter, tier floor from complexity signals, cost/latency scoring)
-- [ ] **2A.5** Add `SessionBudget` tracking struct (extends existing `LlmExchangeUsage`)
-- [ ] **2A.6** Parse `llm_presets` and `llm_routing` config sections from `gateway.yaml`
-- [ ] **2A.7** Assemble `RoutingContext` from existing state in `AgentExecutor` (token usage, manifest, session metadata)
+- [x] **2A.1** Define `RoutingContext` struct (BudgetState, ComplexitySignals, TimeSignals, agent_id, session_id, turn_number)
+- [x] **2A.2** Define `ModelEntry`, `CapabilityTier`, `ModelCost`, `ModelLatency` types
+- [x] **2A.3** Define `ModelRouter` trait + `RoutingDecision` struct (async, with strategy_name, rationale, fallback_chain)
+- [x] **2A.4** Implement `DeterministicRouter` (budget filter, tier floor from complexity signals, cost/latency scoring)
+- [x] **2A.5** Add `SessionBudget` tracking struct (extends existing `LlmExchangeUsage`)
+- [x] **2A.6** Parse `llm_presets` and `llm_routing` config sections from `gateway.yaml`
+- [x] **2A.7** Assemble `RoutingContext` from existing state in `AgentExecutor` (token usage, manifest, session metadata)
 - [ ] **2A.8** Wire `complete_with_routing()` into the LLM call path with fallback chain
 - [ ] **2A.9** Log routing decisions to causal chain
-- [ ] **2A.10** Tests for deterministic routing, budget scoring, fallback chain
+- [x] **2A.10** Tests for deterministic routing, budget scoring, fallback chain
 
 #### Phase B — LLM Classifier Router (~200 lines)
 
