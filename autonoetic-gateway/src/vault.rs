@@ -22,6 +22,8 @@ const VAULT_KEY_PATH_ENV: &str = "AUTONOETIC_VAULT_KEY_PATH";
 /// Encrypted vault file format.
 #[derive(Debug, Serialize, Deserialize)]
 struct EncryptedVault {
+    /// Magic marker to distinguish from plaintext JSON vaults.
+    format: String,
     version: u32,
     nonce: String,
     ciphertext: String,
@@ -86,9 +88,9 @@ impl Vault {
         }
         let raw = std::fs::read_to_string(path)?;
 
-        // Try to parse as encrypted vault first
+        // Try to parse as encrypted vault first (check for format marker)
         if let Ok(encrypted) = serde_json::from_str::<EncryptedVault>(&raw) {
-            if encrypted.version == 1 {
+            if encrypted.format == "autonoetic-vault-enc" && encrypted.version == 1 {
                 return Self::decrypt_vault(&encrypted);
             }
         }
@@ -145,6 +147,7 @@ impl Vault {
             .map_err(|e| anyhow::anyhow!("Vault encryption failed: {}", e))?;
 
         Ok(EncryptedVault {
+            format: "autonoetic-vault-enc".to_string(),
             version: 1,
             nonce: hex::encode(nonce_bytes),
             ciphertext: hex::encode(ciphertext),
@@ -153,10 +156,19 @@ impl Vault {
 
     /// Decrypt an encrypted vault file using AES-256-GCM.
     fn decrypt_vault(encrypted: &EncryptedVault) -> anyhow::Result<Self> {
+        if encrypted.format != "autonoetic-vault-enc" {
+            anyhow::bail!("Unrecognized encrypted vault format: {}", encrypted.format);
+        }
         let key = Self::get_master_key()
             .ok_or_else(|| anyhow::anyhow!("Vault is encrypted but no master key is configured"))?;
 
         let nonce_bytes = hex::decode(&encrypted.nonce)?;
+        if nonce_bytes.len() != 12 {
+            anyhow::bail!(
+                "Invalid nonce length in encrypted vault: expected 12, got {}",
+                nonce_bytes.len()
+            );
+        }
         let ciphertext = hex::decode(&encrypted.ciphertext)?;
 
         let cipher = Aes256Gcm::new_from_slice(&key)
@@ -260,9 +272,10 @@ mod tests {
         vault.set_secret("DB_PASSWORD", "hunter2".to_string());
         vault.persist_to_file(&path).unwrap();
 
-        // Verify file is encrypted (has version/nonce/ciphertext fields)
+        // Verify file is encrypted (has format/version/nonce/ciphertext fields)
         let raw = std::fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["format"], "autonoetic-vault-enc");
         assert_eq!(parsed["version"], 1);
         assert!(parsed["nonce"].as_str().is_some());
         assert!(parsed["ciphertext"].as_str().is_some());
