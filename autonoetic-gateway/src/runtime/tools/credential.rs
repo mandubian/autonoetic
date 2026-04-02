@@ -541,12 +541,18 @@ impl NativeTool for CredentialSetupTool {
         for step in &args.steps {
             if let CredentialSetupStep::ApiCall { url, .. } = step {
                 let host = extract_host(url)?;
-                if !policy.can_connect_net(&host) {
+                if host.is_empty() || !policy.can_connect_net(&host) {
                     return Ok(json!({
                         "ok": false,
-                        "error": format!("Network access denied for host: {}", host),
+                        "error": format!(
+                            "Network access denied for host: {}",
+                            if host.is_empty() { "<empty>" } else { &host }
+                        ),
                         "approval_required": true,
-                        "reason": format!("API call to {} requires approval", host),
+                        "reason": format!(
+                            "API call to {} requires approval",
+                            if host.is_empty() { "<empty host>" } else { &host }
+                        ),
                     })
                     .to_string());
                 }
@@ -587,6 +593,8 @@ impl NativeTool for CredentialSetupTool {
         let mut secret_names = Vec::new();
         let mut public_data = serde_json::Map::new();
         let mut step_results = Vec::new();
+        let mut suspended = false;
+        let mut suspended_at_step = None;
 
         for (i, step) in args.steps.iter().enumerate() {
             match step {
@@ -631,8 +639,14 @@ impl NativeTool for CredentialSetupTool {
                         }
                     }
 
-                    // Extract public data
+                    // Extract public data — but block paths that overlap with secrets
+                    // to prevent exfiltration of sensitive values via extract_public
+                    let secret_paths: std::collections::HashSet<&str> =
+                        extract_secrets.values().map(|s| s.as_str()).collect();
                     for (field_name, json_path) in extract_public {
+                        if secret_paths.contains(json_path.as_str()) {
+                            continue;
+                        }
                         if let Some(val) = extract_json_path(&resp_value, json_path) {
                             public_data.insert(field_name.clone(), json!(val));
                         }
@@ -649,8 +663,8 @@ impl NativeTool for CredentialSetupTool {
                     message,
                     secret_fields,
                 } => {
-                    // For UserPrompt, we return the prompt details and suspend
-                    // The actual secret entry happens through the approval/human channel
+                    // For UserPrompt, record the prompt and suspend immediately.
+                    // No further steps are executed until the human provides input.
                     step_results.push(json!({
                         "step": i,
                         "step_type": "user_prompt",
@@ -658,6 +672,9 @@ impl NativeTool for CredentialSetupTool {
                         "secret_fields": secret_fields,
                         "status": "awaiting_human_input",
                     }));
+                    suspended = true;
+                    suspended_at_step = Some(i);
+                    break;
                 }
                 CredentialSetupStep::UserAction {
                     instruction,
@@ -674,9 +691,24 @@ impl NativeTool for CredentialSetupTool {
             }
         }
 
-        // Persist vault
+        // Persist vault (only secrets extracted before any suspension)
         if let Some(vp) = &vault_path {
             vault.persist_to_file(vp)?;
+        }
+
+        // If suspended on UserPrompt, return immediately with approval_required flag
+        if suspended {
+            return Ok(json!({
+                "ok": false,
+                "suspended": true,
+                "approval_required": true,
+                "credential_id": credential_id,
+                "service": args.service,
+                "steps": step_results,
+                "suspended_at_step": suspended_at_step,
+                "reason": "UserPrompt step requires human input for secret fields"
+            })
+            .to_string());
         }
 
         // Create credential record if we extracted at least one secret
