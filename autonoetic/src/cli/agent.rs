@@ -2495,4 +2495,226 @@ layers: []
             .expect("alias should exist");
         assert_eq!(alias.revision_id, revisions[0].revision_id);
     }
+
+    #[test]
+    fn test_import_skill_writes_skill_md_with_agentskills_metadata() {
+        use crate::cli::common::TrustMode;
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let skill_dir = temp.path().join("external-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let skill_content = r#"---
+name: "external-git-helper"
+description: "A git helper from agentskills.io"
+license: "MIT"
+compatibility: "claude-code"
+allowed-tools:
+  - "Bash(git:*)"
+  - "Read"
+  - "Write"
+---
+
+# External Git Helper
+
+Use Bash(git log) to inspect history.
+"#;
+        std::fs::write(skill_dir.join("SKILL.md"), skill_content).unwrap();
+
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+llm_presets:
+  agentic:
+    provider: openai
+    model: gpt-4o
+    temperature: 0.2
+"#,
+        )
+        .unwrap();
+
+        let target_agents_dir = config_dir.join("agents");
+        let result = handle_agent_import_skill(
+            &config_path,
+            skill_dir.to_str().unwrap(),
+            "imported.git-helper",
+            TrustMode::Strict,
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "import should succeed: {:?}", result.err());
+
+        let target_skill_path = target_agents_dir.join("imported-git-helper").join("SKILL.md");
+        assert!(target_skill_path.exists(), "imported SKILL.md should exist");
+
+        let written = std::fs::read_to_string(&target_skill_path).unwrap();
+
+        assert!(
+            written.contains("name: \"imported.git-helper\""),
+            "agent_id should be rewritten: {}",
+            written
+        );
+        assert!(
+            written.contains("license: \"MIT\""),
+            "license should be preserved: {}",
+            written
+        );
+        assert!(
+            written.contains("compatibility: \"claude-code\""),
+            "compatibility should be preserved: {}",
+            written
+        );
+        assert!(
+            written.contains("allowed-tools:") && written.contains("Bash(git:*)"),
+            "allowed-tools should be preserved: {}",
+            written
+        );
+        assert!(
+            written.contains("engine: \"autonoetic\""),
+            "autonoetic runtime should be present: {}",
+            written
+        );
+
+        let (reparsed, _body) =
+            autonoetic_gateway::runtime::parser::SkillParser::parse(&written).unwrap();
+        assert_eq!(reparsed.agent.id, "imported.git-helper");
+        assert!(
+            reparsed.agentskills_import.is_some(),
+            "agentskills_import should be reconstructable from reparsed manifest"
+        );
+        let import = reparsed.agentskills_import.unwrap();
+        assert_eq!(import.license.as_deref(), Some("MIT"));
+        assert_eq!(import.compatibility.as_deref(), Some("claude-code"));
+        assert!(import.allowed_tools.contains(&"Bash(git:*)".to_string()));
+        assert!(import.needs_tool_bridging);
+    }
+
+    #[test]
+    fn test_import_skill_copies_resource_directories() {
+        use crate::cli::common::TrustMode;
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let skill_dir = temp.path().join("external-skill");
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("references")).unwrap();
+        std::fs::write(skill_dir.join("scripts/helper.sh"), "#!/bin/bash\necho hello\n").unwrap();
+        std::fs::write(skill_dir.join("references/doc.txt"), "Reference docs\n").unwrap();
+
+        let skill_content = r#"---
+name: "resource-skill"
+description: "Skill with resources"
+---
+
+# Resource Skill
+"#;
+        std::fs::write(skill_dir.join("SKILL.md"), skill_content).unwrap();
+
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+llm_presets:
+  agentic:
+    provider: openai
+    model: gpt-4o
+    temperature: 0.2
+"#,
+        )
+        .unwrap();
+
+        let target_agents_dir = config_dir.join("agents");
+        let result = handle_agent_import_skill(
+            &config_path,
+            skill_dir.to_str().unwrap(),
+            "imported.resource-skill",
+            TrustMode::Generous,
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "import should succeed: {:?}", result.err());
+
+        let target_dir = target_agents_dir.join("imported-resource-skill");
+        assert!(target_dir.join("scripts/helper.sh").exists(), "scripts/ should be copied");
+        assert!(
+            target_dir.join("references/doc.txt").exists(),
+            "references/ should be copied"
+        );
+
+        let script_content = std::fs::read_to_string(target_dir.join("scripts/helper.sh")).unwrap();
+        assert!(script_content.contains("echo hello"), "file content should be preserved");
+    }
+
+    #[test]
+    fn test_import_skill_trust_mode_strict_adds_approval_capability() {
+        use crate::cli::common::TrustMode;
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let skill_dir = temp.path().join("external-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let skill_content = r#"---
+name: "strict-skill"
+description: "Skill under strict trust"
+allowed-tools:
+  - "Bash(*)"
+  - "WebSearch"
+---
+
+# Strict Skill
+"#;
+        std::fs::write(skill_dir.join("SKILL.md"), skill_content).unwrap();
+
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+llm_presets:
+  agentic:
+    provider: openai
+    model: gpt-4o
+    temperature: 0.2
+"#,
+        )
+        .unwrap();
+
+        let target_agents_dir = config_dir.join("agents");
+        let result = handle_agent_import_skill(
+            &config_path,
+            skill_dir.to_str().unwrap(),
+            "imported.strict-skill",
+            TrustMode::Strict,
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "import should succeed: {:?}", result.err());
+
+        let target_skill_path = target_agents_dir.join("imported-strict-skill").join("SKILL.md");
+        let written = std::fs::read_to_string(&target_skill_path).unwrap();
+
+        assert!(
+            written.contains("ApprovalQueue"),
+            "Strict mode should add ApprovalQueue capability: {}",
+            written
+        );
+
+        let (reparsed, _body) =
+            autonoetic_gateway::runtime::parser::SkillParser::parse(&written).unwrap();
+        assert!(
+            reparsed.capabilities.iter().any(|c| matches!(
+                c,
+                autonoetic_types::capability::Capability::ApprovalQueue { .. }
+            )),
+            "reparsed manifest should have ApprovalQueue capability"
+        );
+    }
 }
