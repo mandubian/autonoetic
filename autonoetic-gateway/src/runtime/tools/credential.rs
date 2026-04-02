@@ -11,6 +11,7 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentManifest, CredentialRecord, CredentialSetupStep};
+use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -640,11 +641,22 @@ impl NativeTool for CredentialSetupTool {
                     }
 
                     // Extract public data — but block paths that overlap with secrets
-                    // to prevent exfiltration of sensitive values via extract_public
-                    let secret_paths: std::collections::HashSet<&str> =
-                        extract_secrets.values().map(|s| s.as_str()).collect();
+                    // to prevent exfiltration of sensitive values via extract_public.
+                    // Normalize paths by stripping $ prefix for comparison.
+                    let secret_paths: std::collections::HashSet<String> = extract_secrets
+                        .values()
+                        .map(|s| {
+                            s.trim_start_matches('$')
+                                .trim_start_matches('.')
+                                .to_string()
+                        })
+                        .collect();
                     for (field_name, json_path) in extract_public {
-                        if secret_paths.contains(json_path.as_str()) {
+                        let normalized = json_path
+                            .trim_start_matches('$')
+                            .trim_start_matches('.')
+                            .to_string();
+                        if secret_paths.contains(&normalized) {
                             continue;
                         }
                         if let Some(val) = extract_json_path(&resp_value, json_path) {
@@ -663,14 +675,46 @@ impl NativeTool for CredentialSetupTool {
                     message,
                     secret_fields,
                 } => {
-                    // For UserPrompt, record the prompt and suspend immediately.
-                    // No further steps are executed until the human provides input.
+                    // Create an approval request for the UserPrompt step
+                    let request_id = format!(
+                        "cred_setup_{}_{}",
+                        credential_id,
+                        uuid::Uuid::new_v4().to_string().replace('-', "")
+                    );
+                    let approval_action = ScheduledAction::CredentialPrompt {
+                        service: args.service.clone(),
+                        credential_id: credential_id.clone(),
+                        message: message.clone(),
+                        secret_fields: secret_fields.clone(),
+                        payload: None,
+                    };
+                    let approval_req = ApprovalRequest {
+                        request_id: request_id.clone(),
+                        agent_id: manifest.agent.id.clone(),
+                        session_id: _session_id.unwrap_or("").to_string(),
+                        action: approval_action,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        reason: Some(format!(
+                            "Credential setup for '{}' requires human input for secret fields",
+                            args.service
+                        )),
+                        evidence_ref: None,
+                        root_session_id: None,
+                        workflow_id: None,
+                        task_id: None,
+                        status: None,
+                        decided_at: None,
+                        decided_by: None,
+                    };
+                    store.create_approval(&approval_req)?;
+
                     step_results.push(json!({
                         "step": i,
                         "step_type": "user_prompt",
                         "message": message,
                         "secret_fields": secret_fields,
                         "status": "awaiting_human_input",
+                        "approval_request_id": request_id.clone(),
                     }));
                     suspended = true;
                     suspended_at_step = Some(i);
@@ -698,12 +742,20 @@ impl NativeTool for CredentialSetupTool {
 
         // If suspended on UserPrompt, return immediately with approval_required flag
         if suspended {
+            let approval_request_id = step_results
+                .iter()
+                .filter_map(|s| {
+                    s.get("approval_request_id")
+                        .and_then(|v| v.as_str().map(String::from))
+                })
+                .next();
             return Ok(json!({
                 "ok": false,
                 "suspended": true,
                 "approval_required": true,
                 "credential_id": credential_id,
                 "service": args.service,
+                "approval_request_id": approval_request_id,
                 "steps": step_results,
                 "suspended_at_step": suspended_at_step,
                 "reason": "UserPrompt step requires human input for secret fields"

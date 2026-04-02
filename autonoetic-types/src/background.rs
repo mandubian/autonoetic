@@ -94,13 +94,27 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+    /// Approval subject only: "this approval request is for a credential setup UserPrompt step."
+    /// Not executed by the scheduler; the operator provides secrets through the approval channel,
+    /// then the caller retries `credential.setup` with `approval_ref`.
+    CredentialPrompt {
+        service: String,
+        credential_id: String,
+        message: String,
+        secret_fields: Vec<super::agent::SecretFieldSpec>,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
 }
 
 impl ScheduledAction {
     /// True if this action is something the scheduler can execute (WriteFile, SandboxExec).
-    /// False for AgentInstall, which is only an approval subject.
+    /// False for AgentInstall and CredentialPrompt, which are only approval subjects.
     pub fn is_executable_by_scheduler(&self) -> bool {
-        !matches!(self, Self::AgentInstall { .. })
+        !matches!(
+            self,
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. }
+        )
     }
 
     pub fn requires_approval(&self) -> bool {
@@ -111,7 +125,7 @@ impl ScheduledAction {
             | Self::SandboxExec {
                 requires_approval, ..
             } => *requires_approval,
-            Self::AgentInstall { .. } => true,
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => true,
         }
     }
 
@@ -120,6 +134,7 @@ impl ScheduledAction {
             Self::WriteFile { .. } => "write_file",
             Self::SandboxExec { .. } => "sandbox_exec",
             Self::AgentInstall { .. } => "agent_install",
+            Self::CredentialPrompt { .. } => "credential_prompt",
         }
     }
 
@@ -127,7 +142,7 @@ impl ScheduledAction {
         match self {
             Self::WriteFile { evidence_ref, .. } => evidence_ref.clone(),
             Self::SandboxExec { evidence_ref, .. } => evidence_ref.clone(),
-            Self::AgentInstall { .. } => None,
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => None,
         }
     }
 
@@ -139,7 +154,7 @@ impl ScheduledAction {
             Self::SandboxExec {
                 evidence_ref: r, ..
             } => *r = evidence_ref,
-            Self::AgentInstall { .. } => {}
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => {}
         }
         self
     }
