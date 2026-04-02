@@ -154,9 +154,9 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 #### Phase C — Encryption at Rest (~100 lines)
 
-- [ ] **3C.1** Add AES-256-GCM encryption to `Vault.persist_to_file()` / `load_from_file()`
-- [ ] **3C.2** Master key sources: env var, passphrase at boot, OS keychain (optional)
-- [ ] **3C.3** Tests for encrypt/decrypt round-trip
+- [x] **3C.1** Add AES-256-GCM encryption to `Vault.persist_to_file()` / `load_from_file()`
+- [x] **3C.2** Master key sources: env var `AUTONOETIC_VAULT_KEY` (hex-encoded 32-byte key) or file path `AUTONOETIC_VAULT_KEY_PATH`
+- [x] **3C.3** Tests for encrypt/decrypt round-trip (7 tests: hex parsing, plaintext fallback, encrypted roundtrip, missing key error, nonce uniqueness)
 
 #### Phase D — Secure User Prompt Channel (~200 lines)
 

@@ -1,11 +1,34 @@
 //! Vault for secure credential injection.
+//!
+//! Secrets are encrypted at rest using AES-256-GCM when a master key is
+//! configured via `AUTONOETIC_VAULT_KEY` (hex-encoded 32-byte key) or
+//! `AUTONOETIC_VAULT_KEY_PATH` (path to file containing hex key).
+//! If no key is configured, the vault is stored as plaintext JSON
+//! (backward compatible with existing deployments).
 
-use secrecy::ExposeSecret;
-use secrecy::SecretString;
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use rand::RngCore;
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+const VAULT_KEY_ENV: &str = "AUTONOETIC_VAULT_KEY";
+const VAULT_KEY_PATH_ENV: &str = "AUTONOETIC_VAULT_KEY_PATH";
+
+/// Encrypted vault file format.
+#[derive(Debug, Serialize, Deserialize)]
+struct EncryptedVault {
+    version: u32,
+    nonce: String,
+    ciphertext: String,
+}
+
 /// Vault manages secrets for agents and injects them into tools safely.
+#[derive(Debug)]
 pub struct Vault {
     secrets: HashMap<String, SecretString>,
 }
@@ -41,12 +64,36 @@ impl Vault {
         self.secrets.clear();
     }
 
-    /// Load a vault snapshot from JSON on disk.
+    /// Get the configured master key, if any.
+    /// Tries env var first, then key file.
+    fn get_master_key() -> Option<[u8; 32]> {
+        if let Ok(key_hex) = std::env::var(VAULT_KEY_ENV) {
+            return hex_to_key(&key_hex);
+        }
+        if let Ok(key_path) = std::env::var(VAULT_KEY_PATH_ENV) {
+            if let Ok(key_hex) = std::fs::read_to_string(&key_path) {
+                return hex_to_key(key_hex.trim());
+            }
+        }
+        None
+    }
+
+    /// Load a vault snapshot from disk. Decrypts if encrypted, otherwise
+    /// falls back to plaintext JSON (backward compatible).
     pub fn load_from_file(path: &Path) -> anyhow::Result<Self> {
         if !path.exists() {
             return Ok(Self::new());
         }
         let raw = std::fs::read_to_string(path)?;
+
+        // Try to parse as encrypted vault first
+        if let Ok(encrypted) = serde_json::from_str::<EncryptedVault>(&raw) {
+            if encrypted.version == 1 {
+                return Self::decrypt_vault(&encrypted);
+            }
+        }
+
+        // Fall back to plaintext JSON
         let plain: HashMap<String, String> = serde_json::from_str(&raw)?;
         let mut vault = Self::new();
         for (k, v) in plain {
@@ -55,23 +102,232 @@ impl Vault {
         Ok(vault)
     }
 
-    /// Persist current vault state to JSON on disk.
+    /// Persist current vault state to disk. Encrypts if a master key is
+    /// configured, otherwise writes plaintext JSON (backward compatible).
     pub fn persist_to_file(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        if let Some(key) = Self::get_master_key() {
+            let encrypted = self.encrypt_vault(&key)?;
+            std::fs::write(path, serde_json::to_string_pretty(&encrypted)?)?;
+            Ok(())
+        } else {
+            // Plaintext fallback
+            let plain: HashMap<String, String> = self
+                .secrets
+                .iter()
+                .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
+                .collect();
+            std::fs::write(path, serde_json::to_string_pretty(&plain)?)?;
+            Ok(())
+        }
+    }
+
+    /// Encrypt the vault contents using AES-256-GCM.
+    fn encrypt_vault(&self, key: &[u8; 32]) -> anyhow::Result<EncryptedVault> {
         let plain: HashMap<String, String> = self
             .secrets
             .iter()
             .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
             .collect();
-        std::fs::write(path, serde_json::to_string_pretty(&plain)?)?;
-        Ok(())
+        let plaintext = serde_json::to_string(&plain)?;
+
+        let cipher = Aes256Gcm::new_from_slice(key)
+            .map_err(|e| anyhow::anyhow!("Failed to initialize AES-256-GCM cipher: {}", e))?;
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Vault encryption failed: {}", e))?;
+
+        Ok(EncryptedVault {
+            version: 1,
+            nonce: hex::encode(nonce_bytes),
+            ciphertext: hex::encode(ciphertext),
+        })
     }
+
+    /// Decrypt an encrypted vault file using AES-256-GCM.
+    fn decrypt_vault(encrypted: &EncryptedVault) -> anyhow::Result<Self> {
+        let key = Self::get_master_key()
+            .ok_or_else(|| anyhow::anyhow!("Vault is encrypted but no master key is configured"))?;
+
+        let nonce_bytes = hex::decode(&encrypted.nonce)?;
+        let ciphertext = hex::decode(&encrypted.ciphertext)?;
+
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| anyhow::anyhow!("Failed to initialize AES-256-GCM cipher: {}", e))?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext.as_ref())
+            .map_err(|e| anyhow::anyhow!("Vault decryption failed: {}", e))?;
+
+        let plain: HashMap<String, String> = serde_json::from_slice(&plaintext)?;
+        let mut vault = Self::new();
+        for (k, v) in plain {
+            vault.set_secret(&k, v);
+        }
+        Ok(vault)
+    }
+}
+
+/// Parse a hex-encoded 32-byte (64-char) key string into a [u8; 32] array.
+fn hex_to_key(hex_str: &str) -> Option<[u8; 32]> {
+    let hex_str = hex_str.trim();
+    if hex_str.len() != 64 {
+        return None;
+    }
+    let bytes = hex::decode(hex_str).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    Some(bytes.try_into().unwrap())
 }
 
 impl Default for Vault {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_hex_to_key_valid() {
+        let hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        let key = hex_to_key(hex).expect("should parse");
+        assert_eq!(key.len(), 32);
+        assert_eq!(key[0], 0x00);
+        assert_eq!(key[31], 0x1f);
+    }
+
+    #[test]
+    fn test_hex_to_key_invalid_length() {
+        assert!(hex_to_key("tooshort").is_none());
+        assert!(
+            hex_to_key("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e").is_none()
+        );
+    }
+
+    #[test]
+    fn test_hex_to_key_invalid_chars() {
+        assert!(
+            hex_to_key("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_vault_plaintext_roundtrip() {
+        // Ensure no encryption key is set
+        std::env::remove_var(VAULT_KEY_ENV);
+        std::env::remove_var(VAULT_KEY_PATH_ENV);
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("vault.json");
+
+        let mut vault = Vault::new();
+        vault.set_secret("API_KEY", "secret123".to_string());
+        vault.persist_to_file(&path).unwrap();
+
+        let loaded = Vault::load_from_file(&path).unwrap();
+        assert_eq!(
+            loaded.get_secret("API_KEY").unwrap().expose_secret(),
+            "secret123"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_vault_encrypted_roundtrip() {
+        let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        std::env::set_var(VAULT_KEY_ENV, key_hex);
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("vault.enc.json");
+
+        let mut vault = Vault::new();
+        vault.set_secret("API_KEY", "secret123".to_string());
+        vault.set_secret("DB_PASSWORD", "hunter2".to_string());
+        vault.persist_to_file(&path).unwrap();
+
+        // Verify file is encrypted (has version/nonce/ciphertext fields)
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["version"], 1);
+        assert!(parsed["nonce"].as_str().is_some());
+        assert!(parsed["ciphertext"].as_str().is_some());
+        assert_ne!(raw, "{}");
+
+        // Load and verify secrets
+        let loaded = Vault::load_from_file(&path).unwrap();
+        assert_eq!(
+            loaded.get_secret("API_KEY").unwrap().expose_secret(),
+            "secret123"
+        );
+        assert_eq!(
+            loaded.get_secret("DB_PASSWORD").unwrap().expose_secret(),
+            "hunter2"
+        );
+
+        std::env::remove_var(VAULT_KEY_ENV);
+    }
+
+    #[test]
+    #[serial]
+    fn test_vault_encrypted_requires_key() {
+        let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        std::env::set_var(VAULT_KEY_ENV, key_hex);
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("vault.enc.json");
+
+        let mut vault = Vault::new();
+        vault.set_secret("KEY", "value".to_string());
+        vault.persist_to_file(&path).unwrap();
+
+        // Remove key and try to load
+        std::env::remove_var(VAULT_KEY_ENV);
+        let result = Vault::load_from_file(&path);
+        std::env::set_var(VAULT_KEY_ENV, key_hex); // restore immediately
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no master key"));
+        std::env::remove_var(VAULT_KEY_ENV);
+    }
+
+    #[test]
+    #[serial]
+    fn test_vault_encrypted_nonce_is_unique() {
+        let temp = tempdir().unwrap();
+        let path1 = temp.path().join("vault1.enc.json");
+        let path2 = temp.path().join("vault2.enc.json");
+
+        let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        std::env::set_var(VAULT_KEY_ENV, key_hex);
+
+        let mut vault1 = Vault::new();
+        vault1.set_secret("KEY", "value".to_string());
+        vault1.persist_to_file(&path1).unwrap();
+
+        let mut vault2 = Vault::new();
+        vault2.set_secret("KEY", "value".to_string());
+        vault2.persist_to_file(&path2).unwrap();
+
+        let raw1 = std::fs::read_to_string(&path1).unwrap();
+        let raw2 = std::fs::read_to_string(&path2).unwrap();
+
+        // Same plaintext should produce different ciphertexts (different nonces)
+        assert_ne!(raw1, raw2);
+
+        std::env::remove_var(VAULT_KEY_ENV);
     }
 }
