@@ -1060,6 +1060,16 @@ impl AgentExecutor {
                 (model.clone(), None, None)
             };
 
+            // Log routing decision to causal chain
+            if let Some(ref decision) = routing_decision_json {
+                let _ = tracer.log_event(
+                    "agent.process",
+                    "model_routing",
+                    autonoetic_types::causal_chain::EntryStatus::Success,
+                    Some(serde_json::to_value(decision).unwrap_or_default()),
+                );
+            }
+
             // From this point forward, use routed_model for all tracing and cost estimation
             let model = routed_model.clone();
 
@@ -1101,6 +1111,7 @@ impl AgentExecutor {
                 .and_then(|v| v.as_bool())
                 == Some(true);
 
+            let mut actual_model = routed_model.clone();
             let response = if skip_llm {
                 let assistant_reply = req
                     .metadata
@@ -1164,6 +1175,7 @@ impl AgentExecutor {
                                         fallback_model = %fb_model,
                                         "Fallback model succeeded"
                                     );
+                                    actual_model = fb_model.clone();
                                     final_response = Some(resp);
                                     break;
                                 }
@@ -1209,7 +1221,7 @@ impl AgentExecutor {
                 match self.openrouter_catalog.as_ref() {
                     Some(cat) => {
                         cat.estimate_cost_usd(
-                            &routed_model,
+                            &actual_model,
                             response.usage.input_tokens,
                             response.usage.output_tokens,
                         )
@@ -1271,7 +1283,7 @@ impl AgentExecutor {
             };
 
             tracer.log_llm_completion(
-                &model,
+                &actual_model,
                 &format!("{:?}", response.stop_reason),
                 &response.text,
                 response.tool_calls.len(),
@@ -1283,7 +1295,7 @@ impl AgentExecutor {
             )?;
 
             let _ = tracer.record_digest_llm_round(
-                &model,
+                &actual_model,
                 &format!("{:?}", response.stop_reason),
                 response.tool_calls.len(),
                 response.usage.input_tokens,
@@ -1303,7 +1315,7 @@ impl AgentExecutor {
                     target: "autonoetic.llm",
                     agent_id = %self.manifest.agent.id,
                     session_id = %session_id,
-                    model = %model,
+                    model = %actual_model,
                     input_tokens = response.usage.input_tokens,
                     output_tokens = response.usage.output_tokens,
                     input_context_pct = ?input_context_pct,
