@@ -820,3 +820,129 @@ fn test_credential_setup_json_path_dollar_prefix() {
     let result = autonoetic_gateway::runtime::store::parse_json_path("$.user");
     assert_eq!(result, vec!["user"]);
 }
+
+#[test]
+fn test_credential_setup_user_prompt_suspends_no_further_steps() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["api.github.com".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let result = registry
+        .execute(
+            "credential.setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "github",
+                "steps": [
+                    {
+                        "step_type": "user_action",
+                        "instruction": "Go to github.com"
+                    },
+                    {
+                        "step_type": "user_prompt",
+                        "message": "Enter your token",
+                        "secret_fields": [{"name": "token", "label": "GitHub Token", "masked": true}]
+                    },
+                    {
+                        "step_type": "api_call",
+                        "method": "GET",
+                        "url": "https://api.github.com/user"
+                    }
+                ]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("credential.setup should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["suspended"], true);
+    assert_eq!(parsed["approval_required"], true);
+    let steps = parsed["steps"].as_array().expect("steps should be array");
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["step_type"], "user_action");
+    assert_eq!(steps[1]["step_type"], "user_prompt");
+}
+
+#[test]
+fn test_credential_setup_extract_public_blocks_overlapping_secret_path() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("GITHUB_TOKEN", "ghp_secret123");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let (url, handle) = spawn_one_shot_http_server(
+        "200 OK",
+        "application/json",
+        r#"{"token":"secret123","user":"alice"}"#.to_string(),
+    );
+
+    let result = registry
+        .execute(
+            "credential.setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "github",
+                "steps": [{
+                    "step_type": "api_call",
+                    "method": "POST",
+                    "url": format!("{}/oauth/token", url),
+                    "extract_secrets": {
+                        "GITHUB_TOKEN": "token"
+                    },
+                    "extract_public": {
+                        "leaked_token": "token",
+                        "username": "user"
+                    }
+                }]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("credential.setup should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], true);
+    let public_data = parsed["public_data"]
+        .as_object()
+        .expect("public_data should be object");
+    assert!(public_data.contains_key("username"));
+    assert!(!public_data.contains_key("leaked_token"));
+
+    handle.join().expect("server thread should join");
+}

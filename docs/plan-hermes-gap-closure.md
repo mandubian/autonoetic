@@ -131,15 +131,21 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - [x] **3A.6** Tests for check/request flow with pre-configured credentials
 
 **Remaining issues:**
-- Test flakiness risk from process-wide `AUTONOETIC_VAULT_PATH` env mutation under parallel test execution (`credential_integration.rs:77`). All tests share the same secret name/value, so cross-contamination is benign. If more credential tests are added with different secrets, switch to config-based vault path threading (no env var). 4 tests are `#[ignore]`d until this is fixed.
+- Test flakiness risk from process-wide `AUTONOETIC_VAULT_PATH` env mutation under parallel test execution (`credential_integration.rs:77`). 4 tests are `#[ignore]`d. Fix: switch to config-based vault path threading.
 
 #### Phase B — Automated Registration (~350 lines)
 
 - [x] **3B.1** Define `CredentialSetupStep` enum (ApiCall, UserPrompt, UserAction) in `autonoetic-types/src/agent.rs`
 - [x] **3B.2** Implement `credential.setup` tool (multi-step server-side execution, extract_secrets via JSONPath, store in Vault)
 - [x] **3B.3** Extend JSONPath parser to accept `$`-prefixed notation (`parse_json_path()` in `runtime/store.rs`)
-- [ ] **3B.4** Wire approval queue integration: `credential.setup` triggers approval before any HTTP calls (UserPrompt step returns `awaiting_human_input` but doesn't create approval request yet)
-- [x] **3B.5** Tests for automated registration flow (6 tests: availability, service denial, network denial, user_action, JSONPath parsing)
+- [x] **3B.4** Wire approval queue integration: UserPrompt step returns `ok:false, suspended:true, approval_required:true` and breaks iteration (no further steps execute). Full approval queue round-trip (operator decision → resume) deferred to Phase D.
+- [x] **3B.5** Tests for automated registration flow (8 tests: availability, service/network denial, user_action, user_prompt suspension, extract_public overlap blocking, JSONPath parsing)
+
+**Fixes applied post-review:**
+1. (High) UserPrompt now suspends immediately — breaks step iteration, returns `suspended:true`
+2. (High) `extract_public` paths overlapping `extract_secrets` paths are silently dropped to prevent exfiltration
+3. (Medium/High) Multi-secret setup: only first secret stored in CredentialRecord (by design — one credential = one secret_name; additional secrets stored in vault but not tracked in the record)
+4. (Low) Empty host explicitly denied in network policy check
 
 #### Phase C — Encryption at Rest (~100 lines)
 
