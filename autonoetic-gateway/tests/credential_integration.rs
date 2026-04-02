@@ -876,8 +876,8 @@ fn test_credential_setup_user_prompt_suspends_no_further_steps() {
     assert_eq!(parsed["suspended"], true);
     assert_eq!(parsed["approval_required"], true);
     assert!(
-        parsed["approval_request_id"].as_str().is_some(),
-        "approval_request_id should be present"
+        parsed["request_id"].as_str().is_some(),
+        "request_id should be present"
     );
     let steps = parsed["steps"].as_array().expect("steps should be array");
     assert_eq!(steps.len(), 2);
