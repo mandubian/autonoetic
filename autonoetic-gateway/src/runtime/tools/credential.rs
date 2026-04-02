@@ -15,7 +15,7 @@ use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(CredentialCheckTool));
@@ -561,27 +561,15 @@ impl NativeTool for CredentialSetupTool {
         }
 
         // Load vault
-        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH").ok().and_then(|p| {
-            let path = std::path::PathBuf::from(p);
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
-        });
+        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+            .ok()
+            .map(PathBuf::from);
 
-        let mut vault = vault_path
-            .as_ref()
-            .and_then(|vp| crate::vault::Vault::load_from_file(vp).ok());
-
-        if vault.is_none() {
-            return Ok(json!({
-                "ok": false,
-                "error": "Vault not available. Set AUTONOETIC_VAULT_PATH to a valid vault file."
-            })
-            .to_string());
-        }
-        let vault = vault.as_mut().unwrap();
+        let mut vault = if let Some(ref vp) = vault_path {
+            crate::vault::Vault::load_from_file(vp).unwrap_or_default()
+        } else {
+            crate::vault::Vault::new()
+        };
 
         // Execute steps
         let credential_id = args.credential_id.clone().unwrap_or_else(|| {
