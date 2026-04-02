@@ -458,4 +458,20 @@ mod tests {
 
         assert!(decision.was_downgraded);
     }
+
+    #[tokio::test]
+    async fn test_fallback_chain_excludes_primary_model() {
+        let router = DeterministicRouter::new();
+        let ctx = RoutingContext::default();
+        let config = routing_config();
+        let decision = router.route(&ctx, &primary_config(), &config).await;
+
+        assert!(!decision.fallback_chain.is_empty());
+        for (provider, model) in &decision.fallback_chain {
+            assert!(
+                !(provider == "anthropic" && model == "claude-opus-4-20250514"),
+                "fallback chain should not include the primary model"
+            );
+        }
+    }
 }
