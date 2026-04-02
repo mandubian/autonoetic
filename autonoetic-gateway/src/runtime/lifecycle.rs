@@ -959,7 +959,18 @@ impl AgentExecutor {
             )?;
             *history = trimmed_history;
 
-           // --- Model Routing: select model based on budget/complexity signals ---
+            // --- Model Routing: select model based on budget/complexity signals ---
+            let default_cfg = autonoetic_types::agent::LlmConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                temperature: 0.2,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: false,
+                context_window_tokens: None,
+                base_url: None,
+            };
+            let mut routed_llm_cfg = self.manifest.llm_config.clone().unwrap_or(default_cfg);
             let (routed_model, routing_decision_json, matched_entry) = if let Some(routing_cfg) =
                 self.config.as_ref().and_then(|c| c.llm_routing.as_ref())
             {
@@ -1003,7 +1014,7 @@ impl AgentExecutor {
                         m.provider == decision.provider && m.model == decision.model
                     });
  
-                    let routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
+                    routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
                         &decision, llm_cfg, matched_entry,
                     );
  
@@ -1115,7 +1126,62 @@ impl AgentExecutor {
                 }
             } else {
                 tracing::debug!("Calling LLM");
-                self.llm.complete(&req).await?
+                let fallback_chain: Vec<(String, String)> = routing_decision_json
+                    .as_ref()
+                    .map(|d| d.fallback_chain.clone())
+                    .unwrap_or_default();
+
+                let mut last_err = None;
+                let response = self.llm.complete(&req).await;
+                match response {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        if fallback_chain.is_empty() {
+                            return Err(e);
+                        }
+                        tracing::warn!(
+                            target: "autonoetic::model_routing",
+                            original_model = %routed_model,
+                            error = %e,
+                            "Primary model failed, trying fallback chain"
+                        );
+                        last_err = Some(e);
+                        let mut final_response = None;
+                        for (fb_provider, fb_model) in &fallback_chain {
+                            if *fb_provider != routed_llm_cfg.provider {
+                                continue;
+                            }
+                            let mut fallback_req = req.clone();
+                            fallback_req.model = fb_model.clone();
+                            tracing::info!(
+                                target: "autonoetic::model_routing",
+                                fallback_model = %fb_model,
+                                "Trying fallback model"
+                            );
+                            match self.llm.complete(&fallback_req).await {
+                                Ok(resp) => {
+                                    final_response = Some(resp);
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "autonoetic::model_routing",
+                                        fallback_model = %fb_model,
+                                        error = %e,
+                                        "Fallback model failed"
+                                    );
+                                    last_err = Some(e);
+                                }
+                            }
+                        }
+                        match final_response {
+                            Some(resp) => resp,
+                            None => {
+                                return Err(last_err.unwrap());
+                            }
+                        }
+                    }
+                }
             };
 
             // --- Post-process hook: transform output after LLM call ---
