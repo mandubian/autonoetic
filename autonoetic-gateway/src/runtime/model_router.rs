@@ -120,7 +120,9 @@ impl ModelRouter for DeterministicRouter {
 
         if let Some(override_entry) = routing_config.agent_overrides.get(&ctx.agent_id) {
             if let Some(tier) = override_entry.min_tier {
-                max_tier = tier;
+                if max_tier < tier {
+                    max_tier = tier;
+                }
             }
             if let Some(ref model) = override_entry.model {
                 let override_valid = routing_config

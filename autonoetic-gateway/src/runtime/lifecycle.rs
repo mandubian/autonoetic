@@ -1001,6 +1001,14 @@ impl AgentExecutor {
 
                     let decision_json = serde_json::to_value(&decision).ok();
 
+                    let matched_entry = routing_cfg.models.iter().find(|m| {
+                        m.provider == decision.provider && m.model == decision.model
+                    });
+
+                    let routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
+                        &decision, llm_cfg, matched_entry,
+                    );
+
                     // Only apply routing when the routed provider matches the original.
                     // Cross-provider routing requires rebuilding the LlmDriver, which
                     // is not supported in the current architecture.
@@ -1022,6 +1030,8 @@ impl AgentExecutor {
                                 strategy = %decision.strategy_name,
                                 rationale = %decision.rationale,
                                 was_downgraded = decision.was_downgraded,
+                                context_window = ?routed_llm_cfg.context_window_tokens,
+                                base_url = ?routed_llm_cfg.base_url,
                                 "Model routing decision"
                             );
                         }
