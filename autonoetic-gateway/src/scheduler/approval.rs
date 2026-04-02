@@ -94,97 +94,113 @@ pub fn approve_request(
 ) -> anyhow::Result<ApprovalDecision> {
     // If secrets are provided, store them in the vault before approving
     // and create the CredentialRecord so the caller can resume.
-    if let Some(ref secret_pairs) = secrets {
-        if !secret_pairs.is_empty() {
-            if let Some(store) = gateway_store {
-                // Get the approval request to check if it's a CredentialPrompt
-                if let Some(req) = store.get_approval(request_id)? {
-                    if let ScheduledAction::CredentialPrompt {
-                        service,
-                        credential_id,
-                        secret_fields,
-                        payload,
-                        ..
-                    } = &req.action
-                    {
-                        // Extract setup metadata from payload
-                        let inject_as = payload.as_ref().and_then(|p| {
-                            p.get("inject_as")
-                                .and_then(|v| v.as_str().map(String::from))
-                        });
-                        let allowed_hosts: Vec<String> = payload
-                            .as_ref()
-                            .and_then(|p| {
-                                p.get("allowed_hosts")
-                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            })
-                            .unwrap_or_default();
-                        let expires_at = payload.as_ref().and_then(|p| {
-                            p.get("expires_at")
-                                .and_then(|v| v.as_str().map(String::from))
-                        });
+    if let Some(store) = gateway_store {
+        // Get the approval request to check if it's a CredentialPrompt
+        if let Some(req) = store.get_approval(request_id)? {
+            if let ScheduledAction::CredentialPrompt {
+                service,
+                credential_id,
+                secret_fields,
+                payload,
+                ..
+            } = &req.action
+            {
+                // For CredentialPrompt, secrets are always required
+                let secret_pairs = secrets.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "CredentialPrompt approval requires secrets. Provide them via --secret KEY=VALUE or interactively."
+                    )
+                })?;
+                if secret_pairs.is_empty() {
+                    anyhow::bail!(
+                        "CredentialPrompt approval requires at least one secret. None provided."
+                    );
+                }
 
-                        // Store secrets in vault — fail-closed, require VAULT_PATH
-                        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
-                            .ok()
-                            .map(std::path::PathBuf::from)
-                            .ok_or_else(|| anyhow::anyhow!("AUTONOETIC_VAULT_PATH must be set for credential prompt approval"))?;
-                        let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
-                                vault_path.display(),
-                                e
-                            )
-                        })?;
+                // Extract setup metadata from payload
+                let inject_as = payload.as_ref().and_then(|p| {
+                    p.get("inject_as")
+                        .and_then(|v| v.as_str().map(String::from))
+                });
+                let allowed_hosts: Vec<String> = payload
+                    .as_ref()
+                    .and_then(|p| {
+                        p.get("allowed_hosts")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    })
+                    .unwrap_or_default();
+                let expires_at = payload.as_ref().and_then(|p| {
+                    p.get("expires_at")
+                        .and_then(|v| v.as_str().map(String::from))
+                });
 
-                        // Validate that all secret_fields have corresponding values
-                        let missing: Vec<&str> = secret_fields
+                // Store secrets in vault — fail-closed, require VAULT_PATH
+                let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+                    .ok()
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "AUTONOETIC_VAULT_PATH must be set for credential prompt approval"
+                        )
+                    })?;
+                let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
+                        vault_path.display(),
+                        e
+                    )
+                })?;
+
+                // Validate that all secret_fields have corresponding values
+                let missing: Vec<&str> = secret_fields
+                    .iter()
+                    .filter(|f| !secret_pairs.iter().any(|(name, _)| name == &f.name))
+                    .map(|f| f.name.as_str())
+                    .collect();
+                if !missing.is_empty() {
+                    anyhow::bail!(
+                        "Missing required secret fields for credential prompt: {}. Provided: {:?}.",
+                        missing.join(", "),
+                        secret_pairs
                             .iter()
-                            .filter(|f| !secret_pairs.iter().any(|(name, _)| name == &f.name))
-                            .map(|f| f.name.as_str())
-                            .collect();
-                        if !missing.is_empty() {
-                            anyhow::bail!(
-                                "Missing required secret fields for credential prompt: {}. Provided: {:?}.",
-                                missing.join(", "),
-                                secret_pairs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
-                            );
-                        }
+                            .map(|(n, _)| n.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
 
-                        for field in secret_fields {
-                            if let Some((_, value)) =
-                                secret_pairs.iter().find(|(name, _)| name == &field.name)
-                            {
-                                vault.set_secret(&field.name, value.clone());
-                            }
-                        }
-                        vault.persist_to_file(&vault_path)?;
-
-                        // Create the CredentialRecord with full metadata
-                        let cred = autonoetic_types::agent::CredentialRecord {
-                            credential_id: credential_id.clone(),
-                            service: service.clone(),
-                            secret_name: secret_fields
-                                .first()
-                                .map(|f| f.name.clone())
-                                .unwrap_or_default(),
-                            inject_as,
-                            created_by_agent: Some(req.agent_id.clone()),
-                            expires_at,
-                            shared_with: vec![],
-                            allowed_hosts,
-                        };
-                        store.upsert_credential(&cred)?;
-
-                        tracing::info!(
-                            target: "approval",
-                            request_id = %request_id,
-                            credential_id = %credential_id,
-                            secrets_stored = secret_pairs.len(),
-                            "Stored secrets and created credential record for credential prompt"
-                        );
+                for field in secret_fields {
+                    if let Some((_, value)) =
+                        secret_pairs.iter().find(|(name, _)| name == &field.name)
+                    {
+                        vault.set_secret(&field.name, value.clone());
                     }
                 }
+                vault.persist_to_file(&vault_path)?;
+
+                // Create the CredentialRecord with full metadata
+                let cred = autonoetic_types::agent::CredentialRecord {
+                    credential_id: credential_id.clone(),
+                    service: service.clone(),
+                    secret_name: secret_fields
+                        .first()
+                        .map(|f| f.name.clone())
+                        .unwrap_or_default(),
+                    inject_as,
+                    created_by_agent: Some(req.agent_id.clone()),
+                    expires_at,
+                    shared_with: vec![],
+                    allowed_hosts,
+                };
+                store.upsert_credential(&cred)?;
+
+                tracing::info!(
+                    target: "approval",
+                    request_id = %request_id,
+                    credential_id = %credential_id,
+                    secrets_stored = secret_pairs.len(),
+                    "Stored secrets and created credential record for credential prompt"
+                );
             }
         }
     }
