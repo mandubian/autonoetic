@@ -136,6 +136,21 @@ pub fn approve_request(
                                 e
                             )
                         })?;
+
+                        // Validate that all secret_fields have corresponding values
+                        let missing: Vec<&str> = secret_fields
+                            .iter()
+                            .filter(|f| !secret_pairs.iter().any(|(name, _)| name == &f.name))
+                            .map(|f| f.name.as_str())
+                            .collect();
+                        if !missing.is_empty() {
+                            anyhow::bail!(
+                                "Missing required secret fields for credential prompt: {}. Provided: {:?}.",
+                                missing.join(", "),
+                                secret_pairs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+                            );
+                        }
+
                         for field in secret_fields {
                             if let Some((_, value)) =
                                 secret_pairs.iter().find(|(name, _)| name == &field.name)

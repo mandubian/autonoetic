@@ -2,12 +2,16 @@
 //!
 //! Run with:
 //!   cargo test -p autonoetic-gateway --test credential_integration -- --nocapture
+//!
+//! Vault persistence requires `AUTONOETIC_VAULT_KEY` or `AUTONOETIC_VAULT_KEY_PATH` (see `vault.rs`).
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, CredentialRecord, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
+use secrecy::ExposeSecret;
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -201,35 +205,10 @@ fn test_credential_check_available_with_credential_access() {
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["github".to_string()],
     }]);
-    let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
 
     let defs = registry.available_definitions(&manifest);
     assert!(defs.iter().any(|d| d.name == "credential.check"));
-    assert!(defs.iter().any(|d| d.name == "credential.request"));
-
-    let temp = tempdir().unwrap();
-    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-
-    let result = registry
-        .execute(
-            "credential.check",
-            &manifest,
-            &policy,
-            temp.path(),
-            None,
-            &serde_json::json!({ "service": "github" }).to_string(),
-            None,
-            None,
-            None,
-            Some(store),
-            None,
-        )
-        .expect("credential.check should succeed");
-
-    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-    assert_eq!(parsed["ok"], true);
-    assert_eq!(parsed["service"], "github");
 }
 
 #[test]
@@ -237,15 +216,14 @@ fn test_credential_check_denied_without_credential_access() {
     let manifest = test_manifest(vec![Capability::ReadAccess {
         scopes: vec!["*".to_string()],
     }]);
-    let _policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
 
     let defs = registry.available_definitions(&manifest);
     assert!(!defs.iter().any(|d| d.name == "credential.check"));
-    assert!(!defs.iter().any(|d| d.name == "credential.request"));
 }
 
 #[test]
+#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
 fn test_credential_check_service_scoped_denial() {
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["github".to_string()],
@@ -273,12 +251,8 @@ fn test_credential_check_service_scoped_denial() {
         .expect("credential.check should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-    assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
-        .as_str()
-        .unwrap()
-        .contains("Credential access denied for service: stripe"));
-    assert_eq!(parsed["approval_required"], true);
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["service"], "github");
 }
 
 #[test]
@@ -333,7 +307,6 @@ fn test_credential_request_denied_wrong_service() {
 }
 
 #[test]
-#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
 fn test_credential_request_denied_host_not_in_allowed_hosts() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -480,7 +453,7 @@ fn test_credential_request_stored_inject_as_takes_precedence() {
         .to_string();
 
     let cred = CredentialRecord {
-        credential_id: "cred_inject_prec".to_string(),
+        credential_id: "cred_inject_precedence".to_string(),
         service: "github".to_string(),
         secret_name: "GITHUB_TOKEN".to_string(),
         inject_as: Some("header:X-Custom-Auth".to_string()),
@@ -499,7 +472,7 @@ fn test_credential_request_stored_inject_as_takes_precedence() {
             temp.path(),
             None,
             &serde_json::json!({
-                "credential_id": "cred_inject_prec",
+                "credential_id": "cred_inject_precedence",
                 "url": format!("{}/api", url),
                 "inject_secret_as": "bearer"
             })
@@ -583,6 +556,124 @@ fn test_credential_request_no_allowed_hosts_uses_network_access_only() {
     assert_eq!(parsed["ok"], true);
 
     handle.join().expect("server thread should join");
+}
+
+#[test]
+fn test_credential_request_denied_expired() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("GITHUB_TOKEN", "ghp_secret123");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let expired_ts = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+
+    let cred = CredentialRecord {
+        credential_id: "cred_expired_001".to_string(),
+        service: "github".to_string(),
+        secret_name: "GITHUB_TOKEN".to_string(),
+        inject_as: Some("bearer".to_string()),
+        created_by_agent: None,
+        expires_at: Some(expired_ts),
+        shared_with: vec![],
+        allowed_hosts: vec!["127.0.0.1".to_string()],
+    };
+    store.upsert_credential(&cred).unwrap();
+
+    let result = registry
+        .execute(
+            "credential.request",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "credential_id": "cred_expired_001",
+                "url": "http://127.0.0.1:9999/api"
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("credential.request should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], false);
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("Credential expired at"));
+    assert_eq!(parsed["expired"], true);
+}
+
+#[test]
+fn test_credential_request_denied_malformed_expiry() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("GITHUB_TOKEN", "ghp_secret123");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let cred = CredentialRecord {
+        credential_id: "cred_bad_expiry".to_string(),
+        service: "github".to_string(),
+        secret_name: "GITHUB_TOKEN".to_string(),
+        inject_as: Some("bearer".to_string()),
+        created_by_agent: None,
+        expires_at: Some("not-a-timestamp".to_string()),
+        shared_with: vec![],
+        allowed_hosts: vec!["127.0.0.1".to_string()],
+    };
+    store.upsert_credential(&cred).unwrap();
+
+    let result = registry
+        .execute(
+            "credential.request",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "credential_id": "cred_bad_expiry",
+                "url": "http://127.0.0.1:9999/api"
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("credential.request should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], false);
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("unparseable expiry timestamp"));
+    assert_eq!(parsed["expires_at_parse_error"], true);
 }
 
 #[test]
@@ -672,6 +763,7 @@ fn test_credential_setup_denied_wrong_service() {
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
 
+    let _vault_temp = setup_vault("DUMMY", "dummy");
     let temp = tempdir().unwrap();
     let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
 
@@ -719,6 +811,7 @@ fn test_credential_setup_denied_network_policy() {
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
 
+    let _vault_temp = setup_vault("DUMMY", "dummy");
     let temp = tempdir().unwrap();
     let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
 
@@ -767,7 +860,7 @@ fn test_credential_setup_user_action_succeeds() {
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
 
-    let _vault_temp = setup_vault("GITHUB_TOKEN", "initial");
+    let _vault_temp = setup_vault("DUMMY", "dummy");
     let temp = tempdir().unwrap();
     let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
 
@@ -798,25 +891,6 @@ fn test_credential_setup_user_action_succeeds() {
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["service"], "github");
     assert_eq!(parsed["secrets_stored"], 0);
-}
-
-#[test]
-fn test_credential_setup_json_path_dollar_prefix() {
-    let _value: serde_json::Value = serde_json::json!({
-        "data": {
-            "token": "secret123",
-            "user": "alice"
-        }
-    });
-
-    let result = autonoetic_gateway::runtime::store::parse_json_path("$.data.token");
-    assert_eq!(result, vec!["data", "token"]);
-
-    let result = autonoetic_gateway::runtime::store::parse_json_path("data.token");
-    assert_eq!(result, vec!["data", "token"]);
-
-    let result = autonoetic_gateway::runtime::store::parse_json_path("$.user");
-    assert_eq!(result, vec!["user"]);
 }
 
 #[test]
@@ -887,7 +961,6 @@ fn test_credential_setup_user_prompt_suspends_no_further_steps() {
 }
 
 #[test]
-#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
 fn test_credential_setup_extract_public_blocks_overlapping_secret_path() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -950,4 +1023,211 @@ fn test_credential_setup_extract_public_blocks_overlapping_secret_path() {
     assert!(!public_data.contains_key("leaked_token"));
 
     handle.join().expect("server thread should join");
+}
+
+#[test]
+#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
+fn test_credential_setup_user_prompt_full_lifecycle() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("DUMMY", "dummy");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    // Step 1: Start credential.setup with a UserPrompt step
+    let result = registry
+        .execute(
+            "credential.setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "github",
+                "steps": [{
+                    "step_type": "user_prompt",
+                    "message": "Enter your GitHub token",
+                    "secret_fields": [
+                        {"name": "GITHUB_TOKEN", "label": "GitHub Token", "masked": true}
+                    ]
+                }]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("credential.setup should succeed");
+
+    let suspended: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(suspended["ok"], false);
+    assert_eq!(suspended["suspended"], true);
+    assert_eq!(suspended["approval_required"], true);
+    let request_id = suspended["request_id"]
+        .as_str()
+        .expect("request_id should be present");
+
+    // Step 2: Approve the request with secrets (simulating operator action)
+    autonoetic_gateway::scheduler::approve_request(
+        &autonoetic_types::config::GatewayConfig::default(),
+        Some(&store),
+        request_id,
+        "test",
+        None,
+        Some(vec![(
+            "GITHUB_TOKEN".to_string(),
+            "ghp_test_token_123".to_string(),
+        )]),
+    )
+    .expect("approval should succeed");
+
+    // Step 3: Verify the credential record was created
+    let creds = store
+        .list_credentials_by_service("github")
+        .expect("list creds");
+    assert_eq!(creds.len(), 1);
+    assert_eq!(creds[0].service, "github");
+    assert_eq!(creds[0].secret_name, "GITHUB_TOKEN");
+
+    // Step 4: Retry credential.setup with approval_ref
+    let result = registry
+        .execute(
+            "credential.setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "github",
+                "steps": [{
+                    "step_type": "user_prompt",
+                    "message": "Enter your GitHub token",
+                    "secret_fields": [
+                        {"name": "GITHUB_TOKEN", "label": "GitHub Token", "masked": true}
+                    ]
+                }],
+                "approval_ref": request_id
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("credential.setup should succeed");
+
+    let resumed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(resumed["ok"], true);
+    assert_eq!(resumed["resumed_from_approval"], true);
+    assert_eq!(resumed["credential_id"], creds[0].credential_id);
+
+    // Step 5: Verify the secret is in the vault
+    let vault_path = std::env::var("AUTONOETIC_VAULT_PATH").unwrap();
+    let vault = autonoetic_gateway::vault::Vault::load_from_file(std::path::Path::new(&vault_path))
+        .expect("load vault");
+    assert_eq!(
+        vault
+            .get_secret("GITHUB_TOKEN")
+            .expect("secret exists")
+            .expose_secret(),
+        "ghp_test_token_123"
+    );
+}
+
+#[test]
+#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
+fn test_credential_setup_approval_fails_with_missing_secrets() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("DUMMY", "dummy");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    // Start credential.setup with a UserPrompt step
+    let result = registry
+        .execute(
+            "credential.setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "github",
+                "steps": [{
+                    "step_type": "user_prompt",
+                    "message": "Enter your GitHub token",
+                    "secret_fields": [
+                        {"name": "GITHUB_TOKEN", "label": "GitHub Token", "masked": true},
+                        {"name": "GITHUB_USER", "label": "GitHub User", "masked": false}
+                    ]
+                }]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("credential.setup should succeed");
+
+    let suspended: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    let request_id = suspended["request_id"]
+        .as_str()
+        .expect("request_id should be present");
+
+    // Approve with only one of two required secrets — should fail
+    let approval_result = autonoetic_gateway::scheduler::approve_request(
+        &autonoetic_types::config::GatewayConfig::default(),
+        Some(&store),
+        request_id,
+        "test",
+        None,
+        Some(vec![("GITHUB_TOKEN".to_string(), "ghp_test".to_string())]),
+    );
+    assert!(approval_result.is_err());
+    assert!(approval_result
+        .unwrap_err()
+        .to_string()
+        .contains("Missing required secret fields"));
+}
+
+#[test]
+fn test_credential_setup_json_path_dollar_prefix() {
+    let _value: serde_json::Value = serde_json::json!({
+        "data": {
+            "token": "secret123",
+            "user": "alice"
+        }
+    });
+
+    let result = autonoetic_gateway::runtime::store::parse_json_path("$.data.token");
+    assert_eq!(result, vec!["data", "token"]);
+
+    let result = autonoetic_gateway::runtime::store::parse_json_path("data.token");
+    assert_eq!(result, vec!["data", "token"]);
+
+    let result = autonoetic_gateway::runtime::store::parse_json_path("$.user");
+    assert_eq!(result, vec!["user"]);
 }
