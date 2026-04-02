@@ -430,6 +430,8 @@ struct CredentialSetupArgs {
     inject_as: Option<String>,
     /// Optional: hosts this credential is bound to.
     allowed_hosts: Option<Vec<String>>,
+    /// Optional: approval reference after operator provides secrets via approval channel.
+    approval_ref: Option<String>,
 }
 
 impl NativeTool for CredentialSetupTool {
@@ -538,6 +540,26 @@ impl NativeTool for CredentialSetupTool {
             .to_string());
         };
 
+        // Handle resume after approval: if approval_ref is provided,
+        // check if the credential was already created by the approval handler.
+        if let Some(ref approval_ref) = args.approval_ref {
+            if let Some(cred) = store.get_credential(approval_ref)? {
+                return Ok(json!({
+                    "ok": true,
+                    "credential_id": cred.credential_id,
+                    "service": cred.service,
+                    "secrets_stored": 1,
+                    "resumed_from_approval": true,
+                })
+                .to_string());
+            }
+            return Ok(json!({
+                "ok": false,
+                "error": format!("Approval reference '{}' not found or not yet approved", approval_ref),
+            })
+            .to_string());
+        }
+
         // Check network policy for all API call steps before executing any
         for step in &args.steps {
             if let CredentialSetupStep::ApiCall { url, .. } = step {
@@ -560,13 +582,18 @@ impl NativeTool for CredentialSetupTool {
             }
         }
 
-        // Load vault
+        // Load vault — fail-closed if it can't be loaded
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
             .map(PathBuf::from);
-
         let mut vault = if let Some(ref vp) = vault_path {
-            crate::vault::Vault::load_from_file(vp).unwrap_or_default()
+            crate::vault::Vault::load_from_file(vp).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load vault from {}: {}. Set AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH.",
+                    vp.display(),
+                    e
+                )
+            })?
         } else {
             crate::vault::Vault::new()
         };
