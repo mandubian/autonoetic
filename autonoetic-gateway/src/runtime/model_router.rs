@@ -32,9 +32,10 @@ pub struct RoutingDecision {
 }
 
 /// Trait for model routing strategies.
+#[async_trait::async_trait]
 pub trait ModelRouter: Send + Sync {
     /// Select a model given the routing context and available models.
-    fn route(
+    async fn route(
         &self,
         ctx: &RoutingContext,
         primary_config: &LlmConfig,
@@ -109,8 +110,9 @@ impl DeterministicRouter {
     }
 }
 
+#[async_trait::async_trait]
 impl ModelRouter for DeterministicRouter {
-    fn route(
+    async fn route(
         &self,
         ctx: &RoutingContext,
         primary_config: &LlmConfig,
@@ -204,8 +206,9 @@ impl ModelRouter for DeterministicRouter {
 #[derive(Debug, Clone, Default)]
 pub struct DisabledRouter;
 
+#[async_trait::async_trait]
 impl ModelRouter for DisabledRouter {
-    fn route(
+    async fn route(
         &self,
         _ctx: &RoutingContext,
         primary_config: &LlmConfig,
@@ -326,8 +329,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_deterministic_router_selects_primary_when_budget_low() {
+    #[tokio::test]
+    async fn test_deterministic_router_selects_primary_when_budget_low() {
         let router = DeterministicRouter::new();
         let ctx = RoutingContext {
             agent_id: "test-agent".to_string(),
@@ -341,7 +344,7 @@ mod tests {
             time: TimeSignals::default(),
         };
         let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config);
+        let decision = router.route(&ctx, &primary_config(), &config).await;
 
         assert_eq!(decision.provider, "anthropic");
         assert_eq!(decision.model, "claude-opus-4-20250514");
@@ -349,8 +352,8 @@ mod tests {
         assert_eq!(decision.strategy_name, "deterministic");
     }
 
-    #[test]
-    fn test_deterministic_router_downgrades_on_budget_pressure() {
+    #[tokio::test]
+    async fn test_deterministic_router_downgrades_on_budget_pressure() {
         let router = DeterministicRouter::new();
         let ctx = RoutingContext {
             agent_id: "test-agent".to_string(),
@@ -364,14 +367,14 @@ mod tests {
             time: TimeSignals::default(),
         };
         let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config);
+        let decision = router.route(&ctx, &primary_config(), &config).await;
 
         assert!(decision.was_downgraded);
         assert_eq!(decision.model, "claude-haiku-3-20250307");
     }
 
-    #[test]
-    fn test_deterministic_router_downgrades_on_cost_threshold() {
+    #[tokio::test]
+    async fn test_deterministic_router_downgrades_on_cost_threshold() {
         let router = DeterministicRouter::new();
         let ctx = RoutingContext {
             agent_id: "test-agent".to_string(),
@@ -385,17 +388,17 @@ mod tests {
             time: TimeSignals::default(),
         };
         let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config);
+        let decision = router.route(&ctx, &primary_config(), &config).await;
 
         assert!(decision.was_downgraded);
     }
 
-    #[test]
-    fn test_deterministic_router_includes_fallback_chain() {
+    #[tokio::test]
+    async fn test_deterministic_router_includes_fallback_chain() {
         let router = DeterministicRouter::new();
         let ctx = RoutingContext::default();
         let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config);
+        let decision = router.route(&ctx, &primary_config(), &config).await;
 
         assert!(!decision.fallback_chain.is_empty());
         assert!(decision
@@ -404,8 +407,8 @@ mod tests {
             .any(|(p, m)| { p == "anthropic" && m == "claude-sonnet-4-20250514" }));
     }
 
-    #[test]
-    fn test_disabled_router_always_returns_primary() {
+    #[tokio::test]
+    async fn test_disabled_router_always_returns_primary() {
         let router = DisabledRouter;
         let ctx = RoutingContext {
             budget: BudgetState {
@@ -415,7 +418,7 @@ mod tests {
             ..Default::default()
         };
         let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config);
+        let decision = router.route(&ctx, &primary_config(), &config).await;
 
         assert_eq!(decision.provider, "anthropic");
         assert_eq!(decision.model, "claude-opus-4-20250514");
@@ -440,8 +443,8 @@ mod tests {
         assert_eq!(new_config.temperature, base.temperature);
     }
 
-    #[test]
-    fn test_script_mode_forces_economy_tier() {
+    #[tokio::test]
+    async fn test_script_mode_forces_economy_tier() {
         let router = DeterministicRouter::new();
         let ctx = RoutingContext {
             complexity: ComplexitySignals {
@@ -451,7 +454,7 @@ mod tests {
             ..Default::default()
         };
         let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config);
+        let decision = router.route(&ctx, &primary_config(), &config).await;
 
         assert!(decision.was_downgraded);
     }
