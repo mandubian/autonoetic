@@ -212,6 +212,16 @@ pub struct BudgetState {
     pub session_cost_usd: Option<f64>,
 }
 
+/// Context for making a routing decision.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoutingContext {
+    pub agent_id: String,
+    pub session_id: String,
+    pub budget: BudgetState,
+    pub complexity: ComplexitySignals,
+    pub time: TimeSignals,
+}
+
 /// Complexity signals for routing decisions.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComplexitySignals {
@@ -246,47 +256,6 @@ pub struct TimeSignals {
     pub elapsed_secs: Option<u64>,
 }
 
-/// Routing strategy selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutingStrategy {
-    /// Always use the primary model (no routing).
-    #[default]
-    Disabled,
-    /// Deterministic routing based on budget + complexity signals.
-    Deterministic,
-}
-
-/// Configuration for deterministic model routing.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DeterministicRoutingConfig {
-    /// Maximum capability tier allowed (filters out models above this tier).
-    /// Set to premium to allow all models; economy to restrict to cheap models only.
-    #[serde(default = "default_max_tier")]
-    pub max_tier: CapabilityTier,
-    /// Maximum cost per session in USD before downgrading to economy tier.
-    #[serde(default)]
-    pub max_cost_usd: Option<f64>,
-    /// Budget pressure threshold (0.0–1.0) at which to downgrade to economy.
-    #[serde(default = "default_budget_downgrade_threshold")]
-    pub budget_downgrade_threshold: f32,
-    /// Whether to include fallback chain on failure.
-    #[serde(default = "default_true_fn")]
-    pub enable_fallback_chain: bool,
-}
-
-fn default_max_tier() -> CapabilityTier {
-    CapabilityTier::Premium
-}
-
-fn default_true_fn() -> bool {
-    true
-}
-
-fn default_budget_downgrade_threshold() -> f32 {
-    0.8
-}
-
 /// Agent-specific model override.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelOverride {
@@ -307,6 +276,42 @@ pub struct ApprovalGatesConfig {
     /// Require approval when budget threshold is crossed.
     #[serde(default)]
     pub budget_threshold_crossed: Option<f32>,
+}
+
+fn default_budget_downgrade_threshold() -> f32 {
+    0.8
+}
+
+fn default_max_tier() -> CapabilityTier {
+    CapabilityTier::Premium
+}
+
+/// Routing strategy selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingStrategy {
+    /// Always use the primary model (no routing).
+    #[default]
+    Disabled,
+    /// Deterministic routing based on budget + complexity signals.
+    Deterministic,
+}
+
+/// Configuration for deterministic model routing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeterministicRoutingConfig {
+    /// Maximum capability tier allowed (filters out models above this tier).
+    #[serde(default = "default_max_tier")]
+    pub max_tier: CapabilityTier,
+    /// Maximum cost per session in USD before downgrading to economy tier.
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
+    /// Budget pressure threshold (0.0–1.0) at which to downgrade to economy.
+    #[serde(default = "default_budget_downgrade_threshold")]
+    pub budget_downgrade_threshold: f32,
+    /// Whether to include fallback chain on failure.
+    #[serde(default = "default_true")]
+    pub enable_fallback_chain: bool,
 }
 
 /// Top-level LLM routing configuration in gateway.yaml.
