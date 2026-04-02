@@ -326,12 +326,12 @@ pub enum AgentCommands {
 /// Trust mode for importing external AgentSkills.io skills.
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum TrustMode {
-    /// Auto-grant all capabilities declared in allowed-tools.
+    /// Auto-grant all capabilities inferred from allowed-tools. No approval gates.
     Generous,
-    /// Require approval for each capability at first use (default).
+    /// Preserve inferred capabilities but require approval for all privileged operations (default).
     #[default]
     Strict,
-    /// Dry-run sandbox — log all tool calls, report before granting.
+    /// Restrict to read-only access; all operations require approval before execution.
     Audit,
 }
 

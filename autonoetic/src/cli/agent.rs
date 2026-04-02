@@ -1604,7 +1604,7 @@ pub fn handle_agent_import_skill(
             (caps, false)
         }
         TrustMode::Strict => {
-            let caps = if parsed_manifest.capabilities.is_empty() {
+            let mut caps = if parsed_manifest.capabilities.is_empty() {
                 let allowed_tools: Vec<String> = parsed_manifest
                     .agentskills_import
                     .as_ref()
@@ -1622,14 +1622,21 @@ pub fn handle_agent_import_skill(
             } else {
                 parsed_manifest.capabilities.clone()
             };
+            caps.push(autonoetic_types::capability::Capability::ApprovalQueue {
+                patterns: vec!["*".to_string()],
+            });
             (caps, true)
         }
         TrustMode::Audit => {
-            (vec![
+            let mut caps = vec![
                 autonoetic_types::capability::Capability::ReadAccess {
                     scopes: vec!["self.*".to_string()],
                 },
-            ], true)
+            ];
+            caps.push(autonoetic_types::capability::Capability::ApprovalQueue {
+                patterns: vec!["*".to_string()],
+            });
+            (caps, true)
         }
     };
 
@@ -1811,7 +1818,15 @@ pub fn handle_agent_import_skill(
             TrustMode::Strict => "strict",
             TrustMode::Audit => "audit",
         };
-        info!("Trust mode '{}' applied — capabilities were restricted during import", trust_label);
+        info!(
+            "Trust mode '{}' applied: imported agent capabilities are {}.",
+            trust_label,
+            match trust {
+                TrustMode::Generous => "unchanged",
+                TrustMode::Strict => "preserved but all privileged operations require approval",
+                TrustMode::Audit => "restricted to read-only; all operations require approval",
+            }
+        );
     }
 
     if let Some(import_meta) = &target_manifest.agentskills_import {
