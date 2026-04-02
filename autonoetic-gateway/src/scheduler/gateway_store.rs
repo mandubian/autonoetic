@@ -681,6 +681,45 @@ impl GatewayStore {
             );
             CREATE INDEX IF NOT EXISTS idx_credentials_service ON credentials(service);
             CREATE INDEX IF NOT EXISTS idx_credentials_agent ON credentials(created_by_agent);
+
+            CREATE TABLE IF NOT EXISTS session_transcripts (
+                transcript_id  TEXT PRIMARY KEY,
+                session_id     TEXT NOT NULL,
+                root_session_id TEXT NOT NULL,
+                agent_id       TEXT NOT NULL,
+                revision_id    TEXT,
+                user_id        TEXT,
+                started_at     TEXT NOT NULL,
+                ended_at       TEXT,
+                status         TEXT NOT NULL DEFAULT 'completed',
+                turn_count     INTEGER NOT NULL DEFAULT 0,
+                transcript_handle TEXT,
+                excerpt        TEXT,
+                origin_node_id TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_transcripts_agent ON session_transcripts(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_session_transcripts_root ON session_transcripts(root_session_id);
+            CREATE INDEX IF NOT EXISTS idx_session_transcripts_started ON session_transcripts(started_at);
+            CREATE INDEX IF NOT EXISTS idx_session_transcripts_status ON session_transcripts(status);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS session_transcripts_fts USING fts5(
+                excerpt,
+                content='session_transcripts',
+                content_rowid='rowid'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS session_transcripts_ai AFTER INSERT ON session_transcripts BEGIN
+                INSERT INTO session_transcripts_fts(rowid, excerpt) VALUES (new.rowid, new.excerpt);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS session_transcripts_ad AFTER DELETE ON session_transcripts BEGIN
+                INSERT INTO session_transcripts_fts(session_transcripts_fts, rowid, excerpt) VALUES('delete', old.rowid, old.excerpt);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS session_transcripts_au AFTER UPDATE ON session_transcripts BEGIN
+                INSERT INTO session_transcripts_fts(session_transcripts_fts, rowid, excerpt) VALUES('delete', old.rowid, old.excerpt);
+                INSERT INTO session_transcripts_fts(rowid, excerpt) VALUES (new.rowid, new.excerpt);
+            END;
             ",
         )?;
 
@@ -2532,6 +2571,130 @@ impl GatewayStore {
                 approval_request_id: row.get(16)?,
                 arguments: row.get(17)?,
                 result: row.get(18)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    pub fn upsert_session_transcript(
+        &self,
+        record: &autonoetic_types::causal_chain::SessionTranscriptRecord,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session_transcripts (
+                transcript_id, session_id, root_session_id, agent_id,
+                revision_id, user_id, started_at, ended_at, status,
+                turn_count, transcript_handle, excerpt, origin_node_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(transcript_id) DO UPDATE SET
+                ended_at = excluded.ended_at,
+                status = excluded.status,
+                turn_count = excluded.turn_count,
+                transcript_handle = excluded.transcript_handle,
+                excerpt = excluded.excerpt",
+            params![
+                record.transcript_id,
+                record.session_id,
+                record.root_session_id,
+                record.agent_id,
+                record.revision_id,
+                record.user_id,
+                record.started_at,
+                record.ended_at,
+                record.status,
+                record.turn_count,
+                record.transcript_handle,
+                record.excerpt,
+                record.origin_node_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn search_session_transcripts(
+        &self,
+        query: Option<&str>,
+        agent_id: Option<&str>,
+        root_session_id: Option<&str>,
+        status: Option<&str>,
+        since: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<autonoetic_types::causal_chain::SessionTranscriptRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut conditions = Vec::new();
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
+
+        if let Some(q) = query {
+            conditions.push("transcript_id IN (SELECT transcript_id FROM session_transcripts_fts WHERE session_transcripts_fts MATCH ?)".to_string());
+            params.push(rusqlite::types::Value::Text(q.to_string()));
+        }
+
+        if let Some(aid) = agent_id {
+            conditions.push("agent_id = ?".to_string());
+            params.push(rusqlite::types::Value::Text(aid.to_string()));
+        }
+
+        if let Some(rid) = root_session_id {
+            conditions.push("root_session_id = ?".to_string());
+            params.push(rusqlite::types::Value::Text(rid.to_string()));
+        }
+
+        if let Some(s) = status {
+            conditions.push("status = ?".to_string());
+            params.push(rusqlite::types::Value::Text(s.to_string()));
+        }
+
+        if let Some(since_time) = since {
+            conditions.push("started_at >= ?".to_string());
+            params.push(rusqlite::types::Value::Text(since_time.to_string()));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            "1".to_string()
+        } else {
+            conditions.join(" AND ")
+        };
+
+        let order_by = if query.is_some() {
+            "ORDER BY bm25(session_transcripts_fts) ASC"
+        } else {
+            "ORDER BY started_at DESC"
+        };
+
+        let sql = format!(
+            "SELECT transcript_id, session_id, root_session_id, agent_id,
+                    revision_id, user_id, started_at, ended_at, status,
+                    turn_count, transcript_handle, excerpt, origin_node_id
+             FROM session_transcripts
+             WHERE {} {} LIMIT ?",
+            where_clause, order_by,
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        params.push(rusqlite::types::Value::Integer(limit));
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(autonoetic_types::causal_chain::SessionTranscriptRecord {
+                transcript_id: row.get(0)?,
+                session_id: row.get(1)?,
+                root_session_id: row.get(2)?,
+                agent_id: row.get(3)?,
+                revision_id: row.get(4)?,
+                user_id: row.get(5)?,
+                started_at: row.get(6)?,
+                ended_at: row.get(7)?,
+                status: row.get(8)?,
+                turn_count: row.get(9)?,
+                transcript_handle: row.get(10)?,
+                excerpt: row.get(11)?,
+                origin_node_id: row.get(12)?,
             })
         })?;
 

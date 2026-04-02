@@ -90,3 +90,22 @@ pub struct ExecutionTraceRecord {
     pub arguments: Option<String>,
     pub result: Option<String>,
 }
+
+/// Session transcript record for storage in gateway.db session_transcripts table.
+/// Used for full-text search across conversation history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTranscriptRecord {
+    pub transcript_id: String,
+    pub session_id: String,
+    pub root_session_id: String,
+    pub agent_id: String,
+    pub revision_id: Option<String>,
+    pub user_id: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub status: String,
+    pub turn_count: i64,
+    pub transcript_handle: Option<String>,
+    pub excerpt: Option<String>,
+    pub origin_node_id: Option<String>,
+}

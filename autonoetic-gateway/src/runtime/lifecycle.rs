@@ -319,6 +319,8 @@ pub struct AgentExecutor {
         Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
     /// Shared live digest (`digest.md`) when `gateway_dir` is set.
     pub live_digest: Option<Arc<std::sync::Mutex<crate::runtime::live_digest::LiveDigestWriter>>>,
+    /// Last conversation history from `execute_with_history`, retained for `close_session` transcript persistence.
+    pub last_history: Vec<Message>,
 }
 
 impl AgentExecutor {
@@ -353,6 +355,7 @@ impl AgentExecutor {
             runtime_lock_hash: None,
             active_executions: None,
             live_digest: None,
+            last_history: Vec::new(),
         }
     }
 
@@ -436,6 +439,32 @@ impl AgentExecutor {
         persist_reevaluation_state(&self.agent_dir, |state| {
             state.last_outcome = Some(reason.to_string());
         })?;
+
+        if let Some(gateway_dir) = self.gateway_dir.as_ref() {
+            if !self.last_history.is_empty() {
+                let mut tracer =
+                    SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?;
+                let disclosure_state = DisclosureState::new(
+                    self.manifest
+                        .disclosure
+                        .clone()
+                        .unwrap_or_else(DisclosurePolicy::default),
+                );
+                if let Err(e) = persist_history_to_content_store(
+                    &self.agent_dir,
+                    &session_id,
+                    &self.last_history,
+                    gateway_dir,
+                    &mut tracer,
+                    &disclosure_state,
+                    self.gateway_store.as_deref(),
+                    Some(&self.manifest.agent.id),
+                ) {
+                    tracing::warn!("Failed to persist history on close: {}", e);
+                }
+            }
+        }
+
         if let Some(d) = self.live_digest.take() {
             if let Ok(mut g) = d.lock() {
                 let _ = g.write_session_summary(reason);
@@ -1343,6 +1372,8 @@ impl AgentExecutor {
                             gateway_dir,
                             &mut tracer,
                             &disclosure_state,
+                            self.gateway_store.as_deref(),
+                            Some(&self.manifest.agent.id),
                         ) {
                             tracing::warn!("Failed to persist history: {}", e);
                         }
@@ -1371,9 +1402,11 @@ impl AgentExecutor {
             }
         }
 
-        Ok(TurnOutcome::Completed(
+        let outcome = Ok(TurnOutcome::Completed(
             latest_assistant_text.map(|t| disclosure_state.filter_reply(&t)),
-        ))
+        ));
+        self.last_history = history.clone();
+        outcome
     }
 
     fn log_output_schema_validation(
@@ -2832,6 +2865,8 @@ fn persist_history_to_content_store(
     gateway_dir: &Path,
     tracer: &mut SessionTracer,
     disclosure_state: &DisclosureState,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    agent_id: Option<&str>,
 ) -> anyhow::Result<()> {
     use crate::runtime::content_store::ContentStore;
     const MAX_PERSISTED_MESSAGES: usize = 400;
@@ -2895,6 +2930,39 @@ fn persist_history_to_content_store(
     // Register in session
     store.register_name(session_id, "session_history", &history_handle)?;
 
+    // Extract searchable excerpt for FTS
+    let excerpt = extract_searchable_excerpt(&merged_history);
+
+    // Upsert session transcript to database for FTS
+    if let Some(gs) = gateway_store {
+        let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+        let transcript_id = format!("stx-{}", uuid::Uuid::new_v4());
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = autonoetic_types::causal_chain::SessionTranscriptRecord {
+            transcript_id,
+            session_id: session_id.to_string(),
+            root_session_id: root_session_id.to_string(),
+            agent_id: agent_id.unwrap_or("unknown").to_string(),
+            revision_id: None,
+            user_id: None,
+            started_at: now.clone(),
+            ended_at: None,
+            status: "completed".to_string(),
+            turn_count: history.len() as i64,
+            transcript_handle: Some(history_handle.to_string()),
+            excerpt: Some(excerpt),
+            origin_node_id: None,
+        };
+        if let Err(e) = gs.upsert_session_transcript(&record) {
+            tracing::warn!(
+                target: "lifecycle",
+                session_id = %session_id,
+                error = %e,
+                "Failed to upsert session transcript"
+            );
+        }
+    }
+
     // Log causal chain entry
     tracer.log_history_persisted(history.len(), &history_handle);
 
@@ -2907,6 +2975,34 @@ fn persist_history_to_content_store(
     );
 
     Ok(())
+}
+
+pub fn extract_searchable_excerpt(messages: &[Message]) -> String {
+    const MAX_CHARS: usize = 8000;
+    let mut parts = Vec::new();
+    let mut total = 0;
+    for msg in messages {
+        if !msg.content.is_empty() {
+            let role_label = match msg.role {
+                crate::llm::Role::System => "[system]",
+                crate::llm::Role::User => "[user]",
+                crate::llm::Role::Assistant => "[assistant]",
+                crate::llm::Role::Tool => "[tool]",
+            };
+            let line = format!("{}: {}", role_label, msg.content);
+            let line_len = line.len();
+            if total + line_len > MAX_CHARS {
+                let remaining = MAX_CHARS.saturating_sub(total);
+                if remaining > 0 {
+                    parts.push(line[..remaining].to_string());
+                }
+                break;
+            }
+            parts.push(line);
+            total += line_len;
+        }
+    }
+    parts.join("\n")
 }
 
 #[cfg(test)]
@@ -2941,6 +3037,8 @@ mod history_persistence_tests {
             &gateway_dir,
             &mut tracer,
             &disclosure,
+            None,
+            None,
         )?;
 
         let store = ContentStore::new(&gateway_dir)?;

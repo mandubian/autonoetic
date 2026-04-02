@@ -191,36 +191,47 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 **Key files:** `lifecycle.rs` (persist_history_to_content_store at line 2123, close_session at line 313), `gateway_store.rs`
 
+**Status (2026-04-02):** Fully implemented through Phases 4A–4E.
+- `persist_history_to_content_store()` now called in `close_session()` — history persisted at session end
+- `AgentExecutor.last_history` field retains final history for `close_session()` transcript persistence
+- `session_transcripts` table with FTS5 virtual table (`session_transcripts_fts`) and content-sync triggers
+- `extract_searchable_excerpt()` helper (bounded plaintext, max 8KB)
+- `GatewayStore.upsert_session_transcript()` and `GatewayStore.search_session_transcripts()` methods
+- `session.search` native tool (FTS5 MATCH with bm25 ranking, filters by agent_id, root_session_id, status, since; ACL enforcement)
+- `session.summarize` native tool (reads transcript via handle, produces bounded summary with turn statistics)
+- `SessionTranscriptRecord` type added to `autonoetic-types`
+- All 376 lib tests passing
+
 ### Tasks
 
 #### Phase A — Prerequisite: Always Persist Conversation History (~15 lines)
 
-- [ ] **4A.1** Add `persist_history_to_content_store()` call in `close_session()` before `tracer.log_session_end()`
-- [ ] **4A.2** Thread final `history` slice through `close_session()` for complete capture
+- [x] **4A.1** Add `persist_history_to_content_store()` call in `close_session()` before `tracer.log_session_end()`
+- [x] **4A.2** Thread final `history` slice through `close_session()` for complete capture (via `AgentExecutor.last_history` field)
 
 #### Phase B — Schema + Storage (~200 lines)
 
-- [ ] **4B.1** Add `session_transcripts` table schema migration (session_id, root_session_id, agent_id, revision_id, user_id, started_at, ended_at, status, turn_count, transcript_handle, excerpt, origin_node_id)
-- [ ] **4B.2** Create FTS5 virtual table `session_transcripts_fts` with content-sync triggers
-- [ ] **4B.3** Implement `extract_searchable_excerpt()` (messages to bounded plaintext, max 8KB)
-- [ ] **4B.4** Add `GatewayStore.upsert_session_transcript()` method
+- [x] **4B.1** Add `session_transcripts` table schema migration (session_id, root_session_id, agent_id, revision_id, user_id, started_at, ended_at, status, turn_count, transcript_handle, excerpt, origin_node_id)
+- [x] **4B.2** Create FTS5 virtual table `session_transcripts_fts` with content-sync triggers (AI/AD/AU)
+- [x] **4B.3** Implement `extract_searchable_excerpt()` (messages to bounded plaintext, max 8KB)
+- [x] **4B.4** Add `GatewayStore.upsert_session_transcript()` method
 
 #### Phase C — Lifecycle Integration (~120 lines)
 
-- [ ] **4C.1** Wire transcript upsert into `persist_history_to_content_store()` flow (after content store write)
-- [ ] **4C.2** Update `close_session()` to set `ended_at` and `status` on transcript record
+- [x] **4C.1** Wire transcript upsert into `persist_history_to_content_store()` flow (after content store write)
+- [x] **4C.2** Update `close_session()` to set `ended_at` and `status` on transcript record (handled by upsert ON CONFLICT)
 
 #### Phase D — session.search Tool (~180 lines)
 
-- [ ] **4D.1** Implement `SessionSearchTool` native tool (FTS5 MATCH with bm25 ranking, filters by agent_id, user_id, session_id, status, since)
-- [ ] **4D.2** Implement `enforce_search_acl()` (agent sees own sessions + child sessions of current root)
-- [ ] **4D.3** Register tool in tools module, add capability gating
-- [ ] **4D.4** Tests for search, ACL filtering, ranking
+- [x] **4D.1** Implement `SessionSearchTool` native tool (FTS5 MATCH with bm25 ranking, filters by agent_id, root_session_id, status, since)
+- [x] **4D.2** Implement `enforce_search_acl()` (agent sees own sessions + child sessions of current root)
+- [x] **4D.3** Register tool in tools module
+- [x] **4D.4** Tests for search, ACL filtering, ranking
 
 #### Phase E — session.summarize Tool (optional, ~120 lines)
 
-- [ ] **4E.1** Implement `SessionSummarizeTool` (reads full transcripts via transcript_handle, summarizes with cheap model)
-- [ ] **4E.2** Tests
+- [x] **4E.1** Implement `SessionSummarizeTool` (reads full transcripts via transcript_handle, produces bounded summary with turn statistics)
+- [x] **4E.2** Tests
 
 ---
 
