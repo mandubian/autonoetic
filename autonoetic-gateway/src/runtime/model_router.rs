@@ -192,8 +192,8 @@ impl ModelRouter for DeterministicRouter {
             self.build_fallback_chain(&primary_model, routing_config, effective_max_tier);
 
         let rationale = format!(
-            "deterministic: tier={}, budget_used={:.0}%, cost=${:.2}, downgraded={}",
-            format!("{:?}", max_tier).to_lowercase(),
+            "deterministic: effective_tier={}, budget_used={:.0}%, cost=${:.2}, downgraded={}",
+            format!("{:?}", effective_max_tier).to_lowercase(),
             ctx.budget.session_budget_used_pct.unwrap_or(0.0) * 100.0,
             ctx.budget.session_cost_usd.unwrap_or(0.0),
             was_downgraded,
