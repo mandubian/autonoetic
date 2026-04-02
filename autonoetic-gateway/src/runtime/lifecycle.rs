@@ -997,7 +997,7 @@ impl AgentExecutor {
                     };
 
                     let router = crate::runtime::model_router::create_router(routing_cfg.strategy);
-                    let decision = router.route(&ctx, llm_cfg, routing_cfg);
+                    let decision = router.route(&ctx, llm_cfg, routing_cfg).await;
 
                     let decision_json = serde_json::to_value(&decision).ok();
 
