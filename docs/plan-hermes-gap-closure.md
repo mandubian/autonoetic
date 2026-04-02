@@ -123,12 +123,15 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 #### Phase A — MVP: Pre-configured Credentials (~250 lines)
 
-- [ ] **3A.1** Define `CredentialRecord` struct (credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with)
-- [ ] **3A.2** Add `credentials` table schema migration in `gateway_store.rs`
-- [ ] **3A.3** Implement `credential.check` tool (query CredentialRecord by service name)
-- [ ] **3A.4** Implement `credential.request` tool (fetch secret from Vault, inject into HTTP request via reqwest, sanitize response)
-- [ ] **3A.5** Add `CredentialAccess` capability type with service-scoped patterns
-- [ ] **3A.6** Tests for check/request flow with pre-configured credentials
+- [x] **3A.1** Define `CredentialRecord` struct (credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts)
+- [x] **3A.2** Add `credentials` table schema migration in `gateway_store.rs`
+- [x] **3A.3** Implement `credential.check` tool (query CredentialRecord by service name)
+- [x] **3A.4** Implement `credential.request` tool (fetch secret from Vault, inject into HTTP request via reqwest, sanitize response)
+- [x] **3A.5** Add `CredentialAccess` capability type with service-scoped patterns
+- [x] **3A.6** Tests for check/request flow with pre-configured credentials
+
+**Remaining issues:**
+- Test flakiness risk from process-wide `AUTONOETIC_VAULT_PATH` env mutation under parallel test execution (`credential_integration.rs:77`). All tests share the same secret name/value, so cross-contamination is benign. If more credential tests are added with different secrets, switch to config-based vault path threading (no env var).
 
 #### Phase B — Automated Registration (~350 lines)
 

@@ -148,6 +148,29 @@ pub enum ToolTier {
     Specialized,
 }
 
+/// A stored credential record for agent-to-service authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRecord {
+    /// Unique credential identifier.
+    pub credential_id: String,
+    /// Service name (e.g. "github", "stripe", "slack").
+    pub service: String,
+    /// Secret name/key in the vault.
+    pub secret_name: String,
+    /// Environment variable or header name to inject as.
+    pub inject_as: Option<String>,
+    /// Agent that originally created this credential.
+    pub created_by_agent: Option<String>,
+    /// Optional expiry timestamp (ISO 8601).
+    pub expires_at: Option<String>,
+    /// Agents this credential is shared with.
+    #[serde(default)]
+    pub shared_with: Vec<String>,
+    /// Hosts this credential is bound to (prevents exfiltration to unrelated hosts).
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+}
+
 /// I/O schema contract for an agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentIO {

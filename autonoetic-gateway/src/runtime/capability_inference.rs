@@ -261,6 +261,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::Evaluation { .. } => "Evaluation",
         Capability::ApprovalQueue { .. } => "ApprovalQueue",
         Capability::SchedulerSignal { .. } => "SchedulerSignal",
+        Capability::CredentialAccess { .. } => "CredentialAccess",
     }
 }
 

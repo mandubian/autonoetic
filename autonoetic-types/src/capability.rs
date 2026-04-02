@@ -66,4 +66,9 @@ pub enum Capability {
 
     /// Access to scheduler signal operations.
     SchedulerSignal { patterns: Vec<String> },
+
+    /// Access to credential operations (check, request, setup).
+    /// The `services` field restricts which services can be accessed.
+    /// Use ["*"] for all services, or specific service names.
+    CredentialAccess { services: Vec<String> },
 }
