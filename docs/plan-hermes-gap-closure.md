@@ -131,15 +131,15 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - [x] **3A.6** Tests for check/request flow with pre-configured credentials
 
 **Remaining issues:**
-- Test flakiness risk from process-wide `AUTONOETIC_VAULT_PATH` env mutation under parallel test execution (`credential_integration.rs:77`). All tests share the same secret name/value, so cross-contamination is benign. If more credential tests are added with different secrets, switch to config-based vault path threading (no env var).
+- Test flakiness risk from process-wide `AUTONOETIC_VAULT_PATH` env mutation under parallel test execution (`credential_integration.rs:77`). All tests share the same secret name/value, so cross-contamination is benign. If more credential tests are added with different secrets, switch to config-based vault path threading (no env var). 4 tests are `#[ignore]`d until this is fixed.
 
 #### Phase B — Automated Registration (~350 lines)
 
-- [ ] **3B.1** Define `CredentialSetupStep` enum (ApiCall, UserPrompt, UserAction)
-- [ ] **3B.2** Implement `credential.setup` tool (multi-step server-side execution, extract_secrets via JSONPath, store in Vault)
-- [ ] **3B.3** Extend JSONPath parser to accept `$`-prefixed notation (~10 lines in `extract_json_path_as_string`)
-- [ ] **3B.4** Wire approval queue integration: `credential.setup` triggers approval before any HTTP calls
-- [ ] **3B.5** Tests for automated registration flow
+- [x] **3B.1** Define `CredentialSetupStep` enum (ApiCall, UserPrompt, UserAction) in `autonoetic-types/src/agent.rs`
+- [x] **3B.2** Implement `credential.setup` tool (multi-step server-side execution, extract_secrets via JSONPath, store in Vault)
+- [x] **3B.3** Extend JSONPath parser to accept `$`-prefixed notation (`parse_json_path()` in `runtime/store.rs`)
+- [ ] **3B.4** Wire approval queue integration: `credential.setup` triggers approval before any HTTP calls (UserPrompt step returns `awaiting_human_input` but doesn't create approval request yet)
+- [x] **3B.5** Tests for automated registration flow (6 tests: availability, service denial, network denial, user_action, JSONPath parsing)
 
 #### Phase C — Encryption at Rest (~100 lines)
 
