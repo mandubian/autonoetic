@@ -138,6 +138,197 @@ impl Default for DigestAgentConfig {
     }
 }
 
+/// Capability tier for model routing — determines the minimum model quality
+/// required for a given task complexity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityTier {
+    /// Cheap, fast models (e.g., haiku, gpt-4o-mini). For simple Q&A, classification.
+    #[default]
+    Economy,
+    /// Mid-tier models (e.g., sonnet, gpt-4o). For reasoning + tool use.
+    Standard,
+    /// Top-tier models (e.g., opus, o1). For complex reasoning, code review.
+    Premium,
+}
+
+/// Cost configuration for a model entry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelCost {
+    /// Cost per million input tokens in USD.
+    #[serde(default)]
+    pub input_per_million: Option<f64>,
+    /// Cost per million output tokens in USD.
+    #[serde(default)]
+    pub output_per_million: Option<f64>,
+}
+
+/// Latency configuration for a model entry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelLatency {
+    /// Expected time-to-first-token in milliseconds.
+    #[serde(default)]
+    pub ttft_ms: Option<u64>,
+    /// Expected tokens per second output rate.
+    #[serde(default)]
+    pub tokens_per_second: Option<u64>,
+}
+
+/// A single model entry available for routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEntry {
+    /// Provider name (e.g., "anthropic", "openai", "openrouter").
+    pub provider: String,
+    /// Model name (e.g., "claude-sonnet-4-20250514", "gpt-4o").
+    pub model: String,
+    /// Capability tier for filtering.
+    #[serde(default)]
+    pub tier: CapabilityTier,
+    /// Optional cost info for scoring.
+    #[serde(default)]
+    pub cost: Option<ModelCost>,
+    /// Optional latency info for scoring.
+    #[serde(default)]
+    pub latency: Option<ModelLatency>,
+    /// Optional context window override.
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
+    /// Optional base URL override.
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+/// Budget state for routing decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BudgetState {
+    /// Fraction of session budget consumed (0.0–1.0).
+    #[serde(default)]
+    pub session_budget_used_pct: Option<f32>,
+    /// Fraction of prompt budget consumed (0.0–1.0).
+    #[serde(default)]
+    pub prompt_budget_used_pct: Option<f32>,
+    /// Estimated cost of this session so far in USD.
+    #[serde(default)]
+    pub session_cost_usd: Option<f64>,
+}
+
+/// Complexity signals for routing decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComplexitySignals {
+    /// Number of tool definitions in the registry.
+    #[serde(default)]
+    pub tool_count: Option<u32>,
+    /// Number of tools used in the last N turns.
+    #[serde(default)]
+    pub recent_tool_use_count: Option<u32>,
+    /// Whether the agent has AgentSpawn capability (workflow orchestration).
+    #[serde(default)]
+    pub has_workflow_caps: bool,
+    /// Whether the agent has WriteAccess capability (artifact generation).
+    #[serde(default)]
+    pub has_artifact_caps: bool,
+    /// Whether the agent is in script mode (no LLM).
+    #[serde(default)]
+    pub is_script_mode: bool,
+}
+
+/// Time signals for routing decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TimeSignals {
+    /// Current turn number in the session.
+    #[serde(default)]
+    pub turn_number: Option<u32>,
+    /// Total turns in the session so far.
+    #[serde(default)]
+    pub session_turn_count: Option<u32>,
+    /// Seconds since session start.
+    #[serde(default)]
+    pub elapsed_secs: Option<u64>,
+}
+
+/// Routing strategy selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingStrategy {
+    /// Always use the primary model (no routing).
+    #[default]
+    Disabled,
+    /// Deterministic routing based on budget + complexity signals.
+    Deterministic,
+}
+
+/// Configuration for deterministic model routing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeterministicRoutingConfig {
+    /// Maximum capability tier allowed (filters out models above this tier).
+    /// Set to premium to allow all models; economy to restrict to cheap models only.
+    #[serde(default = "default_max_tier")]
+    pub max_tier: CapabilityTier,
+    /// Maximum cost per session in USD before downgrading to economy tier.
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
+    /// Budget pressure threshold (0.0–1.0) at which to downgrade to economy.
+    #[serde(default = "default_budget_downgrade_threshold")]
+    pub budget_downgrade_threshold: f32,
+    /// Whether to include fallback chain on failure.
+    #[serde(default = "default_true_fn")]
+    pub enable_fallback_chain: bool,
+}
+
+fn default_max_tier() -> CapabilityTier {
+    CapabilityTier::Premium
+}
+
+fn default_true_fn() -> bool {
+    true
+}
+
+fn default_budget_downgrade_threshold() -> f32 {
+    0.8
+}
+
+/// Agent-specific model override.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelOverride {
+    /// Force a specific model for this agent.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Minimum tier for this agent.
+    #[serde(default)]
+    pub min_tier: Option<CapabilityTier>,
+}
+
+/// Approval gates for routing decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ApprovalGatesConfig {
+    /// Require approval before using premium tier models.
+    #[serde(default)]
+    pub premium_model_first_use: bool,
+    /// Require approval when budget threshold is crossed.
+    #[serde(default)]
+    pub budget_threshold_crossed: Option<f32>,
+}
+
+/// Top-level LLM routing configuration in gateway.yaml.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LlmRoutingConfig {
+    /// Routing strategy: disabled, deterministic.
+    #[serde(default)]
+    pub strategy: RoutingStrategy,
+    /// Available models for routing (primary + fallbacks).
+    #[serde(default)]
+    pub models: Vec<ModelEntry>,
+    /// Deterministic routing settings.
+    #[serde(default)]
+    pub deterministic: DeterministicRoutingConfig,
+    /// Agent-specific overrides (agent_id → min_tier or explicit model).
+    #[serde(default)]
+    pub agent_overrides: std::collections::HashMap<String, ModelOverride>,
+    /// Approval gates for routing decisions.
+    #[serde(default)]
+    pub approval_gates: ApprovalGatesConfig,
+}
+
 /// Top-level Gateway daemon configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -255,6 +446,12 @@ pub struct GatewayConfig {
     /// Prompt budget transparency and enforcement configuration.
     #[serde(default)]
     pub prompt_budget: PromptBudgetConfig,
+
+    /// Optional LLM model routing configuration.
+    /// When set, enables intelligent model selection based on budget pressure,
+    /// task complexity, and cost constraints.
+    #[serde(default)]
+    pub llm_routing: Option<LlmRoutingConfig>,
 }
 
 /// Configuration for evidence storage.
@@ -594,6 +791,7 @@ impl Default for GatewayConfig {
             sandbox: SandboxConfig::default(),
             max_session_turns: default_max_session_turns(),
             prompt_budget: PromptBudgetConfig::default(),
+            llm_routing: None,
         }
     }
 }

@@ -247,31 +247,31 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 #### Phase A — Frontmatter Adapter (~200 lines)
 
-- [ ] **5A.1** Define `AgentSkillsFrontmatter` parser (name, description, license, compatibility, allowed-tools)
-- [ ] **5A.2** Implement `adapt_agentskills_frontmatter()` mapping to `AutonoeticManifest`
-- [ ] **5A.3** Implement `infer_capabilities()` from `allowed-tools` (Bash patterns, Read/Write, WebSearch/WebFetch)
+- [x] **5A.1** Define `AgentSkillsFrontmatter` parser (name, description, license, compatibility, allowed-tools)
+- [x] **5A.2** Implement `adapt_agentskills_frontmatter()` mapping to `AutonoeticManifest`
+- [x] **5A.3** Implement `infer_capabilities()` from `allowed-tools` (Bash patterns, Read/Write, WebSearch/WebFetch)
 
 #### Phase B — Tool Name Bridging (~60 lines)
 
-- [ ] **5B.1** Generate tool name mapping table (Bash -> sandbox.exec, Read -> content.read, etc.)
-- [ ] **5B.2** Inject mapping as instruction appendix into imported agent's system prompt (~200 tokens)
+- [x] **5B.1** Generate tool name mapping table (Bash -> sandbox.exec, Read -> content.read, etc.)
+- [x] **5B.2** Inject mapping as instruction appendix into imported agent's system prompt (~200 tokens)
 
 #### Phase C — Resource Mounting (~100 lines)
 
-- [ ] **5C.1** Import `scripts/`, `references/`, `assets/` directories into agent dir under `imported/`
-- [ ] **5C.2** Register imported files as content store entries
-- [ ] **5C.3** Configure sandbox mounts for expected paths
+- [x] **5C.1** Import `scripts/`, `references/`, `assets/` directories into agent dir
+- [x] **5C.2** Register imported files as content store entries
+- [x] **5C.3** Configure sandbox mounts for expected paths
 
 #### Phase D — Progressive Disclosure (~80 lines)
 
-- [ ] **5D.1** Adopt 3-tier disclosure for all agents: metadata only at startup, full body when activated, resources on demand
-- [ ] **5D.2** Wire into `compose_system_instructions` (cross-cuts with Feature 1 prompt optimization)
+- [x] **5D.1** Adopt 3-tier disclosure for all agents: metadata only at startup, full body when activated, resources on demand
+- [x] **5D.2** Wire into `compose_system_instructions` (cross-cuts with Feature 1 prompt optimization)
 
 #### Phase E — Trust Modes + CLI (~230 lines)
 
-- [ ] **5E.1** Implement trust mode selection: Generous (auto-grant), Strict (approval per capability), Audit (dry-run sandbox)
-- [ ] **5E.2** Add `agent.import_skill` tool or CLI command
-- [ ] **5E.3** Tests for import flow, capability inference, trust modes
+- [x] **5E.1** Implement trust mode selection: Generous (auto-grant), Strict (approval per capability), Audit (dry-run sandbox)
+- [x] **5E.2** Add `agent.import_skill` tool or CLI command
+- [x] **5E.3** Tests for import flow, capability inference, trust modes
 
 ---
 
