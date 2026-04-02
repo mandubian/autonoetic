@@ -117,6 +117,9 @@ pub fn execute_scheduled_action(
 
             Ok(result)
         }
+        ScheduledAction::CredentialPrompt { .. } => anyhow::bail!(
+            "CredentialPrompt is not directly executable; secrets must be provided through the approval channel"
+        ),
     }
 }
 

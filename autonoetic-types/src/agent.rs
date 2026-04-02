@@ -205,7 +205,7 @@ pub enum CredentialSetupStep {
 }
 
 /// Specification for a secret field in a UserPrompt step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretFieldSpec {
     /// Field name used as the secret name in the vault.
     pub name: String,
