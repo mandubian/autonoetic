@@ -303,6 +303,36 @@ pub enum AgentCommands {
         #[arg(long)]
         overwrite: bool,
     },
+    /// Imports an external AgentSkills.io skill into Autonoetic
+    ImportSkill {
+        /// Path to the external skill directory (must contain SKILL.md)
+        #[arg(long)]
+        from: String,
+        /// Agent ID to import as (e.g., myagent.default)
+        #[arg(long)]
+        agent_id: String,
+        /// Trust mode: generous (auto-grant), strict (approval per capability), audit (dry-run)
+        #[arg(long, value_enum, default_value = "strict")]
+        trust: TrustMode,
+        /// LLM provider for the imported agent (default: openai)
+        #[arg(long)]
+        provider: Option<String>,
+        /// LLM model for the imported agent (default: gpt-4o)
+        #[arg(long)]
+        model: Option<String>,
+    },
+}
+
+/// Trust mode for importing external AgentSkills.io skills.
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum TrustMode {
+    /// Auto-grant all capabilities declared in allowed-tools.
+    Generous,
+    /// Require approval for each capability at first use (default).
+    #[default]
+    Strict,
+    /// Dry-run sandbox — log all tool calls, report before granting.
+    Audit,
 }
 
 #[derive(Subcommand)]

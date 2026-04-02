@@ -569,6 +569,7 @@ fn admin_revision_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+        agentskills_import: None,
     }
 }
 
@@ -1483,6 +1484,165 @@ pub async fn run_interactive_session(
         };
     }
     runtime.close_session("interactive_exit")?;
+    Ok(())
+}
+
+pub fn handle_agent_import_skill(
+    config_path: &Path,
+    from: &str,
+    agent_id: &str,
+    trust: crate::cli::common::TrustMode,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> anyhow::Result<()> {
+    use crate::cli::common::TrustMode;
+    use autonoetic_types::agent::AgentSkillsImportMetadata;
+
+    let skill_dir = std::path::Path::new(from);
+    anyhow::ensure!(
+        skill_dir.exists(),
+        "Skill directory does not exist: {}",
+        from
+    );
+
+    let skill_manifest_path = skill_dir.join("SKILL.md");
+    anyhow::ensure!(
+        skill_manifest_path.exists(),
+        "SKILL.md not found in: {}",
+        from
+    );
+
+    let skill_content = std::fs::read_to_string(&skill_manifest_path)?;
+    let (parsed_manifest, _body) =
+        autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_content)?;
+
+    info!(
+        "Importing AgentSkills skill '{}' as '{}'",
+        parsed_manifest.agent.id, agent_id
+    );
+
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let llm_config = if let Some(p) = provider {
+        Some(autonoetic_types::agent::LlmConfig {
+            provider: p.to_string(),
+            model: model.unwrap_or("gpt-4o").to_string(),
+            temperature: 0.2,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: false,
+            context_window_tokens: None,
+            base_url: None,
+        })
+    } else {
+        let resolved = resolve_llm_config(&config, None, None, provider, model);
+        Some(autonoetic_types::agent::LlmConfig {
+            provider: resolved.provider,
+            model: resolved.model,
+            temperature: resolved.temperature,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: resolved.chat_only,
+            context_window_tokens: None,
+            base_url: resolved.base_url,
+        })
+    };
+
+    let capabilities = match trust {
+        TrustMode::Generous => parsed_manifest.capabilities.clone(),
+        TrustMode::Strict => {
+            let mut caps = parsed_manifest.capabilities.clone();
+            if caps.is_empty() {
+                caps.push(autonoetic_types::capability::Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                });
+            }
+            caps
+        }
+        TrustMode::Audit => {
+            vec![autonoetic_types::capability::Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            }]
+        }
+    };
+
+    let agentskills_import = parsed_manifest.agentskills_import.or_else(|| {
+        if skill_content.contains("allowed-tools") {
+            Some(AgentSkillsImportMetadata {
+                license: None,
+                compatibility: None,
+                allowed_tools: vec![],
+                needs_tool_bridging: false,
+            })
+        } else {
+            None
+        }
+    });
+
+    let target_manifest = autonoetic_types::agent::AgentManifest {
+        version: parsed_manifest.version.clone(),
+        runtime: parsed_manifest.runtime.clone(),
+        agent: autonoetic_types::agent::AgentIdentity {
+            id: agent_id.to_string(),
+            name: parsed_manifest.agent.name.clone(),
+            description: parsed_manifest.agent.description.clone(),
+        },
+        capabilities,
+        llm_config,
+        limits: parsed_manifest.limits.clone(),
+        background: parsed_manifest.background.clone(),
+        disclosure: parsed_manifest.disclosure.clone(),
+        io: parsed_manifest.io.clone(),
+        middleware: parsed_manifest.middleware.clone(),
+        execution_mode: parsed_manifest.execution_mode,
+        script_entry: parsed_manifest.script_entry.clone(),
+        gateway_url: None,
+        gateway_token: None,
+        response_contract: parsed_manifest.response_contract.clone(),
+        allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
+        agentskills_import,
+    };
+
+    let agents_dir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("agents");
+    let target_dir = agents_dir.join(agent_id.replace('.', "-"));
+    std::fs::create_dir_all(&target_dir)?;
+
+    let mut output_skill = skill_content.clone();
+    if !output_skill.contains("metadata:\n  autonoetic:") {
+        let parts: Vec<&str> = skill_content.splitn(2, "---").collect();
+        let body = if parts.len() > 1 {
+            parts[1].trim()
+        } else {
+            &skill_content
+        };
+        output_skill = format!(
+            "---\nname: \"{}\"\ndescription: \"{}\"\nmetadata:\n  autonoetic:\n    version: \"{}\"\n    runtime:\n      engine: \"autonoetic\"\n      gateway_version: \"0.1.0\"\n      sdk_version: \"0.1.0\"\n      type: \"stateful\"\n      sandbox: \"bubblewrap\"\n      runtime_lock: \"runtime.lock\"\n    agent:\n      id: \"{}\"\n      name: \"{}\"\n      description: \"{}\"\n---\n\n{}",
+            agent_id,
+            parsed_manifest.agent.description,
+            parsed_manifest.version,
+            agent_id,
+            parsed_manifest.agent.name,
+            parsed_manifest.agent.description,
+            body,
+        );
+    }
+
+    std::fs::write(target_dir.join("SKILL.md"), &output_skill)?;
+    info!("Imported skill written to: {}", target_dir.display());
+
+    if let Some(import_meta) = &target_manifest.agentskills_import {
+        if import_meta.needs_tool_bridging {
+            info!("Tool bridging will be injected at runtime");
+        }
+    }
+
+    info!(
+        "Agent '{}' imported successfully. Run 'autonoetic agent bootstrap' then 'autonoetic agent revision create/promote' to activate.",
+        agent_id
+    );
+
     Ok(())
 }
 

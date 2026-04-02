@@ -41,6 +41,7 @@ fn evolution_manifest() -> AgentManifest {
         gateway_token: None,
         response_contract: None,
             allowed_tool_tiers: vec![],
+        agentskills_import: None,
     }
 }
 

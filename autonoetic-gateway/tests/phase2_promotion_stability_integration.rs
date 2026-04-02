@@ -3,7 +3,9 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
-use autonoetic_types::agent_revision::{AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus};
+use autonoetic_types::agent_revision::{
+    AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
+};
 use autonoetic_types::capability::Capability;
 use serde_json::json;
 use std::path::Path;
@@ -40,7 +42,8 @@ fn revision_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         response_contract: None,
-            allowed_tool_tiers: vec![],
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
     }
 }
 

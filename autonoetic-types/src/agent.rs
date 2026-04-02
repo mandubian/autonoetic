@@ -112,6 +112,11 @@ pub struct AgentManifest {
     /// When set, tools outside these tiers are excluded from the agent's tool set.
     #[serde(default)]
     pub allowed_tool_tiers: Vec<ToolTier>,
+    /// Metadata from AgentSkills.io import. Set when the agent was imported
+    /// from an external AgentSkills-compatible SKILL.md. Used for tool name
+    /// bridging, resource mounting, and trust mode enforcement.
+    #[serde(default)]
+    pub agentskills_import: Option<AgentSkillsImportMetadata>,
 }
 
 /// Middleware hooks declared in the agent's own manifest (replaces overlay-based hooks).
@@ -312,4 +317,17 @@ impl ResponseContract {
 pub struct AgentMeta {
     pub id: String,
     pub dir: std::path::PathBuf,
+}
+
+/// Metadata attached when an agent is imported from the AgentSkills.io format.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentSkillsImportMetadata {
+    /// Original license from the AgentSkills frontmatter.
+    pub license: Option<String>,
+    /// Compatibility string (e.g., "claude-code", "cursor", "copilot").
+    pub compatibility: Option<String>,
+    /// Raw allowed-tools list from the original frontmatter.
+    pub allowed_tools: Vec<String>,
+    /// Whether tool name bridging should be injected into the system prompt.
+    pub needs_tool_bridging: bool,
 }
