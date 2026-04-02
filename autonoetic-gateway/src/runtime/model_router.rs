@@ -7,19 +7,10 @@
 use autonoetic_types::agent::LlmConfig;
 use autonoetic_types::config::{
     ApprovalGatesConfig, BudgetState, CapabilityTier, ComplexitySignals,
-    DeterministicRoutingConfig, LlmRoutingConfig, ModelEntry, RoutingStrategy, TimeSignals,
+    DeterministicRoutingConfig, LlmRoutingConfig, ModelEntry, RoutingContext, RoutingStrategy,
+    TimeSignals,
 };
 use serde::{Deserialize, Serialize};
-
-/// Context for making a routing decision.
-#[derive(Debug, Clone, Default)]
-pub struct RoutingContext {
-    pub agent_id: String,
-    pub session_id: String,
-    pub budget: BudgetState,
-    pub complexity: ComplexitySignals,
-    pub time: TimeSignals,
-}
 
 /// The result of a routing decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,8 +56,9 @@ impl DeterministicRouter {
         &self,
         ctx: &RoutingContext,
         det_config: &DeterministicRoutingConfig,
+        starting_max_tier: CapabilityTier,
     ) -> (CapabilityTier, bool) {
-        let mut max_tier = det_config.max_tier;
+        let mut max_tier = starting_max_tier;
         let mut downgraded = false;
 
         if let Some(override_cost) = det_config.max_cost_usd {
@@ -124,8 +116,29 @@ impl ModelRouter for DeterministicRouter {
         primary_config: &LlmConfig,
         routing_config: &LlmRoutingConfig,
     ) -> RoutingDecision {
-        let (max_tier, was_downgraded) =
-            self.compute_effective_tier(ctx, &routing_config.deterministic);
+        let mut max_tier = routing_config.deterministic.max_tier;
+
+        if let Some(override_entry) = routing_config.agent_overrides.get(&ctx.agent_id) {
+            if let Some(tier) = override_entry.min_tier {
+                max_tier = tier;
+            }
+            if let Some(ref model) = override_entry.model {
+                return RoutingDecision {
+                    provider: primary_config.provider.clone(),
+                    model: model.clone(),
+                    strategy_name: "agent_override".to_string(),
+                    rationale: format!(
+                        "agent override: forcing model {} for agent {}",
+                        model, ctx.agent_id
+                    ),
+                    fallback_chain: vec![],
+                    was_downgraded: false,
+                };
+            }
+        }
+
+        let (effective_max_tier, was_downgraded) =
+            self.compute_effective_tier(ctx, &routing_config.deterministic, max_tier);
 
         let primary_entry = routing_config
             .models
@@ -133,13 +146,13 @@ impl ModelRouter for DeterministicRouter {
             .find(|m| m.provider == primary_config.provider && m.model == primary_config.model);
 
         let (provider, model) = if let Some(entry) = primary_entry {
-            if entry.tier <= max_tier {
+            if entry.tier <= effective_max_tier {
                 (entry.provider.clone(), entry.model.clone())
             } else {
                 let fallback = routing_config
                     .models
                     .iter()
-                    .find(|m| m.tier <= max_tier)
+                    .find(|m| m.tier <= effective_max_tier)
                     .or_else(|| routing_config.models.iter().min_by_key(|m| m.tier));
                 if let Some(fb) = fallback {
                     (fb.provider.clone(), fb.model.clone())
@@ -167,7 +180,8 @@ impl ModelRouter for DeterministicRouter {
             base_url: None,
         };
 
-        let fallback_chain = self.build_fallback_chain(&primary_model, routing_config, max_tier);
+        let fallback_chain =
+            self.build_fallback_chain(&primary_model, routing_config, effective_max_tier);
 
         let rationale = format!(
             "deterministic: tier={}, budget_used={:.0}%, cost=${:.2}, downgraded={}",
@@ -213,9 +227,8 @@ impl ModelRouter for DisabledRouter {
 /// Factory function to create the appropriate router based on config.
 pub fn create_router(strategy: RoutingStrategy) -> Box<dyn ModelRouter> {
     match strategy {
-        RoutingStrategy::Disabled | RoutingStrategy::Deterministic => {
-            Box::new(DeterministicRouter::new())
-        }
+        RoutingStrategy::Disabled => Box::new(DisabledRouter),
+        RoutingStrategy::Deterministic => Box::new(DeterministicRouter::new()),
     }
 }
 

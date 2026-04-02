@@ -959,8 +959,70 @@ impl AgentExecutor {
             )?;
             *history = trimmed_history;
 
+            // --- Model Routing: select model based on budget/complexity signals ---
+            let (routed_model, routing_decision_json) = if let Some(routing_cfg) =
+                self.config.as_ref().and_then(|c| c.llm_routing.as_ref())
+            {
+                if let Some(llm_cfg) = &self.manifest.llm_config {
+                    let budget_state = self.session_budget.as_ref().and_then(|sb| {
+                        sb.snapshot_counters(&session_id).map(|(rounds, tokens, cost)| {
+                            let config = self.config.as_ref()?;
+                            let max_rounds = config.session_budget.max_llm_rounds? as f32;
+                            Some(autonoetic_types::config::BudgetState {
+                                session_budget_used_pct: Some(rounds as f32 / max_rounds),
+                                prompt_budget_used_pct: budget_breakdown.utilization_pct.map(|v| v as f32),
+                                session_cost_usd: Some(cost),
+                            })
+                        }).flatten()
+                    }).unwrap_or_default();
+
+                    let complexity = autonoetic_types::config::ComplexitySignals {
+                        tool_count: Some(tools.len() as u32),
+                        recent_tool_use_count: None,
+                        has_workflow_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. })),
+                        has_artifact_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::WriteAccess { .. })),
+                        is_script_mode: self.manifest.execution_mode == autonoetic_types::agent::ExecutionMode::Script,
+                    };
+
+                    let ctx = autonoetic_types::config::RoutingContext {
+                        agent_id: self.manifest.agent.id.clone(),
+                        session_id: session_id.clone(),
+                        budget: budget_state,
+                        complexity,
+                        time: autonoetic_types::config::TimeSignals {
+                            turn_number: Some(self.turn_counter as u32),
+                            session_turn_count: Some(self.turn_counter as u32),
+                            elapsed_secs: None,
+                        },
+                    };
+
+                    let router = crate::runtime::model_router::create_router(routing_cfg.strategy);
+                    let decision = router.route(&ctx, llm_cfg, routing_cfg);
+
+                    let decision_json = serde_json::to_value(&decision).ok();
+
+                    if decision.provider != llm_cfg.provider || decision.model != llm_cfg.model {
+                        tracing::info!(
+                            target: "autonoetic::model_routing",
+                            original_model = %llm_cfg.model,
+                            routed_model = %decision.model,
+                            strategy = %decision.strategy_name,
+                            rationale = %decision.rationale,
+                            was_downgraded = decision.was_downgraded,
+                            "Model routing decision"
+                        );
+                    }
+
+                    (decision.model.clone(), decision_json)
+                } else {
+                    (model.clone(), None)
+                }
+            } else {
+                (model.clone(), None)
+            };
+
             let req = CompletionRequest {
-                model: model.clone(),
+                model: routed_model.clone(),
                 messages: history.clone(),
                 tools,
                 max_tokens: None,
@@ -1040,7 +1102,7 @@ impl AgentExecutor {
                 match self.openrouter_catalog.as_ref() {
                     Some(cat) => {
                         cat.estimate_cost_usd(
-                            &model,
+                            &routed_model,
                             response.usage.input_tokens,
                             response.usage.output_tokens,
                         )
