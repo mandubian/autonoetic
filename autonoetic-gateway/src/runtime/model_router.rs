@@ -32,7 +32,6 @@ pub struct RoutingDecision {
 }
 
 /// Trait for model routing strategies.
-#[async_trait::async_trait]
 pub trait ModelRouter: Send + Sync {
     /// Select a model given the routing context and available models.
     fn route(
@@ -90,9 +89,10 @@ impl DeterministicRouter {
 
     fn build_fallback_chain(
         &self,
-        primary: &ModelEntry,
         routing_config: &LlmRoutingConfig,
         max_tier: CapabilityTier,
+        primary_provider: &str,
+        primary_model: &str,
     ) -> Vec<(String, String)> {
         if !routing_config.deterministic.enable_fallback_chain {
             return vec![];
@@ -102,7 +102,7 @@ impl DeterministicRouter {
             .models
             .iter()
             .filter(|m| {
-                m.tier <= max_tier && !(m.provider == primary.provider && m.model == primary.model)
+                m.tier <= max_tier && !(m.provider == primary_provider && m.model == primary_model)
             })
             .map(|m| (m.provider.clone(), m.model.clone()))
             .collect()
@@ -178,18 +178,8 @@ impl ModelRouter for DeterministicRouter {
             )
         };
 
-        let primary_model = ModelEntry {
-            provider: provider.clone(),
-            model: model.clone(),
-            tier: max_tier,
-            cost: None,
-            latency: None,
-            context_window_tokens: None,
-            base_url: None,
-        };
-
         let fallback_chain =
-            self.build_fallback_chain(&primary_model, routing_config, effective_max_tier);
+            self.build_fallback_chain(routing_config, effective_max_tier, &provider, &model);
 
         let rationale = format!(
             "deterministic: effective_tier={}, budget_used={:.0}%, cost=${:.2}, downgraded={}",
