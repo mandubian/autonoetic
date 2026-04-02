@@ -162,9 +162,20 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 #### Phase D — Secure User Prompt Channel (~200 lines)
 
-- [ ] **3D.1** Implement out-of-band secure prompt (TUI/CLI password prompt) for human-assisted credential entry
-- [ ] **3D.2** Wire into `credential.setup` UserPrompt step type
-- [ ] **3D.3** Tests
+- [x] **3D.1** Implement out-of-band secure prompt (TUI/CLI password prompt) for human-assisted credential entry
+- [x] **3D.2** Wire into `credential.setup` UserPrompt step type
+- [x] **3D.3** Tests
+
+**Status (2026-04-02):** Fully implemented.
+- Interactive TUI with masked password prompt for `CredentialPrompt` approvals (`autonoetic/src/cli/gateway.rs`)
+- CLI approval command with `--secret KEY=VALUE` flags (`autonoetic/src/cli/common.rs`)
+- `approve_request()` in `approval.rs` now always requires and validates all `secret_fields` for `CredentialPrompt` actions — rejects `None` and empty
+- End-to-end lifecycle test covering: suspend → approve with secrets → credential record created → resume with approval_ref → verify vault contents
+- Missing-secrets rejection test
+- All 376 lib tests passing
+
+**Known issues:**
+- (Low) `--secret KEY=VALUE` CLI flag exposes secrets in shell history. Practical for now; should be replaced with stdin/file-based input in a future iteration.
 
 #### Phase E — Advanced Features
 
