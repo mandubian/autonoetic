@@ -394,6 +394,9 @@ impl AgentExecutor {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        if self.session_started_at.is_none() {
+            self.session_started_at = Some(chrono::Utc::now().to_rfc3339());
+        }
         self
     }
 
@@ -2874,6 +2877,29 @@ Hope this helps!"#;
         };
 
         executor.log_output_schema_validation(&response2, &mut tracer2);
+    }
+
+    #[test]
+    fn with_session_id_initializes_session_started_at() {
+        use std::sync::Arc;
+        let manifest = manifest_with_capabilities(vec![]);
+        let llm: Arc<dyn LlmDriver> = Arc::new(FixedTextDriver);
+        let registry = NativeToolRegistry::new();
+        let executor = AgentExecutor::new(
+            manifest,
+            String::new(),
+            llm,
+            PathBuf::from("/tmp"),
+            registry,
+            None,
+        )
+        .with_session_id("preassigned-session-123");
+
+        assert_eq!(executor.session_id.as_deref(), Some("preassigned-session-123"));
+        assert!(
+            executor.session_started_at.is_some(),
+            "with_session_id must initialize session_started_at"
+        );
     }
 }
 

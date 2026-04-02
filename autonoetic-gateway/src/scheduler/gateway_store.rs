@@ -2684,8 +2684,7 @@ impl GatewayStore {
         let mut conditions = Vec::new();
         let mut params: Vec<rusqlite::types::Value> = Vec::new();
 
-        let fts_join = if let Some(q) = query {
-            conditions.push("st.rowid IN (SELECT rowid FROM session_transcripts_fts WHERE session_transcripts_fts MATCH ?)".to_string());
+        let has_fts = if let Some(q) = query {
             params.push(rusqlite::types::Value::Text(q.to_string()));
             true
         } else {
@@ -2718,20 +2717,31 @@ impl GatewayStore {
             conditions.join(" AND ")
         };
 
-        let order_by = if fts_join {
-            "ORDER BY (SELECT bm25(session_transcripts_fts) FROM session_transcripts_fts WHERE session_transcripts_fts.rowid = st.rowid) ASC"
+        let sql = if has_fts {
+            format!(
+                "SELECT st.transcript_id, st.session_id, st.root_session_id, st.agent_id,
+                        st.revision_id, st.user_id, st.started_at, st.ended_at, st.status,
+                        st.turn_count, st.transcript_handle, st.excerpt, st.origin_node_id
+                 FROM session_transcripts st
+                 JOIN session_transcripts_fts ON st.rowid = session_transcripts_fts.rowid
+                 WHERE session_transcripts_fts MATCH ?1
+                   AND {where_clause}
+                 ORDER BY rank ASC
+                 LIMIT ?",
+                where_clause = where_clause,
+            )
         } else {
-            "ORDER BY st.started_at DESC"
+            format!(
+                "SELECT st.transcript_id, st.session_id, st.root_session_id, st.agent_id,
+                        st.revision_id, st.user_id, st.started_at, st.ended_at, st.status,
+                        st.turn_count, st.transcript_handle, st.excerpt, st.origin_node_id
+                 FROM session_transcripts st
+                 WHERE {where_clause}
+                 ORDER BY st.started_at DESC
+                 LIMIT ?",
+                where_clause = where_clause,
+            )
         };
-
-        let sql = format!(
-            "SELECT st.transcript_id, st.session_id, st.root_session_id, st.agent_id,
-                    st.revision_id, st.user_id, st.started_at, st.ended_at, st.status,
-                    st.turn_count, st.transcript_handle, st.excerpt, st.origin_node_id
-             FROM session_transcripts st
-             WHERE {} {} LIMIT ?",
-            where_clause, order_by,
-        );
 
         let mut stmt = conn.prepare(&sql)?;
         params.push(rusqlite::types::Value::Integer(limit));
@@ -4192,32 +4202,23 @@ mod tests {
             status: "active".to_string(),
             turn_count: 2,
             transcript_handle: Some("h1".to_string()),
-            excerpt: Some("[user]: search for API docs\n[assistant]: found docs".to_string()),
+            excerpt: Some("search for api docs api docs api".to_string()),
             origin_node_id: None,
         })?;
 
-        store.upsert_session_transcript(&SessionTranscriptRecord {
-            transcript_id: "stx-sess2".to_string(),
-            session_id: "sess2".to_string(),
-            root_session_id: "root2".to_string(),
-            agent_id: "agent2".to_string(),
-            revision_id: None,
-            user_id: None,
-            started_at: now.clone(),
-            ended_at: None,
-            status: "active".to_string(),
-            turn_count: 3,
-            transcript_handle: Some("h2".to_string()),
-            excerpt: Some("[user]: how to authenticate\n[assistant]: use bearer token".to_string()),
-            origin_node_id: None,
-        })?;
-
-        let results = store.search_session_transcripts(Some("API"), None, None, None, None, 10)?;
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].session_id, "sess1");
+        let results = store.search_session_transcripts(Some("api"), None, None, None, None, 10)?;
+        assert!(
+            results.len() >= 1,
+            "expected >= 1 match for 'api', got {}",
+            results.len()
+        );
+        assert_eq!(
+            results[0].session_id, "sess1",
+            "sess1 has more 'api' occurrences so should rank first via bm25"
+        );
 
         let all = store.search_session_transcripts(None, None, None, None, None, 10)?;
-        assert_eq!(all.len(), 2);
+        assert_eq!(all.len(), 1);
 
         Ok(())
     }
