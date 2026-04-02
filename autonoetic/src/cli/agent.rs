@@ -1649,42 +1649,122 @@ pub fn handle_agent_import_skill(
     let target_dir = agents_dir.join(agent_id.replace('.', "-"));
     std::fs::create_dir_all(&target_dir)?;
 
-    let yaml_frontmatter = format!(
-        "name: \"{}\"\ndescription: \"{}\"\n{}",
-        agent_id,
-        target_manifest.agent.description,
-        {
-            let mut lines = Vec::new();
-            lines.push("metadata:".to_string());
-            lines.push("  autonoetic:".to_string());
-            lines.push(format!("    version: \"{}\"", target_manifest.version));
-            lines.push("    runtime:".to_string());
-            lines.push(format!("      engine: \"{}\"", target_manifest.runtime.engine));
-            lines.push(format!("      gateway_version: \"{}\"", target_manifest.runtime.gateway_version));
-            lines.push(format!("      sdk_version: \"{}\"", target_manifest.runtime.sdk_version));
-            lines.push(format!("      type: \"{}\"", target_manifest.runtime.runtime_type));
-            lines.push(format!("      sandbox: \"{}\"", target_manifest.runtime.sandbox));
-            lines.push(format!("      runtime_lock: \"{}\"", target_manifest.runtime.runtime_lock));
-            lines.push("    agent:".to_string());
-            lines.push(format!("      id: \"{}\"", target_manifest.agent.id));
-            lines.push(format!("      name: \"{}\"", target_manifest.agent.name));
-            lines.push(format!("      description: \"{}\"", target_manifest.agent.description));
-            if !target_manifest.capabilities.is_empty() {
-                lines.push("    capabilities:".to_string());
-                for cap in &target_manifest.capabilities {
-                    let cap_yaml = serde_json::to_string(cap).unwrap_or_default();
-                    lines.push(format!("      - {}", cap_yaml));
+    let yaml_frontmatter = {
+        let mut lines = Vec::new();
+        lines.push(format!("name: \"{}\"", agent_id));
+        lines.push(format!("description: \"{}\"", target_manifest.agent.description));
+        lines.push("metadata:".to_string());
+        lines.push("  autonoetic:".to_string());
+        lines.push(format!("    version: \"{}\"", target_manifest.version));
+        lines.push("    runtime:".to_string());
+        lines.push(format!("      engine: \"{}\"", target_manifest.runtime.engine));
+        lines.push(format!("      gateway_version: \"{}\"", target_manifest.runtime.gateway_version));
+        lines.push(format!("      sdk_version: \"{}\"", target_manifest.runtime.sdk_version));
+        lines.push(format!("      type: \"{}\"", target_manifest.runtime.runtime_type));
+        lines.push(format!("      sandbox: \"{}\"", target_manifest.runtime.sandbox));
+        lines.push(format!("      runtime_lock: \"{}\"", target_manifest.runtime.runtime_lock));
+        lines.push("    agent:".to_string());
+        lines.push(format!("      id: \"{}\"", target_manifest.agent.id));
+        lines.push(format!("      name: \"{}\"", target_manifest.agent.name));
+        lines.push(format!("      description: \"{}\"", target_manifest.agent.description));
+        if !target_manifest.capabilities.is_empty() {
+            lines.push("    capabilities:".to_string());
+            for cap in &target_manifest.capabilities {
+                let cap_yaml = serde_json::to_string(cap).unwrap_or_default();
+                lines.push(format!("      - {}", cap_yaml));
+            }
+        }
+        if let Some(ref llm) = target_manifest.llm_config {
+            lines.push("    llm_config:".to_string());
+            lines.push(format!("      provider: \"{}\"", llm.provider));
+            lines.push(format!("      model: \"{}\"", llm.model));
+            lines.push(format!("      temperature: {}", llm.temperature));
+            if let Some(ref fb) = llm.fallback_provider {
+                lines.push(format!("      fallback_provider: \"{}\"", fb));
+            }
+            if let Some(ref fb) = llm.fallback_model {
+                lines.push(format!("      fallback_model: \"{}\"", fb));
+            }
+        }
+        if let Some(ref limits) = target_manifest.limits {
+            lines.push("    limits:".to_string());
+            lines.push(format!("      max_memory_mb: {}", limits.max_memory_mb));
+            lines.push(format!("      max_execution_time_sec: {}", limits.max_execution_time_sec));
+            if let Some(tb) = limits.token_budget_monthly {
+                lines.push(format!("      token_budget_monthly: {}", tb));
+            }
+        }
+        if let Some(ref disclosure) = target_manifest.disclosure {
+            lines.push("    disclosure:".to_string());
+            if disclosure.default_class.is_restricted() {
+                lines.push(format!("      default_class: restricted"));
+            }
+            if !disclosure.rules.is_empty() {
+                lines.push("      rules:".to_string());
+                for rule in &disclosure.rules {
+                    let r_yaml = serde_json::to_string(rule).unwrap_or_default();
+                    lines.push(format!("        - {}", r_yaml));
                 }
             }
-            if let Some(ref llm) = target_manifest.llm_config {
-                lines.push("    llm_config:".to_string());
-                lines.push(format!("      provider: \"{}\"", llm.provider));
-                lines.push(format!("      model: \"{}\"", llm.model));
-                lines.push(format!("      temperature: {}", llm.temperature));
-            }
-            lines.join("\n")
         }
-    );
+        if let Some(ref io) = target_manifest.io {
+            lines.push("    io:".to_string());
+            if let Some(ref accepts) = io.accepts {
+                lines.push(format!("      accepts: {}", serde_json::to_string(accepts).unwrap_or_default()));
+            }
+            if let Some(ref returns) = io.returns {
+                lines.push(format!("      returns: {}", serde_json::to_string(returns).unwrap_or_default()));
+            }
+        }
+        if let Some(ref mw) = target_manifest.middleware {
+            if mw.pre_process.is_some() || mw.post_process.is_some() {
+                lines.push("    middleware:".to_string());
+                if let Some(ref p) = mw.pre_process {
+                    lines.push(format!("      pre_process: \"{}\"", p));
+                }
+                if let Some(ref p) = mw.post_process {
+                    lines.push(format!("      post_process: \"{}\"", p));
+                }
+            }
+        }
+        lines.push(format!("    execution_mode: {}", match target_manifest.execution_mode {
+            autonoetic_types::agent::ExecutionMode::Script => "script",
+            autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
+        }));
+        if let Some(ref se) = target_manifest.script_entry {
+            lines.push(format!("    script_entry: \"{}\"", se));
+        }
+        if let Some(ref rc) = target_manifest.response_contract {
+            lines.push(format!("    response_contract: {}", serde_json::to_string(rc).unwrap_or_default()));
+        }
+        if !target_manifest.allowed_tool_tiers.is_empty() {
+            lines.push("    allowed_tool_tiers:".to_string());
+            for tier in &target_manifest.allowed_tool_tiers {
+                lines.push(format!("      - {}", match tier {
+                    autonoetic_types::agent::ToolTier::Core => "core",
+                    autonoetic_types::agent::ToolTier::Workflow => "workflow",
+                    autonoetic_types::agent::ToolTier::Specialized => "specialized",
+                }));
+            }
+        }
+        if let Some(ref ai) = target_manifest.agentskills_import {
+            lines.push("    agentskills_import:".to_string());
+            if let Some(ref l) = ai.license {
+                lines.push(format!("      license: \"{}\"", l));
+            }
+            if let Some(ref c) = ai.compatibility {
+                lines.push(format!("      compatibility: \"{}\"", c));
+            }
+            if !ai.allowed_tools.is_empty() {
+                lines.push("      allowed_tools:".to_string());
+                for t in &ai.allowed_tools {
+                    lines.push(format!("        - \"{}\"", t));
+                }
+            }
+            lines.push(format!("      needs_tool_bridging: {}", ai.needs_tool_bridging));
+        }
+        lines.join("\n")
+    };
 
     let output_skill = format!("---\n{}\n---\n\n{}", yaml_frontmatter, body.trim());
     std::fs::write(target_dir.join("SKILL.md"), &output_skill)?;
