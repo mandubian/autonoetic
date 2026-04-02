@@ -502,7 +502,7 @@ fn enforce_search_acl(
     if let Some(ref root) = effective_root {
         if let Some(ref cr) = caller_root {
             if root != cr {
-                return Ok((Some(caller_id.to_string()), Some(caller_id.to_string())));
+                return Ok((Some(caller_id.to_string()), Some(cr.clone())));
             }
         }
     }
@@ -533,4 +533,110 @@ fn enforce_summarize_acl(
         transcript_root,
         caller_id
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_store() -> std::sync::Arc<crate::scheduler::gateway_store::GatewayStore> {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().to_path_buf();
+        std::mem::forget(temp);
+        std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&path).expect("store"),
+        )
+    }
+
+    #[test]
+    fn search_acl_defaults_to_caller_root() {
+        let store = make_store();
+        let (agent_id, root) = enforce_search_acl(
+            "agent-a",
+            None,
+            None,
+            Some("root-123/child-456"),
+            store.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(agent_id, None);
+        assert_eq!(root.as_deref(), Some("root-123"));
+    }
+
+    #[test]
+    fn search_acl_rewrites_foreign_agent_to_caller() {
+        let store = make_store();
+        let (agent_id, _root) = enforce_search_acl(
+            "agent-a",
+            Some("agent-b"),
+            None,
+            Some("root-123/child-456"),
+            store.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[test]
+    fn search_acl_rewrites_foreign_root_to_caller_root() {
+        let store = make_store();
+        let (agent_id, _root) = enforce_search_acl(
+            "agent-a",
+            None,
+            Some("root-other"),
+            Some("root-123/child-456"),
+            store.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("agent-a"));
+        assert_eq!(
+            _root.as_deref(),
+            Some("root-123"),
+            "should be caller's root, not caller's agent id"
+        );
+    }
+
+    #[test]
+    fn search_acl_allows_own_root() {
+        let store = make_store();
+        let (agent_id, root) = enforce_search_acl(
+            "agent-a",
+            None,
+            Some("root-123"),
+            Some("root-123/child-456"),
+            store.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(agent_id, None);
+        assert_eq!(root.as_deref(), Some("root-123"));
+    }
+
+    #[test]
+    fn summarize_acl_allows_own_agent() {
+        assert!(
+            enforce_summarize_acl("agent-a", "agent-a", "root-123", Some("root-123/child"),)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn summarize_acl_allows_child_under_same_root() {
+        assert!(
+            enforce_summarize_acl("agent-a", "agent-b", "root-123", Some("root-123/child"),)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn summarize_acl_denies_different_root() {
+        assert!(
+            enforce_summarize_acl("agent-a", "agent-b", "root-other", Some("root-123/child"),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn summarize_acl_denies_no_session_context() {
+        assert!(enforce_summarize_acl("agent-a", "agent-b", "root-other", None,).is_err());
+    }
 }
