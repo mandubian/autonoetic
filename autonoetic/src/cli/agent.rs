@@ -1516,6 +1516,34 @@ pub fn handle_agent_import_skill(
     let (parsed_manifest, body) =
         autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_content)?;
 
+    let import_license: Option<String> = parsed_manifest
+        .agentskills_import
+        .as_ref()
+        .and_then(|ai| ai.license.clone());
+    let import_compatibility: Option<String> = parsed_manifest
+        .agentskills_import
+        .as_ref()
+        .and_then(|ai| ai.compatibility.clone());
+    let import_allowed_tools: Vec<String> = parsed_manifest
+        .agentskills_import
+        .as_ref()
+        .map(|ai| ai.allowed_tools.clone())
+        .unwrap_or_default();
+
+    let agentskills_import = if !import_allowed_tools.is_empty()
+        || import_license.is_some()
+        || import_compatibility.is_some()
+    {
+        Some(AgentSkillsImportMetadata {
+            license: import_license.clone(),
+            compatibility: import_compatibility.clone(),
+            allowed_tools: import_allowed_tools.clone(),
+            needs_tool_bridging: !import_allowed_tools.is_empty(),
+        })
+    } else {
+        parsed_manifest.agentskills_import.clone()
+    };
+
     info!(
         "Importing AgentSkills skill '{}' as '{}'",
         parsed_manifest.agent.id, agent_id
@@ -1605,19 +1633,6 @@ pub fn handle_agent_import_skill(
         }
     };
 
-    let agentskills_import = parsed_manifest.agentskills_import.or_else(|| {
-        if skill_content.contains("allowed-tools") {
-            Some(AgentSkillsImportMetadata {
-                license: None,
-                compatibility: None,
-                allowed_tools: vec![],
-                needs_tool_bridging: false,
-            })
-        } else {
-            None
-        }
-    });
-
     let target_manifest = autonoetic_types::agent::AgentManifest {
         version: parsed_manifest.version.clone(),
         runtime: parsed_manifest.runtime.clone(),
@@ -1653,6 +1668,18 @@ pub fn handle_agent_import_skill(
         let mut lines = Vec::new();
         lines.push(format!("name: \"{}\"", agent_id));
         lines.push(format!("description: \"{}\"", target_manifest.agent.description));
+        if let Some(ref l) = import_license {
+            lines.push(format!("license: \"{}\"", l));
+        }
+        if let Some(ref c) = import_compatibility {
+            lines.push(format!("compatibility: \"{}\"", c));
+        }
+        if !import_allowed_tools.is_empty() {
+            lines.push("allowed-tools:".to_string());
+            for t in &import_allowed_tools {
+                lines.push(format!("  - \"{}\"", t));
+            }
+        }
         lines.push("metadata:".to_string());
         lines.push("  autonoetic:".to_string());
         lines.push(format!("    version: \"{}\"", target_manifest.version));
@@ -1746,22 +1773,6 @@ pub fn handle_agent_import_skill(
                     autonoetic_types::agent::ToolTier::Specialized => "specialized",
                 }));
             }
-        }
-        if let Some(ref ai) = target_manifest.agentskills_import {
-            lines.push("    agentskills_import:".to_string());
-            if let Some(ref l) = ai.license {
-                lines.push(format!("      license: \"{}\"", l));
-            }
-            if let Some(ref c) = ai.compatibility {
-                lines.push(format!("      compatibility: \"{}\"", c));
-            }
-            if !ai.allowed_tools.is_empty() {
-                lines.push("      allowed_tools:".to_string());
-                for t in &ai.allowed_tools {
-                    lines.push(format!("        - \"{}\"", t));
-                }
-            }
-            lines.push(format!("      needs_tool_bridging: {}", ai.needs_tool_bridging));
         }
         lines.join("\n")
     };
