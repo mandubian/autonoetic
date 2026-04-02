@@ -1035,6 +1035,14 @@ impl AgentExecutor {
                                 "Model routing decision"
                             );
                         }
+                        if routed_llm_cfg.base_url != llm_cfg.base_url {
+                            tracing::warn!(
+                                target: "autonoetic::model_routing",
+                                original_base_url = ?llm_cfg.base_url,
+                                routed_base_url = ?routed_llm_cfg.base_url,
+                                "Model-specific base_url override cannot be applied — driver already built"
+                            );
+                        }
                         (decision.model.clone(), decision_json, matched_entry)
                     }
                 } else {
