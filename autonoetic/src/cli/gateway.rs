@@ -221,13 +221,18 @@ pub async fn handle_gateway_approvals(
                 );
             }
         }
-        super::common::GatewayApprovalCommands::Approve { request_id, reason } => {
+        super::common::GatewayApprovalCommands::Approve {
+            request_id,
+            reason,
+            secrets,
+        } => {
             let decision = autonoetic_gateway::scheduler::approve_request(
                 &config,
                 Some(&gateway_store),
                 request_id,
                 "cli",
                 reason.clone(),
+                if secrets.is_empty() { None } else { Some(secrets.clone()) },
             )?;
             println!(
                 "Approved {} for agent {} ({})",
@@ -520,6 +525,7 @@ async fn run_interactive_approvals(
                                 Some(gateway_store),
                                 &req.request_id,
                                 "cli-interactive",
+                                None,
                                 None,
                             ) {
                                 Ok(decision) => {

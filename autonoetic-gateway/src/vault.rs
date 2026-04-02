@@ -21,7 +21,7 @@ const VAULT_KEY_PATH_ENV: &str = "AUTONOETIC_VAULT_KEY_PATH";
 /// Encrypted vault file format.
 #[derive(Debug, Serialize, Deserialize)]
 struct EncryptedVault {
-    /// Magic marker to distinguish from plaintext JSON vaults.
+    /// File format id (`autonoetic-vault-enc`). On-disk vault is always this encrypted shape.
     format: String,
     version: u32,
     nonce: String,

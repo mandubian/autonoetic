@@ -2,9 +2,16 @@
 //!
 //! Run with:
 //!   cargo test -p autonoetic-gateway --test secret_store_integration -- --nocapture
+//!
+//! Vault persistence requires `AUTONOETIC_VAULT_KEY` or `AUTONOETIC_VAULT_KEY_PATH` (see `vault.rs`).
 
 use autonoetic_gateway::runtime::store::SecretStoreRuntime;
+use autonoetic_gateway::vault::Vault;
+use secrecy::ExposeSecret;
 use tempfile::tempdir;
+
+const TEST_VAULT_KEY_HEX: &str =
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 #[test]
 fn test_response_secret_is_persisted_and_redacted() -> anyhow::Result<()> {
@@ -12,7 +19,9 @@ fn test_response_secret_is_persisted_and_redacted() -> anyhow::Result<()> {
     let vault_path = tmp.path().join("vault.json");
 
     let old_vault_env = std::env::var("AUTONOETIC_VAULT_PATH").ok();
+    let old_key_env = std::env::var("AUTONOETIC_VAULT_KEY").ok();
     std::env::set_var("AUTONOETIC_VAULT_PATH", vault_path.display().to_string());
+    std::env::set_var("AUTONOETIC_VAULT_KEY", TEST_VAULT_KEY_HEX);
 
     let instructions = r#"
 #### 1. register-agent
@@ -32,8 +41,18 @@ fn test_response_secret_is_persisted_and_redacted() -> anyhow::Result<()> {
     assert_eq!(redacted_json["secret"], "[REDACTED]");
 
     let vault_raw = std::fs::read_to_string(&vault_path)?;
-    let vault_json: serde_json::Value = serde_json::from_str(&vault_raw)?;
-    assert_eq!(vault_json["MOLTBOOK_SECRET"], "super-secret-value");
+    let vault_parsed: serde_json::Value = serde_json::from_str(&vault_raw)?;
+    assert_eq!(vault_parsed["format"], "autonoetic-vault-enc");
+    assert_eq!(vault_parsed["version"], 1);
+
+    let loaded = Vault::load_from_file(&vault_path)?;
+    assert_eq!(
+        loaded
+            .get_secret("MOLTBOOK_SECRET")
+            .unwrap()
+            .expose_secret(),
+        "super-secret-value"
+    );
 
     // Assert that apply_and_redact successfully extracted the core secret string as well
     assert_eq!(extracted.len(), 1);
@@ -42,6 +61,10 @@ fn test_response_secret_is_persisted_and_redacted() -> anyhow::Result<()> {
     match old_vault_env {
         Some(v) => std::env::set_var("AUTONOETIC_VAULT_PATH", v),
         None => std::env::remove_var("AUTONOETIC_VAULT_PATH"),
+    }
+    match old_key_env {
+        Some(v) => std::env::set_var("AUTONOETIC_VAULT_KEY", v),
+        None => std::env::remove_var("AUTONOETIC_VAULT_KEY"),
     }
     Ok(())
 }

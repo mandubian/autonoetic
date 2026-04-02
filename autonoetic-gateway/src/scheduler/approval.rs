@@ -90,7 +90,43 @@ pub fn approve_request(
     request_id: &str,
     decided_by: &str,
     reason: Option<String>,
+    secrets: Option<Vec<(String, String)>>,
 ) -> anyhow::Result<ApprovalDecision> {
+    // If secrets are provided, store them in the vault before approving
+    if let Some(secret_pairs) = secrets {
+        if !secret_pairs.is_empty() {
+            if let Some(store) = gateway_store {
+                // Get the approval request to check if it's a CredentialPrompt
+                if let Some(req) = store.get_approval(request_id)? {
+                    if matches!(req.action, ScheduledAction::CredentialPrompt { .. }) {
+                        // Store secrets in vault
+                        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+                            .ok()
+                            .map(std::path::PathBuf::from);
+                        let mut vault = if let Some(ref vp) = vault_path {
+                            crate::vault::Vault::load_from_file(vp).unwrap_or_default()
+                        } else {
+                            crate::vault::Vault::new()
+                        };
+                        for (name, value) in &secret_pairs {
+                            vault.set_secret(name, value.clone());
+                        }
+                        if let Some(ref vp) = vault_path {
+                            vault.persist_to_file(vp)?;
+                        }
+                        tracing::info!(
+                            target: "approval",
+                            request_id = %request_id,
+                            secrets_stored = secret_pairs.len(),
+                            "Stored {} secrets in vault for credential prompt",
+                            secret_pairs.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     let decision = decide_request(
         config,
         gateway_store,
@@ -1092,7 +1128,15 @@ mod tests {
         };
         store.create_approval(&request).unwrap();
 
-        super::approve_request(&cfg, Some(&store), &request.request_id, "operator", None).unwrap();
+        super::approve_request(
+            &cfg,
+            Some(&store),
+            &request.request_id,
+            "operator",
+            None,
+            None,
+        )
+        .unwrap();
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(
@@ -1176,11 +1220,13 @@ mod tests {
         store.create_approval(&request).unwrap();
 
         // First approve succeeds
-        let result = super::approve_request(&cfg, Some(&store), "apr-double", "operator", None);
+        let result =
+            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None, None);
         assert!(result.is_ok(), "first approve should succeed");
 
         // Second approve fails with idempotency error
-        let result = super::approve_request(&cfg, Some(&store), "apr-double", "operator", None);
+        let result =
+            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None, None);
         assert!(result.is_err(), "second approve should be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(
