@@ -85,6 +85,7 @@ fn evolution_manifest() -> AgentManifest {
         gateway_token: None,
 
         response_contract: None,
+            allowed_tool_tiers: vec![],
     }
 }
 
@@ -119,6 +120,7 @@ fn evaluator_manifest() -> AgentManifest {
         gateway_token: None,
 
         response_contract: None,
+            allowed_tool_tiers: vec![],
     }
 }
 
@@ -333,6 +335,7 @@ async fn test_promotion_auditor_fail_rejected() {
         gateway_token: None,
 
         response_contract: None,
+            allowed_tool_tiers: vec![],
     };
 
     let audit_args = serde_json::json!({

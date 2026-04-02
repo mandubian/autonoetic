@@ -43,6 +43,7 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
         gateway_url: None,
         gateway_token: None,
         response_contract: None,
+            allowed_tool_tiers: vec![],
     }
 }
 

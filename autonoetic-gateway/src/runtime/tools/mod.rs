@@ -416,6 +416,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::Evaluation { .. } => "Evaluation".to_string(),
         Capability::ApprovalQueue { .. } => "ApprovalQueue".to_string(),
         Capability::SchedulerSignal { .. } => "SchedulerSignal".to_string(),
+        Capability::CredentialAccess { .. } => "CredentialAccess".to_string(),
     }
 }
 
@@ -482,6 +483,7 @@ pub mod agent;
 pub mod agent_revision;
 pub mod artifact;
 pub mod content;
+pub mod credential;
 pub mod digest;
 pub mod evaluation;
 pub mod execution;
@@ -510,6 +512,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::content::register_tools(&mut registry);
     crate::runtime::tools::agent_revision::register_tools(&mut registry);
     crate::runtime::tools::evaluation::register_tools(&mut registry);
+    crate::runtime::tools::credential::register_tools(&mut registry);
     crate::runtime::tools::web::register_tools(&mut registry);
     crate::runtime::tools::artifact::register_tools(&mut registry);
     crate::runtime::tools::knowledge::register_tools(&mut registry);

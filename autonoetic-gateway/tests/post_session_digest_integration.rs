@@ -54,6 +54,7 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
         gateway_token: None,
 
         response_contract: None,
+            allowed_tool_tiers: vec![],
     }
 }
 
