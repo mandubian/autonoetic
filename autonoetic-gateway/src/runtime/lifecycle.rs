@@ -78,6 +78,28 @@ fn compose_foundation(manifest: &AgentManifest) -> String {
     parts.join("\n\n---\n\n")
 }
 
+const TOOL_BRIDGING_APPENDIX: &str = r#"---
+
+Tool Compatibility Notes (auto-generated from AgentSkills import)
+
+This skill was imported from the Agent Skills (agentskills.io) format.
+The following tool mappings apply:
+
+| Skill references | Autonoetic equivalent |
+|---|---|
+| `Bash(command)` | `sandbox.exec({"command": "command"})` |
+| `Read(path)` | `content.read(name_or_handle)` — files must be loaded via content store |
+| `Write(path, content)` | `content.write(name, content)` |
+| `WebSearch(query)` | `web.search({"query": "query"})` |
+| `WebFetch(url)` | `web.fetch({"url": "url"})` |
+
+File paths referenced by the skill are mounted in the sandbox at `/workspace/`.
+Use `content.read` for any file the skill's instructions reference."#;
+
+fn tool_bridging_appendix() -> String {
+    TOOL_BRIDGING_APPENDIX.to_string()
+}
+
 #[derive(Debug, Clone, Default)]
 struct SchemaValidation {
     valid: bool,
@@ -127,17 +149,24 @@ pub(crate) fn compose_system_instructions_with_metadata(
     metadata: Option<&serde_json::Value>,
 ) -> String {
     let foundation = compose_foundation(manifest);
+
+    let tool_bridging = manifest
+        .agentskills_import
+        .as_ref()
+        .filter(|m| m.needs_tool_bridging)
+        .map(|_| tool_bridging_appendix());
+
     let base = {
         let trimmed = agent_instructions.trim();
-        if trimmed.is_empty() {
-            foundation
-        } else {
-            format!(
-                "{}\n\n---\n\nAgent-Specific Instructions\n\n{}",
-                foundation,
-                trimmed
-            )
+        let mut parts = vec![foundation.as_str()];
+        if let Some(ref bridging) = tool_bridging {
+            parts.push(bridging);
         }
+        if !trimmed.is_empty() {
+            parts.push("---\n\nAgent-Specific Instructions\n\n");
+            parts.push(trimmed);
+        }
+        parts.join("\n\n")
     };
 
     let contract_section = metadata
@@ -200,6 +229,93 @@ pub(crate) fn compose_system_instructions_with_metadata(
     match contract_section {
         Some(section) => format!("{base}\n\n{section}"),
         None => base,
+    }
+}
+
+#[cfg(test)]
+mod agentskills_bridging_tests {
+    use super::*;
+    use autonoetic_types::agent::AgentSkillsImportMetadata;
+
+    #[test]
+    fn tool_bridging_injected_for_agentskills_import() {
+        let mut manifest = default_test_manifest();
+        manifest.agentskills_import = Some(AgentSkillsImportMetadata {
+            license: Some("MIT".to_string()),
+            compatibility: Some("claude-code".to_string()),
+            allowed_tools: vec!["Bash(*)".to_string(), "Read".to_string()],
+            needs_tool_bridging: true,
+        });
+
+        let output = compose_system_instructions_with_metadata(
+            "Do git things with Bash(git log).",
+            &manifest,
+            None,
+        );
+
+        assert!(
+            output.contains("Tool Compatibility Notes"),
+            "should include tool bridging appendix"
+        );
+        assert!(
+            output.contains("Bash(command)"),
+            "should contain Bash mapping"
+        );
+        assert!(
+            output.contains("content.read"),
+            "should contain content.read mapping"
+        );
+        assert!(
+            output.contains("Do git things with Bash(git log)."),
+            "should still contain agent instructions"
+        );
+    }
+
+    #[test]
+    fn no_tool_bridging_without_agentskills_import() {
+        let manifest = default_test_manifest();
+        let output = compose_system_instructions_with_metadata(
+            "Do things.",
+            &manifest,
+            None,
+        );
+        assert!(
+            !output.contains("Tool Compatibility Notes"),
+            "should not include tool bridging for native agents"
+        );
+    }
+
+    fn default_test_manifest() -> AgentManifest {
+        AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "test".to_string(),
+                name: "Test".to_string(),
+                description: "Test".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            gateway_url: None,
+            gateway_token: None,
+            response_contract: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+        }
     }
 }
 
@@ -1814,6 +1930,7 @@ mod tests {
 
             response_contract: None,
             allowed_tool_tiers: vec![],
+            agentskills_import: None,
         }
     }
 

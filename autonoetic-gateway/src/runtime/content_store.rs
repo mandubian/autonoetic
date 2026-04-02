@@ -627,6 +627,52 @@ impl ContentStore {
             total_size_bytes: total_size,
         })
     }
+
+    /// Imports resource directories (scripts/, references/, assets/) from an
+    /// external AgentSkills.io skill into the content store. Each file is
+    /// stored as content-addressed blob and registered under a session-scoped
+    /// name so the agent can access it via content.read.
+    ///
+    /// Returns the list of registered resource names.
+    pub fn import_skill_resources(
+        &self,
+        skill_dir: &Path,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut registered = Vec::new();
+        for subdir in &["scripts", "references", "assets"] {
+            let source = skill_dir.join(subdir);
+            if !source.is_dir() {
+                continue;
+            }
+            Self::import_dir_recursive(&self, &source, session_id, subdir, &mut registered)?;
+        }
+        Ok(registered)
+    }
+
+    fn import_dir_recursive(
+        store: &ContentStore,
+        dir: &Path,
+        session_id: &str,
+        prefix: &str,
+        registered: &mut Vec<String>,
+    ) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                let new_prefix = format!("{}/{}", prefix, entry.file_name().to_string_lossy());
+                Self::import_dir_recursive(store, &path, session_id, &new_prefix, registered)?;
+            } else if path.is_file() {
+                let content = std::fs::read(&path)?;
+                let handle = store.write(&content)?;
+                let name = format!("{}/{}", prefix, entry.file_name().to_string_lossy());
+                store.register_name(session_id, &name, &handle)?;
+                registered.push(name);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Statistics about the content store.

@@ -334,6 +334,7 @@ async fn test_approval_continuation_suspends_and_resumes() -> anyhow::Result<()>
         &suspended_request_id,
         "test-operator",
         Some("approved for test".to_string()),
+        None,
     )?;
 
     // -----------------------------------------------------------------------
@@ -687,6 +688,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         &suspended_request_id,
         "test-operator",
         Some("approved for parallel-join test".to_string()),
+        None,
     )?;
     let resumed_result = execution
         .spawn_agent_once(
@@ -1021,6 +1023,7 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
         &request_id,
         "test-operator",
         Some("approved after restart".to_string()),
+        None,
     )?;
 
     // "After restart": continuation is loaded and resumed successfully.
@@ -1217,6 +1220,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         &suspended_a,
         "test-operator",
         Some("approved A".to_string()),
+        None,
     )?;
     approve_request(
         &config,
@@ -1224,6 +1228,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         &suspended_b,
         "test-operator",
         Some("approved B".to_string()),
+        None,
     )?;
 
     // Resume A first; join should still be unsatisfied.

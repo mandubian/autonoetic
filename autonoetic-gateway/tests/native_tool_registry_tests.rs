@@ -43,7 +43,8 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
         gateway_url: None,
         gateway_token: None,
         response_contract: None,
-            allowed_tool_tiers: vec![],
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
     }
 }
 
@@ -111,12 +112,12 @@ fn spawn_counting_http_server(
 fn test_native_tool_registry_availability() {
     let registry = default_registry();
     let manifest_none = test_manifest(vec![]);
-    assert_eq!(registry.available_definitions(&manifest_none).len(), 6);
+    assert_eq!(registry.available_definitions(&manifest_none).len(), 8);
     let manifest_shell = test_manifest(vec![Capability::CodeExecution {
         patterns: vec!["*".into()],
     }]);
     let defs = registry.available_definitions(&manifest_shell);
-    assert_eq!(defs.len(), 7);
+    assert_eq!(defs.len(), 9);
     assert!(defs.iter().any(|d| d.name == "sandbox.exec"));
 
     let manifest_all = test_manifest(vec![
@@ -125,11 +126,11 @@ fn test_native_tool_registry_availability() {
         Capability::WriteAccess { scopes: vec![] },
     ]);
     let defs_all = registry.available_definitions(&manifest_all);
-    assert_eq!(defs_all.len(), 20);
+    assert_eq!(defs_all.len(), 22);
 
     let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
     let defs_spawn = registry.available_definitions(&manifest_spawn);
-    assert!(defs_spawn.len() >= 7);
+    assert!(defs_spawn.len() >= 8);
     assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
     assert!(defs_spawn.iter().any(|d| d.name == "agent.exists"));
     assert!(defs_spawn.iter().any(|d| d.name == "agent.discover"));
@@ -162,7 +163,7 @@ fn test_native_tool_registry_availability() {
         hosts: vec!["*".to_string()],
     }]);
     let defs_net = registry.available_definitions(&manifest_net);
-    assert_eq!(defs_net.len(), 8);
+    assert_eq!(defs_net.len(), 10);
     assert!(defs_net.iter().any(|d| d.name == "web.search"));
     assert!(defs_net.iter().any(|d| d.name == "web.fetch"));
 }

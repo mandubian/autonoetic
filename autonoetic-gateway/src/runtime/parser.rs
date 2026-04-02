@@ -1,8 +1,8 @@
 //! SKILL.md Parser.
 
 use autonoetic_types::agent::{
-    AgentIO, AgentIdentity, AgentManifest, ExecutionMode, LlmConfig, Middleware, ResourceLimits,
-    RuntimeDeclaration,
+    AgentIO, AgentIdentity, AgentManifest, AgentSkillsImportMetadata, ExecutionMode, LlmConfig,
+    Middleware, ResourceLimits, RuntimeDeclaration,
 };
 use autonoetic_types::background::BackgroundPolicy;
 use autonoetic_types::capability::Capability;
@@ -13,6 +13,12 @@ use serde::Deserialize;
 struct StandardSkillFrontmatter {
     name: String,
     description: String,
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
+    compatibility: Option<String>,
+    #[serde(default, rename = "allowed-tools")]
+    allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     metadata: Option<StandardMetadataRoot>,
 }
@@ -108,11 +114,33 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         agent.description = standard.description.clone();
     }
 
+    let allowed_tools = standard.allowed_tools.unwrap_or_default();
+    let has_agentskills_fields =
+        standard.license.is_some() || standard.compatibility.is_some() || !allowed_tools.is_empty();
+
+    let capabilities =
+        if meta.capabilities.as_ref().map_or(true, |c| c.is_empty()) && !allowed_tools.is_empty() {
+            infer_capabilities(&allowed_tools)
+        } else {
+            meta.capabilities.unwrap_or_default()
+        };
+
+    let agentskills_import = if has_agentskills_fields {
+        Some(AgentSkillsImportMetadata {
+            license: standard.license,
+            compatibility: standard.compatibility,
+            allowed_tools: allowed_tools.clone(),
+            needs_tool_bridging: !allowed_tools.is_empty(),
+        })
+    } else {
+        None
+    };
+
     AgentManifest {
         version: meta.version.unwrap_or_else(|| "1.0".to_string()),
         runtime,
         agent,
-        capabilities: meta.capabilities.unwrap_or_default(),
+        capabilities,
         llm_config: meta.llm_config,
         limits: meta.limits,
         background: meta.background,
@@ -125,7 +153,77 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         gateway_token: meta.gateway_token,
         response_contract: meta.response_contract,
         allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
+        agentskills_import,
     }
+}
+
+/// Infers Autonoetic capabilities from AgentSkills.io `allowed-tools` entries.
+///
+/// Maps known AgentSkills tool names to Autonoetic capability types:
+/// - `Bash(*)` → `SandboxFunctions` / `CodeExecution`
+/// - `Read`/`View` → covered by baseline `ReadAccess`
+/// - `Write`/`Edit` → `WriteAccess`
+/// - `WebSearch`/`WebFetch` → `NetworkAccess`
+pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
+    let mut caps = vec![Capability::ReadAccess {
+        scopes: vec!["self.*".into()],
+    }];
+
+    let mut has_sandbox = false;
+    let mut has_write = false;
+    let mut has_network = false;
+    let mut sandbox_patterns = Vec::new();
+
+    for tool in allowed_tools {
+        let t = tool.trim();
+        if let Some(rest) = t.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')')) {
+            has_sandbox = true;
+            if !rest.is_empty() && rest != "*" {
+                for pattern in rest.split('|').map(|s| s.trim().to_string()) {
+                    if !pattern.is_empty() && !sandbox_patterns.contains(&pattern) {
+                        sandbox_patterns.push(pattern);
+                    }
+                }
+            }
+        } else if matches!(t, "Read" | "View") {
+            // Already covered by baseline ReadAccess
+        } else if matches!(t, "Write" | "Edit") {
+            has_write = true;
+        } else if matches!(t, "WebSearch" | "WebFetch" | "Fetch") {
+            has_network = true;
+        } else {
+            if !sandbox_patterns.contains(&tool.clone()) {
+                sandbox_patterns.push(tool.clone());
+            }
+            has_sandbox = true;
+        }
+    }
+
+    if has_sandbox {
+        if sandbox_patterns.is_empty() {
+            sandbox_patterns.push("*".to_string());
+        }
+        caps.push(Capability::SandboxFunctions {
+            allowed: sandbox_patterns,
+        });
+        caps.push(Capability::CodeExecution {
+            patterns: vec!["*".to_string()],
+        });
+    }
+
+    if has_write {
+        caps.push(Capability::WriteAccess {
+            scopes: vec!["self.*".into(), "skills/*".into()],
+        });
+    }
+
+    if has_network {
+        caps.push(Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        });
+    }
+
+    caps
 }
 
 fn default_runtime() -> RuntimeDeclaration {
@@ -401,5 +499,132 @@ agent:
         let (manifest, _body) = SkillParser::parse(content).expect("should parse");
         assert_eq!(manifest.execution_mode, ExecutionMode::Reasoning);
         assert!(manifest.script_entry.is_none());
+    }
+
+    #[test]
+    fn test_agentskills_allowed_tools_inference() {
+        let content = r#"---
+name: "git-helper"
+description: "A git helper skill"
+license: "MIT"
+compatibility: "claude-code"
+allowed-tools:
+  - "Bash(git:*)"
+  - "Read"
+  - "Write"
+  - "WebSearch"
+---
+# Git Helper
+Use Bash(git log) to inspect history.
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert_eq!(manifest.agent.id, "git-helper");
+
+        let import = manifest
+            .agentskills_import
+            .expect("should have agentskills_import");
+        assert_eq!(import.license.as_deref(), Some("MIT"));
+        assert_eq!(import.compatibility.as_deref(), Some("claude-code"));
+        assert_eq!(import.allowed_tools.len(), 4);
+        assert!(import.needs_tool_bridging);
+
+        let caps = &manifest.capabilities;
+        assert!(caps
+            .iter()
+            .any(|c| matches!(c, Capability::ReadAccess { .. })));
+        assert!(caps
+            .iter()
+            .any(|c| matches!(c, Capability::WriteAccess { .. })));
+        assert!(caps
+            .iter()
+            .any(|c| matches!(c, Capability::NetworkAccess { .. })));
+        assert!(caps
+            .iter()
+            .any(|c| matches!(c, Capability::SandboxFunctions { .. })));
+    }
+
+    #[test]
+    fn test_agentskills_no_allowed_tools_no_import_metadata() {
+        let content = r#"---
+name: "simple-agent"
+description: "No allowed tools"
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "simple-agent"
+      name: "Simple Agent"
+      description: "No allowed tools"
+---
+# Simple Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert!(
+            manifest.agentskills_import.is_none(),
+            "should not set agentskills_import without allowed-tools"
+        );
+    }
+
+    #[test]
+    fn test_agentskills_existing_capabilities_not_overridden() {
+        let content = r#"---
+name: "explicit-caps"
+description: "Has explicit capabilities"
+allowed-tools:
+  - "Bash(*)"
+metadata:
+  autonoetic:
+    capabilities:
+      - type: ReadAccess
+        scopes: ["global/*"]
+---
+# Explicit Caps
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert_eq!(manifest.capabilities.len(), 1);
+        assert!(
+            manifest.capabilities.iter().any(|c| matches!(
+                c,
+                Capability::ReadAccess { scopes } if scopes.contains(&"global/*".to_string())
+            )),
+            "explicit capabilities should not be overridden by allowed-tools inference"
+        );
+    }
+
+    #[test]
+    fn test_infer_capabilities_bash_patterns() {
+        let caps = infer_capabilities(&["Bash(git:*)".to_string(), "Bash(cargo:*)".to_string()]);
+        let sandbox = caps
+            .iter()
+            .filter_map(|c| match c {
+                Capability::SandboxFunctions { allowed } => Some(allowed),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert!(sandbox.contains(&"git:*".to_string()));
+        assert!(sandbox.contains(&"cargo:*".to_string()));
+    }
+
+    #[test]
+    fn test_infer_capabilities_wildcard_bash() {
+        let caps = infer_capabilities(&["Bash(*)".to_string(), "Read".to_string()]);
+        let sandbox = caps
+            .iter()
+            .filter_map(|c| match c {
+                Capability::SandboxFunctions { allowed } => Some(allowed),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert_eq!(sandbox.len(), 1);
+        assert_eq!(sandbox[0], "*");
     }
 }

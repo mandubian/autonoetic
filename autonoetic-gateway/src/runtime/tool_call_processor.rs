@@ -480,6 +480,7 @@ mod tests {
 
             response_contract: None,
             allowed_tool_tiers: vec![],
+            agentskills_import: None,
         }
     }
 

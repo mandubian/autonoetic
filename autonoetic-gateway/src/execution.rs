@@ -2710,6 +2710,7 @@ mod tests {
             gateway_token: None,
             response_contract: None,
             allowed_tool_tiers: vec![],
+            agentskills_import: None,
         };
 
         let history = build_initial_history(

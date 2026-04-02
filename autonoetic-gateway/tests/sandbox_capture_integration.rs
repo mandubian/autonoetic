@@ -51,11 +51,12 @@ fn test_manifest() -> AgentManifest {
         io: None,
         middleware: None,
         response_contract: None,
-            allowed_tool_tiers: vec![],
+        allowed_tool_tiers: vec![],
         execution_mode: ExecutionMode::Reasoning,
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+        agentskills_import: None,
     }
 }
 

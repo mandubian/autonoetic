@@ -123,6 +123,22 @@ async fn main() -> anyhow::Result<()> {
             cli::common::AgentCommands::PromotionHistory { agent_id, json } => {
                 cli::agent::handle_agent_promotion_history(&config_path, agent_id.as_deref(), *json)?;
             }
+            cli::common::AgentCommands::ImportSkill {
+                from,
+                agent_id,
+                trust,
+                provider,
+                model,
+            } => {
+                cli::agent::handle_agent_import_skill(
+                    &config_path,
+                    from,
+                    agent_id,
+                    *trust,
+                    provider.as_deref(),
+                    model.as_deref(),
+                )?;
+            }
         },
 
         Commands::Chat(args) => {

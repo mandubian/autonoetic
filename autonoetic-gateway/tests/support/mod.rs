@@ -456,6 +456,7 @@ pub async fn approve_pending_request_and_tick(
         &request.request_id,
         decided_by,
         reason,
+        None,
     )?;
     run_scheduler_tick(execution).await?;
     Ok(decision)
