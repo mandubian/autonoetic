@@ -960,7 +960,7 @@ impl AgentExecutor {
             *history = trimmed_history;
 
             // --- Model Routing: select model based on budget/complexity signals ---
-            let (routed_model, routing_decision_json) = if let Some(routing_cfg) =
+            let (routed_model, routing_decision_json, matched_entry) = if let Some(routing_cfg) =
                 self.config.as_ref().and_then(|c| c.llm_routing.as_ref())
             {
                 if let Some(llm_cfg) = &self.manifest.llm_config {
@@ -1020,7 +1020,7 @@ impl AgentExecutor {
                             routed_model = %decision.model,
                             "Cross-provider routing requested but not supported — staying with original provider"
                         );
-                        (llm_cfg.model.clone(), decision_json)
+                        (llm_cfg.model.clone(), decision_json, None)
                     } else {
                         if decision.model != llm_cfg.model {
                             tracing::info!(
@@ -1035,14 +1035,22 @@ impl AgentExecutor {
                                 "Model routing decision"
                             );
                         }
-                        (decision.model.clone(), decision_json)
+                        (decision.model.clone(), decision_json, matched_entry)
                     }
                 } else {
-                    (model.clone(), None)
+                    (model.clone(), None, None)
                 }
             } else {
-                (model.clone(), None)
+                (model.clone(), None, None)
             };
+
+            // From this point forward, use routed_model for all tracing and cost estimation
+            let model = routed_model.clone();
+
+            // Update context window if routing selected a model with different context
+            let context_window_resolved = matched_entry
+                .and_then(|e| e.context_window_tokens.map(|v| v as u32))
+                .or(context_window_resolved);
 
             let req = CompletionRequest {
                 model: routed_model.clone(),
