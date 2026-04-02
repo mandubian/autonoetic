@@ -171,6 +171,51 @@ pub struct CredentialRecord {
     pub allowed_hosts: Vec<String>,
 }
 
+/// A step in the credential setup (automated registration) workflow.
+/// Each step is executed server-side by the gateway during `credential.setup`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "step_type", rename_all = "snake_case")]
+pub enum CredentialSetupStep {
+    /// Gateway makes an HTTP call, extracts secrets from the response,
+    /// stores them in the vault, and returns public fields to the agent.
+    ApiCall {
+        method: Option<String>,
+        url: String,
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+        body: Option<serde_json::Value>,
+        /// Secret fields to extract and store in vault: secret_name -> JSONPath
+        #[serde(default)]
+        extract_secrets: std::collections::HashMap<String, String>,
+        /// Public fields to extract and return to agent: field_name -> JSONPath
+        #[serde(default)]
+        extract_public: std::collections::HashMap<String, String>,
+    },
+    /// Gateway prompts a human through a secure out-of-band channel for secret values.
+    UserPrompt {
+        message: String,
+        secret_fields: Vec<SecretFieldSpec>,
+    },
+    /// Gateway instructs the agent to perform an action (e.g. visit a URL).
+    UserAction {
+        instruction: String,
+        #[serde(default)]
+        data_refs: Vec<String>,
+    },
+}
+
+/// Specification for a secret field in a UserPrompt step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretFieldSpec {
+    /// Field name used as the secret name in the vault.
+    pub name: String,
+    /// Human-readable label shown in the prompt.
+    pub label: String,
+    /// Whether to mask input (password-style).
+    #[serde(default)]
+    pub masked: bool,
+}
+
 /// I/O schema contract for an agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentIO {

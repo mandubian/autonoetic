@@ -1,13 +1,16 @@
-//! Credential management tools — credential.check, credential.request.
+//! Credential management tools — credential.check, credential.request, credential.setup.
 //!
 //! Phase A (MVP): Pre-configured credentials.
 //! - credential.check: Query stored credentials by service name
 //! - credential.request: Gateway-side HTTP client using stored credentials
+//!
+//! Phase B (Automated Registration):
+//! - credential.setup: Multi-step server-side credential registration flow
 
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
-use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::agent::{AgentManifest, CredentialRecord, CredentialSetupStep};
 use autonoetic_types::capability::Capability;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -16,6 +19,7 @@ use std::path::Path;
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(CredentialCheckTool));
     registry.register(Box::new(CredentialRequestTool));
+    registry.register(Box::new(CredentialSetupTool));
 }
 
 // ---------------------------------------------------------------------------
@@ -401,4 +405,322 @@ impl NativeTool for CredentialRequestTool {
 fn extract_host(url: &str) -> anyhow::Result<String> {
     let parsed = url::Url::parse(url)?;
     Ok(parsed.host_str().unwrap_or("").to_string())
+}
+
+// ---------------------------------------------------------------------------
+// credential.setup
+// ---------------------------------------------------------------------------
+
+/// Multi-step server-side credential registration flow.
+/// Executes setup steps (API calls, user prompts, user actions) to register
+/// new credentials. Secrets extracted from API responses are stored in the
+/// vault and never returned to the LLM.
+struct CredentialSetupTool;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CredentialSetupArgs {
+    service: String,
+    steps: Vec<CredentialSetupStep>,
+    /// Optional: credential ID to use. Generated if not provided.
+    credential_id: Option<String>,
+    /// Optional: expiry timestamp for the credential.
+    expires_at: Option<String>,
+    /// Optional: how to inject the secret (bearer, header:X-Custom, env var name).
+    inject_as: Option<String>,
+    /// Optional: hosts this credential is bound to.
+    allowed_hosts: Option<Vec<String>>,
+}
+
+impl NativeTool for CredentialSetupTool {
+    fn name(&self) -> &'static str {
+        "credential.setup"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "credential.setup".to_string(),
+            description: "Register a new credential through a multi-step setup flow. The gateway executes steps server-side: making API calls, extracting secrets from responses, and storing them in the vault. Secrets never appear in the LLM context.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Service name (e.g. 'github', 'stripe', 'slack')"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step_type": {
+                                    "type": "string",
+                                    "enum": ["api_call", "user_prompt", "user_action"]
+                                },
+                                "method": {"type": "string"},
+                                "url": {"type": "string"},
+                                "headers": {"type": "object"},
+                                "body": {"type": "object"},
+                                "extract_secrets": {"type": "object"},
+                                "extract_public": {"type": "object"},
+                                "message": {"type": "string"},
+                                "secret_fields": {"type": "array"},
+                                "instruction": {"type": "string"},
+                                "data_refs": {"type": "array"}
+                            }
+                        },
+                        "description": "Ordered sequence of setup steps to execute"
+                    },
+                    "credential_id": {
+                        "type": "string",
+                        "description": "Optional credential ID (generated if not provided)"
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional expiry timestamp (ISO 8601)"
+                    },
+                    "inject_as": {
+                        "type": "string",
+                        "description": "How to inject the secret: 'bearer', 'header:X-Custom-Header', or env var name"
+                    },
+                    "allowed_hosts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Hosts this credential is bound to"
+                    }
+                },
+                "required": ["service", "steps"]
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::CredentialAccess { .. }))
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: CredentialSetupArgs = serde_json::from_str(arguments_json)?;
+
+        // Check service-scoped authorization
+        let service_allowed = manifest.capabilities.iter().any(|c| {
+            matches!(c, Capability::CredentialAccess { services } if services.iter().any(|s| s == "*" || s == &args.service))
+        });
+        if !service_allowed {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("Credential setup denied for service: {}", args.service),
+                "approval_required": true,
+                "reason": format!("Setup for {} credentials requires approval", args.service),
+            })
+            .to_string());
+        }
+
+        let Some(store) = gateway_store else {
+            return Ok(json!({
+                "ok": false,
+                "error": "Gateway store not available"
+            })
+            .to_string());
+        };
+
+        // Check network policy for all API call steps before executing any
+        for step in &args.steps {
+            if let CredentialSetupStep::ApiCall { url, .. } = step {
+                let host = extract_host(url)?;
+                if !policy.can_connect_net(&host) {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": format!("Network access denied for host: {}", host),
+                        "approval_required": true,
+                        "reason": format!("API call to {} requires approval", host),
+                    })
+                    .to_string());
+                }
+            }
+        }
+
+        // Load vault
+        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH").ok().and_then(|p| {
+            let path = std::path::PathBuf::from(p);
+            if path.exists() {
+                Some(path)
+            } else {
+                None
+            }
+        });
+
+        let mut vault = vault_path
+            .as_ref()
+            .and_then(|vp| crate::vault::Vault::load_from_file(vp).ok());
+
+        if vault.is_none() {
+            return Ok(json!({
+                "ok": false,
+                "error": "Vault not available. Set AUTONOETIC_VAULT_PATH to a valid vault file."
+            })
+            .to_string());
+        }
+        let vault = vault.as_mut().unwrap();
+
+        // Execute steps
+        let credential_id = args.credential_id.clone().unwrap_or_else(|| {
+            format!(
+                "cred_{}_{}",
+                args.service,
+                uuid::Uuid::new_v4().to_string().replace('-', "")
+            )
+        });
+        let mut secret_names = Vec::new();
+        let mut public_data = serde_json::Map::new();
+        let mut step_results = Vec::new();
+
+        for (i, step) in args.steps.iter().enumerate() {
+            match step {
+                CredentialSetupStep::ApiCall {
+                    method,
+                    url,
+                    headers,
+                    body,
+                    extract_secrets,
+                    extract_public,
+                } => {
+                    // Make the HTTP request
+                    let http_method = method.as_deref().unwrap_or("POST");
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()?;
+
+                    let mut req =
+                        client.request(reqwest::Method::from_bytes(http_method.as_bytes())?, url);
+
+                    for (k, v) in headers {
+                        req = req.header(k, v);
+                    }
+
+                    if let Some(b) = body {
+                        req = req.json(b);
+                    }
+
+                    let resp = req.send()?;
+                    let status = resp.status().as_u16();
+                    let resp_body = resp.text()?;
+
+                    // Parse response
+                    let resp_value: serde_json::Value =
+                        serde_json::from_str(&resp_body).unwrap_or(json!(resp_body));
+
+                    // Extract secrets
+                    for (secret_name, json_path) in extract_secrets {
+                        if let Some(val) = extract_json_path(&resp_value, json_path) {
+                            vault.set_secret(secret_name, val.clone());
+                            secret_names.push(secret_name.clone());
+                        }
+                    }
+
+                    // Extract public data
+                    for (field_name, json_path) in extract_public {
+                        if let Some(val) = extract_json_path(&resp_value, json_path) {
+                            public_data.insert(field_name.clone(), json!(val));
+                        }
+                    }
+
+                    step_results.push(json!({
+                        "step": i,
+                        "step_type": "api_call",
+                        "status": status,
+                        "url": url,
+                    }));
+                }
+                CredentialSetupStep::UserPrompt {
+                    message,
+                    secret_fields,
+                } => {
+                    // For UserPrompt, we return the prompt details and suspend
+                    // The actual secret entry happens through the approval/human channel
+                    step_results.push(json!({
+                        "step": i,
+                        "step_type": "user_prompt",
+                        "message": message,
+                        "secret_fields": secret_fields,
+                        "status": "awaiting_human_input",
+                    }));
+                }
+                CredentialSetupStep::UserAction {
+                    instruction,
+                    data_refs,
+                } => {
+                    step_results.push(json!({
+                        "step": i,
+                        "step_type": "user_action",
+                        "instruction": instruction,
+                        "data_refs": data_refs,
+                        "status": "completed",
+                    }));
+                }
+            }
+        }
+
+        // Persist vault
+        if let Some(vp) = &vault_path {
+            vault.persist_to_file(vp)?;
+        }
+
+        // Create credential record if we extracted at least one secret
+        if !secret_names.is_empty() {
+            let cred = CredentialRecord {
+                credential_id: credential_id.clone(),
+                service: args.service.clone(),
+                secret_name: secret_names[0].clone(),
+                inject_as: args.inject_as.clone(),
+                created_by_agent: Some(manifest.agent.id.clone()),
+                expires_at: args.expires_at.clone(),
+                shared_with: vec![],
+                allowed_hosts: args.allowed_hosts.clone().unwrap_or_default(),
+            };
+            store.upsert_credential(&cred)?;
+        }
+
+        Ok(json!({
+            "ok": true,
+            "credential_id": credential_id,
+            "service": args.service,
+            "secrets_stored": secret_names.len(),
+            "public_data": public_data,
+            "steps": step_results,
+        })
+        .to_string())
+    }
+}
+
+/// Extract a value from JSON at a dot-separated or $-prefixed path.
+fn extract_json_path(value: &serde_json::Value, path: &str) -> Option<String> {
+    let path = path.trim_start_matches('$').trim_start_matches('.');
+    if path.is_empty() {
+        return None;
+    }
+    let segments: Vec<&str> = path.split('.').collect();
+    let mut cur = value;
+    for seg in &segments {
+        cur = cur.get(*seg)?;
+    }
+    match cur {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }

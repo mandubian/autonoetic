@@ -136,6 +136,16 @@ fn extract_json_path_as_string(value: &Value, path: &[String]) -> Option<String>
     }
 }
 
+/// Parse a JSONPath string (dot-separated or $-prefixed) into segments.
+/// Supports: "response.secret", "$.secret", "$.data.token"
+pub fn parse_json_path(path: &str) -> Vec<String> {
+    let path = path.trim_start_matches('$').trim_start_matches('.');
+    path.split('.')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn redact_json_path(value: &mut Value, path: &[String], redaction: &str) {
     if path.is_empty() {
         return;
