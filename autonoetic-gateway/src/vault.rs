@@ -1,10 +1,9 @@
-//! Vault for secure credential injection.
+//! Vault for secure credential injection with encryption at rest.
 //!
-//! Secrets are encrypted at rest using AES-256-GCM when a master key is
-//! configured via `AUTONOETIC_VAULT_KEY` (hex-encoded 32-byte key) or
+//! Secrets are encrypted using AES-256-GCM. A master key must be configured
+//! via `AUTONOETIC_VAULT_KEY` (hex-encoded 32-byte key) or
 //! `AUTONOETIC_VAULT_KEY_PATH` (path to file containing hex key).
-//! If no key is configured, the vault is stored as plaintext JSON
-//! (backward compatible with existing deployments).
+//! Both persist and load require encryption — no plaintext fallback.
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -221,7 +220,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_vault_plaintext_roundtrip() {
+    fn test_vault_encrypted_roundtrip() {
         let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         std::env::set_var(VAULT_KEY_ENV, key_hex);
 
@@ -243,43 +242,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_vault_encrypted_roundtrip() {
-        let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-        std::env::set_var(VAULT_KEY_ENV, key_hex);
-
-        let temp = tempdir().unwrap();
-        let path = temp.path().join("vault.enc.json");
-
-        let mut vault = Vault::new();
-        vault.set_secret("API_KEY", "secret123".to_string());
-        vault.set_secret("DB_PASSWORD", "hunter2".to_string());
-        vault.persist_to_file(&path).unwrap();
-
-        // Verify file is encrypted (has format/version/nonce/ciphertext fields)
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed["format"], "autonoetic-vault-enc");
-        assert_eq!(parsed["version"], 1);
-        assert!(parsed["nonce"].as_str().is_some());
-        assert!(parsed["ciphertext"].as_str().is_some());
-        assert_ne!(raw, "{}");
-
-        // Load and verify secrets
-        let loaded = Vault::load_from_file(&path).unwrap();
-        assert_eq!(
-            loaded.get_secret("API_KEY").unwrap().expose_secret(),
-            "secret123"
-        );
-        assert_eq!(
-            loaded.get_secret("DB_PASSWORD").unwrap().expose_secret(),
-            "hunter2"
-        );
-
-        std::env::remove_var(VAULT_KEY_ENV);
-    }
-
-    #[test]
-    #[serial]
     fn test_vault_requires_key() {
         std::env::remove_var(VAULT_KEY_ENV);
         std::env::remove_var(VAULT_KEY_PATH_ENV);
@@ -294,6 +256,33 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("encryption requires"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_vault_key_from_file() {
+        std::env::remove_var(VAULT_KEY_ENV);
+
+        let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        let key_temp = tempdir().unwrap();
+        let key_path = key_temp.path().join("master.key");
+        std::fs::write(&key_path, key_hex).unwrap();
+        std::env::set_var(VAULT_KEY_PATH_ENV, &key_path);
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("vault.enc.json");
+
+        let mut vault = Vault::new();
+        vault.set_secret("API_KEY", "secret123".to_string());
+        vault.persist_to_file(&path).unwrap();
+
+        let loaded = Vault::load_from_file(&path).unwrap();
+        assert_eq!(
+            loaded.get_secret("API_KEY").unwrap().expose_secret(),
+            "secret123"
+        );
+
+        std::env::remove_var(VAULT_KEY_PATH_ENV);
     }
 
     #[test]

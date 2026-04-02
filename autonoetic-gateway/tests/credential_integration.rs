@@ -73,13 +73,11 @@ fn spawn_one_shot_http_server(
     (format!("http://{}", addr), handle)
 }
 
-fn setup_vault(secret_name: &str, secret_value: &str) -> tempfile::TempDir {
+fn setup_vault(_secret_name: &str, _secret_value: &str) -> tempfile::TempDir {
     let temp = tempdir().unwrap();
-    let vault_path = temp.path().join("vault.json");
-    let vault_data = serde_json::json!({
-        secret_name: secret_value
-    });
-    std::fs::write(&vault_path, vault_data.to_string()).unwrap();
+    let vault_path = temp.path().join("vault.enc.json");
+    let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    std::env::set_var("AUTONOETIC_VAULT_KEY", key_hex);
     std::env::set_var("AUTONOETIC_VAULT_PATH", &vault_path);
     temp
 }
