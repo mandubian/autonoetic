@@ -304,8 +304,8 @@ impl NativeTool for SessionSearchTool {
 
         let results = store.search_session_transcripts(
             args.query.as_deref(),
-            effective_agent_id,
-            effective_root,
+            effective_agent_id.as_deref(),
+            effective_root.as_deref(),
             args.status.as_deref(),
             args.since.as_deref(),
             args.limit,
@@ -376,13 +376,13 @@ impl NativeTool for SessionSummarizeTool {
         &self,
         _manifest: &AgentManifest,
         _policy: &PolicyEngine,
-        _agent_dir: &Path,
+        agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
@@ -406,8 +406,40 @@ impl NativeTool for SessionSummarizeTool {
             .to_string());
         };
 
-        let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
-        let bytes = store.read(&args.transcript_handle)?;
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::json!({
+                "error": "Gateway store not available"
+            })
+            .to_string());
+        };
+
+        let skill_path = agent_dir.join("SKILL.md");
+        let manifest = if skill_path.exists() {
+            let content = std::fs::read_to_string(&skill_path)?;
+            let (m, _) = crate::runtime::parser::SkillParser::parse(&content)?;
+            m
+        } else {
+            return Ok(serde_json::json!({
+                "error": "Agent manifest not found"
+            })
+            .to_string());
+        };
+
+        let caller_id = &manifest.agent.id;
+
+        let transcript_record = store
+            .find_transcript_by_handle(&args.transcript_handle)?
+            .ok_or_else(|| anyhow::anyhow!("Transcript not found for handle"))?;
+
+        enforce_summarize_acl(
+            caller_id,
+            &transcript_record.agent_id,
+            &transcript_record.root_session_id,
+            session_id,
+        )?;
+
+        let content_store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
+        let bytes = content_store.read(&args.transcript_handle)?;
         let messages: Vec<crate::llm::Message> = serde_json::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("Failed to parse transcript: {}", e))?;
 
@@ -444,28 +476,61 @@ impl NativeTool for SessionSummarizeTool {
     }
 }
 
-fn enforce_search_acl<'a>(
-    caller_id: &'a str,
-    requested_agent_id: Option<&'a str>,
-    requested_root: Option<&'a str>,
-    current_session_id: Option<&'a str>,
-    _store: &'a crate::scheduler::gateway_store::GatewayStore,
-) -> anyhow::Result<(Option<&'a str>, Option<&'a str>)> {
-    let caller_root = current_session_id.map(crate::runtime::content_store::root_session_id);
+fn enforce_search_acl(
+    caller_id: &str,
+    requested_agent_id: Option<&str>,
+    requested_root: Option<&str>,
+    current_session_id: Option<&str>,
+    _store: &crate::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let caller_root = current_session_id
+        .map(|sid| crate::runtime::content_store::root_session_id(sid).to_string());
 
     if let Some(aid) = requested_agent_id {
         if aid != caller_id {
-            return Ok((Some(caller_id), requested_root));
+            let default_root = caller_root.clone();
+            return Ok((
+                Some(caller_id.to_string()),
+                requested_root.map(|s| s.to_string()).or(default_root),
+            ));
         }
     }
 
-    if let Some(root) = requested_root {
+    let default_root = caller_root.clone();
+    let effective_root = requested_root.map(|s| s.to_string()).or(default_root);
+
+    if let Some(ref root) = effective_root {
         if let Some(ref cr) = caller_root {
-            if root != &cr[..] {
-                return Ok((requested_agent_id, Some(caller_id)));
+            if root != cr {
+                return Ok((Some(caller_id.to_string()), Some(caller_id.to_string())));
             }
         }
     }
 
-    Ok((requested_agent_id, requested_root))
+    Ok((requested_agent_id.map(|s| s.to_string()), effective_root))
+}
+
+fn enforce_summarize_acl(
+    caller_id: &str,
+    transcript_agent_id: &str,
+    transcript_root: &str,
+    current_session_id: Option<&str>,
+) -> anyhow::Result<()> {
+    if transcript_agent_id == caller_id {
+        return Ok(());
+    }
+
+    if let Some(sid) = current_session_id {
+        let caller_root = crate::runtime::content_store::root_session_id(sid);
+        if transcript_root == &caller_root[..] {
+            return Ok(());
+        }
+    }
+
+    anyhow::bail!(
+        "Access denied: transcript belongs to agent '{}' (root '{}'), caller '{}' cannot access it",
+        transcript_agent_id,
+        transcript_root,
+        caller_id
+    );
 }
