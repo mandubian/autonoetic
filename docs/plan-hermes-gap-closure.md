@@ -156,7 +156,9 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 - [x] **3C.1** Add AES-256-GCM encryption to `Vault.persist_to_file()` / `load_from_file()`
 - [x] **3C.2** Master key sources: env var `AUTONOETIC_VAULT_KEY` (hex-encoded 32-byte key) or file path `AUTONOETIC_VAULT_KEY_PATH`
-- [x] **3C.3** Tests for encrypt/decrypt round-trip (7 tests: hex parsing, plaintext fallback, encrypted roundtrip, missing key error, nonce uniqueness)
+- [x] **3C.3** Tests for encrypt/decrypt round-trip (7 tests: hex parsing, encrypted roundtrip, persist requires key, key-from-file, nonce uniqueness)
+
+**MVP scope:** Master key via env or key file only. No migration from old plaintext vault files (not required). OS keychain / passphrase-at-boot and similar are **deferred** after MVP.
 
 #### Phase D — Secure User Prompt Channel (~200 lines)
 

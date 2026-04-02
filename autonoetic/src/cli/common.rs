@@ -6,6 +6,14 @@ use autonoetic_types::causal_chain::CausalChainEntry;
 use autonoetic_types::config::GatewayConfig;
 use std::collections::BTreeMap;
 
+fn parse_key_value(s: &str) -> anyhow::Result<(String, String)> {
+    let parts: Vec<&str> = s.splitn(2, '=').collect();
+    if parts.len() != 2 {
+        return Err(anyhow::anyhow!("Invalid KEY=VALUE format: {}", s));
+    }
+    Ok((parts[0].to_string(), parts[1].to_string()))
+}
+
 // Re-exports for modules
 pub use autonoetic_mcp::{
     AgentExecutor as McpAgentExecutor, McpClient, McpServer, McpTool, McpTransportConfig,
@@ -142,6 +150,9 @@ pub enum GatewayApprovalCommands {
         /// Optional approval note.
         #[arg(long)]
         reason: Option<String>,
+        /// Secret values to provide for credential prompts (KEY=VALUE format).
+        #[arg(long = "secret", value_parser = parse_key_value)]
+        secrets: Vec<(String, String)>,
     },
     /// Reject one pending request.
     Reject {

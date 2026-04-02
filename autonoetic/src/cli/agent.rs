@@ -568,6 +568,7 @@ fn admin_revision_manifest() -> AgentManifest {
         script_entry: None,
         gateway_url: None,
         gateway_token: None,
+        allowed_tool_tiers: vec![],
     }
 }
 
