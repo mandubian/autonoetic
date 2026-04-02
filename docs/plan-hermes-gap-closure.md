@@ -177,7 +177,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 **Known issues:**
 - (Low) `--secret KEY=VALUE` CLI flag exposes secrets in shell history. Practical for now; should be replaced with stdin/file-based input in a future iteration.
 
-#### Phase E — Advanced Features
+#### Phase E — Advanced Features (deferred — not critical for MVP)
 
 - [ ] **3E.1** Token refresh/rotation handling (transparent 401 retry with refresh token)
 - [ ] **3E.2** Credential sharing between agents (`credential.share` + approval)
