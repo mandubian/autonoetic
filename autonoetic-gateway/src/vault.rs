@@ -80,51 +80,33 @@ impl Vault {
         None
     }
 
-    /// Load a vault snapshot from disk. Decrypts if encrypted, otherwise
-    /// falls back to plaintext JSON (backward compatible).
+    /// Load a vault snapshot from disk. Expects an encrypted vault file.
+    /// Fails if no master key is configured or the file is not a valid encrypted vault.
     pub fn load_from_file(path: &Path) -> anyhow::Result<Self> {
         if !path.exists() {
             return Ok(Self::new());
         }
         let raw = std::fs::read_to_string(path)?;
-
-        // Try to parse as encrypted vault first (check for format marker)
-        if let Ok(encrypted) = serde_json::from_str::<EncryptedVault>(&raw) {
-            if encrypted.format == "autonoetic-vault-enc" && encrypted.version == 1 {
-                return Self::decrypt_vault(&encrypted);
-            }
-        }
-
-        // Fall back to plaintext JSON
-        let plain: HashMap<String, String> = serde_json::from_str(&raw)?;
-        let mut vault = Self::new();
-        for (k, v) in plain {
-            vault.set_secret(&k, v);
-        }
-        Ok(vault)
+        let encrypted: EncryptedVault = serde_json::from_str(&raw)?;
+        Self::decrypt_vault(&encrypted)
     }
 
-    /// Persist current vault state to disk. Encrypts if a master key is
-    /// configured, otherwise writes plaintext JSON (backward compatible).
+    /// Persist current vault state to disk as an encrypted file.
+    /// Requires a master key to be configured via env var or key file.
     pub fn persist_to_file(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-
-        if let Some(key) = Self::get_master_key() {
-            let encrypted = self.encrypt_vault(&key)?;
-            std::fs::write(path, serde_json::to_string_pretty(&encrypted)?)?;
-            Ok(())
-        } else {
-            // Plaintext fallback
-            let plain: HashMap<String, String> = self
-                .secrets
-                .iter()
-                .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
-                .collect();
-            std::fs::write(path, serde_json::to_string_pretty(&plain)?)?;
-            Ok(())
-        }
+        let key = Self::get_master_key().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Vault encryption requires {} or {} to be set",
+                VAULT_KEY_ENV,
+                VAULT_KEY_PATH_ENV
+            )
+        })?;
+        let encrypted = self.encrypt_vault(&key)?;
+        std::fs::write(path, serde_json::to_string_pretty(&encrypted)?)?;
+        Ok(())
     }
 
     /// Encrypt the vault contents using AES-256-GCM.
@@ -240,9 +222,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_vault_plaintext_roundtrip() {
-        // Ensure no encryption key is set
-        std::env::remove_var(VAULT_KEY_ENV);
-        std::env::remove_var(VAULT_KEY_PATH_ENV);
+        let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        std::env::set_var(VAULT_KEY_ENV, key_hex);
 
         let temp = tempdir().unwrap();
         let path = temp.path().join("vault.json");
@@ -256,6 +237,8 @@ mod tests {
             loaded.get_secret("API_KEY").unwrap().expose_secret(),
             "secret123"
         );
+
+        std::env::remove_var(VAULT_KEY_ENV);
     }
 
     #[test]
@@ -297,24 +280,20 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_vault_encrypted_requires_key() {
-        let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-        std::env::set_var(VAULT_KEY_ENV, key_hex);
+    fn test_vault_requires_key() {
+        std::env::remove_var(VAULT_KEY_ENV);
+        std::env::remove_var(VAULT_KEY_PATH_ENV);
 
         let temp = tempdir().unwrap();
         let path = temp.path().join("vault.enc.json");
 
-        let mut vault = Vault::new();
-        vault.set_secret("KEY", "value".to_string());
-        vault.persist_to_file(&path).unwrap();
-
-        // Remove key and try to load
-        std::env::remove_var(VAULT_KEY_ENV);
-        let result = Vault::load_from_file(&path);
-        std::env::set_var(VAULT_KEY_ENV, key_hex); // restore immediately
+        let vault = Vault::new();
+        let result = vault.persist_to_file(&path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no master key"));
-        std::env::remove_var(VAULT_KEY_ENV);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("encryption requires"));
     }
 
     #[test]
