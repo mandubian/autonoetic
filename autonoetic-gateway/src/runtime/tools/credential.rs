@@ -489,6 +489,10 @@ impl NativeTool for CredentialSetupTool {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Hosts this credential is bound to"
+                    },
+                    "approval_ref": {
+                        "type": "string",
+                        "description": "Approval request ID from a completed UserPrompt approval. Retry with this after operator provides secrets."
                     }
                 },
                 "required": ["service", "steps"]
@@ -541,21 +545,36 @@ impl NativeTool for CredentialSetupTool {
         };
 
         // Handle resume after approval: if approval_ref is provided,
-        // check if the credential was already created by the approval handler.
+        // look up the approval request to find the credential_id, then check if the record exists.
         if let Some(ref approval_ref) = args.approval_ref {
-            if let Some(cred) = store.get_credential(approval_ref)? {
-                return Ok(json!({
-                    "ok": true,
-                    "credential_id": cred.credential_id,
-                    "service": cred.service,
-                    "secrets_stored": 1,
-                    "resumed_from_approval": true,
-                })
-                .to_string());
+            if let Some(approval) = store.get_approval(approval_ref)? {
+                if let autonoetic_types::background::ScheduledAction::CredentialPrompt {
+                    credential_id,
+                    ..
+                } = &approval.action
+                {
+                    if approval.status
+                        == Some(autonoetic_types::background::ApprovalStatus::Approved)
+                    {
+                        if let Some(cred) = store.get_credential(credential_id)? {
+                            return Ok(json!({
+                                "ok": true,
+                                "credential_id": cred.credential_id,
+                                "service": cred.service,
+                                "secrets_stored": 1,
+                                "resumed_from_approval": true,
+                            })
+                            .to_string());
+                        }
+                    }
+                }
             }
             return Ok(json!({
                 "ok": false,
-                "error": format!("Approval reference '{}' not found or not yet approved", approval_ref),
+                "error": format!(
+                    "Approval reference '{}' not found, not yet approved, or credential not yet created",
+                    approval_ref
+                ),
             })
             .to_string());
         }
@@ -582,21 +601,18 @@ impl NativeTool for CredentialSetupTool {
             }
         }
 
-        // Load vault — fail-closed if it can't be loaded
+        // Load vault — fail-closed if not configured or can't be loaded
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
-            .map(PathBuf::from);
-        let mut vault = if let Some(ref vp) = vault_path {
-            crate::vault::Vault::load_from_file(vp).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to load vault from {}: {}. Set AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH.",
-                    vp.display(),
-                    e
-                )
-            })?
-        } else {
-            crate::vault::Vault::new()
-        };
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("AUTONOETIC_VAULT_PATH must be set"))?;
+        let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
+                vault_path.display(),
+                e
+            )
+        })?;
 
         // Execute steps
         let credential_id = args.credential_id.clone().unwrap_or_else(|| {
@@ -701,7 +717,11 @@ impl NativeTool for CredentialSetupTool {
                         credential_id: credential_id.clone(),
                         message: message.clone(),
                         secret_fields: secret_fields.clone(),
-                        payload: None,
+                        payload: Some(json!({
+                            "inject_as": args.inject_as,
+                            "allowed_hosts": args.allowed_hosts,
+                            "expires_at": args.expires_at,
+                        })),
                     };
                     let approval_req = ApprovalRequest {
                         request_id: request_id.clone(),
@@ -751,9 +771,7 @@ impl NativeTool for CredentialSetupTool {
         }
 
         // Persist vault (only secrets extracted before any suspension)
-        if let Some(vp) = &vault_path {
-            vault.persist_to_file(vp)?;
-        }
+        vault.persist_to_file(&vault_path)?;
 
         // If suspended on UserPrompt, return immediately with approval_required flag
         if suspended {
@@ -768,9 +786,9 @@ impl NativeTool for CredentialSetupTool {
                 "ok": false,
                 "suspended": true,
                 "approval_required": true,
+                "request_id": approval_request_id,
                 "credential_id": credential_id,
                 "service": args.service,
-                "approval_request_id": approval_request_id,
                 "steps": step_results,
                 "suspended_at_step": suspended_at_step,
                 "reason": "UserPrompt step requires human input for secret fields"

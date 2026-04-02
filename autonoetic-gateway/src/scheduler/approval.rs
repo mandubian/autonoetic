@@ -103,25 +103,39 @@ pub fn approve_request(
                         service,
                         credential_id,
                         secret_fields,
+                        payload,
                         ..
                     } = &req.action
                     {
-                        // Store secrets in vault — fail-closed
+                        // Extract setup metadata from payload
+                        let inject_as = payload.as_ref().and_then(|p| {
+                            p.get("inject_as")
+                                .and_then(|v| v.as_str().map(String::from))
+                        });
+                        let allowed_hosts: Vec<String> = payload
+                            .as_ref()
+                            .and_then(|p| {
+                                p.get("allowed_hosts")
+                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            })
+                            .unwrap_or_default();
+                        let expires_at = payload.as_ref().and_then(|p| {
+                            p.get("expires_at")
+                                .and_then(|v| v.as_str().map(String::from))
+                        });
+
+                        // Store secrets in vault — fail-closed, require VAULT_PATH
                         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
                             .ok()
-                            .map(std::path::PathBuf::from);
-                        let mut vault = if let Some(ref vp) = vault_path {
-                            crate::vault::Vault::load_from_file(vp).map_err(|e| {
-                                anyhow::anyhow!(
-                                    "Failed to load vault from {}: {}. Set AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH.",
-                                    vp.display(),
-                                    e
-                                )
-                            })?
-                        } else {
-                            crate::vault::Vault::new()
-                        };
-                        // Map secret_fields to the provided values
+                            .map(std::path::PathBuf::from)
+                            .ok_or_else(|| anyhow::anyhow!("AUTONOETIC_VAULT_PATH must be set for credential prompt approval"))?;
+                        let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
+                                vault_path.display(),
+                                e
+                            )
+                        })?;
                         for field in secret_fields {
                             if let Some((_, value)) =
                                 secret_pairs.iter().find(|(name, _)| name == &field.name)
@@ -129,11 +143,9 @@ pub fn approve_request(
                                 vault.set_secret(&field.name, value.clone());
                             }
                         }
-                        if let Some(ref vp) = vault_path {
-                            vault.persist_to_file(vp)?;
-                        }
+                        vault.persist_to_file(&vault_path)?;
 
-                        // Create the CredentialRecord
+                        // Create the CredentialRecord with full metadata
                         let cred = autonoetic_types::agent::CredentialRecord {
                             credential_id: credential_id.clone(),
                             service: service.clone(),
@@ -141,11 +153,11 @@ pub fn approve_request(
                                 .first()
                                 .map(|f| f.name.clone())
                                 .unwrap_or_default(),
-                            inject_as: None,
+                            inject_as,
                             created_by_agent: Some(req.agent_id.clone()),
-                            expires_at: None,
+                            expires_at,
                             shared_with: vec![],
-                            allowed_hosts: vec![],
+                            allowed_hosts,
                         };
                         store.upsert_credential(&cred)?;
 
