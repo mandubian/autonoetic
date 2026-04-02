@@ -93,8 +93,8 @@ The following tool mappings apply:
 | `WebSearch(query)` | `web.search({"query": "query"})` |
 | `WebFetch(url)` | `web.fetch({"url": "url"})` |
 
-File paths referenced by the skill are mounted in the sandbox at `/workspace/`.
-Use `content.read` for any file the skill's instructions reference."#;
+File paths referenced by the skill are available in the agent directory.
+Use content.store or sandbox paths relative to the agent working directory."#;
 
 fn tool_bridging_appendix() -> String {
     TOOL_BRIDGING_APPENDIX.to_string()

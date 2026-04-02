@@ -1513,7 +1513,7 @@ pub fn handle_agent_import_skill(
     );
 
     let skill_content = std::fs::read_to_string(&skill_manifest_path)?;
-    let (parsed_manifest, _body) =
+    let (parsed_manifest, body) =
         autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_content)?;
 
     info!(
@@ -1547,21 +1547,61 @@ pub fn handle_agent_import_skill(
         })
     };
 
-    let capabilities = match trust {
-        TrustMode::Generous => parsed_manifest.capabilities.clone(),
+    let (capabilities, trust_applied) = match trust {
+        TrustMode::Generous => {
+            let caps = if parsed_manifest.capabilities.is_empty() {
+                let allowed_tools: Vec<String> = parsed_manifest
+                    .agentskills_import
+                    .as_ref()
+                    .map(|m| m.allowed_tools.clone())
+                    .unwrap_or_default();
+                if allowed_tools.is_empty() {
+                    vec![
+                        autonoetic_types::capability::Capability::ReadAccess {
+                            scopes: vec!["self.*".to_string()],
+                        },
+                        autonoetic_types::capability::Capability::WriteAccess {
+                            scopes: vec!["self.*".to_string()],
+                        },
+                        autonoetic_types::capability::Capability::CodeExecution {
+                            patterns: vec!["*".to_string()],
+                        },
+                    ]
+                } else {
+                    autonoetic_gateway::runtime::parser::infer_capabilities(&allowed_tools)
+                }
+            } else {
+                parsed_manifest.capabilities.clone()
+            };
+            (caps, false)
+        }
         TrustMode::Strict => {
-            let mut caps = parsed_manifest.capabilities.clone();
-            if caps.is_empty() {
-                caps.push(autonoetic_types::capability::Capability::ReadAccess {
-                    scopes: vec!["self.*".to_string()],
-                });
-            }
-            caps
+            let caps = if parsed_manifest.capabilities.is_empty() {
+                let allowed_tools: Vec<String> = parsed_manifest
+                    .agentskills_import
+                    .as_ref()
+                    .map(|m| m.allowed_tools.clone())
+                    .unwrap_or_default();
+                if allowed_tools.is_empty() {
+                    vec![
+                        autonoetic_types::capability::Capability::ReadAccess {
+                            scopes: vec!["self.*".to_string()],
+                        },
+                    ]
+                } else {
+                    autonoetic_gateway::runtime::parser::infer_capabilities(&allowed_tools)
+                }
+            } else {
+                parsed_manifest.capabilities.clone()
+            };
+            (caps, true)
         }
         TrustMode::Audit => {
-            vec![autonoetic_types::capability::Capability::ReadAccess {
-                scopes: vec!["self.*".to_string()],
-            }]
+            (vec![
+                autonoetic_types::capability::Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                },
+            ], true)
         }
     };
 
@@ -1609,28 +1649,79 @@ pub fn handle_agent_import_skill(
     let target_dir = agents_dir.join(agent_id.replace('.', "-"));
     std::fs::create_dir_all(&target_dir)?;
 
-    let mut output_skill = skill_content.clone();
-    if !output_skill.contains("metadata:\n  autonoetic:") {
-        let parts: Vec<&str> = skill_content.splitn(2, "---").collect();
-        let body = if parts.len() > 1 {
-            parts[1].trim()
-        } else {
-            &skill_content
-        };
-        output_skill = format!(
-            "---\nname: \"{}\"\ndescription: \"{}\"\nmetadata:\n  autonoetic:\n    version: \"{}\"\n    runtime:\n      engine: \"autonoetic\"\n      gateway_version: \"0.1.0\"\n      sdk_version: \"0.1.0\"\n      type: \"stateful\"\n      sandbox: \"bubblewrap\"\n      runtime_lock: \"runtime.lock\"\n    agent:\n      id: \"{}\"\n      name: \"{}\"\n      description: \"{}\"\n---\n\n{}",
-            agent_id,
-            parsed_manifest.agent.description,
-            parsed_manifest.version,
-            agent_id,
-            parsed_manifest.agent.name,
-            parsed_manifest.agent.description,
-            body,
-        );
+    let yaml_frontmatter = format!(
+        "name: \"{}\"\ndescription: \"{}\"\n{}",
+        agent_id,
+        target_manifest.agent.description,
+        {
+            let mut lines = Vec::new();
+            lines.push("metadata:".to_string());
+            lines.push("  autonoetic:".to_string());
+            lines.push(format!("    version: \"{}\"", target_manifest.version));
+            lines.push("    runtime:".to_string());
+            lines.push(format!("      engine: \"{}\"", target_manifest.runtime.engine));
+            lines.push(format!("      gateway_version: \"{}\"", target_manifest.runtime.gateway_version));
+            lines.push(format!("      sdk_version: \"{}\"", target_manifest.runtime.sdk_version));
+            lines.push(format!("      type: \"{}\"", target_manifest.runtime.runtime_type));
+            lines.push(format!("      sandbox: \"{}\"", target_manifest.runtime.sandbox));
+            lines.push(format!("      runtime_lock: \"{}\"", target_manifest.runtime.runtime_lock));
+            lines.push("    agent:".to_string());
+            lines.push(format!("      id: \"{}\"", target_manifest.agent.id));
+            lines.push(format!("      name: \"{}\"", target_manifest.agent.name));
+            lines.push(format!("      description: \"{}\"", target_manifest.agent.description));
+            if !target_manifest.capabilities.is_empty() {
+                lines.push("    capabilities:".to_string());
+                for cap in &target_manifest.capabilities {
+                    let cap_yaml = serde_json::to_string(cap).unwrap_or_default();
+                    lines.push(format!("      - {}", cap_yaml));
+                }
+            }
+            if let Some(ref llm) = target_manifest.llm_config {
+                lines.push("    llm_config:".to_string());
+                lines.push(format!("      provider: \"{}\"", llm.provider));
+                lines.push(format!("      model: \"{}\"", llm.model));
+                lines.push(format!("      temperature: {}", llm.temperature));
+            }
+            lines.join("\n")
+        }
+    );
+
+    let output_skill = format!("---\n{}\n---\n\n{}", yaml_frontmatter, body.trim());
+    std::fs::write(target_dir.join("SKILL.md"), &output_skill)?;
+
+    for subdir in &["scripts", "references", "assets"] {
+        let src = skill_dir.join(subdir);
+        let dst = target_dir.join(subdir);
+        if src.is_dir() {
+            fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+                std::fs::create_dir_all(dst)?;
+                for entry in std::fs::read_dir(src)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    let target = dst.join(entry.file_name());
+                    if path.is_dir() {
+                        copy_dir_recursive(&path, &target)?;
+                    } else {
+                        std::fs::copy(&path, &target)?;
+                    }
+                }
+                Ok(())
+            }
+            copy_dir_recursive(&src, &dst)?;
+            info!("Copied {} to {}", subdir, dst.display());
+        }
     }
 
-    std::fs::write(target_dir.join("SKILL.md"), &output_skill)?;
     info!("Imported skill written to: {}", target_dir.display());
+
+    if trust_applied {
+        let trust_label = match trust {
+            TrustMode::Generous => "generous",
+            TrustMode::Strict => "strict",
+            TrustMode::Audit => "audit",
+        };
+        info!("Trust mode '{}' applied — capabilities were restricted during import", trust_label);
+    }
 
     if let Some(import_meta) = &target_manifest.agentskills_import {
         if import_meta.needs_tool_bridging {
