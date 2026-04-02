@@ -684,14 +684,14 @@ impl GatewayStore {
 
             CREATE TABLE IF NOT EXISTS session_transcripts (
                 transcript_id  TEXT PRIMARY KEY,
-                session_id     TEXT NOT NULL,
+                session_id     TEXT NOT NULL UNIQUE,
                 root_session_id TEXT NOT NULL,
                 agent_id       TEXT NOT NULL,
                 revision_id    TEXT,
                 user_id        TEXT,
                 started_at     TEXT NOT NULL,
                 ended_at       TEXT,
-                status         TEXT NOT NULL DEFAULT 'completed',
+                status         TEXT NOT NULL DEFAULT 'active',
                 turn_count     INTEGER NOT NULL DEFAULT 0,
                 transcript_handle TEXT,
                 excerpt        TEXT,
@@ -2592,7 +2592,8 @@ impl GatewayStore {
                 revision_id, user_id, started_at, ended_at, status,
                 turn_count, transcript_handle, excerpt, origin_node_id
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-            ON CONFLICT(transcript_id) DO UPDATE SET
+            ON CONFLICT(session_id) DO UPDATE SET
+                transcript_id = excluded.transcript_id,
                 ended_at = excluded.ended_at,
                 status = excluded.status,
                 turn_count = excluded.turn_count,
@@ -2617,6 +2618,58 @@ impl GatewayStore {
         Ok(())
     }
 
+    pub fn finalize_session_transcript(
+        &self,
+        session_id: &str,
+        ended_at: &str,
+        status: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE session_transcripts SET ended_at = ?1, status = ?2 WHERE session_id = ?3",
+            params![ended_at, status, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_transcript_by_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<autonoetic_types::causal_chain::SessionTranscriptRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT transcript_id, session_id, root_session_id, agent_id,
+                    revision_id, user_id, started_at, ended_at, status,
+                    turn_count, transcript_handle, excerpt, origin_node_id
+             FROM session_transcripts
+             WHERE transcript_handle = ?1
+             LIMIT 1",
+        )?;
+        let result = stmt.query_row(params![handle], |row| {
+            Ok(autonoetic_types::causal_chain::SessionTranscriptRecord {
+                transcript_id: row.get(0)?,
+                session_id: row.get(1)?,
+                root_session_id: row.get(2)?,
+                agent_id: row.get(3)?,
+                revision_id: row.get(4)?,
+                user_id: row.get(5)?,
+                started_at: row.get(6)?,
+                ended_at: row.get(7)?,
+                status: row.get(8)?,
+                turn_count: row.get(9)?,
+                transcript_handle: row.get(10)?,
+                excerpt: row.get(11)?,
+                origin_node_id: row.get(12)?,
+            })
+        });
+
+        match result {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn search_session_transcripts(
         &self,
         query: Option<&str>,
@@ -2631,30 +2684,35 @@ impl GatewayStore {
         let mut conditions = Vec::new();
         let mut params: Vec<rusqlite::types::Value> = Vec::new();
 
-        if let Some(q) = query {
-            conditions.push("transcript_id IN (SELECT transcript_id FROM session_transcripts_fts WHERE session_transcripts_fts MATCH ?)".to_string());
-            params.push(rusqlite::types::Value::Text(q.to_string()));
-        }
-
         if let Some(aid) = agent_id {
-            conditions.push("agent_id = ?".to_string());
+            conditions.push("st.agent_id = ?".to_string());
             params.push(rusqlite::types::Value::Text(aid.to_string()));
         }
 
         if let Some(rid) = root_session_id {
-            conditions.push("root_session_id = ?".to_string());
+            conditions.push("st.root_session_id = ?".to_string());
             params.push(rusqlite::types::Value::Text(rid.to_string()));
         }
 
         if let Some(s) = status {
-            conditions.push("status = ?".to_string());
+            conditions.push("st.status = ?".to_string());
             params.push(rusqlite::types::Value::Text(s.to_string()));
         }
 
         if let Some(since_time) = since {
-            conditions.push("started_at >= ?".to_string());
+            conditions.push("st.started_at >= ?".to_string());
             params.push(rusqlite::types::Value::Text(since_time.to_string()));
         }
+
+        let (fts_join, order_by) = if let Some(q) = query {
+            params.push(rusqlite::types::Value::Text(q.to_string()));
+            (
+                "JOIN session_transcripts_fts AS fts ON st.rowid = fts.rowid",
+                "ORDER BY bm25(fts) ASC",
+            )
+        } else {
+            ("", "ORDER BY st.started_at DESC")
+        };
 
         let where_clause = if conditions.is_empty() {
             "1".to_string()
@@ -2662,19 +2720,14 @@ impl GatewayStore {
             conditions.join(" AND ")
         };
 
-        let order_by = if query.is_some() {
-            "ORDER BY bm25(session_transcripts_fts) ASC"
-        } else {
-            "ORDER BY started_at DESC"
-        };
-
         let sql = format!(
-            "SELECT transcript_id, session_id, root_session_id, agent_id,
-                    revision_id, user_id, started_at, ended_at, status,
-                    turn_count, transcript_handle, excerpt, origin_node_id
-             FROM session_transcripts
+            "SELECT st.transcript_id, st.session_id, st.root_session_id, st.agent_id,
+                    st.revision_id, st.user_id, st.started_at, st.ended_at, st.status,
+                    st.turn_count, st.transcript_handle, st.excerpt, st.origin_node_id
+             FROM session_transcripts st
+             {}
              WHERE {} {} LIMIT ?",
-            where_clause, order_by,
+            fts_join, where_clause, order_by,
         );
 
         let mut stmt = conn.prepare(&sql)?;

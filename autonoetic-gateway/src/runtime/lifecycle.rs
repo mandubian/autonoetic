@@ -321,6 +321,8 @@ pub struct AgentExecutor {
     pub live_digest: Option<Arc<std::sync::Mutex<crate::runtime::live_digest::LiveDigestWriter>>>,
     /// Last conversation history from `execute_with_history`, retained for `close_session` transcript persistence.
     pub last_history: Vec<Message>,
+    /// Session start timestamp (ISO 8601), captured when session_id is first assigned.
+    pub session_started_at: Option<String>,
 }
 
 impl AgentExecutor {
@@ -356,6 +358,7 @@ impl AgentExecutor {
             active_executions: None,
             live_digest: None,
             last_history: Vec::new(),
+            session_started_at: None,
         }
     }
 
@@ -423,6 +426,7 @@ impl AgentExecutor {
         }
         let id = uuid::Uuid::new_v4().to_string();
         self.session_id = Some(id.clone());
+        self.session_started_at = Some(chrono::Utc::now().to_rfc3339());
         id
     }
 
@@ -459,8 +463,23 @@ impl AgentExecutor {
                     &disclosure_state,
                     self.gateway_store.as_deref(),
                     Some(&self.manifest.agent.id),
+                    self.session_started_at.as_deref(),
                 ) {
                     tracing::warn!("Failed to persist history on close: {}", e);
+                }
+
+                if let Some(gs) = self.gateway_store.as_ref() {
+                    let ended_at = chrono::Utc::now().to_rfc3339();
+                    let status = if reason.contains("suspended") {
+                        "suspended"
+                    } else if reason.contains("error") {
+                        "failed"
+                    } else {
+                        "completed"
+                    };
+                    if let Err(e) = gs.finalize_session_transcript(&session_id, &ended_at, status) {
+                        tracing::warn!("Failed to finalize transcript: {}", e);
+                    }
                 }
             }
         }
@@ -1374,6 +1393,7 @@ impl AgentExecutor {
                             &disclosure_state,
                             self.gateway_store.as_deref(),
                             Some(&self.manifest.agent.id),
+                            self.session_started_at.as_deref(),
                         ) {
                             tracing::warn!("Failed to persist history: {}", e);
                         }
@@ -2867,6 +2887,7 @@ fn persist_history_to_content_store(
     disclosure_state: &DisclosureState,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     agent_id: Option<&str>,
+    session_started_at: Option<&str>,
 ) -> anyhow::Result<()> {
     use crate::runtime::content_store::ContentStore;
     const MAX_PERSISTED_MESSAGES: usize = 400;
@@ -2936,8 +2957,7 @@ fn persist_history_to_content_store(
     // Upsert session transcript to database for FTS
     if let Some(gs) = gateway_store {
         let root_session_id = crate::runtime::content_store::root_session_id(session_id);
-        let transcript_id = format!("stx-{}", uuid::Uuid::new_v4());
-        let now = chrono::Utc::now().to_rfc3339();
+        let transcript_id = format!("stx-{}", session_id);
         let record = autonoetic_types::causal_chain::SessionTranscriptRecord {
             transcript_id,
             session_id: session_id.to_string(),
@@ -2945,10 +2965,10 @@ fn persist_history_to_content_store(
             agent_id: agent_id.unwrap_or("unknown").to_string(),
             revision_id: None,
             user_id: None,
-            started_at: now.clone(),
+            started_at: session_started_at.map(|s| s.to_string()).unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             ended_at: None,
-            status: "completed".to_string(),
-            turn_count: history.len() as i64,
+            status: "active".to_string(),
+            turn_count: merged_history.len() as i64,
             transcript_handle: Some(history_handle.to_string()),
             excerpt: Some(excerpt),
             origin_node_id: None,
@@ -3037,6 +3057,7 @@ mod history_persistence_tests {
             &gateway_dir,
             &mut tracer,
             &disclosure,
+            None,
             None,
             None,
         )?;
