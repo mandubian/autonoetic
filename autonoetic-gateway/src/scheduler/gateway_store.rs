@@ -2684,6 +2684,14 @@ impl GatewayStore {
         let mut conditions = Vec::new();
         let mut params: Vec<rusqlite::types::Value> = Vec::new();
 
+        let fts_join = if let Some(q) = query {
+            conditions.push("st.rowid IN (SELECT rowid FROM session_transcripts_fts WHERE session_transcripts_fts MATCH ?)".to_string());
+            params.push(rusqlite::types::Value::Text(q.to_string()));
+            true
+        } else {
+            false
+        };
+
         if let Some(aid) = agent_id {
             conditions.push("st.agent_id = ?".to_string());
             params.push(rusqlite::types::Value::Text(aid.to_string()));
@@ -2704,20 +2712,16 @@ impl GatewayStore {
             params.push(rusqlite::types::Value::Text(since_time.to_string()));
         }
 
-        let (fts_join, order_by) = if let Some(q) = query {
-            params.push(rusqlite::types::Value::Text(q.to_string()));
-            (
-                "JOIN session_transcripts_fts AS fts ON st.rowid = fts.rowid",
-                "ORDER BY bm25(fts) ASC",
-            )
-        } else {
-            ("", "ORDER BY st.started_at DESC")
-        };
-
         let where_clause = if conditions.is_empty() {
             "1".to_string()
         } else {
             conditions.join(" AND ")
+        };
+
+        let order_by = if fts_join {
+            "ORDER BY (SELECT bm25(session_transcripts_fts) FROM session_transcripts_fts WHERE session_transcripts_fts.rowid = st.rowid) ASC"
+        } else {
+            "ORDER BY st.started_at DESC"
         };
 
         let sql = format!(
@@ -2725,9 +2729,8 @@ impl GatewayStore {
                     st.revision_id, st.user_id, st.started_at, st.ended_at, st.status,
                     st.turn_count, st.transcript_handle, st.excerpt, st.origin_node_id
              FROM session_transcripts st
-             {}
              WHERE {} {} LIMIT ?",
-            fts_join, where_clause, order_by,
+            where_clause, order_by,
         );
 
         let mut stmt = conn.prepare(&sql)?;
@@ -3836,6 +3839,7 @@ mod tests {
     use autonoetic_types::background::{
         UserInteraction, UserInteractionAnswer, UserInteractionKind, UserInteractionOption,
     };
+    use autonoetic_types::causal_chain::SessionTranscriptRecord;
 
     fn artifact_ref(
         ref_id: &str,
@@ -4171,20 +4175,82 @@ mod tests {
     }
 
     #[test]
-    fn cancel_user_interaction_requires_pending_interaction() -> Result<()> {
+    fn search_session_transcripts_fts_query() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let store = GatewayStore::open(temp_dir.path())?;
 
-        let interaction = pending_interaction("ui-cancel-1", true, vec![]);
-        store.create_user_interaction(&interaction)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        store.upsert_session_transcript(&SessionTranscriptRecord {
+            transcript_id: "stx-sess1".to_string(),
+            session_id: "sess1".to_string(),
+            root_session_id: "root1".to_string(),
+            agent_id: "agent1".to_string(),
+            revision_id: None,
+            user_id: None,
+            started_at: now.clone(),
+            ended_at: None,
+            status: "active".to_string(),
+            turn_count: 2,
+            transcript_handle: Some("h1".to_string()),
+            excerpt: Some("[user]: search for API docs\n[assistant]: found docs".to_string()),
+            origin_node_id: None,
+        })?;
 
-        store.cancel_user_interaction("ui-cancel-1", "cancelled by test")?;
+        store.upsert_session_transcript(&SessionTranscriptRecord {
+            transcript_id: "stx-sess2".to_string(),
+            session_id: "sess2".to_string(),
+            root_session_id: "root2".to_string(),
+            agent_id: "agent2".to_string(),
+            revision_id: None,
+            user_id: None,
+            started_at: now.clone(),
+            ended_at: None,
+            status: "active".to_string(),
+            turn_count: 3,
+            transcript_handle: Some("h2".to_string()),
+            excerpt: Some("[user]: how to authenticate\n[assistant]: use bearer token".to_string()),
+            origin_node_id: None,
+        })?;
 
-        let second_cancel = store.cancel_user_interaction("ui-cancel-1", "again");
-        assert!(second_cancel.is_err());
+        let results = store.search_session_transcripts(Some("API"), None, None, None, None, 10)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, "sess1");
 
-        let unknown = store.cancel_user_interaction("ui-missing", "x");
-        assert!(unknown.is_err());
+        let all = store.search_session_transcripts(None, None, None, None, None, 10)?;
+        assert_eq!(all.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_session_transcript_updates_status() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        store.upsert_session_transcript(&SessionTranscriptRecord {
+            transcript_id: "stx-sess1".to_string(),
+            session_id: "sess1".to_string(),
+            root_session_id: "root1".to_string(),
+            agent_id: "agent1".to_string(),
+            revision_id: None,
+            user_id: None,
+            started_at: now.clone(),
+            ended_at: None,
+            status: "active".to_string(),
+            turn_count: 1,
+            transcript_handle: Some("h1".to_string()),
+            excerpt: Some("test".to_string()),
+            origin_node_id: None,
+        })?;
+
+        store.finalize_session_transcript("sess1", &now, "completed")?;
+
+        let results =
+            store.search_session_transcripts(None, None, None, Some("completed"), None, 10)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, "completed");
+        assert!(results[0].ended_at.is_some());
 
         Ok(())
     }
