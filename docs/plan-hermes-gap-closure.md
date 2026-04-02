@@ -138,14 +138,19 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - [x] **3B.1** Define `CredentialSetupStep` enum (ApiCall, UserPrompt, UserAction) in `autonoetic-types/src/agent.rs`
 - [x] **3B.2** Implement `credential.setup` tool (multi-step server-side execution, extract_secrets via JSONPath, store in Vault)
 - [x] **3B.3** Extend JSONPath parser to accept `$`-prefixed notation (`parse_json_path()` in `runtime/store.rs`)
-- [x] **3B.4** Wire approval queue integration: UserPrompt step returns `ok:false, suspended:true, approval_required:true` and breaks iteration (no further steps execute). Full approval queue round-trip (operator decision → resume) deferred to Phase D.
-- [x] **3B.5** Tests for automated registration flow (8 tests: availability, service/network denial, user_action, user_prompt suspension, extract_public overlap blocking, JSONPath parsing)
+- [x] **3B.4** Wire approval queue integration: UserPrompt step creates `ApprovalRequest` with `ScheduledAction::CredentialPrompt`, returns `approval_request_id`, and breaks iteration
+- [x] **3B.5** Tests for automated registration flow (8 tests: availability, service/network denial, user_action, user_prompt suspension with approval_id, extract_public overlap blocking, JSONPath parsing)
+
+**Design decisions:**
+- Multi-secret setups: only the first extracted secret name is persisted in `CredentialRecord`. Additional secrets are stored in the vault but not tracked in the record. One credential = one `secret_name`.
+- JSONPath overlap normalization: `trim_start_matches('$').trim_start_matches('.')` is sufficient because `extract_json_path()` only resolves a minimal subset (dot-separated object keys, no brackets/wildcards/filters). Edge cases like whitespace or consecutive dots (`$.data..token`) are not normalized — if stronger canonicalization is needed, compare `Vec<String>` segments instead of strings.
 
 **Fixes applied post-review:**
-1. (High) UserPrompt now suspends immediately — breaks step iteration, returns `suspended:true`
-2. (High) `extract_public` paths overlapping `extract_secrets` paths are silently dropped to prevent exfiltration
-3. (Medium/High) Multi-secret setup: only first secret stored in CredentialRecord (by design — one credential = one secret_name; additional secrets stored in vault but not tracked in the record)
-4. (Low) Empty host explicitly denied in network policy check
+1. (High) UserPrompt now suspends immediately — breaks step iteration, returns `ok:false suspended:true approval_required:true` with `approval_request_id`
+2. (High) `extract_public` paths overlapping `extract_secrets` paths are silently dropped (prevents secret exfiltration); paths normalized by stripping `$`/`.` prefix
+3. (Medium/High) Multi-secret setup: only first secret stored in CredentialRecord (by design)
+4. (Medium) Approval queue integration: `ScheduledAction::CredentialPrompt` variant added; UserPrompt creates approval request in store
+5. (Low) Empty host explicitly denied in network policy check
 
 #### Phase C — Encryption at Rest (~100 lines)
 
