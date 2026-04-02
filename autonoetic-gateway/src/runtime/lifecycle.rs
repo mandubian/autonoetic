@@ -94,7 +94,7 @@ The following tool mappings apply:
 | `WebFetch(url)` | `web.fetch({"url": "url"})` |
 
 File paths referenced by the skill are available in the agent directory.
-Use content.store or sandbox paths relative to the agent working directory."#;
+Use content.read/content.write or sandbox paths relative to the agent working directory."#;
 
 fn tool_bridging_appendix() -> String {
     TOOL_BRIDGING_APPENDIX.to_string()

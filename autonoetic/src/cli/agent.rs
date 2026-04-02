@@ -1719,6 +1719,13 @@ pub fn handle_agent_import_skill(
             if let Some(ref fb) = llm.fallback_model {
                 lines.push(format!("      fallback_model: \"{}\"", fb));
             }
+            lines.push(format!("      chat_only: {}", llm.chat_only));
+            if let Some(cw) = llm.context_window_tokens {
+                lines.push(format!("      context_window_tokens: {}", cw));
+            }
+            if let Some(ref bu) = llm.base_url {
+                lines.push(format!("      base_url: \"{}\"", bu));
+            }
         }
         if let Some(ref limits) = target_manifest.limits {
             lines.push("    limits:".to_string());
@@ -1727,6 +1734,19 @@ pub fn handle_agent_import_skill(
             if let Some(tb) = limits.token_budget_monthly {
                 lines.push(format!("      token_budget_monthly: {}", tb));
             }
+        }
+        if let Some(ref bg) = target_manifest.background {
+            lines.push("    background:".to_string());
+            lines.push(format!("      enabled: {}", bg.enabled));
+            lines.push(format!("      interval_secs: {}", bg.interval_secs));
+            lines.push(format!("      mode: {}", match bg.mode {
+                autonoetic_types::background::BackgroundMode::Deterministic => "deterministic",
+                autonoetic_types::background::BackgroundMode::Reasoning => "reasoning",
+            }));
+            lines.push("      wake_predicates:".to_string());
+            lines.push(format!("        timer: {}", bg.wake_predicates.timer));
+            lines.push(format!("        approval_resolved: {}", bg.wake_predicates.approval_resolved));
+            lines.push(format!("      validate_on_install: {}", bg.validate_on_install));
         }
         if let Some(ref disclosure) = target_manifest.disclosure {
             lines.push("    disclosure:".to_string());
