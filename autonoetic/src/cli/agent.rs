@@ -333,12 +333,6 @@ response_validation:
   enabled: true
   repair_enabled: true
 
-# ── Agent Install Approval ────────────────────────────────────────────
-# always = every install needs human approval
-# risk_based = only high-risk installs (default)
-# never = rely on promotion gate only
-agent_install_approval_policy: risk_based
-
 # ── Approval Timeout ──────────────────────────────────────────────────
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
 approval_timeout_secs: 600

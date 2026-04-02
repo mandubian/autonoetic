@@ -965,7 +965,7 @@ impl AgentExecutor {
             {
                 if let Some(llm_cfg) = &self.manifest.llm_config {
                     let budget_state = self.session_budget.as_ref().and_then(|sb| {
-                        sb.snapshot_counters(&session_id).map(|(rounds, tokens, cost)| {
+                        sb.snapshot_counters(&session_id).and_then(|(rounds, _tokens, cost)| {
                             let config = self.config.as_ref()?;
                             let max_rounds = config.session_budget.max_llm_rounds? as f32;
                             Some(autonoetic_types::config::BudgetState {
@@ -973,7 +973,7 @@ impl AgentExecutor {
                                 prompt_budget_used_pct: budget_breakdown.utilization_pct.map(|v| v as f32),
                                 session_cost_usd: Some(cost),
                             })
-                        }).flatten()
+                        })
                     }).unwrap_or_default();
 
                     let complexity = autonoetic_types::config::ComplexitySignals {
@@ -1001,19 +1001,32 @@ impl AgentExecutor {
 
                     let decision_json = serde_json::to_value(&decision).ok();
 
-                    if decision.provider != llm_cfg.provider || decision.model != llm_cfg.model {
-                        tracing::info!(
+                    // Only apply routing when the routed provider matches the original.
+                    // Cross-provider routing requires rebuilding the LlmDriver, which
+                    // is not supported in the current architecture.
+                    if decision.provider != llm_cfg.provider {
+                        tracing::warn!(
                             target: "autonoetic::model_routing",
-                            original_model = %llm_cfg.model,
+                            original_provider = %llm_cfg.provider,
+                            routed_provider = %decision.provider,
                             routed_model = %decision.model,
-                            strategy = %decision.strategy_name,
-                            rationale = %decision.rationale,
-                            was_downgraded = decision.was_downgraded,
-                            "Model routing decision"
+                            "Cross-provider routing requested but not supported — staying with original provider"
                         );
+                        (llm_cfg.model.clone(), decision_json)
+                    } else {
+                        if decision.model != llm_cfg.model {
+                            tracing::info!(
+                                target: "autonoetic::model_routing",
+                                original_model = %llm_cfg.model,
+                                routed_model = %decision.model,
+                                strategy = %decision.strategy_name,
+                                rationale = %decision.rationale,
+                                was_downgraded = decision.was_downgraded,
+                                "Model routing decision"
+                            );
+                        }
+                        (decision.model.clone(), decision_json)
                     }
-
-                    (decision.model.clone(), decision_json)
                 } else {
                     (model.clone(), None)
                 }

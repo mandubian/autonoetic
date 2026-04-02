@@ -13,7 +13,69 @@ It also includes the required config-file step so `agent bootstrap` does not fal
 
 - workspace root available
 - Rust toolchain installed
-- OpenRouter key available in your environment (`OPENROUTER_API_KEY`)
+- At least one LLM provider API key (see environment variables below)
+
+## Environment Variables
+
+All secrets and provider keys are kept **out of config.yaml** and passed as env vars.
+
+### Required
+
+| Env var | Purpose |
+|---------|---------|
+| `AUTONOETIC_SHARED_SECRET` | Gateway auth token — must be set before `gateway start`. Not stored in config. |
+| _One or more provider API keys_ | At least the key for the provider referenced in your `llm_presets` (see table below). |
+
+### LLM Provider API Keys
+
+Each LLM provider reads its key from a standard env var. Export the ones your `llm_presets` reference:
+
+| Provider | Env var |
+|----------|---------|
+| OpenRouter | `OPENROUTER_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_API_KEY` |
+| Google Gemini | `GEMINI_API_KEY` |
+| Groq | `GROQ_API_KEY` |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| Mistral | `MISTRAL_API_KEY` |
+| Together | `TOGETHER_API_KEY` |
+| Fireworks | `FIREWORKS_API_KEY` |
+| xAI | `XAI_API_KEY` |
+| Perplexity | `PERPLEXITY_API_KEY` |
+| Cohere | `COHERE_API_KEY` |
+| Cerebras | `CEREBRAS_API_KEY` |
+| SambaNova | `SAMBANOVA_API_KEY` |
+| HuggingFace | `HUGGINGFACE_API_KEY` |
+| Replicate | `REPLICATE_API_TOKEN` |
+| Moonshot/Kimi | `MOONSHOT_API_KEY` |
+| Qwen/DashScope | `DASHSCOPE_API_KEY` |
+| Ollama / vLLM / LM Studio | _(none — local providers)_ |
+
+A global override `AUTONOETIC_LLM_API_KEY` exists but is not recommended when using provider-specific keys. If both are set, the global override wins.
+
+### Optional
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `AUTONOETIC_NODE_ID` | config `node_id` or `"gateway"` | Node identity for OFP federation and causal chain authorship |
+| `AUTONOETIC_NODE_NAME` | config `node_name` or `"gateway"` | Human-readable node name |
+| `AUTONOETIC_BWRAP_SHARE_NET` | config `sandbox.share_net` or `false` | Share host network namespace |
+| `AUTONOETIC_BWRAP_DEV_MODE` | config `sandbox.dev_mode` or `"legacy"` | `/dev` mount strategy for bubblewrap |
+| `AUTONOETIC_EVIDENCE_MODE` | config `evidence_mode` or `"full"` | How much tool/LLM data to save (`full`, `errors`, `off`) |
+| `AUTONOETIC_VAULT_PATH` | — | Vault file location (for credential management) |
+| `AUTONOETIC_VAULT_KEY` | — | Hex-encoded 32-byte AES-256-GCM master key for vault encryption |
+| `AUTONOETIC_VAULT_KEY_PATH` | — | Path to file containing hex vault key (alternative to inline key) |
+| `AUTONOETIC_LLM_CONTEXT_WINDOW` | — | Override context window for prompt budget enforcement |
+| `AUTONOETIC_GOOGLE_SEARCH_API_KEY` | — | Google Custom Search API key for `web.search` |
+| `AUTONOETIC_GOOGLE_SEARCH_ENGINE_ID` | — | Google Custom Search Engine ID |
+| `AUTONOETIC_HOST_ID` | hostname | Host/process identity for active execution tracking |
+| `AUTONOETIC_MCP_REGISTRY_PATH` | — | Override MCP server registry file path |
+| `AUTONOETIC_REFERENCE_AGENTS_DIR` | — | Override reference bundles location for `agent bootstrap` |
+| `AUTONOETIC_OPENROUTER_CATALOG` | `1` | Set to `0` to disable OpenRouter model catalog |
+| `AUTONOETIC_LLM_OTHER_EMPTY_RETRIES` | `0` | Retry count when LLM returns empty response |
+
+Env vars always take precedence over config values.
 
 ## 1) Create config (quick method)
 
@@ -27,8 +89,8 @@ cargo run -p autonoetic -- agent init-config --output /tmp/autonoetic-demo/confi
 This creates a config with:
 - Gateway settings (ports, limits, scheduler)
 - Response validation with repair enabled
-- Agent install approval policy (risk-based)
 - Schema enforcement, code analysis, retention
+- Prompt budget transparency (observability + enforcement)
 - LLM presets (agentic, coding, research, fallback)
 - Template-to-preset mappings for automatic LLM selection
 
@@ -61,8 +123,6 @@ response_validation:
   enabled: true
   repair_enabled: true
 
-agent_install_approval_policy: risk_based
-
 approval_timeout_secs: 600
 
 schema_enforcement:
@@ -82,6 +142,26 @@ code_analysis:
 retention:
   execution_traces_days: 30
   causal_events_days: 90
+
+# ── Prompt Budget ─────────────────────────────────────────────────────
+# Controls token budget observability and enforcement per LLM request.
+# See docs/prompt-budget.md for details.
+prompt_budget:
+  system_prompt_max_tokens: 0      # 0 = unlimited
+  tool_definitions_max_tokens: 0   # 0 = unlimited
+  warn_at_pct: 80.0                # warn when utilization exceeds this %
+  margin_tokens: 4096              # reserve for LLM output
+  on_exceeded: warn                # warn | trim_history | demote_tools | fail
+  compress_tool_schemas_after_turn_0: false
+
+# ── Session Budget (optional per-session resource limits) ─────────────
+# Uncomment to cap LLM rounds, tool calls, tokens, or wall-clock time.
+# session_budget:
+#   profile: dev
+#   max_llm_rounds: 200
+#   max_tool_invocations: 500
+#   max_llm_tokens: 5000000
+#   max_wall_clock_secs: 3600
 
 # LLM presets for role-specific model selection
 llm_presets:
@@ -110,18 +190,26 @@ llm_preset_mapping:
   coder: coding
   debugger: coding
   auditor: agentic
+  evaluator: agentic
   specialized_builder: agentic
   default: agentic
 EOF
 ```
 
-## 2) Bootstrap reference bundles into runtime agents
+## 2) Bootstrap reference bundles and activate agents
 
 From `autonoetic/`:
 
 ```bash
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml agent bootstrap
 ```
+
+Bootstrap performs three steps for each reference agent bundle:
+1. Copies reference bundle files into the runtime `agents_dir`
+2. Creates an **immutable revision** in the GatewayStore (content-hashed and deduplicated)
+3. Creates an **alias binding** that points to the new revision (activation)
+
+After bootstrap, the alias registry is authoritative for agent resolution — runtime execution resolves through alias → revision, not directory scanning.
 
 Bootstrap automatically applies LLM presets from config:
 - If `llm_preset_mapping` exists, each template uses its mapped preset
@@ -138,9 +226,26 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml agent boots
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml agent bootstrap --from /path/to/autonoetic/agents
 ```
 
-## 2b) Check LLM presets
+### 2a) Verify alias bindings
 
-After bootstrap, verify the LLM configuration:
+After bootstrap, verify that all agents are activated with revision bindings:
+
+```bash
+# List all alias bindings and their active revisions
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml agent alias list
+```
+
+You should see output like:
+
+```
+ALIAS ID                     AGENT ID                     ACTIVE REVISION                STATUS     UPDATED AT
+planner.default              planner.default              rev_a1b2c3d4                   Ready      2026-04-02T...
+researcher.default           researcher.default           rev_e5f6a7b8                   Ready      2026-04-02T...
+coder.default                coder.default                rev_c9d0e1f2                   Ready      2026-04-02T...
+...
+```
+
+### 2b) Check LLM presets
 
 ```bash
 # List configured presets and template mappings
@@ -149,7 +254,7 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml agent prese
 
 This shows available presets and which template uses which preset.
 
-## 2c) Researcher and web search (required for "search today's weather" etc.)
+### 2c) Researcher and web search (required for "search today's weather" etc.)
 
 The researcher can use native `web.search` and `web.fetch` only if its runtime SKILL has a **NetworkAccess** capability that allows the target hosts (e.g. DuckDuckGo, or `*` for all).
 
@@ -173,7 +278,7 @@ The researcher can use native `web.search` and `web.fetch` only if its runtime S
   cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace show demo-session --agent researcher.default
   ```
 
-## 2d) Optional: add MCP web tools (native web tools already available)
+### 2d) Optional: add MCP web tools (native web tools already available)
 
 You can still add MCP web tools for richer provider-specific search/fetch behavior.
 
@@ -266,7 +371,7 @@ When no preset is specified, each template uses a role-optimized default:
 | planner | anthropic | claude-sonnet-4-20250514 | Best agentic/tool-use capabilities |
 | researcher | openai | gpt-4o | Strong research and synthesis |
 | coder | anthropic | claude-sonnet-4-20250514 | Best code generation |
-| auditor | anthropic | claude-sonnet-4-20250514 | Careful analysis |
+| evaluator/auditor | openrouter | google/gemini-3-flash-preview | Cost-efficient analysis |
 | generic | openai | gpt-4o | Balanced capabilities |
 
 ## 4) Start gateway
@@ -279,18 +384,6 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway sta
 ```
 
 The only required environment variable is `AUTONOETIC_SHARED_SECRET` (kept out of config.yaml for security). Node identity and sandbox settings are read from `config.yaml` by default.
-
-Env vars override config values when set:
-
-| Env var | Config equivalent | Required |
-|---------|-------------------|----------|
-| `AUTONOETIC_SHARED_SECRET` | — | **Yes** |
-| `AUTONOETIC_NODE_ID` | `node_id` | No (config or default: `"gateway"`) |
-| `AUTONOETIC_NODE_NAME` | `node_name` | No (config or default: `"gateway"`) |
-| `AUTONOETIC_BWRAP_SHARE_NET` | `sandbox.share_net` | No (config or default: `false`) |
-| `AUTONOETIC_BWRAP_DEV_MODE` | `sandbox.dev_mode` | No (config or default: `"legacy"`) |
-
-Do not set `AUTONOETIC_LLM_API_KEY` when using provider-specific keys. It is a global override.
 
 If you previously exported overrides in your shell, clear them before starting the gateway:
 
@@ -308,8 +401,6 @@ AUTONOETIC_BWRAP_SHARE_NET=1 \
 AUTONOETIC_BWRAP_DEV_MODE=host-bind \
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway start
 ```
-
-Env vars always take precedence over config values.
 
 ## 5) Open terminal chat with implicit routing
 
@@ -331,7 +422,7 @@ Research Rust JSON-RPC libraries and summarize tradeoffs.
 
 Expected behavior:
 
-- gateway ingress resolves to `planner.default`
+- gateway ingress resolves to `planner.default` via alias registry → pinned revision
 - planner uses `agent.spawn` to call an appropriate specialist (for example `researcher.default`)
 - planner synthesizes and returns response
 
@@ -342,6 +433,7 @@ Current runtime behavior is a hybrid:
 - Tier 1 local state lives under each agent directory (`state/`) and is suitable for deterministic, near-term continuity.
 - Tier 2 durable memory is gateway-managed (`memory.db`) and should be used for reusable/cross-session facts.
 - Gateway injects compact session context for same-session continuity; this is not yet a full automatic `state/summary.md` pipeline.
+- **Session transcripts** are automatically persisted at hibernation and session close and indexed with SQLite FTS5 for full-text search. Agents can search past sessions with `session.search` and summarize them with `session.summarize` (see `docs/fts-session-search.md`).
 
 For multi-step tasks that benefit from explicit textual state, prefer these conventions:
 
@@ -354,7 +446,7 @@ For multi-step tasks that benefit from explicit textual state, prefer these conv
 **Where to look:**
 
 - **Gateway causal chain** — `agents/.gateway/history/causal_chain.jsonl` — records every ingress (top-level `event.ingest` when you chat) and every **delegation** (each `agent.spawn` from planner → researcher, coder, etc.). One place to see the full delegation tree for a session.
-- **Per-agent causal chains** — `agents/<agent_id>/history/causal_chain.jsonl` — record that agent’s lifecycle, LLM calls, and tool invocations (including `agent.spawn` requests and results as seen by that agent).
+- **Per-agent causal chains** — `agents/<agent_id>/history/causal_chain.jsonl` — record that agent's lifecycle, LLM calls, and tool invocations (including `agent.spawn` requests and results as seen by that agent).
 
 ```bash
 # Gateway log (all delegations for the session)
@@ -380,6 +472,34 @@ You should see:
 - `agents/.gateway/sessions/<session_id>/artifacts/<artifact_id>/` — named projection of built artifact files so you can open generated code directly without resolving SHA handles by hand.
 - failed or approval-blocked tool runs now attach an `evidence_ref` in the timeline/causal entry, pointing to the full redacted result payload (useful for test stdout/stderr and approval details).
 
+**Additional trace commands:**
+
+```bash
+# Follow session events in real-time
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace follow demo-session
+
+# Show durable workflow orchestration events
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace workflow demo-session --root
+
+# Show workflow graph (text DAG visualization)
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace graph demo-session
+
+# Show conversation history for a session
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace history demo-session
+
+# Fork a session from a snapshot to explore alternative paths
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace fork demo-session --message "Try a different approach" --interactive
+
+# Print the post-session narrative digest
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace digest demo-session
+```
+
+**Why is `result_preview` truncated in causal_chain.jsonl?**  
+Tool results in the causal chain are intentionally limited to 256 characters so log lines stay readable and bounded. The payload still has `result_len` and `result_sha256`. By default, the gateway now captures full redacted evidence and adds an `evidence_ref` for traced events under the agent's `history/evidence/<session_id>/`. If you want to reduce evidence volume, set `AUTONOETIC_EVIDENCE_MODE=off`; failed and approval-blocked tool runs will still preserve an `evidence_ref` so the full error/test payload remains inspectable.
+
+**Does `causal_chain.jsonl` rotate?**  
+Not yet. Current logs append to a single file per history location (`agents/.gateway/history/causal_chain.jsonl` and `agents/<agent_id>/history/causal_chain.jsonl`). Rotation/segmentation is planned.
+
 ## Adapter specialist docs
 
 For schema/behavior wrapper generation via `agent-adapter.default`, including
@@ -387,11 +507,80 @@ details of `schema_diff.py` and `generate_wrapper.py`, see:
 
 - `docs/agent-adapter-specialist.md`
 
-**Why is `result_preview` truncated in causal_chain.jsonl?**  
-Tool results in the causal chain are intentionally limited to 256 characters so log lines stay readable and bounded. The payload still has `result_len` and `result_sha256`. By default, the gateway now captures full redacted evidence and adds an `evidence_ref` for traced events under the agent's `history/evidence/<session_id>/`. If you want to reduce evidence volume, set `AUTONOETIC_EVIDENCE_MODE=off`; failed and approval-blocked tool runs will still preserve an `evidence_ref` so the full error/test payload remains inspectable.
+## Agent Activation Model (revision + promote)
 
-**Does `causal_chain.jsonl` rotate?**  
-Not yet. Current logs append to a single file per history location (`agents/.gateway/history/causal_chain.jsonl` and `agents/<agent_id>/history/causal_chain.jsonl`). Rotation/segmentation is planned.
+Agent activation uses an **immutable revision** model:
+
+1. **Create artifact** — agent source files are bundled into a content-addressed `AgentBundle` artifact
+2. **Create revision** — `agent.revision.create` or `agent revision create` produces an immutable revision with content digest, runtime closure, and status (`candidate` or `ready`)
+3. **Promote** — `agent.revision.promote` or `agent revision promote` moves the alias to point to the new revision
+4. **Sessions pin** — when a session starts, a session binding records the exact revision and runtime lock hash; running sessions are unaffected by later promotions
+
+The `agent bootstrap` command performs all three steps automatically. For manual lifecycle:
+
+```bash
+# Create a revision from an artifact
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
+  agent revision create planner.default <artifact_id>
+
+# Promote a revision (moves alias target)
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
+  agent revision promote planner.default <revision_id> --reason "Tested and verified"
+
+# Inspect promotion history
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
+  agent promotion-history --agent-id planner.default
+
+# Deterministic seed (useful for tests)
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
+  agent seed planner.default <revision_id>
+```
+
+## Credential Management (optional)
+
+Agents can securely interact with external APIs without secrets leaking into the LLM context. The gateway handles secret storage, injection, and redaction.
+
+### Setup vault encryption
+
+```bash
+# Generate a vault key (do this once)
+openssl rand -hex 32 > /tmp/autonoetic-demo/vault.key
+
+# Set env vars before starting gateway
+export AUTONOETIC_VAULT_PATH=/tmp/autonoetic-demo/vault.dat
+export AUTONOETIC_VAULT_KEY_PATH=/tmp/autonoetic-demo/vault.key
+```
+
+### Credential lifecycle
+
+1. Agent calls `credential.check("github")` → sees if a credential exists (no secret exposed)
+2. Agent calls `credential.setup(...)` → may suspend for human approval if `user_prompt` step
+3. Operator approves via TUI or CLI (secrets entered via masked prompt or `--secret` flag)
+4. Agent calls `credential.request(...)` → gateway injects secret into HTTP request, returns redacted response
+
+```bash
+# Interactive TUI for approving credential prompts (recommended — masked input)
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
+  gateway approvals interactive
+
+# Non-interactive approval with secret
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
+  gateway approvals approve apr-XXXXXXXX --secret github_token=ghp_xxxx
+```
+
+See `docs/credential-management.md` for details.
+
+## Importing External Skills (AgentSkills.io)
+
+Import external skills from the agentskills.io ecosystem:
+
+```bash
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
+  agent import-skill --from /path/to/external-skill \
+  --agent-id myagent.default --trust strict
+```
+
+Trust modes: `generous` (auto-grant), `strict` (approval per capability), `audit` (dry-run sandbox).
 
 ## Common Pitfall
 
@@ -419,11 +608,14 @@ Then verify only canonical specialist IDs are present before testing:
 
 ```bash
 ls -1 /tmp/autonoetic-demo/agents
+
+# Or check alias bindings (authoritative source of truth)
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml agent alias list
 ```
 
-## Approvals (revision promotion and scheduled actions)
+## Approvals (revision promotion, credentials, and scheduled actions)
 
-When a privileged operation such as `agent.revision.promote` triggers an approval gate, the tool returns `approval_required: true` and a `request_id` (short ID format like `apr-db51b7ad`). The operation does not proceed until an operator approves.
+When a privileged operation such as `agent.revision.promote` or a credential setup triggers an approval gate, the tool returns `approval_required: true` and a `request_id` (short ID format like `apr-db51b7ad`). The operation does not proceed until an operator approves.
 
 **List pending approval requests:**
 
@@ -435,16 +627,27 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway app
 
 ```bash
 # Approve — gateway auto-resumes the suspended turn
-cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals approve apr-db51b7ad --reason “Reviewed; OK to promote”
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals approve apr-db51b7ad --reason "Reviewed; OK to promote"
+
+# Approve credential prompt with secret values
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals approve apr-db51b7ad --secret api_token=sk-xxx
 
 # Reject
-cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals reject apr-db51b7ad --reason “Out of scope”
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals reject apr-db51b7ad --reason "Out of scope"
 ```
 
+**Interactive TUI (recommended for credential prompts):**
+
+```bash
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway approvals interactive
+```
+
+The interactive TUI shows pending requests, allows review, and uses masked password prompts for credential secrets — avoiding shell history exposure.
+
 **Execution and notification flow (recommended):**
-1. Tool returns `approval_required: true` with `request_id: “apr-db51b7ad”`
+1. Tool returns `approval_required: true` with `request_id: "apr-db51b7ad"`
 2. Turn is suspended to disk (turn continuation)
-3. Operator approves via CLI
+3. Operator approves via CLI or interactive TUI
 4. **Gateway automatically resumes the turn** and executes the approved action with real tool results
 5. Gateway persists an approval-resolution notification for the waiting session
 6. If terminal chat is open on that session, chat resumes automatically and displays the continuation
@@ -453,7 +656,7 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway app
 You should not need to type manual prompts like `continue` or `done` after approval in the normal chat path.
 
 **Delivery semantics (current model):**
-- Approval-resolution messages use a structured payload (`type: “approval_resolved”` with `request_id`, `status`, `message`).
+- Approval-resolution messages use a structured payload (`type: "approval_resolved"` with `request_id`, `status`, `message`).
 - The gateway owns background polling/delivery; CLI approval commands only record the decision.
 - Chat acknowledges notification consumption only after successful resume/render.
 - Pending notifications are durable in the `GatewayStore` SQLite database until consumed.
@@ -469,14 +672,29 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway app
 ```
 For architecture details, see `docs/approval-notification-delivery.md`.
 
+## User Interactions
+
+The gateway supports a structured user-interaction channel separate from approvals, for cases where agents need clarifying information from the user:
+
+```bash
+# List pending interactions
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway interactions list
+
+# Answer an interaction
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway interactions answer <id> --text "Yes, use the production database"
+
+# Cancel an interaction
+cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway interactions cancel <id> --reason "No longer needed"
+```
+
 ## Troubleshooting: capability errors and memory writes
 
-**”memory write denied by policy” / “scheduled file write denied by WriteAccess policy”**
+**"memory write denied by policy" / "scheduled file write denied by WriteAccess policy"**
 
 - The agent has a `WriteAccess` capability with `scopes` that do not cover the path being written to.
-- **Fix:** Add a `WriteAccess` with `scopes` that cover the path, e.g. `[“skills/*”, “state/*”]`. Paths must be under the agent directory; do not use absolute or `..` paths. Prefer putting files under `skills/*` (e.g. `skills/helper.md`, `skills/script.py`) so they are clearly in scope.
+- **Fix:** Add a `WriteAccess` with `scopes` that cover the path, e.g. `["skills/*", "state/*"]`. Paths must be under the agent directory; do not use absolute or `..` paths. Prefer putting files under `skills/*` (e.g. `skills/helper.md`, `skills/script.py`) so they are clearly in scope.
 
-**”AgentRevision capability required” / revision tool errors**
+**"AgentRevision capability required" / revision tool errors**
 
 - The agent calling `agent.revision.create` or `agent.revision.promote` does not have the `AgentRevision` capability.
 - **Fix:** Only `specialized_builder.default` (or `evolution-steward.default`) should call revision tools. Ensure the correct agent is being delegated to. The capability must declare `patterns` matching the target agent ID.
@@ -508,3 +726,10 @@ If a command matches an agent's `CodeExecution` pattern but still fails with per
 - `docs/session-budget.md` — per-session resource limits
 - `docs/code-analysis.md` — capability and security analysis
 - `docs/CLI.md` — CLI command reference
+- `docs/prompt-budget.md` — prompt budget transparency and enforcement
+- `docs/credential-management.md` — secure credential management
+- `docs/fts-session-search.md` — FTS session search
+- `docs/workflow-orchestration.md` — workflow orchestration
+- `docs/agent-capabilities.md` — agent capabilities reference
+- `docs/plan-agent-revision-evaluation-federation-mvp.md` — revision, evaluation, and federation plan
+- `docs/plan-hermes-gap-closure.md` — Hermes gap closure plan

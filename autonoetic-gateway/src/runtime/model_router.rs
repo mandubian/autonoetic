@@ -123,17 +123,23 @@ impl ModelRouter for DeterministicRouter {
                 max_tier = tier;
             }
             if let Some(ref model) = override_entry.model {
-                return RoutingDecision {
-                    provider: primary_config.provider.clone(),
-                    model: model.clone(),
-                    strategy_name: "agent_override".to_string(),
-                    rationale: format!(
-                        "agent override: forcing model {} for agent {}",
-                        model, ctx.agent_id
-                    ),
-                    fallback_chain: vec![],
-                    was_downgraded: false,
-                };
+                let override_valid = routing_config
+                    .models
+                    .iter()
+                    .any(|m| m.model == *model && m.provider == primary_config.provider);
+                if override_valid {
+                    return RoutingDecision {
+                        provider: primary_config.provider.clone(),
+                        model: model.clone(),
+                        strategy_name: "agent_override".to_string(),
+                        rationale: format!(
+                            "agent override: forcing model {} for agent {}",
+                            model, ctx.agent_id
+                        ),
+                        fallback_chain: vec![],
+                        was_downgraded: false,
+                    };
+                }
             }
         }
 
@@ -232,8 +238,13 @@ pub fn create_router(strategy: RoutingStrategy) -> Box<dyn ModelRouter> {
     }
 }
 
-/// Build an LlmConfig from a routing decision.
-pub fn decision_to_llm_config(decision: &RoutingDecision, base_config: &LlmConfig) -> LlmConfig {
+/// Build an LlmConfig from a routing decision, optionally carrying
+/// model-specific overrides (context window, base URL).
+pub fn decision_to_llm_config(
+    decision: &RoutingDecision,
+    base_config: &LlmConfig,
+    model_entry: Option<&ModelEntry>,
+) -> LlmConfig {
     LlmConfig {
         provider: decision.provider.clone(),
         model: decision.model.clone(),
@@ -241,8 +252,12 @@ pub fn decision_to_llm_config(decision: &RoutingDecision, base_config: &LlmConfi
         fallback_provider: base_config.fallback_provider.clone(),
         fallback_model: base_config.fallback_model.clone(),
         chat_only: base_config.chat_only,
-        context_window_tokens: base_config.context_window_tokens,
-        base_url: base_config.base_url.clone(),
+        context_window_tokens: model_entry
+            .and_then(|e| e.context_window_tokens)
+            .or(base_config.context_window_tokens),
+        base_url: model_entry
+            .and_then(|e| e.base_url.clone())
+            .or(base_config.base_url.clone()),
     }
 }
 
@@ -426,7 +441,7 @@ mod tests {
             was_downgraded: true,
         };
         let base = primary_config();
-        let new_config = decision_to_llm_config(&decision, &base);
+        let new_config = decision_to_llm_config(&decision, &base, None);
 
         assert_eq!(new_config.provider, "anthropic");
         assert_eq!(new_config.model, "claude-sonnet-4-20250514");
