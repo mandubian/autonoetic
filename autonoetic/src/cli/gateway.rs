@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::Path;
 use tracing::info;
 
@@ -520,13 +521,58 @@ async fn run_interactive_approvals(
                     KeyCode::Char('a') => {
                         if let Some(idx) = state.selected() {
                             let req = &items[idx];
+
+                            // For CredentialPrompt, prompt for secrets interactively
+                            let secrets =
+                                if let autonoetic_types::background::ScheduledAction::CredentialPrompt {
+                                    service,
+                                    secret_fields,
+                                    ..
+                                } = &req.action
+                                {
+                                    println!("\nCredential setup for '{}' requires secret input:", service);
+                                    let mut collected = Vec::new();
+                                    for field in secret_fields {
+                                        let mask = if field.masked { "*" } else { "" };
+                                        print!(
+                                            "  {} ({}): ",
+                                            field.label,
+                                            if field.masked { "masked" } else { "visible" }
+                                        );
+                                        std::io::stdout().flush().ok();
+                                        let mut input = String::new();
+                                        if field.masked {
+                                            // Read without echo
+                                            let pass = rpassword::prompt_password("");
+                                            match pass {
+                                                Ok(v) => input = v,
+                                                Err(_) => {
+                                                    status_msg = "Failed to read password".to_string();
+                                                    break;
+                                                }
+                                            }
+                                        } else {
+                                            std::io::stdin().read_line(&mut input).ok();
+                                            input = input.trim().to_string();
+                                        }
+                                        collected.push((field.name.clone(), input));
+                                    }
+                                    if collected.len() != secret_fields.len() {
+                                        status_msg = "Secret input cancelled".to_string();
+                                        continue;
+                                    }
+                                    Some(collected)
+                                } else {
+                                    None
+                                };
+
                             match autonoetic_gateway::scheduler::approve_request(
                                 config,
                                 Some(gateway_store),
                                 &req.request_id,
                                 "cli-interactive",
                                 None,
-                                None,
+                                secrets,
                             ) {
                                 Ok(decision) => {
                                     status_msg = format!(
