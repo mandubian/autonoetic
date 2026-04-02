@@ -1013,11 +1013,7 @@ impl AgentExecutor {
                     let matched_entry = routing_cfg.models.iter().find(|m| {
                         m.provider == decision.provider && m.model == decision.model
                     });
- 
-                    routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
-                        &decision, llm_cfg, matched_entry,
-                    );
- 
+
                     // Only apply routing when the routed provider matches the original.
                     // Cross-provider routing requires rebuilding the LlmDriver, which
                     // is not supported in the current architecture.
@@ -1031,6 +1027,9 @@ impl AgentExecutor {
                         );
                         (llm_cfg.model.clone(), Some(decision), matched_entry)
                     } else {
+                        routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
+                            &decision, llm_cfg, matched_entry,
+                        );
                         if decision.model != llm_cfg.model {
                             tracing::info!(
                                 target: "autonoetic::model_routing",
@@ -1160,6 +1159,11 @@ impl AgentExecutor {
                             );
                             match self.llm.complete(&fallback_req).await {
                                 Ok(resp) => {
+                                    tracing::info!(
+                                        target: "autonoetic::model_routing",
+                                        fallback_model = %fb_model,
+                                        "Fallback model succeeded"
+                                    );
                                     final_response = Some(resp);
                                     break;
                                 }
