@@ -252,13 +252,12 @@ impl GatewayStore {
 
         let mut expired_ids = Vec::new();
         for row in rows {
-            if let Ok(id) = row {
-                conn.execute(
-                    "UPDATE user_interactions SET status = 'expired' WHERE interaction_id = ?1",
-                    params![id],
-                )?;
-                expired_ids.push(id);
-            }
+            let id = row?;
+            conn.execute(
+                "UPDATE user_interactions SET status = 'expired' WHERE interaction_id = ?1",
+                params![id],
+            )?;
+            expired_ids.push(id);
         }
         Ok(expired_ids)
     }
@@ -278,10 +277,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for row in rows {
-            if let Ok(id) = row {
-                if let Ok(Some(interaction)) = Self::get_user_interaction_with_conn(&conn, &id) {
-                    results.push(interaction);
-                }
+            let id = row?;
+            if let Some(interaction) = Self::get_user_interaction_with_conn(&conn, &id)? {
+                results.push(interaction);
             }
         }
         Ok(results)
@@ -302,10 +300,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for row in rows {
-            if let Ok(id) = row {
-                if let Ok(Some(interaction)) = Self::get_user_interaction_with_conn(&conn, &id) {
-                    results.push(interaction);
-                }
+            let id = row?;
+            if let Some(interaction) = Self::get_user_interaction_with_conn(&conn, &id)? {
+                results.push(interaction);
             }
         }
         Ok(results)
@@ -328,10 +325,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for row in rows {
-            if let Ok(id) = row {
-                if let Ok(Some(interaction)) = Self::get_user_interaction_with_conn(&conn, &id) {
-                    results.push(interaction);
-                }
+            let id = row?;
+            if let Some(interaction) = Self::get_user_interaction_with_conn(&conn, &id)? {
+                results.push(interaction);
             }
         }
         Ok(results)
@@ -354,10 +350,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for row in rows {
-            if let Ok(id) = row {
-                if let Ok(Some(interaction)) = Self::get_user_interaction_with_conn(&conn, &id) {
-                    results.push(interaction);
-                }
+            let id = row?;
+            if let Some(interaction) = Self::get_user_interaction_with_conn(&conn, &id)? {
+                results.push(interaction);
             }
         }
         Ok(results)
