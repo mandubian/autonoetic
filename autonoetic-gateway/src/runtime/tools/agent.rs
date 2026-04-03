@@ -67,8 +67,8 @@ impl NativeTool for AgentSpawnTool {
         &self,
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
-        agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -88,9 +88,9 @@ impl NativeTool for AgentSpawnTool {
             .unwrap_or(&default_enforcement_config);
 
         if enforcement_config.mode != SchemaEnforcementMode::Disabled {
-            let agents_dir = agent_dir.parent().ok_or_else(|| {
-                anyhow::anyhow!("Agent directory is missing its agents root parent")
-            })?;
+            let agents_dir = config
+                .map(|c| &c.agents_dir)
+                .ok_or_else(|| anyhow::anyhow!("config is required for agent.spawn schema enforcement"))?;
             let target_agent_path = agents_dir.join(&args.agent_id).join("SKILL.md");
 
             if target_agent_path.exists() {
@@ -142,12 +142,12 @@ impl NativeTool for AgentSpawnTool {
             .or_else(|| session_id.map(ToOwned::to_owned))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let agents_dir = agent_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Agent directory is missing its agents root parent"))?;
+        let agents_dir = config
+            .map(|c| &c.agents_dir)
+            .ok_or_else(|| anyhow::anyhow!("config is required for agent.spawn"))?;
 
         let fallback_gateway_config = GatewayConfig {
-            agents_dir: agents_dir.to_path_buf(),
+            agents_dir: agents_dir.clone(),
             ..GatewayConfig::default()
         };
         let gw_config = config.unwrap_or(&fallback_gateway_config);
@@ -258,7 +258,7 @@ impl NativeTool for AgentSpawnTool {
 
         // Set root session relationship so child's session-visible content is visible to parent
         // Must use the same gateway_dir as the execution engine, NOT agent_dir.parent()
-        if let Some(gw_dir) = _gateway_dir {
+        if let Some(gw_dir) = gateway_dir {
             if let Ok(store) = crate::runtime::content_store::ContentStore::new(gw_dir) {
                 if let Err(e) = store.set_root_session(&child_delegation_path, root) {
                     tracing::warn!(
@@ -498,12 +498,12 @@ impl NativeTool for AgentExistsTool {
         &self,
         _manifest: &AgentManifest,
         _policy: &PolicyEngine,
-        agent_dir: &Path,
+        _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
@@ -512,11 +512,11 @@ impl NativeTool for AgentExistsTool {
 
         validate_agent_id(&args.agent_id)?;
 
-        let agents_dir = agent_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Agent directory is missing its agents root parent"))?;
+        let agents_dir = config
+            .map(|c| &c.agents_dir)
+            .ok_or_else(|| anyhow::anyhow!("config is required for agent.exists"))?;
 
-        let repo = crate::agent::AgentRepository::new(agents_dir.to_path_buf());
+        let repo = crate::agent::AgentRepository::new(agents_dir.clone());
 
         match repo.get_sync(&args.agent_id) {
             Ok(_) => Ok(serde_json::json!({
@@ -626,12 +626,12 @@ impl NativeTool for AgentDiscoverTool {
         &self,
         _manifest: &AgentManifest,
         _policy: &PolicyEngine,
-        agent_dir: &Path,
+        _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
@@ -640,11 +640,11 @@ impl NativeTool for AgentDiscoverTool {
 
         anyhow::ensure!(!args.intent.trim().is_empty(), "intent must not be empty");
 
-        let agents_dir = agent_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Agent directory is missing its agents root parent"))?;
+        let agents_dir = config
+            .map(|c| &c.agents_dir)
+            .ok_or_else(|| anyhow::anyhow!("config is required for agent.discover"))?;
 
-        let repo = crate::agent::AgentRepository::new(agents_dir.to_path_buf());
+        let repo = crate::agent::AgentRepository::new(agents_dir.clone());
         let loaded_agents = repo.list_loaded_sync()?;
 
         let mut results: Vec<AgentDiscoveryResult> = loaded_agents

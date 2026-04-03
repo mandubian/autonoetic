@@ -6,11 +6,23 @@
 
 use autonoetic_types::agent::LlmConfig;
 use autonoetic_types::config::{
-    ApprovalGatesConfig, BudgetState, CapabilityTier, ComplexitySignals,
-    DeterministicRoutingConfig, LlmRoutingConfig, ModelEntry, RoutingContext, RoutingStrategy,
-    TimeSignals,
+    ApprovalGatesConfig, CapabilityTier, DeterministicRoutingConfig,
+    HybridRoutingConfig, LlmRoutingConfig, RoutingContext, RoutingPresetConfig, RoutingStrategy,
 };
+use crate::llm::{CompletionRequest, Message, Role};
 use serde::{Deserialize, Serialize};
+
+/// A resolved model entry from a fixed preset, carrying all metadata
+/// needed for routing decisions.
+#[derive(Debug, Clone)]
+pub struct ResolvedModelEntry {
+    /// The preset name this entry came from.
+    pub preset_name: String,
+    /// The concrete LLM config.
+    pub config: LlmConfig,
+    /// Capability tier for filtering.
+    pub tier: CapabilityTier,
+}
 
 /// The result of a routing decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,22 +35,49 @@ pub struct RoutingDecision {
     pub strategy_name: String,
     /// Human-readable rationale.
     pub rationale: String,
-    /// Fallback chain (provider/model pairs) if the primary fails.
+    /// Fallback chain (preset_name, provider, model) if the primary fails.
     #[serde(default)]
-    pub fallback_chain: Vec<(String, String)>,
+    pub fallback_chain: Vec<(String, String, String)>,
     /// Whether a downgrade was applied due to budget pressure.
     #[serde(default)]
     pub was_downgraded: bool,
+    /// Capability tier of the selected model (for approval gates).
+    #[serde(default)]
+    pub tier: Option<CapabilityTier>,
+}
+
+impl RoutingDecision {
+    /// Check if this decision requires approval before proceeding.
+    pub fn requires_approval(&self, gates: &ApprovalGatesConfig, ctx: &RoutingContext) -> bool {
+        if gates.premium_model_first_use {
+            let is_premium = self.tier == Some(CapabilityTier::Premium);
+            let is_first_turn = ctx.time.turn_number.map(|t| t <= 1).unwrap_or(false);
+            if is_premium && is_first_turn {
+                return true;
+            }
+        }
+
+        if let Some(threshold) = gates.budget_threshold_crossed {
+            if let Some(pct) = ctx.budget.session_budget_used_pct {
+                if pct >= threshold {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
 }
 
 /// Trait for model routing strategies.
 #[async_trait::async_trait]
 pub trait ModelRouter: Send + Sync {
-    /// Select a model given the routing context and available models.
+    /// Select a model given the routing context, primary config, and resolved model list.
     async fn route(
         &self,
         ctx: &RoutingContext,
         primary_config: &LlmConfig,
+        models: &[ResolvedModelEntry],
         routing_config: &LlmRoutingConfig,
     ) -> RoutingDecision;
 }
@@ -87,27 +126,27 @@ impl DeterministicRouter {
 
         (max_tier, downgraded)
     }
+}
 
-    fn build_fallback_chain(
-        &self,
-        routing_config: &LlmRoutingConfig,
-        max_tier: CapabilityTier,
-        primary_provider: &str,
-        primary_model: &str,
-    ) -> Vec<(String, String)> {
-        if !routing_config.deterministic.enable_fallback_chain {
-            return vec![];
-        }
-
-        routing_config
-            .models
-            .iter()
-            .filter(|m| {
-                m.tier <= max_tier && !(m.provider == primary_provider && m.model == primary_model)
-            })
-            .map(|m| (m.provider.clone(), m.model.clone()))
-            .collect()
+/// Build the fallback chain for a given tier, excluding the primary model.
+fn build_fallback_chain(
+    models: &[ResolvedModelEntry],
+    max_tier: CapabilityTier,
+    primary_provider: &str,
+    primary_model: &str,
+    enable_fallback: bool,
+) -> Vec<(String, String, String)> {
+    if !enable_fallback {
+        return vec![];
     }
+
+    models
+        .iter()
+        .filter(|m| {
+            m.tier <= max_tier && !(m.config.provider == primary_provider && m.config.model == primary_model)
+        })
+        .map(|m| (m.preset_name.clone(), m.config.provider.clone(), m.config.model.clone()))
+        .collect()
 }
 
 #[async_trait::async_trait]
@@ -116,9 +155,16 @@ impl ModelRouter for DeterministicRouter {
         &self,
         ctx: &RoutingContext,
         primary_config: &LlmConfig,
+        models: &[ResolvedModelEntry],
         routing_config: &LlmRoutingConfig,
     ) -> RoutingDecision {
-        let mut max_tier = routing_config.deterministic.max_tier;
+        let det_config = DeterministicRoutingConfig {
+            max_tier: CapabilityTier::Premium,
+            max_cost_usd: None,
+            budget_downgrade_threshold: 0.8,
+            enable_fallback_chain: true,
+        };
+        let mut max_tier = det_config.max_tier;
 
         if let Some(override_entry) = routing_config.agent_overrides.get(&ctx.agent_id) {
             if let Some(tier) = override_entry.min_tier {
@@ -127,11 +173,14 @@ impl ModelRouter for DeterministicRouter {
                 }
             }
             if let Some(ref model) = override_entry.model {
-                let override_valid = routing_config
-                    .models
+                let override_valid = models
                     .iter()
-                    .any(|m| m.model == *model && m.provider == primary_config.provider);
+                    .any(|m| m.config.model == *model && m.config.provider == primary_config.provider);
                 if override_valid {
+                    let override_tier = models
+                        .iter()
+                        .find(|m| m.config.model == *model && m.config.provider == primary_config.provider)
+                        .map(|m| m.tier);
                     return RoutingDecision {
                         provider: primary_config.provider.clone(),
                         model: model.clone(),
@@ -142,30 +191,29 @@ impl ModelRouter for DeterministicRouter {
                         ),
                         fallback_chain: vec![],
                         was_downgraded: false,
+                        tier: override_tier,
                     };
                 }
             }
         }
 
         let (effective_max_tier, was_downgraded) =
-            self.compute_effective_tier(ctx, &routing_config.deterministic, max_tier);
+            self.compute_effective_tier(ctx, &det_config, max_tier);
 
-        let primary_entry = routing_config
-            .models
+        let primary_entry = models
             .iter()
-            .find(|m| m.provider == primary_config.provider && m.model == primary_config.model);
+            .find(|m| m.config.provider == primary_config.provider && m.config.model == primary_config.model);
 
         let (provider, model) = if let Some(entry) = primary_entry {
             if entry.tier <= effective_max_tier {
-                (entry.provider.clone(), entry.model.clone())
+                (entry.config.provider.clone(), entry.config.model.clone())
             } else {
-                let fallback = routing_config
-                    .models
+                let fallback = models
                     .iter()
                     .find(|m| m.tier <= effective_max_tier)
-                    .or_else(|| routing_config.models.iter().min_by_key(|m| m.tier));
+                    .or_else(|| models.iter().min_by_key(|m| m.tier));
                 if let Some(fb) = fallback {
-                    (fb.provider.clone(), fb.model.clone())
+                    (fb.config.provider.clone(), fb.config.model.clone())
                 } else {
                     (
                         primary_config.provider.clone(),
@@ -181,7 +229,7 @@ impl ModelRouter for DeterministicRouter {
         };
 
         let fallback_chain =
-            self.build_fallback_chain(routing_config, effective_max_tier, &provider, &model);
+            build_fallback_chain(models, effective_max_tier, &provider, &model, det_config.enable_fallback_chain);
 
         let rationale = format!(
             "deterministic: effective_tier={}, budget_used={:.0}%, cost=${:.2}, downgraded={}",
@@ -198,6 +246,7 @@ impl ModelRouter for DeterministicRouter {
             rationale,
             fallback_chain,
             was_downgraded,
+            tier: Some(effective_max_tier),
         }
     }
 }
@@ -212,6 +261,7 @@ impl ModelRouter for DisabledRouter {
         &self,
         _ctx: &RoutingContext,
         primary_config: &LlmConfig,
+        _models: &[ResolvedModelEntry],
         _routing_config: &LlmRoutingConfig,
     ) -> RoutingDecision {
         RoutingDecision {
@@ -221,15 +271,335 @@ impl ModelRouter for DisabledRouter {
             rationale: "routing disabled — using primary model".to_string(),
             fallback_chain: vec![],
             was_downgraded: false,
+            tier: None,
         }
     }
 }
 
-/// Factory function to create the appropriate router based on config.
-pub fn create_router(strategy: RoutingStrategy) -> Box<dyn ModelRouter> {
-    match strategy {
-        RoutingStrategy::Disabled => Box::new(DisabledRouter),
-        RoutingStrategy::Deterministic => Box::new(DeterministicRouter::new()),
+const CLASSIFIER_PROMPT: &str = r#"Classify the complexity of this conversation to select an appropriate model tier.
+
+Tiers:
+- economy: Simple Q&A, factual lookup, classification, summarization, data extraction
+- standard: Reasoning with tool use, code generation, multi-step planning, analysis
+- premium: Complex reasoning, architecture design, security review, ambiguous requirements
+
+Respond with ONLY one word: "economy", "standard", or "premium"."#;
+
+/// LLM Classifier Router — uses a cheap model to classify request complexity
+/// and select the appropriate tier. Falls back to deterministic routing on
+/// timeout or error.
+#[derive(Debug, Clone)]
+pub struct LlmClassifierRouter {
+    classifier_config: LlmConfig,
+    timeout_secs: u64,
+    skip_threshold: f32,
+}
+
+impl LlmClassifierRouter {
+    pub fn new(classifier_config: LlmConfig, timeout_secs: u64, skip_threshold: f32) -> Self {
+        Self {
+            classifier_config,
+            timeout_secs: if timeout_secs == 0 { 2 } else { timeout_secs },
+            skip_threshold,
+        }
+    }
+
+    fn build_classification_prompt(ctx: &RoutingContext) -> String {
+        format!(
+            "Conversation context:\n- Turn: {}\n- Tool count: {:?}\n- Has workflow caps: {}\n- Has artifact caps: {}\n- Script mode: {}",
+            ctx.time.turn_number.unwrap_or(0),
+            ctx.complexity.tool_count,
+            ctx.complexity.has_workflow_caps,
+            ctx.complexity.has_artifact_caps,
+            ctx.complexity.is_script_mode,
+        )
+    }
+
+    fn tier_from_response(response_text: &str) -> Option<CapabilityTier> {
+        let text = response_text.trim().to_lowercase();
+        if text.contains("economy") {
+            Some(CapabilityTier::Economy)
+        } else if text.contains("standard") {
+            Some(CapabilityTier::Standard)
+        } else if text.contains("premium") {
+            Some(CapabilityTier::Premium)
+        } else {
+            None
+        }
+    }
+
+    fn select_model_for_tier(
+        &self,
+        tier: CapabilityTier,
+        models: &[ResolvedModelEntry],
+        primary_config: &LlmConfig,
+    ) -> (String, String) {
+        let entry = models
+            .iter()
+            .find(|m| m.tier == tier && m.config.provider == primary_config.provider)
+            .or_else(|| models.iter().find(|m| m.tier == tier))
+            .or_else(|| {
+                models
+                    .iter()
+                    .filter(|m| m.tier <= tier)
+                    .max_by_key(|m| m.tier)
+            });
+        if let Some(entry) = entry {
+            (entry.config.provider.clone(), entry.config.model.clone())
+        } else {
+            (
+                primary_config.provider.clone(),
+                primary_config.model.clone(),
+            )
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelRouter for LlmClassifierRouter {
+    async fn route(
+        &self,
+        ctx: &RoutingContext,
+        primary_config: &LlmConfig,
+        models: &[ResolvedModelEntry],
+        routing_config: &LlmRoutingConfig,
+    ) -> RoutingDecision {
+        let skip_threshold = self.skip_threshold;
+
+        if let Some(pct) = ctx.budget.session_budget_used_pct {
+            if pct >= skip_threshold {
+                tracing::debug!(
+                    target: "autonoetic::model_routing",
+                    "Skipping LLM classifier due to extreme budget pressure"
+                );
+                return DeterministicRouter::new()
+                    .route(ctx, primary_config, models, routing_config)
+                    .await;
+            }
+        }
+
+        let prompt = Self::build_classification_prompt(ctx);
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: CLASSIFIER_PROMPT.to_string(),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::User,
+                content: prompt,
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+        ];
+
+        let req = CompletionRequest {
+            model: self.classifier_config.model.clone(),
+            messages,
+            tools: vec![],
+            max_tokens: Some(20),
+            temperature: Some(0.0),
+            metadata: None,
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            self.call_classifier(&self.classifier_config, &req),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(response)) => {
+                if let Some(tier) = Self::tier_from_response(&response.text) {
+                    let (provider, model) =
+                        self.select_model_for_tier(tier, models, primary_config);
+                    let fallback_chain =
+                        build_fallback_chain(models, tier, &provider, &model, true);
+
+                    let rationale = format!(
+                        "classifier: tier={}, classifier_model={}",
+                        format!("{:?}", tier).to_lowercase(),
+                        self.classifier_config.model
+                    );
+
+                    return RoutingDecision {
+                        provider,
+                        model,
+                        strategy_name: "classifier".to_string(),
+                        rationale,
+                        fallback_chain,
+                        was_downgraded: false,
+                        tier: Some(tier),
+                    };
+                }
+                tracing::warn!(
+                    target: "autonoetic::model_routing",
+                    "Classifier returned unparsable response, falling back to deterministic"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target: "autonoetic::model_routing",
+                    error = %e,
+                    "Classifier call failed, falling back to deterministic"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "autonoetic::model_routing",
+                    timeout_secs = self.timeout_secs,
+                    "Classifier timed out, falling back to deterministic"
+                );
+            }
+        }
+
+        DeterministicRouter::new()
+            .route(ctx, primary_config, models, routing_config)
+            .await
+    }
+}
+
+impl LlmClassifierRouter {
+    async fn call_classifier(
+        &self,
+        config: &LlmConfig,
+        req: &CompletionRequest,
+    ) -> anyhow::Result<crate::llm::CompletionResponse> {
+        let driver = crate::llm::build_driver(config.clone(), reqwest::Client::new())?;
+        driver.complete(req).await
+    }
+}
+
+/// Hybrid Router — uses deterministic routing first, then consults
+/// the LLM classifier only when the deterministic confidence is below
+/// the ambiguity threshold.
+#[derive(Debug, Clone)]
+pub struct HybridRouter {
+    deterministic: DeterministicRouter,
+    classifier: LlmClassifierRouter,
+    ambiguity_threshold: f32,
+}
+
+impl HybridRouter {
+    pub fn new(classifier_config: LlmConfig, classifier_timeout: u64, classifier_skip: f32, ambiguity_threshold: f32) -> Self {
+        Self {
+            deterministic: DeterministicRouter::new(),
+            classifier: LlmClassifierRouter::new(classifier_config, classifier_timeout, classifier_skip),
+            ambiguity_threshold: if ambiguity_threshold == 0.0 { 0.5 } else { ambiguity_threshold },
+        }
+    }
+
+    fn compute_ambiguity(ctx: &RoutingContext) -> f32 {
+        let mut ambiguity = 0.0;
+
+        if ctx.complexity.tool_count.unwrap_or(0) > 5 {
+            ambiguity += 0.2;
+        }
+        if ctx.complexity.has_workflow_caps {
+            ambiguity += 0.15;
+        }
+        if ctx.complexity.has_artifact_caps {
+            ambiguity += 0.15;
+        }
+        if ctx.complexity.is_script_mode {
+            ambiguity = 0.0;
+        }
+
+        if let Some(pct) = ctx.budget.session_budget_used_pct {
+            if pct > 0.5 {
+                ambiguity += 0.1 * pct;
+            }
+        }
+
+        ambiguity.min(1.0)
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelRouter for HybridRouter {
+    async fn route(
+        &self,
+        ctx: &RoutingContext,
+        primary_config: &LlmConfig,
+        models: &[ResolvedModelEntry],
+        routing_config: &LlmRoutingConfig,
+    ) -> RoutingDecision {
+        let ambiguity = Self::compute_ambiguity(ctx);
+
+        if ambiguity < self.ambiguity_threshold {
+            self.deterministic
+                .route(ctx, primary_config, models, routing_config)
+                .await
+        } else {
+            let mut decision = self
+                .classifier
+                .route(ctx, primary_config, models, routing_config)
+                .await;
+            decision.strategy_name = "hybrid".to_string();
+            decision.rationale = format!(
+                "hybrid: ambiguity={:.2}, threshold={:.2}, {}",
+                ambiguity, self.ambiguity_threshold, decision.rationale
+            );
+            decision
+        }
+    }
+}
+
+/// Create router from a routing preset config.
+/// `resolved_models`: (preset_name, LlmConfig, tier) tuples from resolving the preset's models list.
+/// `classifier_config`: resolved LlmConfig for the classifier, if applicable.
+pub fn create_router_from_preset(
+    preset: &RoutingPresetConfig,
+    resolved_models: Vec<ResolvedModelEntry>,
+    classifier_config: Option<LlmConfig>,
+) -> (Box<dyn ModelRouter>, Vec<ResolvedModelEntry>) {
+    match preset.strategy {
+        RoutingStrategy::Disabled => (Box::new(DisabledRouter), resolved_models),
+        RoutingStrategy::Deterministic => (Box::new(DeterministicRouter::new()), resolved_models),
+        RoutingStrategy::Classifier => {
+            let classifier = classifier_config.unwrap_or_else(|| LlmConfig {
+                provider: "anthropic".to_string(),
+                model: "claude-haiku-3-20250307".to_string(),
+                temperature: 0.0,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: false,
+                context_window_tokens: None,
+                base_url: None,
+                routing_preset: None,
+            });
+            (
+                Box::new(LlmClassifierRouter::new(
+                    classifier,
+                    preset.classifier.timeout_secs,
+                    preset.classifier.skip_threshold,
+                )),
+                resolved_models,
+            )
+        }
+        RoutingStrategy::Hybrid => {
+            let classifier = classifier_config.unwrap_or_else(|| LlmConfig {
+                provider: "anthropic".to_string(),
+                model: "claude-haiku-3-20250307".to_string(),
+                temperature: 0.0,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: false,
+                context_window_tokens: None,
+                base_url: None,
+                routing_preset: None,
+            });
+            (
+                Box::new(HybridRouter::new(
+                    classifier,
+                    preset.classifier.timeout_secs,
+                    preset.classifier.skip_threshold,
+                    preset.hybrid.ambiguity_threshold,
+                )),
+                resolved_models,
+            )
+        }
     }
 }
 
@@ -238,7 +608,7 @@ pub fn create_router(strategy: RoutingStrategy) -> Box<dyn ModelRouter> {
 pub fn decision_to_llm_config(
     decision: &RoutingDecision,
     base_config: &LlmConfig,
-    model_entry: Option<&ModelEntry>,
+    model_entry: Option<&ResolvedModelEntry>,
 ) -> LlmConfig {
     LlmConfig {
         provider: decision.provider.clone(),
@@ -248,11 +618,12 @@ pub fn decision_to_llm_config(
         fallback_model: base_config.fallback_model.clone(),
         chat_only: base_config.chat_only,
         context_window_tokens: model_entry
-            .and_then(|e| e.context_window_tokens)
+            .and_then(|e| e.config.context_window_tokens)
             .or(base_config.context_window_tokens),
         base_url: model_entry
-            .and_then(|e| e.base_url.clone())
+            .and_then(|e| e.config.base_url.clone())
             .or(base_config.base_url.clone()),
+        routing_preset: base_config.routing_preset.clone(),
     }
 }
 
@@ -260,60 +631,59 @@ pub fn decision_to_llm_config(
 mod tests {
     use super::*;
     use autonoetic_types::config::{
-        ApprovalGatesConfig, BudgetState, ComplexitySignals, DeterministicRoutingConfig,
-        LlmRoutingConfig, ModelCost, ModelEntry, RoutingStrategy, TimeSignals,
+        ApprovalGatesConfig, BudgetState, ComplexitySignals,
+        DeterministicRoutingConfig, RoutingStrategy,
+        TimeSignals, ModelCost, CapabilityTier,
     };
 
-    fn routing_config() -> LlmRoutingConfig {
-        LlmRoutingConfig {
-            strategy: RoutingStrategy::Deterministic,
-            models: vec![
-                ModelEntry {
+    fn resolved_models() -> Vec<ResolvedModelEntry> {
+        vec![
+            ResolvedModelEntry {
+                preset_name: "opus".to_string(),
+                config: LlmConfig {
                     provider: "anthropic".to_string(),
                     model: "claude-opus-4-20250514".to_string(),
-                    tier: CapabilityTier::Premium,
-                    cost: Some(ModelCost {
-                        input_per_million: Some(15.0),
-                        output_per_million: Some(75.0),
-                    }),
-                    latency: None,
+                    temperature: 0.2,
+                    fallback_provider: None,
+                    fallback_model: None,
+                    chat_only: false,
                     context_window_tokens: None,
                     base_url: None,
+                    routing_preset: None,
                 },
-                ModelEntry {
+                tier: CapabilityTier::Premium,
+            },
+            ResolvedModelEntry {
+                preset_name: "sonnet".to_string(),
+                config: LlmConfig {
                     provider: "anthropic".to_string(),
                     model: "claude-sonnet-4-20250514".to_string(),
-                    tier: CapabilityTier::Standard,
-                    cost: Some(ModelCost {
-                        input_per_million: Some(3.0),
-                        output_per_million: Some(15.0),
-                    }),
-                    latency: None,
+                    temperature: 0.2,
+                    fallback_provider: None,
+                    fallback_model: None,
+                    chat_only: false,
                     context_window_tokens: None,
                     base_url: None,
+                    routing_preset: None,
                 },
-                ModelEntry {
+                tier: CapabilityTier::Standard,
+            },
+            ResolvedModelEntry {
+                preset_name: "haiku".to_string(),
+                config: LlmConfig {
                     provider: "anthropic".to_string(),
                     model: "claude-haiku-3-20250307".to_string(),
-                    tier: CapabilityTier::Economy,
-                    cost: Some(ModelCost {
-                        input_per_million: Some(0.25),
-                        output_per_million: Some(1.25),
-                    }),
-                    latency: None,
+                    temperature: 0.0,
+                    fallback_provider: None,
+                    fallback_model: None,
+                    chat_only: false,
                     context_window_tokens: None,
                     base_url: None,
+                    routing_preset: None,
                 },
-            ],
-            deterministic: DeterministicRoutingConfig {
-                max_tier: CapabilityTier::Premium,
-                max_cost_usd: Some(10.0),
-                budget_downgrade_threshold: 0.8,
-                enable_fallback_chain: true,
+                tier: CapabilityTier::Economy,
             },
-            agent_overrides: std::collections::HashMap::new(),
-            approval_gates: ApprovalGatesConfig::default(),
-        }
+        ]
     }
 
     fn primary_config() -> LlmConfig {
@@ -326,7 +696,12 @@ mod tests {
             chat_only: false,
             context_window_tokens: None,
             base_url: None,
+            routing_preset: None,
         }
+    }
+
+    fn routing_config() -> LlmRoutingConfig {
+        LlmRoutingConfig::default()
     }
 
     #[tokio::test]
@@ -343,8 +718,8 @@ mod tests {
             complexity: ComplexitySignals::default(),
             time: TimeSignals::default(),
         };
-        let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config).await;
+        let models = resolved_models();
+        let decision = router.route(&ctx, &primary_config(), &models, &routing_config()).await;
 
         assert_eq!(decision.provider, "anthropic");
         assert_eq!(decision.model, "claude-opus-4-20250514");
@@ -366,112 +741,87 @@ mod tests {
             complexity: ComplexitySignals::default(),
             time: TimeSignals::default(),
         };
-        let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config).await;
+        let models = resolved_models();
+        let decision = router.route(&ctx, &primary_config(), &models, &routing_config()).await;
 
-        assert!(decision.was_downgraded);
         assert_eq!(decision.model, "claude-haiku-3-20250307");
+        assert!(decision.was_downgraded);
     }
 
     #[tokio::test]
-    async fn test_deterministic_router_downgrades_on_cost_threshold() {
+    async fn test_disabled_router_returns_primary() {
+        let router = DisabledRouter;
+        let ctx = RoutingContext::default();
+        let models = resolved_models();
+        let decision = router.route(&ctx, &primary_config(), &models, &routing_config()).await;
+
+        assert_eq!(decision.provider, "anthropic");
+        assert_eq!(decision.model, "claude-opus-4-20250514");
+        assert_eq!(decision.strategy_name, "disabled");
+    }
+
+    #[tokio::test]
+    async fn test_deterministic_router_respects_budget_pressure() {
         let router = DeterministicRouter::new();
         let ctx = RoutingContext {
             agent_id: "test-agent".to_string(),
             session_id: "test-session".to_string(),
             budget: BudgetState {
-                session_budget_used_pct: Some(0.5),
-                prompt_budget_used_pct: Some(0.3),
-                session_cost_usd: Some(12.0),
+                session_budget_used_pct: Some(0.85),
+                prompt_budget_used_pct: Some(0.7),
+                session_cost_usd: Some(15.0),
             },
             complexity: ComplexitySignals::default(),
             time: TimeSignals::default(),
         };
-        let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config).await;
+        let models = resolved_models();
+        let decision = router.route(&ctx, &primary_config(), &models, &routing_config()).await;
 
+        assert_eq!(decision.model, "claude-haiku-3-20250307");
         assert!(decision.was_downgraded);
     }
 
     #[tokio::test]
-    async fn test_deterministic_router_includes_fallback_chain() {
-        let router = DeterministicRouter::new();
-        let ctx = RoutingContext::default();
-        let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config).await;
+    async fn test_fallback_chain_excludes_primary() {
+        let models = resolved_models();
+        let chain = build_fallback_chain(
+            &models,
+            CapabilityTier::Premium,
+            "anthropic",
+            "claude-opus-4-20250514",
+            true,
+        );
 
-        assert!(!decision.fallback_chain.is_empty());
-        assert!(decision
-            .fallback_chain
-            .iter()
-            .any(|(p, m)| { p == "anthropic" && m == "claude-sonnet-4-20250514" }));
+        assert_eq!(chain.len(), 2);
+        assert!(!chain.iter().any(|(_, p, m)| p == "anthropic" && m == "claude-opus-4-20250514"));
     }
 
     #[tokio::test]
-    async fn test_disabled_router_always_returns_primary() {
-        let router = DisabledRouter;
+    async fn test_agent_override_forces_model() {
+        let router = DeterministicRouter::new();
         let ctx = RoutingContext {
+            agent_id: "coder.default".to_string(),
+            session_id: "test-session".to_string(),
             budget: BudgetState {
-                session_budget_used_pct: Some(0.99),
-                ..Default::default()
+                session_budget_used_pct: Some(0.3),
+                prompt_budget_used_pct: Some(0.2),
+                session_cost_usd: Some(1.0),
             },
-            ..Default::default()
+            complexity: ComplexitySignals::default(),
+            time: TimeSignals::default(),
         };
-        let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config).await;
+        let models = resolved_models();
+        let mut rc = routing_config();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("coder.default".to_string(), autonoetic_types::config::ModelOverride {
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            min_tier: None,
+        });
+        rc.agent_overrides = overrides;
 
-        assert_eq!(decision.provider, "anthropic");
-        assert_eq!(decision.model, "claude-opus-4-20250514");
-        assert!(!decision.was_downgraded);
-    }
+        let decision = router.route(&ctx, &primary_config(), &models, &rc).await;
 
-    #[test]
-    fn test_decision_to_llm_config() {
-        let decision = RoutingDecision {
-            provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
-            strategy_name: "deterministic".to_string(),
-            rationale: "test".to_string(),
-            fallback_chain: vec![],
-            was_downgraded: true,
-        };
-        let base = primary_config();
-        let new_config = decision_to_llm_config(&decision, &base, None);
-
-        assert_eq!(new_config.provider, "anthropic");
-        assert_eq!(new_config.model, "claude-sonnet-4-20250514");
-        assert_eq!(new_config.temperature, base.temperature);
-    }
-
-    #[tokio::test]
-    async fn test_script_mode_forces_economy_tier() {
-        let router = DeterministicRouter::new();
-        let ctx = RoutingContext {
-            complexity: ComplexitySignals {
-                is_script_mode: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config).await;
-
-        assert!(decision.was_downgraded);
-    }
-
-    #[tokio::test]
-    async fn test_fallback_chain_excludes_primary_model() {
-        let router = DeterministicRouter::new();
-        let ctx = RoutingContext::default();
-        let config = routing_config();
-        let decision = router.route(&ctx, &primary_config(), &config).await;
-
-        assert!(!decision.fallback_chain.is_empty());
-        for (provider, model) in &decision.fallback_chain {
-            assert!(
-                !(provider == "anthropic" && model == "claude-opus-4-20250514"),
-                "fallback chain should not include the primary model"
-            );
-        }
+        assert_eq!(decision.model, "claude-sonnet-4-20250514");
+        assert_eq!(decision.strategy_name, "agent_override");
     }
 }

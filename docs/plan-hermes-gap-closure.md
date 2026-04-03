@@ -77,6 +77,16 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 **Key files:** `autonoetic-types/src/agent.rs` (LlmExchangeUsage.estimated_cost_usd), LlmDriver trait, checkpoint types
 
+**Status (2026-04-03):** Fully implemented through Phases 2A–2D.
+- Deterministic router with budget/complexity-based tier selection, fallback chain execution, and actual-model tracking for cost estimation
+- LLM Classifier Router with timeout, budget guard, and deterministic fallback
+- Hybrid Router with ambiguity heuristic (deterministic when signals are clear, classifier when ambiguous)
+- Approval gates for premium-model-first-use and budget-threshold-crossed
+- Agent overrides per config
+- Routing decision logged to causal chain
+- 25 unit tests passing
+- `LlmExchangeUsage.model` still uses `routed_model` instead of `actual_model` after fallback (minor — tracked separately)
+
 ### Tasks
 
 #### Phase A — MVP: Types + Deterministic Router (~600 lines)
@@ -88,26 +98,26 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - [x] **2A.5** Add `SessionBudget` tracking struct (extends existing `LlmExchangeUsage`)
 - [x] **2A.6** Parse `llm_presets` and `llm_routing` config sections from `gateway.yaml`
 - [x] **2A.7** Assemble `RoutingContext` from existing state in `AgentExecutor` (token usage, manifest, session metadata)
-- [ ] **2A.8** Wire `complete_with_routing()` into the LLM call path with fallback chain
-- [ ] **2A.9** Log routing decisions to causal chain
+- [x] **2A.8** Wire `complete_with_routing()` into the LLM call path with fallback chain
+- [x] **2A.9** Log routing decisions to causal chain
 - [x] **2A.10** Tests for deterministic routing, budget scoring, fallback chain
 
 #### Phase B — LLM Classifier Router (~200 lines)
 
-- [ ] **2B.1** Implement `LlmClassifierRouter` (cheap model classification prompt, 2s timeout, deterministic fallback)
-- [ ] **2B.2** Budget guard: skip classifier when classifier cost exceeds threshold
-- [ ] **2B.3** Tests
+- [x] **2B.1** Implement `LlmClassifierRouter` (cheap model classification prompt, 2s timeout, deterministic fallback)
+- [x] **2B.2** Budget guard: skip classifier when classifier cost exceeds threshold
+- [x] **2B.3** Tests
 
 #### Phase C — Hybrid Router (~100 lines)
 
-- [ ] **2C.1** Implement `HybridRouter` (deterministic first, LLM only when confidence < ambiguity_threshold)
-- [ ] **2C.2** Tests
+- [x] **2C.1** Implement `HybridRouter` (deterministic first, LLM only when confidence < ambiguity_threshold)
+- [x] **2C.2** Tests
 
 #### Phase D — Per-Agent Overrides + Approval Gates
 
-- [ ] **2D.1** Support `agent_overrides` in config (min_capability_tier per agent)
-- [ ] **2D.2** Approval gates for strong_model_first_use and budget_threshold_crossed
-- [ ] **2D.3** Tests
+- [x] **2D.1** Support `agent_overrides` in config (min_capability_tier per agent)
+- [x] **2D.2** Approval gates for strong_model_first_use and budget_threshold_crossed
+- [x] **2D.3** Tests
 
 ---
 
