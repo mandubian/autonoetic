@@ -4,11 +4,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Named LLM preset that can be referenced by agents.
+/// Named LLM preset — either a fixed preset (concrete provider/model) or a
+/// routing preset (dynamic selection from fixed presets at call time).
+/// The two kinds are mutually exclusive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LlmPreset {
-    pub provider: String,
-    pub model: String,
+    // ── Fixed preset fields (mutually exclusive with routing) ──
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default)]
@@ -24,6 +30,18 @@ pub struct LlmPreset {
     /// Optional base URL override for OpenAI-compatible providers (e.g., LM Studio, Ollama).
     #[serde(default)]
     pub base_url: Option<String>,
+
+    // ── Tier/cost (used by fixed presets when referenced by routing presets) ──
+    #[serde(default)]
+    pub tier: Option<CapabilityTier>,
+    #[serde(default)]
+    pub cost: Option<ModelCost>,
+    #[serde(default)]
+    pub latency: Option<ModelLatency>,
+
+    // ── Routing preset fields (mutually exclusive with provider/model) ──
+    #[serde(default)]
+    pub routing: Option<RoutingPresetConfig>,
 }
 
 /// Schema enforcement mode for agent.spawn payloads.
@@ -174,30 +192,6 @@ pub struct ModelLatency {
     pub tokens_per_second: Option<u64>,
 }
 
-/// A single model entry available for routing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelEntry {
-    /// Provider name (e.g., "anthropic", "openai", "openrouter").
-    pub provider: String,
-    /// Model name (e.g., "claude-sonnet-4-20250514", "gpt-4o").
-    pub model: String,
-    /// Capability tier for filtering.
-    #[serde(default)]
-    pub tier: CapabilityTier,
-    /// Optional cost info for scoring.
-    #[serde(default)]
-    pub cost: Option<ModelCost>,
-    /// Optional latency info for scoring.
-    #[serde(default)]
-    pub latency: Option<ModelLatency>,
-    /// Optional context window override.
-    #[serde(default)]
-    pub context_window_tokens: Option<u32>,
-    /// Optional base URL override.
-    #[serde(default)]
-    pub base_url: Option<String>,
-}
-
 /// Budget state for routing decisions.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BudgetState {
@@ -295,6 +289,11 @@ pub enum RoutingStrategy {
     Disabled,
     /// Deterministic routing based on budget + complexity signals.
     Deterministic,
+    /// LLM classifier routing — uses a cheap model to classify complexity.
+    Classifier,
+    /// Hybrid routing — deterministic first, LLM classifier only when
+    /// the deterministic signals are ambiguous.
+    Hybrid,
 }
 
 /// Configuration for deterministic model routing.
@@ -314,18 +313,88 @@ pub struct DeterministicRoutingConfig {
     pub enable_fallback_chain: bool,
 }
 
-/// Top-level LLM routing configuration in gateway.yaml.
+/// Routing configuration within a preset. When present, the preset is a
+/// dynamic preset that selects from other (fixed) presets at call time.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LlmRoutingConfig {
-    /// Routing strategy: disabled, deterministic.
-    #[serde(default)]
+pub struct RoutingPresetConfig {
     pub strategy: RoutingStrategy,
-    /// Available models for routing (primary + fallbacks).
+    /// Fixed preset names to route between. Must all be fixed presets.
     #[serde(default)]
-    pub models: Vec<ModelEntry>,
-    /// Deterministic routing settings.
+    pub models: Vec<String>,
+    /// Fixed preset name for the classifier model (classifier/hybrid strategies).
+    #[serde(default)]
+    pub classifier_preset: Option<String>,
+    /// Deterministic strategy settings.
     #[serde(default)]
     pub deterministic: DeterministicRoutingConfig,
+    /// Classifier strategy settings.
+    #[serde(default)]
+    pub classifier: ClassifierRoutingConfig,
+    /// Hybrid strategy settings.
+    #[serde(default)]
+    pub hybrid: HybridRoutingConfig,
+}
+
+/// Configuration for LLM classifier routing.
+/// When used within a routing preset, the classifier model is resolved
+/// from the classifier_preset field rather than from provider/model here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassifierRoutingConfig {
+    /// Timeout in seconds for the classifier call (default: 2).
+    #[serde(default = "default_classifier_timeout")]
+    pub timeout_secs: u64,
+    /// Budget pressure threshold (0.0–1.0) at which to skip classifier entirely.
+    #[serde(default = "default_classifier_budget_skip")]
+    pub skip_threshold: f32,
+}
+
+impl Default for ClassifierRoutingConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 2,
+            skip_threshold: 0.95,
+        }
+    }
+}
+
+fn default_classifier_timeout() -> u64 {
+    2
+}
+
+fn default_classifier_budget_skip() -> f32 {
+    0.95
+}
+
+fn default_ambiguity_threshold() -> f32 {
+    0.5
+}
+
+/// Configuration for hybrid routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HybridRoutingConfig {
+    /// Ambiguity threshold (0.0–1.0). When deterministic confidence
+    /// is below this, the LLM classifier is consulted.
+    #[serde(default = "default_ambiguity_threshold")]
+    pub ambiguity_threshold: f32,
+    /// Classifier settings used when the hybrid router falls through.
+    #[serde(default)]
+    pub classifier: ClassifierRoutingConfig,
+}
+
+impl Default for HybridRoutingConfig {
+    fn default() -> Self {
+        Self {
+            ambiguity_threshold: 0.5,
+            classifier: ClassifierRoutingConfig::default(),
+        }
+    }
+}
+
+/// Cross-cutting routing concerns (agent overrides and approval gates).
+/// Model definitions and routing strategies now live in `llm_presets`
+/// via routing presets.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LlmRoutingConfig {
     /// Agent-specific overrides (agent_id → min_tier or explicit model).
     #[serde(default)]
     pub agent_overrides: std::collections::HashMap<String, ModelOverride>,
@@ -801,6 +870,89 @@ impl Default for GatewayConfig {
     }
 }
 
+impl GatewayConfig {
+    /// Validate that LLM preset references are consistent.
+    /// Returns a list of error messages; empty vec means valid.
+    pub fn validate_llm_presets(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        for (name, preset) in &self.llm_presets {
+            let has_provider = preset.provider.is_some();
+            let has_model = preset.model.is_some();
+            let has_routing = preset.routing.is_some();
+
+            if has_routing && (has_provider || has_model) {
+                errors.push(format!(
+                    "preset '{}': cannot have both routing and provider/model — they are mutually exclusive",
+                    name
+                ));
+            }
+            if !has_routing && (!has_provider || !has_model) {
+                errors.push(format!(
+                    "preset '{}': fixed presets require both provider and model",
+                    name
+                ));
+            }
+            if !has_routing && !has_provider && !has_model {
+                errors.push(format!(
+                    "preset '{}': must have either routing or provider+model",
+                    name
+                ));
+            }
+
+            if let Some(ref routing) = preset.routing {
+                if routing.models.is_empty() {
+                    errors.push(format!(
+                        "preset '{}': routing preset must have at least one model",
+                        name
+                    ));
+                }
+                for model_name in &routing.models {
+                    if let Some(mp) = self.llm_presets.get(model_name) {
+                        if mp.routing.is_some() {
+                            errors.push(format!(
+                                "preset '{}': routing.models references routing preset '{}', but only fixed presets are allowed",
+                                name, model_name
+                            ));
+                        }
+                    } else {
+                        errors.push(format!(
+                            "preset '{}': routing.models references unknown preset '{}'",
+                            name, model_name
+                        ));
+                    }
+                }
+                if let Some(ref cp) = routing.classifier_preset {
+                    if let Some(cpp) = self.llm_presets.get(cp) {
+                        if cpp.routing.is_some() {
+                            errors.push(format!(
+                                "preset '{}': classifier_preset '{}' is a routing preset, but must be fixed",
+                                name, cp
+                            ));
+                        }
+                    } else {
+                        errors.push(format!(
+                            "preset '{}': classifier_preset references unknown preset '{}'",
+                            name, cp
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (template, preset_name) in &self.llm_preset_mapping {
+            if !self.llm_presets.contains_key(preset_name) {
+                errors.push(format!(
+                    "llm_preset_mapping: template '{}' references unknown preset '{}'",
+                    template, preset_name
+                ));
+            }
+        }
+
+        errors
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,5 +1010,161 @@ mod tests {
         assert_eq!(parsed.warn_at_pct, 90.0);
         assert_eq!(parsed.margin_tokens, 2048);
         assert_eq!(parsed.on_exceeded, PromptBudgetAction::DemoteTools);
+    }
+
+    #[test]
+    fn validate_llm_presets_accepts_valid_config() {
+        let mut config = GatewayConfig::default();
+        config.llm_presets.insert(
+            "haiku".to_string(),
+            LlmPreset {
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-haiku-3".to_string()),
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                tier: Some(CapabilityTier::Economy),
+                cost: None,
+                latency: None,
+                routing: None,
+            },
+        );
+        config.llm_presets.insert(
+            "smart".to_string(),
+            LlmPreset {
+                provider: None,
+                model: None,
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: Some(RoutingPresetConfig {
+                    strategy: RoutingStrategy::Deterministic,
+                    models: vec!["haiku".to_string()],
+                    classifier_preset: Some("haiku".to_string()),
+                    deterministic: DeterministicRoutingConfig::default(),
+                    classifier: ClassifierRoutingConfig::default(),
+                    hybrid: HybridRoutingConfig::default(),
+                }),
+            },
+        );
+        config
+            .llm_preset_mapping
+            .insert("planner".to_string(), "smart".to_string());
+
+        let errors = config.validate_llm_presets();
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn validate_llm_presets_rejects_routing_with_provider() {
+        let mut config = GatewayConfig::default();
+        config.llm_presets.insert(
+            "bad".to_string(),
+            LlmPreset {
+                provider: Some("openai".to_string()),
+                model: Some("gpt-4".to_string()),
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: Some(RoutingPresetConfig {
+                    strategy: RoutingStrategy::Deterministic,
+                    models: vec![],
+                    classifier_preset: None,
+                    deterministic: DeterministicRoutingConfig::default(),
+                    classifier: ClassifierRoutingConfig::default(),
+                    hybrid: HybridRoutingConfig::default(),
+                }),
+            },
+        );
+
+        let errors = config.validate_llm_presets();
+        assert!(errors.iter().any(|e| e.contains("mutually exclusive")));
+    }
+
+    #[test]
+    fn validate_llm_presets_rejects_fixed_without_provider() {
+        let mut config = GatewayConfig::default();
+        config.llm_presets.insert(
+            "incomplete".to_string(),
+            LlmPreset {
+                provider: None,
+                model: None,
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: None,
+            },
+        );
+
+        let errors = config.validate_llm_presets();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("require both provider and model")));
+    }
+
+    #[test]
+    fn validate_llm_presets_rejects_routing_preset_in_models() {
+        let mut config = GatewayConfig::default();
+        config.llm_presets.insert(
+            "router".to_string(),
+            LlmPreset {
+                provider: None,
+                model: None,
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: Some(RoutingPresetConfig {
+                    strategy: RoutingStrategy::Deterministic,
+                    models: vec!["router".to_string()], // self-reference
+                    classifier_preset: None,
+                    deterministic: DeterministicRoutingConfig::default(),
+                    classifier: ClassifierRoutingConfig::default(),
+                    hybrid: HybridRoutingConfig::default(),
+                }),
+            },
+        );
+
+        let errors = config.validate_llm_presets();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("only fixed presets are allowed")));
+    }
+
+    #[test]
+    fn validate_llm_presets_rejects_unknown_preset_in_mapping() {
+        let mut config = GatewayConfig::default();
+        config
+            .llm_preset_mapping
+            .insert("coder".to_string(), "nonexistent".to_string());
+
+        let errors = config.validate_llm_presets();
+        assert!(errors.iter().any(|e| e.contains("unknown preset")));
     }
 }

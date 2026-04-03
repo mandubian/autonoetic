@@ -674,7 +674,7 @@ impl JsonRpcRouter {
 
     fn resolve_ingest_target_agent_id(
         &self,
-        _session_id: &str,
+        session_id: &str,
         requested_target_agent_id: Option<&str>,
     ) -> anyhow::Result<String> {
         if let Some(explicit_target) = requested_target_agent_id.map(str::trim) {
@@ -683,6 +683,12 @@ impl JsonRpcRouter {
                 "target_agent_id must not be empty when provided"
             );
             return Ok(explicit_target.to_string());
+        }
+
+        if let Some(store) = self.execution.gateway_store() {
+            if let Ok(Some(binding)) = store.get_session_agent_binding(session_id) {
+                return Ok(binding.agent_id);
+            }
         }
 
         anyhow::bail!(

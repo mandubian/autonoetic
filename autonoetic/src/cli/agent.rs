@@ -21,6 +21,7 @@ pub struct LlmTemplateConfig {
     pub temperature: f64,
     pub chat_only: bool,
     pub base_url: Option<String>,
+    pub routing_preset: Option<String>,
 }
 
 /// Resolve LLM config from CLI flags, presets, or defaults
@@ -39,24 +40,56 @@ pub fn resolve_llm_config(
             temperature: 0.2,
             chat_only: false,
             base_url: None,
+            routing_preset: None,
         };
     }
 
     // Helper to convert preset to template config
-    fn preset_to_config(preset: &autonoetic_types::config::LlmPreset) -> LlmTemplateConfig {
-        LlmTemplateConfig {
-            provider: preset.provider.clone(),
-            model: preset.model.clone(),
-            temperature: preset.temperature.unwrap_or(0.2),
-            chat_only: preset.chat_only.unwrap_or(false),
-            base_url: preset.base_url.clone(),
+    fn preset_to_config(
+        preset_name: &str,
+        preset: &autonoetic_types::config::LlmPreset,
+        all_presets: &std::collections::HashMap<String, autonoetic_types::config::LlmPreset>,
+    ) -> LlmTemplateConfig {
+        if let Some(ref routing) = preset.routing {
+            // Routing preset: resolve first model preset to get concrete provider/model
+            if let Some(first_name) = routing.models.first() {
+                if let Some(first_preset) = all_presets.get(first_name) {
+                    return LlmTemplateConfig {
+                        provider: first_preset.provider.clone().unwrap_or_default(),
+                        model: first_preset.model.clone().unwrap_or_default(),
+                        temperature: preset.temperature.unwrap_or(0.2),
+                        chat_only: preset.chat_only.unwrap_or(false),
+                        base_url: preset.base_url.clone(),
+                        routing_preset: Some(preset_name.to_string()),
+                    };
+                }
+            }
+            // Fallback: empty provider/model, but still set routing_preset
+            LlmTemplateConfig {
+                provider: String::new(),
+                model: String::new(),
+                temperature: preset.temperature.unwrap_or(0.2),
+                chat_only: preset.chat_only.unwrap_or(false),
+                base_url: preset.base_url.clone(),
+                routing_preset: Some(preset_name.to_string()),
+            }
+        } else {
+            // Fixed preset
+            LlmTemplateConfig {
+                provider: preset.provider.clone().unwrap_or_default(),
+                model: preset.model.clone().unwrap_or_default(),
+                temperature: preset.temperature.unwrap_or(0.2),
+                chat_only: preset.chat_only.unwrap_or(false),
+                base_url: preset.base_url.clone(),
+                routing_preset: None,
+            }
         }
     }
 
     // 2. Named preset from config
     if let Some(preset_name) = preset_name {
         if let Some(preset) = config.llm_presets.get(preset_name) {
-            return preset_to_config(preset);
+            return preset_to_config(preset_name, preset, &config.llm_presets);
         }
     }
 
@@ -64,7 +97,7 @@ pub fn resolve_llm_config(
     if let Some(template_name) = template {
         if let Some(mapped_preset_name) = config.llm_preset_mapping.get(template_name) {
             if let Some(preset) = config.llm_presets.get(mapped_preset_name) {
-                return preset_to_config(preset);
+                return preset_to_config(mapped_preset_name, preset, &config.llm_presets);
             }
         }
     }
@@ -77,6 +110,7 @@ pub fn resolve_llm_config(
             temperature: 0.2,
             chat_only: false,
             base_url: None,
+            routing_preset: None,
         },
         "coder" => LlmTemplateConfig {
             provider: "anthropic".to_string(),
@@ -84,6 +118,7 @@ pub fn resolve_llm_config(
             temperature: 0.1,
             chat_only: false,
             base_url: None,
+            routing_preset: None,
         },
         "researcher" => LlmTemplateConfig {
             provider: "openai".to_string(),
@@ -91,6 +126,7 @@ pub fn resolve_llm_config(
             temperature: 0.3,
             chat_only: false,
             base_url: None,
+            routing_preset: None,
         },
         "evaluator" | "auditor" => LlmTemplateConfig {
             provider: "openrouter".to_string(),
@@ -98,6 +134,7 @@ pub fn resolve_llm_config(
             temperature: 0.1,
             chat_only: false,
             base_url: None,
+            routing_preset: None,
         },
         _ => LlmTemplateConfig {
             provider: "openai".to_string(),
@@ -105,6 +142,7 @@ pub fn resolve_llm_config(
             temperature: 0.2,
             chat_only: false,
             base_url: None,
+            routing_preset: None,
         },
     }
 }
@@ -278,9 +316,14 @@ pub fn handle_agent_presets(config_path: &Path) -> anyhow::Result<()> {
 
     for (name, preset) in &config.llm_presets {
         let temp = preset.temperature.unwrap_or(0.0);
+        let provider = preset.provider.as_deref().unwrap_or("(routing preset)");
+        let model = preset.model.as_deref().unwrap_or_else(|| {
+            preset.routing.as_ref().and_then(|r| r.models.first()).map(|s| s.as_str()).unwrap_or("")
+        });
+        let type_tag = if preset.routing.is_some() { " [routing]" } else { "" };
         println!(
-            "{:<20} {:<30} {:<15} {:.1}",
-            name, preset.provider, preset.model, temp
+            "{:<20} {:<30} {:<15} {:.1}{}",
+            name, provider, model, temp, type_tag
         );
     }
 
@@ -295,135 +338,7 @@ pub fn handle_agent_presets(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-const DEFAULT_CONFIG_TEMPLATE: &str = r#"# Autonoetic Gateway Configuration
-# See docs/ARCHITECTURE.md and docs/AGENTS.md for full documentation
-# Full reference: docs/config-reference.md
-
-# agents_dir is set to absolute path based on config location
-port: 4000
-ofp_port: 4200
-tls: false
-max_concurrent_spawns: 8
-max_pending_spawns_per_agent: 4
-
-# ── Node Identity ─────────────────────────────────────────────────────
-# Identity for OFP federation and causal chain authorship.
-# Overridable by AUTONOETIC_NODE_ID and AUTONOETIC_NODE_NAME env vars.
-node_id: "gateway"
-node_name: "gateway"
-# NOTE: AUTONOETIC_SHARED_SECRET must be set as an env var (not in config).
-
-# ── Sandbox ───────────────────────────────────────────────────────────
-# Bubblewrap isolation overrides.
-# Overridable by AUTONOETIC_BWRAP_SHARE_NET and AUTONOETIC_BWRAP_DEV_MODE env vars.
-sandbox:
-  share_net: false
-  dev_mode: legacy   # legacy | minimal | host-bind
-
-# ── Background Scheduler ──────────────────────────────────────────────
-background_scheduler_enabled: true
-background_tick_secs: 5
-background_min_interval_secs: 60
-max_background_due_per_tick: 32
-
-# ── Response Validation & Repair ──────────────────────────────────────
-# When enabled, the gateway validates agent outputs against declared constraints.
-# repair_enabled activates bounded retry loops when validation fails.
-response_validation:
-  enabled: true
-  repair_enabled: true
-
-# ── Approval Timeout ──────────────────────────────────────────────────
-# Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
-approval_timeout_secs: 600
-
-# ── Schema Enforcement ────────────────────────────────────────────────
-# Validates agent.spawn payloads against declared schemas.
-# Modes: disabled, deterministic (default), llm
-schema_enforcement:
-  mode: deterministic
-  audit: true
-
-# ── Evidence Mode ─────────────────────────────────────────────────────
-# How much tool/LLM execution data to save for debugging.
-# full: all results (development) | errors: failures only (production) | off
-evidence_mode: full
-
-# ── Code Analysis ─────────────────────────────────────────────────────
-# Capability and security analysis for tool execution and generated artifacts.
-code_analysis:
-  capability_provider: pattern
-  security_provider: pattern
-  require_capabilities: true
-  require_approval_for:
-    - NetworkAccess
-    - CodeExecution
-
-# ── Session Budget (optional per-session resource limits) ─────────────
-# Uncomment to cap LLM rounds, tool calls, tokens, or wall-clock time.
-# session_budget:
-#   profile: dev
-#   max_llm_rounds: 200
-#   max_tool_invocations: 500
-#   max_llm_tokens: 5000000
-#   max_wall_clock_secs: 3600
-
-# ── Retention ─────────────────────────────────────────────────────────
-# Days to keep execution_traces and causal_events. 0 = forever.
-retention:
-  execution_traces_days: 30
-  causal_events_days: 90
-
-# ── Post-Session Digest ───────────────────────────────────────────────
-# LLM summarization + memory extraction after sessions complete.
-# Uncomment to enable.
-# digest_agent:
-#   enabled: true
-#   min_turns: 2
-#   llm_preset: agentic
-
-# ── LLM Presets ───────────────────────────────────────────────────────
-# Named presets for role-specific model selection.
-# Referenced by name in templates and agent init commands.
-#
-# For local OpenAI-compatible servers (LM Studio, Ollama, etc.), set base_url:
-#
-#   local:
-#     provider: "lmstudio"
-#     model: "unsloth/qwen3.5-35b-a3bi@q4_k_xl"
-#     base_url: "http://192.168.1.20:1234/v1"
-#
-llm_presets:
-  agentic:
-    provider: "openrouter"
-    model: "minimax/minimax-m2.7"
-    temperature: 0.2
-  coding:
-    provider: "openrouter"
-    model: "minimax/minimax-m2.7"
-    temperature: 0.1
-  research:
-    provider: "openrouter"
-    model: "minimax/minimax-m2.7"
-    temperature: 0.3
-  fallback:
-    provider: "openai"
-    model: "gpt-4o"
-    temperature: 0.2
-
-# ── Template → Preset Mapping ────────────────────────────────────────
-# Used during 'agent bootstrap' and 'agent init --template <name>'.
-llm_preset_mapping:
-  planner: agentic
-  researcher: research
-  architect: agentic
-  coder: coding
-  debugger: coding
-  auditor: agentic
-  evaluator: agentic
-  specialized_builder: agentic
-  default: agentic
-"#;
+const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../../config/config-template.yaml");
 
 pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Result<()> {
     let output_path = output.unwrap_or("config.yaml");
@@ -903,6 +818,7 @@ pub fn handle_agent_bootstrap(
         config_path.display()
     );
     let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     std::fs::create_dir_all(&config.agents_dir)?;
 
     let reference_root = resolve_reference_agents_dir(from)?;
@@ -971,12 +887,18 @@ pub fn handle_agent_bootstrap(
         }
     }
 
+    let activated = autonoetic_gateway::scheduler::bootstrap_agents(
+        &config,
+        &gateway_dir,
+    )?;
+
     println!(
-        "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} patched (target: {}).",
+        "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} patched, {} activated (target: {}).",
         copied,
         overwritten,
         skipped,
         patched,
+        activated,
         config.agents_dir.display()
     );
 
@@ -1554,6 +1476,7 @@ pub fn handle_agent_import_skill(
             chat_only: false,
             context_window_tokens: None,
             base_url: None,
+            routing_preset: None,
         })
     } else {
         let resolved = resolve_llm_config(&config, None, None, provider, model);
@@ -1566,6 +1489,7 @@ pub fn handle_agent_import_skill(
             chat_only: resolved.chat_only,
             context_window_tokens: None,
             base_url: resolved.base_url,
+            routing_preset: resolved.routing_preset,
         })
     };
 
@@ -2023,14 +1947,18 @@ Use tools when needed.
         config.llm_presets.insert(
             "fast".to_string(),
             autonoetic_types::config::LlmPreset {
-                provider: "openai".to_string(),
-                model: "gpt-4o-mini".to_string(),
+                provider: Some("openai".to_string()),
+                model: Some("gpt-4o-mini".to_string()),
                 temperature: Some(0.0),
                 fallback_provider: None,
                 fallback_model: None,
                 chat_only: None,
                 context_window_tokens: None,
                 base_url: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: None,
             },
         );
         config

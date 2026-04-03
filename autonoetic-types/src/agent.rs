@@ -46,6 +46,10 @@ pub struct LlmConfig {
     /// Optional base URL override for OpenAI-compatible providers (e.g., LM Studio, Ollama).
     #[serde(default)]
     pub base_url: Option<String>,
+    /// When set, this agent's LLM is resolved via the named routing preset
+    /// at call time. provider/model are the fallback if routing is unavailable.
+    #[serde(default)]
+    pub routing_preset: Option<String>,
 }
 
 /// One provider round-trip: token counts and optional context window utilization.

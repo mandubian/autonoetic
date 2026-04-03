@@ -176,6 +176,199 @@ See `docs/session-budget.md` and `docs/budget-management.md` for details.
 
 ---
 
+## Max Session Turns
+
+Circuit breaker for runaway agent sessions.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_session_turns` | u32 | `12` | Maximum turns per session before forced suspension (`MaxTurnsReached`). |
+
+---
+
+## Prompt Budget
+
+Controls context window transparency and enforcement for prompt construction.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `prompt_budget.system_prompt_max_tokens` | usize | `0` | Maximum tokens for system prompt (foundation + agent instructions). `0` = unlimited. |
+| `prompt_budget.tool_definitions_max_tokens` | usize | `0` | Maximum tokens for all tool definitions combined. `0` = unlimited. |
+| `prompt_budget.warn_at_pct` | float | `80.0` | Warn when total prompt utilization exceeds this percentage of context window. |
+| `prompt_budget.margin_tokens` | usize | `4096` | Reserve this many tokens at the end of the context window for LLM output. |
+| `prompt_budget.on_exceeded` | string | `"warn"` | Action when budget exceeded: `"warn"`, `"trim_history"`, `"demote_tools"`, `"fail"`. |
+| `prompt_budget.compress_tool_schemas_after_turn_0` | bool | `false` | Strip tool JSON schemas to `{}` after the first turn to save tokens. |
+
+Example:
+
+```yaml
+prompt_budget:
+  system_prompt_max_tokens: 0
+  tool_definitions_max_tokens: 0
+  warn_at_pct: 80.0
+  margin_tokens: 4096
+  on_exceeded: warn
+  compress_tool_schemas_after_turn_0: false
+```
+
+---
+
+## LLM Presets
+
+Unified registry for all LLM configurations. Each preset is either **fixed** (concrete provider/model) or **routing** (dynamic selection from fixed presets at call time).
+
+### Fixed Preset Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | required (if no `routing`) | LLM provider: `"openai"`, `"anthropic"`, `"openrouter"`, etc. |
+| `model` | string | required (if no `routing`) | Model identifier. |
+| `temperature` | float | `null` | Sampling temperature. |
+| `fallback_provider` | string | `null` | Fallback provider if primary fails. |
+| `fallback_model` | string | `null` | Fallback model if primary fails. |
+| `chat_only` | bool | `null` | Set `true` if the provider only supports basic chat (no tools). |
+| `context_window_tokens` | u32 | `null` | Context window size for CLI "% of context" display. |
+| `base_url` | string | `null` | Optional base URL for OpenAI-compatible providers (e.g., LM Studio, Ollama). |
+| `tier` | string | `null` | Capability tier: `"economy"`, `"standard"`, `"premium"`. Used when referenced by routing presets. |
+| `cost.input_per_million` | float | `null` | Cost per million input tokens (USD). |
+| `cost.output_per_million` | float | `null` | Cost per million output tokens (USD). |
+| `latency.ttft_ms` | u64 | `null` | Expected time-to-first-token (ms). |
+| `latency.tokens_per_second` | u64 | `null` | Expected output throughput. |
+
+### Routing Preset Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `routing.strategy` | string | required | `"disabled"`, `"deterministic"`, `"classifier"`, `"hybrid"`. |
+| `routing.models` | list | required | Fixed preset names to route between (e.g., `[opus, sonnet, haiku]`). |
+| `routing.classifier_preset` | string | `null` | Fixed preset name for the classifier model (classifier/hybrid strategies). |
+
+#### routing.deterministic sub-object
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_tier` | string | `"premium"` | Maximum allowed tier: `"economy"`, `"standard"`, `"premium"`. |
+| `max_cost_usd` | float | `null` | Max cost per session before downgrading to economy. |
+| `budget_downgrade_threshold` | float | `0.8` | Budget pressure (0.0–1.0) at which to downgrade to economy. |
+| `enable_fallback_chain` | bool | `true` | Retry with fallback model on failure. |
+
+#### routing.classifier sub-object
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `timeout_secs` | u64 | `2` | Classifier call timeout. |
+| `skip_threshold` | float | `0.95` | Skip classifier when budget pressure exceeds this (0.0–1.0). |
+
+#### routing.hybrid sub-object
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ambiguity_threshold` | float | `0.5` | Use classifier when deterministic confidence is below this (0.0–1.0). |
+| `classifier` | object | (see above) | Classifier settings for hybrid fallback. |
+
+### Validation Rules
+
+1. A preset must have either `provider`+`model` (fixed) or `routing` (routing preset), not both, not neither.
+2. `routing.models` must reference existing fixed presets only.
+3. `routing.classifier_preset` must reference an existing fixed preset.
+4. `llm_preset_mapping` values must reference existing presets (fixed or routing).
+
+Example:
+
+```yaml
+llm_presets:
+  # Fixed presets
+  haiku:
+    provider: anthropic
+    model: claude-haiku-3-20250307
+    tier: economy
+    cost:
+      input_per_million: 0.25
+      output_per_million: 1.25
+
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    tier: standard
+    cost:
+      input_per_million: 3.0
+      output_per_million: 15.0
+
+  opus:
+    provider: anthropic
+    model: claude-opus-4-20250514
+    tier: premium
+    cost:
+      input_per_million: 15.0
+      output_per_million: 75.0
+
+  # Routing presets
+  smart:
+    routing:
+      strategy: hybrid
+      models: [opus, sonnet, haiku]
+      classifier_preset: haiku
+      deterministic:
+        max_tier: premium
+        budget_downgrade_threshold: 0.8
+        enable_fallback_chain: true
+      classifier:
+        timeout_secs: 2
+        skip_threshold: 0.95
+      hybrid:
+        ambiguity_threshold: 0.5
+
+  budget:
+    routing:
+      strategy: deterministic
+      models: [sonnet, haiku]
+      deterministic:
+        max_tier: standard
+        budget_downgrade_threshold: 0.6
+        enable_fallback_chain: true
+```
+
+---
+
+## LLM Routing
+
+Cross-cutting concerns only. Model definitions and routing strategies live in `llm_presets`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `llm_routing.agent_overrides` | map | `{}` | Per-agent model/tier overrides. Key = agent ID. |
+| `llm_routing.approval_gates` | object | (see below) | Approval gates for routing decisions. |
+
+### ModelOverride
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | `null` | Force a specific model name (must match a fixed preset's model). No provider prefix. |
+| `min_tier` | string | `null` | Minimum capability tier: `"economy"`, `"standard"`, `"premium"`. |
+
+### Approval Gates
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `approval_gates.premium_model_first_use` | bool | `false` | Require approval before first premium model use. |
+| `approval_gates.budget_threshold_crossed` | float | `null` | Require approval when budget exceeds this (0.0–1.0). |
+
+Example:
+
+```yaml
+llm_routing:
+  agent_overrides:
+    planner.default:
+      min_tier: standard
+    coder.default:
+      model: claude-sonnet-4-20250514
+  approval_gates:
+    premium_model_first_use: false
+    budget_threshold_crossed: 0.75
+```
+
+---
+
 ## Retention
 
 Controls pruning of historical data. Values are in days; `0` means retain forever.
@@ -218,51 +411,21 @@ digest_agent:
 
 ---
 
-## LLM Presets
-
-Named LLM configurations that agents can reference by name. Used during `agent bootstrap` and `agent init --template <name>`.
-
-```yaml
-llm_presets:
-  agentic:
-    provider: "openrouter"
-    model: "minimax/minimax-m2.7"
-    temperature: 0.2
-  coding:
-    provider: "openrouter"
-    model: "minimax/minimax-m2.7"
-    temperature: 0.1
-```
-
-### LlmPreset fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `provider` | string | Yes | LLM provider: `"openai"`, `"anthropic"`, `"openrouter"`, etc. |
-| `model` | string | Yes | Model identifier. |
-| `temperature` | float | No | Sampling temperature. |
-| `fallback_provider` | string | No | Fallback provider if primary fails. |
-| `fallback_model` | string | No | Fallback model if primary fails. |
-| `chat_only` | bool | No | Set `true` if the provider only supports basic chat (no tools). |
-| `context_window_tokens` | u32 | No | Context window size for CLI "% of context" display when preset is applied to a SKILL. |
-
----
-
 ## Template → Preset Mapping
 
 Maps role/template names to preset names. Used during `agent bootstrap` and `agent init --template <name>`.
+Values can reference either fixed presets or routing presets.
 
 ```yaml
 llm_preset_mapping:
-  planner: agentic
-  researcher: research
-  architect: agentic
-  coder: coding
-  debugger: coding
-  auditor: agentic
-  evaluator: agentic
+  planner: smart             # routing preset
+  coder: smart               # routing preset
+  researcher: sonnet         # fixed preset
+  debugger: haiku            # fixed preset
+  evaluator: budget          # routing preset
+  architect: opus            # fixed preset
   specialized_builder: agentic
-  default: agentic
+  default: sonnet
 ```
 
 The key is the template role name; the value must be a key in `llm_presets`.
@@ -283,6 +446,7 @@ max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4
 approval_timeout_secs: 600
 evidence_mode: full
+max_session_turns: 12
 
 background_scheduler_enabled: true
 background_tick_secs: 5
@@ -296,8 +460,6 @@ sandbox:
 response_validation:
   enabled: true
   repair_enabled: true
-
-revision_promote_approval_policy: risk_based
 
 schema_enforcement:
   mode: deterministic
@@ -316,6 +478,11 @@ session_budget:
   max_llm_rounds: 200
   max_tool_invocations: 500
 
+prompt_budget:
+  warn_at_pct: 80.0
+  margin_tokens: 4096
+  on_exceeded: warn
+
 retention:
   execution_traces_days: 30
   causal_events_days: 90
@@ -325,32 +492,90 @@ digest_agent:
   min_turns: 2
   llm_preset: agentic
 
+llm_routing:
+  agent_overrides:
+    planner.default:
+      min_tier: standard
+  approval_gates:
+    premium_model_first_use: false
+    budget_threshold_crossed: 0.75
+
 llm_presets:
+  haiku:
+    provider: anthropic
+    model: claude-haiku-3-20250307
+    tier: economy
+    cost:
+      input_per_million: 0.25
+      output_per_million: 1.25
+
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    tier: standard
+    cost:
+      input_per_million: 3.0
+      output_per_million: 15.0
+
+  opus:
+    provider: anthropic
+    model: claude-opus-4-20250514
+    tier: premium
+    cost:
+      input_per_million: 15.0
+      output_per_million: 75.0
+
+  smart:
+    routing:
+      strategy: hybrid
+      models: [opus, sonnet, haiku]
+      classifier_preset: haiku
+      deterministic:
+        max_tier: premium
+        budget_downgrade_threshold: 0.8
+        enable_fallback_chain: true
+      classifier:
+        timeout_secs: 2
+        skip_threshold: 0.95
+      hybrid:
+        ambiguity_threshold: 0.5
+
+  budget:
+    routing:
+      strategy: deterministic
+      models: [sonnet, haiku]
+      deterministic:
+        max_tier: standard
+        budget_downgrade_threshold: 0.6
+        enable_fallback_chain: true
+
   agentic:
-    provider: "openrouter"
-    model: "minimax/minimax-m2.7"
+    provider: openrouter
+    model: minimax/minimax-m2.7
     temperature: 0.2
+
   coding:
-    provider: "openrouter"
-    model: "minimax/minimax-m2.7"
+    provider: openrouter
+    model: minimax/minimax-m2.7
     temperature: 0.1
+
   research:
-    provider: "openrouter"
-    model: "minimax/minimax-m2.7"
+    provider: openrouter
+    model: minimax/minimax-m2.7
     temperature: 0.3
+
   fallback:
-    provider: "openai"
-    model: "gpt-4o"
+    provider: openai
+    model: gpt-4o
     temperature: 0.2
 
 llm_preset_mapping:
-  planner: agentic
-  researcher: research
-  architect: agentic
-  coder: coding
-  debugger: coding
-  auditor: agentic
-  evaluator: agentic
+  planner: smart
+  coder: smart
+  researcher: sonnet
+  debugger: haiku
+  evaluator: budget
+  architect: opus
   specialized_builder: agentic
-  default: agentic
+  default: sonnet
 ```
