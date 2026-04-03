@@ -52,10 +52,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for id_result in rows {
-            if let Ok(id) = id_result {
-                if let Ok(Some(n)) = Self::get_notification_with_conn(&conn, &id) {
-                    results.push(n);
-                }
+            let id = id_result?;
+            if let Some(n) = Self::get_notification_with_conn(&conn, &id)? {
+                results.push(n);
             }
         }
         Ok(results)
