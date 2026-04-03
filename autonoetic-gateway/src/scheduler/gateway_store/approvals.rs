@@ -125,10 +125,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for id_result in rows {
-            if let Ok(id) = id_result {
-                if let Ok(Some(app)) = Self::get_approval_with_conn(&conn, &id) {
-                    results.push(app);
-                }
+            let id = id_result?;
+            if let Some(app) = Self::get_approval_with_conn(&conn, &id)? {
+                results.push(app);
             }
         }
         Ok(results)
@@ -149,10 +148,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for id_result in rows {
-            if let Ok(id) = id_result {
-                if let Ok(Some(app)) = Self::get_approval_with_conn(&conn, &id) {
-                    results.push(app);
-                }
+            let id = id_result?;
+            if let Some(app) = Self::get_approval_with_conn(&conn, &id)? {
+                results.push(app);
             }
         }
         Ok(results)
@@ -173,10 +171,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for id_result in rows {
-            if let Ok(id) = id_result {
-                if let Ok(Some(app)) = Self::get_approval_with_conn(&conn, &id) {
-                    results.push(app);
-                }
+            let id = id_result?;
+            if let Some(app) = Self::get_approval_with_conn(&conn, &id)? {
+                results.push(app);
             }
         }
         Ok(results)
@@ -197,10 +194,9 @@ impl GatewayStore {
 
         let mut results = Vec::new();
         for id_result in rows {
-            if let Ok(id) = id_result {
-                if let Ok(Some(app)) = Self::get_approval_with_conn(&conn, &id) {
-                    results.push(app);
-                }
+            let id = id_result?;
+            if let Some(app) = Self::get_approval_with_conn(&conn, &id)? {
+                results.push(app);
             }
         }
         Ok(results)
