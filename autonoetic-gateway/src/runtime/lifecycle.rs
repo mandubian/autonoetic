@@ -960,6 +960,7 @@ impl AgentExecutor {
             *history = trimmed_history;
 
             // --- Model Routing: select model based on budget/complexity signals ---
+            use crate::runtime::llm_preset_resolver::{resolve_model_list, resolve_classifier_config, is_routing_preset};
             let default_cfg = autonoetic_types::agent::LlmConfig {
                 provider: "openai".to_string(),
                 model: "gpt-4o".to_string(),
@@ -969,96 +970,121 @@ impl AgentExecutor {
                 chat_only: false,
                 context_window_tokens: None,
                 base_url: None,
+                routing_preset: None,
             };
             let mut routed_llm_cfg = self.manifest.llm_config.clone().unwrap_or(default_cfg);
-            let (routed_model, routing_decision_json, matched_entry) = if let Some(routing_cfg) =
-                self.config.as_ref().and_then(|c| c.llm_routing.as_ref())
-            {
-                if let Some(llm_cfg) = &self.manifest.llm_config {
-                    let budget_state = self.session_budget.as_ref().and_then(|sb| {
-                        sb.snapshot_counters(&session_id).and_then(|(rounds, _tokens, cost)| {
-                            let config = self.config.as_ref()?;
-                            let max_rounds = config.session_budget.max_llm_rounds? as f32;
-                            Some(autonoetic_types::config::BudgetState {
-                                session_budget_used_pct: Some(rounds as f32 / max_rounds),
-                                prompt_budget_used_pct: budget_breakdown.utilization_pct.map(|v| v as f32),
-                                session_cost_usd: Some(cost),
-                            })
-                        })
-                    }).unwrap_or_default();
- 
-                    let complexity = autonoetic_types::config::ComplexitySignals {
-                        tool_count: Some(tools.len() as u32),
-                        recent_tool_use_count: None,
-                        has_workflow_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. })),
-                        has_artifact_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::WriteAccess { .. })),
-                        is_script_mode: self.manifest.execution_mode == autonoetic_types::agent::ExecutionMode::Script,
-                    };
- 
-                    let ctx = autonoetic_types::config::RoutingContext {
-                        agent_id: self.manifest.agent.id.clone(),
-                        session_id: session_id.clone(),
-                        budget: budget_state,
-                        complexity,
-                        time: autonoetic_types::config::TimeSignals {
-                            turn_number: Some(self.turn_counter as u32),
-                            session_turn_count: Some(self.turn_counter as u32),
-                            elapsed_secs: None,
-                        },
-                    };
- 
-                    let router = crate::runtime::model_router::create_router(routing_cfg.strategy);
-                    let decision = router.route(&ctx, llm_cfg, routing_cfg).await;
- 
-                    let matched_entry = routing_cfg.models.iter().find(|m| {
-                        m.provider == decision.provider && m.model == decision.model
-                    });
 
-                    // Only apply routing when the routed provider matches the original.
-                    // Cross-provider routing requires rebuilding the LlmDriver, which
-                    // is not supported in the current architecture.
-                    if decision.provider != llm_cfg.provider {
+            let presets = &self.config.as_ref().map(|c| &c.llm_presets).cloned()
+                .unwrap_or_default();
+            let routing_cfg = self.config.as_ref().and_then(|c| c.llm_routing.as_ref());
+            let preset_name = self.manifest.llm_config.as_ref().and_then(|c| c.routing_preset.clone());
+
+            let (routed_model, routing_decision_json, matched_entry) =
+                if let (Some(routing_cfg), Some(llm_cfg), Some(ref name)) = (routing_cfg, self.manifest.llm_config.as_ref(), preset_name) {
+                    if let Some(preset) = presets.get(name) {
+                        if is_routing_preset(preset) {
+                            let routing = preset.routing.as_ref().unwrap();
+                            let resolved_models = resolve_model_list(routing, presets);
+                            if resolved_models.is_empty() {
+                                (model.clone(), None, None)
+                            } else {
+                                let budget_state = self.session_budget.as_ref().and_then(|sb| {
+                                    sb.snapshot_counters(&session_id).and_then(|(rounds, _tokens, cost)| {
+                                        let config = self.config.as_ref()?;
+                                        let max_rounds = config.session_budget.max_llm_rounds? as f32;
+                                        Some(autonoetic_types::config::BudgetState {
+                                            session_budget_used_pct: Some(rounds as f32 / max_rounds),
+                                            prompt_budget_used_pct: budget_breakdown.utilization_pct.map(|v| v as f32),
+                                            session_cost_usd: Some(cost),
+                                        })
+                                    })
+                                }).unwrap_or_default();
+
+                                let complexity = autonoetic_types::config::ComplexitySignals {
+                                    tool_count: Some(tools.len() as u32),
+                                    recent_tool_use_count: None,
+                                    has_workflow_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. })),
+                                    has_artifact_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::WriteAccess { .. })),
+                                    is_script_mode: self.manifest.execution_mode == autonoetic_types::agent::ExecutionMode::Script,
+                                };
+
+                                let ctx = autonoetic_types::config::RoutingContext {
+                                    agent_id: self.manifest.agent.id.clone(),
+                                    session_id: session_id.clone(),
+                                    budget: budget_state,
+                                    complexity,
+                                    time: autonoetic_types::config::TimeSignals {
+                                        turn_number: Some(self.turn_counter as u32),
+                                        session_turn_count: Some(self.turn_counter as u32),
+                                        elapsed_secs: None,
+                                    },
+                                };
+
+                                let classifier_config = routing.classifier_preset.as_ref()
+                                    .and_then(|cp| resolve_classifier_config(cp, presets));
+
+                                let (router, _) = crate::runtime::model_router::create_router_from_preset(
+                                    routing,
+                                    resolved_models.clone(),
+                                    classifier_config,
+                                );
+                                let decision = router.route(&ctx, llm_cfg, &resolved_models, routing_cfg).await;
+                                let matched_entry = resolved_models.iter().find(|m| {
+                                    m.config.provider == decision.provider && m.config.model == decision.model
+                                }).cloned();
+
+                                if decision.provider != llm_cfg.provider {
+                                    tracing::warn!(
+                                        target: "autonoetic::model_routing",
+                                        original_provider = %llm_cfg.provider,
+                                        routed_provider = %decision.provider,
+                                        routed_model = %decision.model,
+                                        "Cross-provider routing requested but not supported — staying with original provider"
+                                    );
+                                    (llm_cfg.model.clone(), Some(decision), matched_entry)
+                                } else {
+                                    routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
+                                        &decision, llm_cfg, matched_entry.as_ref(),
+                                    );
+                                    if decision.model != llm_cfg.model {
+                                        tracing::info!(
+                                            target: "autonoetic::model_routing",
+                                            original_model = %llm_cfg.model,
+                                            routed_model = %decision.model,
+                                            strategy = %decision.strategy_name,
+                                            rationale = %decision.rationale,
+                                            was_downgraded = decision.was_downgraded,
+                                            context_window = ?routed_llm_cfg.context_window_tokens,
+                                            base_url = ?routed_llm_cfg.base_url,
+                                            "Model routing decision"
+                                        );
+                                    }
+                                    if routed_llm_cfg.base_url != llm_cfg.base_url {
+                                        tracing::warn!(
+                                            target: "autonoetic::model_routing",
+                                            original_base_url = ?llm_cfg.base_url,
+                                            routed_base_url = ?routed_llm_cfg.base_url,
+                                            "Model-specific base_url override cannot be applied — driver already built"
+                                        );
+                                    }
+                                    (decision.model.clone(), Some(decision), matched_entry)
+                                }
+                            }
+                        } else {
+                            // Fixed preset — no routing needed
+                            (llm_cfg.model.clone(), None, None)
+                        }
+                    } else {
                         tracing::warn!(
                             target: "autonoetic::model_routing",
-                            original_provider = %llm_cfg.provider,
-                            routed_provider = %decision.provider,
-                            routed_model = %decision.model,
-                            "Cross-provider routing requested but not supported — staying with original provider"
+                            preset_name = %name,
+                            "Routing preset not found, using primary model"
                         );
-                        (llm_cfg.model.clone(), Some(decision), matched_entry)
-                    } else {
-                        routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
-                            &decision, llm_cfg, matched_entry,
-                        );
-                        if decision.model != llm_cfg.model {
-                            tracing::info!(
-                                target: "autonoetic::model_routing",
-                                original_model = %llm_cfg.model,
-                                routed_model = %decision.model,
-                                strategy = %decision.strategy_name,
-                                rationale = %decision.rationale,
-                                was_downgraded = decision.was_downgraded,
-                                context_window = ?routed_llm_cfg.context_window_tokens,
-                                base_url = ?routed_llm_cfg.base_url,
-                                "Model routing decision"
-                            );
-                        }
-                        if routed_llm_cfg.base_url != llm_cfg.base_url {
-                            tracing::warn!(
-                                target: "autonoetic::model_routing",
-                                original_base_url = ?llm_cfg.base_url,
-                                routed_base_url = ?routed_llm_cfg.base_url,
-                                "Model-specific base_url override cannot be applied — driver already built"
-                            );
-                        }
-                        (decision.model.clone(), Some(decision), matched_entry)
+                        (model.clone(), None, None)
                     }
                 } else {
                     (model.clone(), None, None)
-                }
-            } else {
-                (model.clone(), None, None)
-            };
+                };
 
             // Log routing decision to causal chain
             if let Some(ref decision) = routing_decision_json {
@@ -1075,7 +1101,8 @@ impl AgentExecutor {
 
             // Update context window if routing selected a model with different context
             let context_window_resolved = matched_entry
-                .and_then(|e| e.context_window_tokens.map(|v| v as u32))
+                .as_ref()
+                .and_then(|e| e.config.context_window_tokens)
                 .or(context_window_resolved);
 
             let req = CompletionRequest {
@@ -1136,7 +1163,7 @@ impl AgentExecutor {
                 }
             } else {
                 tracing::debug!("Calling LLM");
-                let fallback_chain: Vec<(String, String)> = routing_decision_json
+                let fallback_chain: Vec<(String, String, String)> = routing_decision_json
                     .as_ref()
                     .map(|d| d.fallback_chain.clone())
                     .unwrap_or_default();
@@ -1157,7 +1184,7 @@ impl AgentExecutor {
                         );
                         last_err = Some(e);
                         let mut final_response = None;
-                        for (fb_provider, fb_model) in &fallback_chain {
+                        for (_fb_preset, fb_provider, fb_model) in &fallback_chain {
                             if *fb_provider != routed_llm_cfg.provider {
                                 continue;
                             }

@@ -90,19 +90,21 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         chat_only: true,
         context_window_tokens: None,
         base_url: None,
+        routing_preset: None,
     })
 }
 
 fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
     LlmConfig {
-        provider: p.provider.clone(),
-        model: p.model.clone(),
+        provider: p.provider.clone().unwrap_or_default(),
+        model: p.model.clone().unwrap_or_default(),
         temperature: p.temperature.unwrap_or(0.0) as f64,
         fallback_provider: p.fallback_provider.clone(),
         fallback_model: p.fallback_model.clone(),
         chat_only: p.chat_only.unwrap_or(false),
         context_window_tokens: p.context_window_tokens,
         base_url: p.base_url.clone(),
+        routing_preset: None,
     }
 }
 
