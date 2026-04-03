@@ -194,4 +194,22 @@ impl GatewayStore {
         )?;
         Ok(())
     }
+
+    /// Delete consumed notifications older than `max_age_hours` and failed
+    /// notifications created before the cutoff.
+    pub fn cleanup_stale_notifications(&self, max_age_hours: u64) -> Result<u64> {
+        use rusqlite::params;
+        let conn = self.conn.lock().unwrap();
+        let cutoff =
+            (chrono::Utc::now() - chrono::Duration::hours(max_age_hours as i64)).to_rfc3339();
+        let rows = conn.execute(
+            "DELETE FROM notifications WHERE consumed_at < ?1 OR (status = ?2 AND created_at < ?3)",
+            params![
+                cutoff,
+                serde_json::to_string(&NotificationStatus::Failed)?,
+                cutoff
+            ],
+        )?;
+        Ok(rows as u64)
+    }
 }

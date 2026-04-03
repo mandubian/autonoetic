@@ -91,21 +91,6 @@ impl GatewayStore {
         Ok(results)
     }
 
-    pub fn cleanup_stale_notifications(&self, max_age_hours: u64) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
-        let cutoff =
-            (chrono::Utc::now() - chrono::Duration::hours(max_age_hours as i64)).to_rfc3339();
-        let rows = conn.execute(
-            "DELETE FROM notifications WHERE consumed_at < ?1 OR (status = ?2 AND created_at < ?3)",
-            params![
-                cutoff,
-                serde_json::to_string(&super::NotificationStatus::Failed)?,
-                cutoff
-            ],
-        )?;
-        Ok(rows as u64)
-    }
-
     pub fn set_workflow_index(&self, root_session_id: &str, workflow_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
