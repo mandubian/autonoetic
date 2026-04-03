@@ -73,17 +73,37 @@ impl GatewayStore {
                     "decision" => UserInteractionKind::Decision,
                     "proposal" => UserInteractionKind::Proposal,
                     "confirmation" => UserInteractionKind::Confirmation,
-                    _ => UserInteractionKind::Clarification,
+                    _ => {
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            7,
+                            rusqlite::types::Type::Text,
+                            format!("invalid user_interactions.kind: {}", kind_str).into(),
+                        ))
+                    }
                 };
                 let status = match status_str.as_str() {
+                    "pending" => UserInteractionStatus::Pending,
                     "answered" => UserInteractionStatus::Answered,
                     "cancelled" => UserInteractionStatus::Cancelled,
                     "expired" => UserInteractionStatus::Expired,
-                    _ => UserInteractionStatus::Pending,
+                    _ => {
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            12,
+                            rusqlite::types::Type::Text,
+                            format!("invalid user_interactions.status: {}", status_str).into(),
+                        ))
+                    }
                 };
-                let options: Vec<UserInteractionOption> = options_json_str
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
+                let options: Vec<UserInteractionOption> = match options_json_str {
+                    Some(s) => serde_json::from_str(&s).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            10,
+                            rusqlite::types::Type::Text,
+                            e.into(),
+                        )
+                    })?,
+                    None => Vec::new(),
+                };
 
                 Ok(UserInteraction {
                     interaction_id: row.get(0)?,
