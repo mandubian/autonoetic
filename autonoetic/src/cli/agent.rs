@@ -887,7 +887,7 @@ pub fn handle_agent_bootstrap(
         }
     }
 
-    let activated = autonoetic_gateway::scheduler::bootstrap_agents(
+    let activated = autonoetic_gateway::bootstrap_agents(
         &config,
         &gateway_dir,
     )?;
