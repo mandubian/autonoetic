@@ -1,0 +1,214 @@
+# Autonoetic Gateway Configuration
+# See docs/ARCHITECTURE.md and docs/AGENTS.md for full documentation
+# Full reference: docs/config-reference.md
+
+# agents_dir is set to absolute path based on config location
+port: 4000
+ofp_port: 4200
+tls: false
+max_concurrent_spawns: 8
+max_pending_spawns_per_agent: 4
+
+# ── Node Identity ─────────────────────────────────────────────────────
+# Identity for OFP federation and causal chain authorship.
+# Overridable by AUTONOETIC_NODE_ID and AUTONOETIC_NODE_NAME env vars.
+node_id: "gateway"
+node_name: "gateway"
+# NOTE: AUTONOETIC_SHARED_SECRET must be set as an env var (not in config).
+
+# ── Sandbox ───────────────────────────────────────────────────────────
+# Bubblewrap isolation overrides.
+# Overridable by AUTONOETIC_BWRAP_SHARE_NET and AUTONOETIC_BWRAP_DEV_MODE env vars.
+sandbox:
+  share_net: false
+  dev_mode: legacy   # legacy | minimal | host-bind
+
+# ── Background Scheduler ──────────────────────────────────────────────
+background_scheduler_enabled: true
+background_tick_secs: 5
+background_min_interval_secs: 60
+max_background_due_per_tick: 32
+
+# ── Response Validation & Repair ──────────────────────────────────────
+# When enabled, the gateway validates agent outputs against declared constraints.
+# repair_enabled activates bounded retry loops when validation fails.
+response_validation:
+  enabled: true
+  repair_enabled: true
+
+# ── Approval Timeout ──────────────────────────────────────────────────
+# Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
+approval_timeout_secs: 600
+
+# ── Schema Enforcement ────────────────────────────────────────────────
+# Validates agent.spawn payloads against declared schemas.
+# mode: disabled | deterministic | llm
+schema_enforcement:
+  mode: deterministic
+  audit: true
+
+# ── Evidence Mode ─────────────────────────────────────────────────────
+# How much tool/LLM execution data to save for debugging.
+# full: all results (development) | errors: failures only (production) | off
+evidence_mode: full
+
+# ── Code Analysis ─────────────────────────────────────────────────────
+# Capability and security analysis for tool execution and generated artifacts.
+# capability_provider: pattern | python_ast | llm | composite | none
+# security_provider: pattern | python_ast | llm | composite | none
+code_analysis:
+  capability_provider: pattern
+  security_provider: pattern
+  require_capabilities: true
+  require_approval_for:
+    - NetworkAccess
+    - CodeExecution
+
+# ── Session Budget (optional per-session resource limits) ─────────────
+# Uncomment to cap LLM rounds, tool calls, tokens, or wall-clock time.
+# session_budget:
+#   profile: dev
+#   max_llm_rounds: 200
+#   max_tool_invocations: 500
+#   max_llm_tokens: 5000000
+#   max_wall_clock_secs: 3600
+
+# ── Retention ─────────────────────────────────────────────────────────
+# Days to keep execution_traces and causal_events. 0 = forever.
+retention:
+  execution_traces_days: 30
+  causal_events_days: 90
+
+# ── Post-Session Digest ───────────────────────────────────────────────
+# LLM summarization + memory extraction after sessions complete.
+# Uncomment to enable.
+# digest_agent:
+#   enabled: true
+#   min_turns: 2
+#   llm_preset: agentic
+
+# ── Max Session Turns ─────────────────────────────────────────────────
+# Circuit breaker: max turns per session before forced suspension.
+max_session_turns: 12
+
+# ── Prompt Budget ─────────────────────────────────────────────────────
+# Transparency and enforcement for context window usage.
+# Uncomment to customize (defaults: warn_at 80%, 4096 margin tokens).
+# prompt_budget:
+#   system_prompt_max_tokens: 0
+#   tool_definitions_max_tokens: 0
+#   warn_at_pct: 80.0
+#   margin_tokens: 4096
+#   on_exceeded: warn           # warn | trim_history | demote_tools | fail
+#   compress_tool_schemas_after_turn_0: false
+
+# ── Cross-cutting Routing Concerns ────────────────────────────────────
+# Agent overrides and approval gates. Model definitions live in llm_presets.
+llm_routing:
+  agent_overrides:
+    planner.default:
+      min_tier: standard                      # economy | standard | premium
+  approval_gates:
+    premium_model_first_use: false            # require approval before first premium model use
+    budget_threshold_crossed: 0.75            # 0.0–1.0, require approval when budget exceeds this
+
+# ── LLM Presets ───────────────────────────────────────────────────────
+# Unified registry: fixed presets (concrete provider/model) and routing
+# presets (dynamic selection from fixed presets at call time).
+#
+# tier: economy | standard | premium
+# strategy: disabled | deterministic | classifier | hybrid
+# on_exceeded (prompt_budget): warn | trim_history | demote_tools | fail
+#
+# For local OpenAI-compatible servers (LM Studio, Ollama, etc.), set base_url:
+#
+#   local:
+#     provider: "lmstudio"
+#     model: "unsloth/qwen3.5-35b-a3bi@q4_k_xl"
+#     base_url: "http://192.168.1.20:1234/v1"
+#     tier: economy
+#
+llm_presets:
+  # ── Fixed presets: concrete model definitions ───────────────────────
+  haiku:
+    provider: "anthropic"
+    model: "claude-haiku-3-20250307"
+    tier: economy
+    cost:
+      input_per_million: 0.25
+      output_per_million: 1.25
+
+  sonnet:
+    provider: "anthropic"
+    model: "claude-sonnet-4-20250514"
+    tier: standard
+    cost:
+      input_per_million: 3.0
+      output_per_million: 15.0
+
+  opus:
+    provider: "anthropic"
+    model: "claude-opus-4-20250514"
+    tier: premium
+    cost:
+      input_per_million: 15.0
+      output_per_million: 75.0
+
+  # ── Routing presets: select from fixed presets at call time ─────────
+  smart:
+    routing:
+      strategy: hybrid
+      models: [opus, sonnet, haiku]           # fixed preset names
+      classifier_preset: haiku                # fixed preset for classification
+      deterministic:
+        max_tier: premium                     # economy | standard | premium
+        budget_downgrade_threshold: 0.8       # 0.0–1.0
+        enable_fallback_chain: true
+      classifier:
+        timeout_secs: 2
+        skip_threshold: 0.95                  # 0.0–1.0
+      hybrid:
+        ambiguity_threshold: 0.5              # 0.0–1.0
+
+  budget:
+    routing:
+      strategy: deterministic
+      models: [sonnet, haiku]
+      deterministic:
+        max_tier: standard                    # economy | standard | premium
+        budget_downgrade_threshold: 0.6
+        enable_fallback_chain: true
+
+  # ── Legacy presets (backward compatible, no routing) ────────────────
+  agentic:
+    provider: "openrouter"
+    model: "minimax/minimax-m2.7"
+    temperature: 0.2
+
+  coding:
+    provider: "openrouter"
+    model: "minimax/minimax-m2.7"
+    temperature: 0.1
+
+  research:
+    provider: "openrouter"
+    model: "minimax/minimax-m2.7"
+    temperature: 0.3
+
+  fallback:
+    provider: "openai"
+    model: "gpt-4o"
+    temperature: 0.2
+
+# ── Template → Preset Mapping ────────────────────────────────────────
+# Used during 'agent bootstrap' and 'agent init --template <name>'.
+# Values can be fixed preset names or routing preset names.
+llm_preset_mapping:
+  planner: smart             # routed
+  coder: smart               # routed
+  researcher: sonnet         # fixed
+  debugger: haiku            # fixed
+  evaluator: budget          # routed
+  architect: opus            # fixed
+  specialized_builder: agentic
+  default: sonnet

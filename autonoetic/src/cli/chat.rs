@@ -988,6 +988,21 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                 let sel_start_clamped = sel_start.min(text_line.len());
                 let sel_end_clamped = sel_end.min(text_line.len());
 
+                let sel_start_clamped = if text_line.is_char_boundary(sel_start_clamped) {
+                    sel_start_clamped
+                } else {
+                    (0..sel_start_clamped)
+                        .rfind(|&i| text_line.is_char_boundary(i))
+                        .unwrap_or(0)
+                };
+                let sel_end_clamped = if text_line.is_char_boundary(sel_end_clamped) {
+                    sel_end_clamped
+                } else {
+                    (0..sel_end_clamped)
+                        .rfind(|&i| text_line.is_char_boundary(i))
+                        .unwrap_or(text_line.len())
+                };
+
                 let before_sel = &text_line[..sel_start_clamped];
                 let in_sel = &text_line[sel_start_clamped..sel_end_clamped];
                 let after_sel = &text_line[sel_end_clamped..];
@@ -1089,13 +1104,46 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
+/// Wait until `deadline` while checking for Ctrl+C via both the shutdown
+/// signal and crossterm key events. In raw mode, Ctrl+C does not generate
+/// SIGINT, so `tokio::signal::ctrl_c()` never fires — we must poll the
+/// terminal for the key event instead.
+///
+/// Returns `true` if the user requested quit (Ctrl+C), `false` if the
+/// deadline elapsed normally.
+async fn wait_with_cancel(
+    deadline: tokio::time::Instant,
+    shutdown: &Arc<tokio::sync::Notify>,
+) -> bool {
+    while tokio::time::Instant::now() < deadline {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                // Drain crossterm events to catch Ctrl+C in raw mode
+                while event::poll(Duration::ZERO).unwrap_or(false) {
+                    if let Ok(Event::Key(key)) = event::read() {
+                        if key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            _ = shutdown.notified() => {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
 
 pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let target_hint = args.agent_id.as_deref().unwrap_or("default-lead");
+    let target_hint = args.agent_id.as_deref().unwrap_or("planner.default");
     let session_id = args
         .session_id
         .clone()
@@ -1151,6 +1199,9 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     // Channel for sending messages from TUI to gateway
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
 
+    // Shared shutdown flag — set by Ctrl+C handler, checked by all loops
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+
     // Map gateway request IDs to internal IDs
     let mut pending_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
@@ -1186,6 +1237,15 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     }
 
     // Main loop
+    // Spawn a single Ctrl+C listener that sets the shutdown flag.
+    // This ensures Ctrl+C is handled exactly once, regardless of how many
+    // tokio::select! branches are waiting on it.
+    let shutdown_listener = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        shutdown_listener.notify_one();
+    });
+
     loop {
         // Connect
         let stream = match TcpStream::connect(&gateway_addr).await {
@@ -1193,10 +1253,16 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             Err(e) => {
                 tracing::debug!(target: "chat", error = %e, "Gateway connection failed, reconnecting");
                 terminal.draw(|f| draw(f, &app))?;
-                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                let reconnect_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                if wait_with_cancel(reconnect_deadline, &shutdown).await {
+                    break;
+                }
                 continue;
             }
         };
+        // Set TCP keepalive to detect dead gateway quickly
+        let _ = stream.set_nodelay(true);
         let (read_half, write_half) = stream.into_split();
         let mut gateway_lines = BufReader::new(read_half).lines();
 
@@ -1213,6 +1279,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             &mut rx,
             &mut pending_map,
             &mut signal_interval,
+            &shutdown,
         )
         .await?;
 
@@ -1225,7 +1292,12 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             "Gateway disconnected, reconnecting in 3s...".to_string(),
         );
         terminal.draw(|f| draw(f, &app))?;
-        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Poll with short intervals so Ctrl+C is responsive during reconnect wait
+        let reconnect_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        if wait_with_cancel(reconnect_deadline, &shutdown).await {
+            break;
+        }
     }
 
     // Cleanup
@@ -1246,7 +1318,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
     app: &mut App,
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
     gateway_lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>>,
-    config: &autonoetic_types::config::GatewayConfig,
+    config: &Arc<autonoetic_types::config::GatewayConfig>,
     gateway_store: Option<&autonoetic_gateway::scheduler::gateway_store::GatewayStore>,
     session_id: &str,
     envelope: &serde_json::Value,
@@ -1254,6 +1326,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, String)>,
     pending_map: &mut std::collections::HashMap<String, u64>,
     signal_interval: &mut tokio::time::Interval,
+    shutdown: &std::sync::Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<bool> {
     let mut needs_redraw = true;
     let mut last_spinner_tick = Instant::now();
@@ -1284,10 +1357,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
         tokio::select! {
             biased;
 
-            // SIGINT — handled by tokio runtime, independent of crossterm polling.
-            // Without this, CTRL+C is only detectable via the 16ms crossterm poll branch,
-            // which can't run while synchronous SQLite work blocks the task.
-            _ = tokio::signal::ctrl_c() => {
+            // Shutdown notification from Ctrl+C handler
+            _ = shutdown.notified() => {
                 return Ok(false); // Clean quit
             }
 
@@ -1439,6 +1510,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         "event_type": "chat",
                         "message": message,
                         "session_id": session_id,
+                        "target_agent_id": app.target_hint.clone(),
                         "metadata": envelope,
                     });
 

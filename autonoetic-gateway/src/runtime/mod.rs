@@ -18,6 +18,7 @@ pub mod lifecycle;
 pub mod live_digest;
 pub mod mcp;
 pub mod memory;
+pub mod llm_preset_resolver;
 pub mod model_router;
 pub mod openrouter_catalog;
 pub mod parser;
