@@ -315,6 +315,7 @@ mod agentskills_bridging_tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
+        compression: None,
         }
     }
 }
@@ -439,6 +440,10 @@ pub struct AgentExecutor {
     pub last_history: Vec<Message>,
     /// Session start timestamp (ISO 8601), captured when session_id is first assigned.
     pub session_started_at: Option<String>,
+    /// Compression state carried across turns within a session.
+    pub compression_metadata: crate::runtime::compression::CompressionMetadata,
+    /// Shared HTTP client for compression and other gateway-side operations.
+    pub http_client: reqwest::Client,
 }
 
 impl AgentExecutor {
@@ -475,6 +480,8 @@ impl AgentExecutor {
             live_digest: None,
             last_history: Vec::new(),
             session_started_at: None,
+            compression_metadata: Default::default(),
+            http_client: reqwest::Client::new(),
         }
     }
 
@@ -536,6 +543,11 @@ impl AgentExecutor {
         registry: Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
     ) -> Self {
         self.active_executions = registry;
+        self
+    }
+
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = client;
         self
     }
 
@@ -657,6 +669,11 @@ impl AgentExecutor {
             tool_invocations_consumed: 0, // tracked separately if needed
             tokens_consumed: tokens,
             estimated_cost_usd: cost,
+            compression_metadata: if self.compression_metadata.compression_count > 0 {
+                Some(self.compression_metadata.clone())
+            } else {
+                None
+            },
         }
     }
 
@@ -958,6 +975,82 @@ impl AgentExecutor {
                 &mut tracer,
             )?;
             *history = trimmed_history;
+
+            // --- Context Compression ---
+            // Note: Budget enforcement (above) trims old turns when the prompt budget
+            // is exceeded. Context compression (below) summarizes old turns instead of
+            // discarding them. Both operate on the same token threshold independently.
+            // If `prompt_budget.warn_at_pct` and `context_compression.threshold_pct`
+            // are set to similar values, they may compete for the same boundary.
+            // Recommended: set compression threshold slightly below the budget trim
+            // threshold so compression fires first, preserving information.
+            let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
+            let agent_compression = self.manifest.compression.as_ref();
+            let should_compress = compression_cfg.map(|c| c.enabled).unwrap_or(false);
+            if should_compress {
+                let empty_presets = std::collections::HashMap::new();
+                let presets = match self.config.as_ref() {
+                    Some(c) => &c.llm_presets,
+                    None => &empty_presets,
+                };
+                match crate::runtime::compression::compress_context(
+                    history.clone(),
+                    context_window_resolved.map(|w| w as usize),
+                    compression_cfg.unwrap(),
+                    agent_compression,
+                    presets,
+                    &self.http_client,
+                    &session_id,
+                    self.turn_counter,
+                    Some(&self.compression_metadata),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        if result.compressed {
+                            let mut metadata = result.metadata;
+                            if let Some(gateway_dir) = self.gateway_dir.as_ref() {
+                                match crate::runtime::compression::persist_compressed_context(
+                                    gateway_dir,
+                                    &session_id,
+                                    &result.original_history,
+                                    &metadata,
+                                ) {
+                                    Ok(handle) => {
+                                        metadata.compressed_context_handle = handle;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "autonoetic::compression",
+                                            error = %e,
+                                            "Failed to persist compressed context"
+                                        );
+                                    }
+                                }
+                            }
+                            let _ = tracer.log_event(
+                                "agent.process",
+                                "context_compression",
+                                autonoetic_types::causal_chain::EntryStatus::Success,
+                                Some(serde_json::json!({
+                                    "messages_summarized": metadata.messages_summarized,
+                                    "compression_count": metadata.compression_count,
+                                    "compressed_context_handle": metadata.compressed_context_handle,
+                                })),
+                            );
+                            *history = result.history;
+                            self.compression_metadata = metadata;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "autonoetic::compression",
+                            error = %e,
+                            "Context compression failed, proceeding without compression"
+                        );
+                    }
+                }
+            }
 
             // --- Model Routing: select model based on budget/complexity signals ---
             use crate::runtime::llm_preset_resolver::{resolve_model_list, resolve_classifier_config, is_routing_preset};
@@ -2139,6 +2232,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
+        compression: None,
         }
     }
 
