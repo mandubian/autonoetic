@@ -127,6 +127,7 @@ fn builder_manifest() -> AgentManifest {
         response_contract: None,
             allowed_tool_tiers: vec![],
         agentskills_import: None,
+        compression: None,
     }
 }
 
@@ -163,6 +164,7 @@ fn evaluator_manifest() -> AgentManifest {
         response_contract: None,
             allowed_tool_tiers: vec![],
         agentskills_import: None,
+        compression: None,
     }
 }
 
@@ -199,6 +201,7 @@ fn auditor_manifest() -> AgentManifest {
         response_contract: None,
             allowed_tool_tiers: vec![],
         agentskills_import: None,
+        compression: None,
     }
 }
 

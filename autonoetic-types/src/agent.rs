@@ -121,6 +121,24 @@ pub struct AgentManifest {
     /// bridging, resource mounting, and trust mode enforcement.
     #[serde(default)]
     pub agentskills_import: Option<AgentSkillsImportMetadata>,
+    /// Per-agent context compression override. When present, enables compression
+    /// for this agent with optional overrides for threshold and LLM preset.
+    #[serde(default)]
+    pub compression: Option<CompressionConfig>,
+}
+
+/// Per-agent context compression configuration (opt-in via SKILL.md).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CompressionConfig {
+    /// Override the gateway-level compression threshold percentage.
+    #[serde(default)]
+    pub threshold_pct: Option<f64>,
+    /// Override the gateway-level LLM preset for compression.
+    #[serde(default)]
+    pub llm_preset: Option<String>,
+    /// Override the number of recent turns to keep.
+    #[serde(default)]
+    pub recent_turns_to_keep: Option<usize>,
 }
 
 /// Middleware hooks declared in the agent's own manifest (replaces overlay-based hooks).
