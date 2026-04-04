@@ -18,7 +18,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 | 4 | FTS session search | — / 915 | Medium | Biggest learning infrastructure unlock |
 | 5 | Agent Skills compatibility | — / 820 | Low | Ecosystem growth enabler |
 | 6 | User modeling | — / 500 | Medium | Lower urgency until multi-user is live |
-| 7 | Context compression | ~590 / — | Med-High | Phases A+B done. Phase C (prune) and D (quality regression) remain |
+| 7 | Context compression | ~590 / ~600 | Med-High | Phases A, B, C complete. Phase D (quality regression framework) remains |
 
 ---
 
@@ -330,7 +330,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 **Autonoetic constraints:** Turn continuation state must be restorable exactly, multi-agent child sessions, checkpoint resume.
 
-**Status (2026-04-04):** Phases 7A and 7B fully implemented.
+**Status (2026-04-04):** Phases 7A, 7B, and 7C fully implemented.
 - Core compression module (`compression.rs`) with LLM-based summarization of old turns
 - `CompressionMetadata` tracked across turns, stored in checkpoints, restored on resume
 - `CompressionResult` carries both compressed and original history (original persisted to content store for audit/restore)
@@ -342,7 +342,8 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - Presets HashMap borrowed directly (not cloned per-turn)
 - Budget enforcement ordering documented: budget trim runs before compression; recommended to set compression threshold slightly below budget trim threshold
 - Per-agent overrides via `compression` field in `AgentManifest` (threshold, preset, recent_turns_to_keep)
-- 15 unit tests covering split logic, config merging, LLM resolution, tool-call groups, re-compression safety, and minimum interval
+- Child agent context handoff: `context` field on `agent.spawn` for bounded context summary from parent
+- 17 unit tests covering split logic, config merging, LLM resolution, tool-call groups, re-compression safety, minimum interval, and persist roundtrip
 
 **Known limitations / deferred:**
 - Token estimation uses ~4 chars/token heuristic (cross-cutting with Feature 1; should be fixed separately)
@@ -372,7 +373,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - [x] **7A.14** Add `http_client` field to `AgentExecutor`, threaded from `GatewayExecutionService` via `with_http_client()` builder
 - [x] **7A.15** Add `compression: None` to all test manifests (18 files)
 - [x] **7A.16** Parse `compression` from SKILL.md frontmatter in `parser.rs`
-- [x] **7A.17** Tests (15): split logic, config merging, LLM resolution (preset/inline), tool-call group preservation, parent pull-into-kept, summary skipping, re-compression safety, minimum interval, disabled path
+- [x] **7A.17** Tests (17): split logic, config merging, LLM resolution (preset/inline), tool-call group preservation (3 tests), parent pull-into-kept, summary skipping, re-compression safety, minimum interval, disabled path, persist roundtrip
 
 #### Phase B — Archive Strategy (leveraged existing checkpoint system, no new code)
 
