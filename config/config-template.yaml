@@ -212,3 +212,12 @@ llm_preset_mapping:
   architect: opus            # fixed
   specialized_builder: agentic
   default: sonnet
+
+# ── Context Compression ──────────────────────────────────────────────
+# Summarizes old conversation turns when approaching context limits.
+# context_compression:
+#   enabled: false
+#   llm_preset: haiku
+#   threshold_pct: 60.0
+#   recent_turns_to_keep: 3
+#   max_summary_tokens: 500
