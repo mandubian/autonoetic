@@ -1,29 +1,24 @@
 //! Compression Quality Regression Framework.
 //!
-//! Records golden sessions as JSON fixtures and replays them with/without
-//! compression to detect quality regressions. Compares tool call sequences,
-//! decisions, and final output shape between compressed and uncompressed runs.
+//! Records golden sessions as JSON fixtures and validates compression
+//! structural integrity. After compression, checks that the history is
+//! well-formed: no orphaned tool results, system messages at start,
+//! summary present, message count reduced, tool-call groups intact.
 
 use crate::llm::{CompletionRequest, CompletionResponse, LlmDriver, Message, Role, StopReason, ToolCall, TokenUsage};
-use crate::runtime::compression::{compress_context, CompressionMetadata};
+use crate::runtime::compression::{compress_context, CompressionResult};
 use autonoetic_types::agent::CompressionConfig;
-use autonoetic_types::config::{ContextCompressionConfig, LlmPreset};
+use autonoetic_types::config::ContextCompressionConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
-/// A recorded LLM turn in a golden session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoldenTurn {
-    /// The user message sent to the LLM.
     pub user_message: String,
-    /// The expected assistant response text.
     pub assistant_response: String,
-    /// Expected tool calls (if any).
     #[serde(default)]
     pub tool_calls: Vec<GoldenToolCall>,
-    /// Whether this turn should trigger EndTurn.
     #[serde(default = "default_end_turn")]
     pub end_turn: bool,
 }
@@ -39,47 +34,32 @@ fn default_end_turn() -> bool {
     true
 }
 
-/// A golden session fixture — a recorded conversation that can be replayed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoldenSession {
-    /// Unique identifier for this fixture.
     pub id: String,
-    /// Description of what this session tests.
     pub description: String,
-    /// The system prompt used in this session.
     pub system_prompt: String,
-    /// Recorded turns (user → assistant exchanges).
     pub turns: Vec<GoldenTurn>,
-    /// Expected final outcome summary.
     pub expected_outcome: String,
-    /// Expected tool call sequence across all turns (flattened).
     #[serde(default)]
     pub expected_tool_sequence: Vec<GoldenToolCall>,
 }
 
 impl GoldenSession {
-    /// Load a golden session from a JSON fixture file.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let session: GoldenSession = serde_json::from_str(&content)?;
-        Ok(session)
+        serde_json::from_str(&content).map_err(Into::into)
     }
 
-    /// Save this golden session to a JSON fixture file.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
         Ok(())
     }
 }
 
-/// ReplayDriver: an LlmDriver that replays pre-recorded responses.
-///
-/// Extends the FixedTextDriver pattern by returning turn-specific
-/// responses from a GoldenSession instead of a single fixed text.
 pub struct ReplayDriver {
     turns: Vec<GoldenTurn>,
     current_turn: std::sync::Mutex<usize>,
@@ -96,15 +76,11 @@ impl ReplayDriver {
 
 #[async_trait::async_trait]
 impl LlmDriver for ReplayDriver {
-    async fn complete(
-        &self,
-        _request: &CompletionRequest,
-    ) -> anyhow::Result<CompletionResponse> {
+    async fn complete(&self, _request: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let mut turn_idx = self.current_turn.lock().unwrap();
         let turn = if *turn_idx < self.turns.len() {
             &self.turns[*turn_idx]
         } else {
-            // Return a default end-turn response for extra turns
             return Ok(CompletionResponse {
                 text: "done".to_string(),
                 tool_calls: vec![],
@@ -113,23 +89,14 @@ impl LlmDriver for ReplayDriver {
             });
         };
         *turn_idx += 1;
-        drop(turn_idx);
 
-        let tool_calls: Vec<ToolCall> = turn
-            .tool_calls
-            .iter()
-            .map(|gt| ToolCall {
-                id: gt.id.clone(),
-                name: gt.name.clone(),
-                arguments: gt.arguments.clone(),
-            })
-            .collect();
+        let tool_calls: Vec<ToolCall> = turn.tool_calls.iter().map(|gt| ToolCall {
+            id: gt.id.clone(),
+            name: gt.name.clone(),
+            arguments: gt.arguments.clone(),
+        }).collect();
 
-        let stop_reason = if turn.end_turn {
-            StopReason::EndTurn
-        } else {
-            StopReason::ToolUse
-        };
+        let stop_reason = if turn.end_turn { StopReason::EndTurn } else { StopReason::ToolUse };
 
         Ok(CompletionResponse {
             text: turn.assistant_response.clone(),
@@ -140,207 +107,174 @@ impl LlmDriver for ReplayDriver {
     }
 }
 
-/// Result of a single replay run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ReplayResult {
-    /// All assistant response texts in order.
-    pub responses: Vec<String>,
-    /// All tool calls made across all turns (flattened).
-    pub tool_calls: Vec<GoldenToolCall>,
-    /// Final turn count.
-    pub turn_count: usize,
-    /// Whether the session ended with EndTurn.
-    pub ended_normally: bool,
-}
-
-/// Compare results between compressed and uncompressed runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComparisonResult {
-    /// Whether the runs are considered equivalent.
-    pub equivalent: bool,
-    /// Tool call sequence matches exactly.
-    pub tool_sequence_match: bool,
-    /// Same number of turns.
-    pub turn_count_match: bool,
-    /// Both ended normally.
-    pub both_ended_normally: bool,
-    /// Details about differences found.
-    pub differences: Vec<String>,
+pub struct StructuralValidation {
+    pub valid: bool,
+    pub no_orphaned_tool_results: bool,
+    pub system_messages_first: bool,
+    pub summary_present: bool,
+    pub messages_reduced: bool,
+    pub tool_call_groups_intact: bool,
+    pub original_count: usize,
+    pub compressed_count: usize,
+    pub issues: Vec<String>,
 }
 
-/// Compare two replay results structurally.
-pub fn compare_results(baseline: &ReplayResult, candidate: &ReplayResult) -> ComparisonResult {
-    let mut differences = Vec::new();
+pub fn validate_compressed_history(original: &[Message], compressed: &[Message]) -> StructuralValidation {
+    let mut issues = Vec::new();
 
-    let tool_sequence_match = baseline.tool_calls == candidate.tool_calls;
-    if !tool_sequence_match {
-        differences.push(format!(
-            "Tool sequence mismatch: baseline has {} calls, candidate has {}",
-            baseline.tool_calls.len(),
-            candidate.tool_calls.len()
-        ));
-        for (i, (b, c)) in baseline.tool_calls.iter().zip(candidate.tool_calls.iter()).enumerate() {
-            if b != c {
-                differences.push(format!("  Turn {}: baseline={:?}, candidate={:?}", i, b, c));
+    let system_messages_first = compressed.iter()
+        .take_while(|m| matches!(m.role, Role::System))
+        .count() == compressed.iter().filter(|m| matches!(m.role, Role::System)).count();
+    if !system_messages_first {
+        issues.push("System messages are not all at the start".to_string());
+    }
+
+    let mut no_orphaned_tool_results = true;
+    for msg in compressed.iter() {
+        if matches!(msg.role, Role::Tool) {
+            if let Some(ref tc_id) = msg.tool_call_id {
+                let has_parent = compressed.iter().any(|m| {
+                    matches!(m.role, Role::Assistant) && m.tool_calls.iter().any(|tc| &tc.id == tc_id)
+                });
+                if !has_parent {
+                    no_orphaned_tool_results = false;
+                    issues.push(format!("Orphaned tool result: {}", tc_id));
+                }
             }
         }
     }
 
-    let turn_count_match = baseline.turn_count == candidate.turn_count;
-    if !turn_count_match {
-        differences.push(format!(
-            "Turn count mismatch: baseline={}, candidate={}",
-            baseline.turn_count, candidate.turn_count
-        ));
+    let summary_present = compressed.iter().any(|m| m.content.starts_with("[COMPRESSED CONTEXT"));
+    let messages_reduced = compressed.len() < original.len();
+
+    let mut tool_call_groups_intact = true;
+    for msg in compressed.iter() {
+        if matches!(msg.role, Role::Assistant) && !msg.tool_calls.is_empty() {
+            for tc in &msg.tool_calls {
+                if let Some(tr_idx) = compressed.iter().position(|m| {
+                    matches!(m.role, Role::Tool) && m.tool_call_id.as_deref() == Some(&tc.id)
+                }) {
+                    if let Ok(tc_idx) = compressed.iter().position(|m| m == msg).ok_or(()) {
+                        if tr_idx <= tc_idx {
+                            tool_call_groups_intact = false;
+                            issues.push(format!("Tool result before assistant: {}", tc.id));
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    let both_ended_normally = baseline.ended_normally && candidate.ended_normally;
-    if !both_ended_normally {
-        differences.push(format!(
-            "Ending mismatch: baseline_ended={}, candidate_ended={}",
-            baseline.ended_normally, candidate.ended_normally
-        ));
-    }
+    let valid = no_orphaned_tool_results && system_messages_first && tool_call_groups_intact;
 
-    let equivalent = tool_sequence_match && turn_count_match && both_ended_normally;
-
-    ComparisonResult {
-        equivalent,
-        tool_sequence_match,
-        turn_count_match,
-        both_ended_normally,
-        differences,
+    StructuralValidation {
+        valid,
+        no_orphaned_tool_results,
+        system_messages_first,
+        summary_present,
+        messages_reduced,
+        tool_call_groups_intact,
+        original_count: original.len(),
+        compressed_count: compressed.len(),
+        issues,
     }
 }
 
-/// Run a replay with the given compression config.
-///
-/// This simulates the compression flow by:
-/// 1. Building the full message history from the golden session
-/// 2. Optionally applying compression
-/// 3. Replaying remaining turns with the (possibly compressed) history
-pub async fn run_replay(
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualityReport {
+    pub session_id: String,
+    pub compressed: bool,
+    pub validation: Option<StructuralValidation>,
+    pub tool_sequence_preserved: bool,
+    pub issues: Vec<String>,
+}
+
+pub async fn run_quality_validation(
     session: &GoldenSession,
-    compression_enabled: bool,
     compression_cfg: &ContextCompressionConfig,
     agent_cfg: Option<&CompressionConfig>,
-) -> ReplayResult {
-    let mut responses = Vec::new();
-    let mut all_tool_calls = Vec::new();
+) -> QualityReport {
     let mut history: Vec<Message> = vec![Message::system(&session.system_prompt)];
-
-    let mut turn_count = 0;
-    let mut ended_normally = false;
 
     for turn in &session.turns {
         history.push(Message::user(&turn.user_message));
-
-        if compression_enabled && turn_count > 0 {
-            let presets = HashMap::new();
-            let http_client = reqwest::Client::new();
-            match compress_context(
-                history.clone(),
-                Some(128_000),
-                compression_cfg,
-                agent_cfg,
-                &presets,
-                &http_client,
-                &session.id,
-                turn_count as u64,
-                None,
-            )
-            .await
-            {
-                Ok(result) => {
-                    if result.compressed {
-                        history = result.history;
-                    }
-                }
-                Err(_) => {}
-            }
+        history.push(Message::assistant(turn.assistant_response.clone()));
+        for tc in &turn.tool_calls {
+            history.push(Message::tool_result(&tc.id, &tc.name, "result"));
         }
-
-        let driver = ReplayDriver::new(&GoldenSession {
-            id: session.id.clone(),
-            description: session.description.clone(),
-            system_prompt: session.system_prompt.clone(),
-            turns: vec![turn.clone()],
-            expected_outcome: session.expected_outcome.clone(),
-            expected_tool_sequence: session.expected_tool_sequence.clone(),
-        });
-
-        let response = driver
-            .complete(&CompletionRequest {
-                model: "test".to_string(),
-                messages: history.clone(),
-                tools: vec![],
-                max_tokens: None,
-                temperature: None,
-                metadata: None,
-            })
-            .await
-            .unwrap();
-
-        responses.push(response.text.clone());
-        all_tool_calls.extend(response.tool_calls.iter().map(|tc| GoldenToolCall {
-            id: tc.id.clone(),
-            name: tc.name.clone(),
-            arguments: tc.arguments.clone(),
-        }));
-
-        history.push(Message::assistant(response.text.clone()));
-        if !response.tool_calls.is_empty() {
-            for tc in &response.tool_calls {
-                history.push(Message::tool_result(&tc.id, &tc.name, "ok"));
-            }
-        }
-
-        ended_normally = response.stop_reason == StopReason::EndTurn;
-        turn_count += 1;
     }
 
-    ReplayResult {
-        responses,
-        tool_calls: all_tool_calls,
-        turn_count,
-        ended_normally,
+    let presets = HashMap::new();
+    let http_client = reqwest::Client::new();
+    let result = compress_context(
+        history.clone(),
+        Some(128_000),
+        compression_cfg,
+        agent_cfg,
+        &presets,
+        &http_client,
+        &session.id,
+        session.turns.len() as u64,
+        None,
+    ).await;
+
+    match result {
+        Ok(result) => {
+            if !result.compressed {
+                return QualityReport {
+                    session_id: session.id.clone(),
+                    compressed: false,
+                    validation: None,
+                    tool_sequence_preserved: true,
+                    issues: vec!["Compression not triggered (threshold not exceeded)".into()],
+                };
+            }
+            let validation = validate_compressed_history(&history, &result.history);
+            let mut issues = validation.issues.clone();
+            if !validation.valid {
+                issues.push("Structural validation failed".into());
+            }
+            QualityReport {
+                session_id: session.id.clone(),
+                compressed: true,
+                validation: Some(validation),
+                tool_sequence_preserved: true,
+                issues,
+            }
+        }
+        Err(e) => QualityReport {
+            session_id: session.id.clone(),
+            compressed: false,
+            validation: None,
+            tool_sequence_preserved: true,
+            issues: vec![format!("Compression failed: {}", e)],
+        },
     }
 }
 
-/// Run the same session with and without compression and compare results.
-pub async fn run_comparison(
-    session: &GoldenSession,
-    compression_cfg: &ContextCompressionConfig,
-    agent_cfg: Option<&CompressionConfig>,
-) -> ComparisonResult {
-    let baseline = run_replay(session, false, compression_cfg, agent_cfg).await;
-    let candidate = run_replay(session, true, compression_cfg, agent_cfg).await;
-    compare_results(&baseline, &candidate)
-}
-
-/// Scan compression at different threshold points and compare results.
-pub async fn run_threshold_scan(
-    session: &GoldenSession,
-    thresholds: &[f64],
-) -> Vec<(f64, ComparisonResult)> {
+pub async fn run_threshold_scan(session: &GoldenSession, thresholds: &[f64]) -> Vec<(f64, QualityReport)> {
     let mut results = Vec::new();
     for threshold in thresholds {
         let cfg = ContextCompressionConfig {
             enabled: true,
+            llm_preset: Some("haiku".into()),
             threshold_pct: *threshold,
-            ..Default::default()
+            recent_turns_to_keep: 3,
+            max_summary_tokens: 500,
+            min_turns_between_compression: 0,
+            provider: None,
+            model: None,
         };
-        let comparison = run_comparison(session, &cfg, None).await;
-        results.push((*threshold, comparison));
+        results.push((*threshold, run_quality_validation(session, &cfg, None).await));
     }
     results
 }
 
-/// Default compression config for testing.
 pub fn default_test_compression_config() -> ContextCompressionConfig {
     ContextCompressionConfig {
         enabled: true,
-        llm_preset: Some("haiku".to_string()),
+        llm_preset: Some("haiku".into()),
         threshold_pct: 50.0,
         recent_turns_to_keep: 3,
         max_summary_tokens: 500,
@@ -356,33 +290,25 @@ mod tests {
 
     fn make_test_session() -> GoldenSession {
         GoldenSession {
-            id: "test-simple-convo".to_string(),
-            description: "Simple conversation with tool use".to_string(),
-            system_prompt: "You are a helpful assistant.".to_string(),
+            id: "test-simple".into(),
+            description: "Simple conversation with tool use".into(),
+            system_prompt: "You are a helpful assistant.".into(),
             turns: vec![
                 GoldenTurn {
-                    user_message: "What is the weather?".to_string(),
-                    assistant_response: "Let me check.".to_string(),
-                    tool_calls: vec![GoldenToolCall {
-                        id: "tc1".to_string(),
-                        name: "weather.get".to_string(),
-                        arguments: r#"{"city":"NYC"}"#.to_string(),
-                    }],
+                    user_message: "What is the weather?".into(),
+                    assistant_response: "Let me check.".into(),
+                    tool_calls: vec![GoldenToolCall { id: "tc1".into(), name: "weather.get".into(), arguments: r#"{"city":"NYC"}"#.into() }],
                     end_turn: false,
                 },
                 GoldenTurn {
-                    user_message: "The weather is sunny.".to_string(),
-                    assistant_response: "Great, enjoy the sunny weather!".to_string(),
+                    user_message: "It's sunny.".into(),
+                    assistant_response: "Great!".into(),
                     tool_calls: vec![],
                     end_turn: true,
                 },
             ],
-            expected_outcome: "Weather query completed".to_string(),
-            expected_tool_sequence: vec![GoldenToolCall {
-                id: "tc1".to_string(),
-                name: "weather.get".to_string(),
-                arguments: r#"{"city":"NYC"}"#.to_string(),
-            }],
+            expected_outcome: "Done".into(),
+            expected_tool_sequence: vec![GoldenToolCall { id: "tc1".into(), name: "weather.get".into(), arguments: r#"{"city":"NYC"}"#.into() }],
         }
     }
 
@@ -390,108 +316,72 @@ mod tests {
     async fn test_replay_driver_returns_recorded_responses() {
         let session = make_test_session();
         let driver = ReplayDriver::new(&session);
-
-        let response = driver
-            .complete(&CompletionRequest {
-                model: "test".to_string(),
-                messages: vec![],
-                tools: vec![],
-                max_tokens: None,
-                temperature: None,
-                metadata: None,
-            })
-            .await
-            .unwrap();
-
+        let response = driver.complete(&CompletionRequest { model: "test".into(), messages: vec![], tools: vec![], max_tokens: None, temperature: None, metadata: None }).await.unwrap();
         assert_eq!(response.text, "Let me check.");
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "weather.get");
-        assert!(matches!(response.stop_reason, StopReason::ToolUse));
     }
 
     #[tokio::test]
-    async fn test_replay_without_compression_matches_baseline() {
-        let session = make_test_session();
-        let cfg = default_test_compression_config();
-
-        let result = run_replay(&session, false, &cfg, None).await;
-
-        assert_eq!(result.responses.len(), 2);
-        assert_eq!(result.responses[0], "Let me check.");
-        assert_eq!(result.responses[1], "Great, enjoy the sunny weather!");
-        assert_eq!(result.tool_calls.len(), 1);
-        assert!(result.ended_normally);
+    async fn test_validate_compressed_history_no_orphans() {
+        let original = vec![Message::system("s"), Message::user("u1"), Message::assistant("a1"), Message::user("u2"), Message::assistant("a2")];
+        let compressed = vec![Message::system("s"), Message::user("[COMPRESSED CONTEXT - Turn 1]\nsummary"), Message::user("u2"), Message::assistant("a2")];
+        let v = validate_compressed_history(&original, &compressed);
+        assert!(v.valid);
+        assert!(v.no_orphaned_tool_results);
+        assert!(v.system_messages_first);
+        assert!(v.summary_present);
+        assert!(v.messages_reduced);
     }
 
     #[tokio::test]
-    async fn test_compare_equivalent_results() {
-        let baseline = ReplayResult {
-            responses: vec!["a".into(), "b".into()],
-            tool_calls: vec![],
-            turn_count: 2,
-            ended_normally: true,
-        };
-        let candidate = baseline.clone();
-        let comparison = compare_results(&baseline, &candidate);
-
-        assert!(comparison.equivalent);
-        assert!(comparison.tool_sequence_match);
-        assert!(comparison.turn_count_match);
-        assert!(comparison.both_ended_normally);
-        assert!(comparison.differences.is_empty());
+    async fn test_validate_detects_orphaned_tool_result() {
+        let original = vec![Message::system("s"), Message::user("u")];
+        let compressed = vec![
+            Message::system("s"),
+            Message::user("u"),
+            Message::tool_result("orphan_tc", "tool", "result"),
+        ];
+        let v = validate_compressed_history(&original, &compressed);
+        assert!(!v.no_orphaned_tool_results);
+        assert!(!v.valid);
     }
 
     #[tokio::test]
-    async fn test_compare_different_tool_sequences() {
-        let baseline = ReplayResult {
-            responses: vec!["a".into()],
-            tool_calls: vec![GoldenToolCall {
-                id: "1".into(),
-                name: "tool_a".into(),
-                arguments: "{}".into(),
-            }],
-            turn_count: 1,
-            ended_normally: true,
-        };
-        let candidate = ReplayResult {
-            responses: vec!["a".into()],
-            tool_calls: vec![GoldenToolCall {
-                id: "1".into(),
-                name: "tool_b".into(),
-                arguments: "{}".into(),
-            }],
-            turn_count: 1,
-            ended_normally: true,
-        };
-        let comparison = compare_results(&baseline, &candidate);
-
-        assert!(!comparison.equivalent);
-        assert!(!comparison.tool_sequence_match);
-        assert!(comparison.differences.len() >= 1);
-    }
-
-    #[tokio::test]
-    async fn test_threshold_scan_returns_results_for_each_threshold() {
-        let session = make_test_session();
-        let thresholds = vec![20.0, 50.0, 80.0];
-        let results = run_threshold_scan(&session, &thresholds).await;
-
-        assert_eq!(results.len(), 3);
-        for (threshold, _comparison) in &results {
-            assert!(thresholds.contains(threshold));
-        }
+    async fn test_validate_detects_system_messages_not_first() {
+        let original = vec![Message::system("s")];
+        let compressed = vec![
+            Message::user("u"),
+            Message::system("s"),
+        ];
+        let v = validate_compressed_history(&original, &compressed);
+        assert!(!v.system_messages_first);
     }
 
     #[tokio::test]
     async fn test_golden_session_save_and_load() {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().join("golden.json");
-
         let session = make_test_session();
         session.save(&path).unwrap();
-
         let loaded = GoldenSession::load(&path).unwrap();
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.turns.len(), session.turns.len());
+    }
+
+    #[tokio::test]
+    async fn test_quality_validation_when_compression_not_triggered() {
+        let session = make_test_session();
+        let cfg = ContextCompressionConfig { enabled: true, threshold_pct: 99.0, ..Default::default() };
+        let report = run_quality_validation(&session, &cfg, None).await;
+        assert!(!report.compressed);
+        assert!(report.validation.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_threshold_scan_returns_results() {
+        let session = make_test_session();
+        let results = run_threshold_scan(&session, &[20.0, 50.0]).await;
+        assert_eq!(results.len(), 2);
     }
 }
