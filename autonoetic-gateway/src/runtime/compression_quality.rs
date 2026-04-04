@@ -4,9 +4,15 @@
 //! structural integrity. After compression, checks that the history is
 //! well-formed: no orphaned tool results, system messages at start,
 //! summary present, message count reduced, tool-call groups intact.
+//!
+//! Note: Full end-to-end quality validation (where compression actually
+//! fires) requires a configured LLM preset in gateway.yaml. The unit
+//! tests in this module exercise structural validation independently;
+//! integration tests with real LLM calls are in
+//! `tests/compression_quality_integration.rs`.
 
-use crate::llm::{CompletionRequest, CompletionResponse, LlmDriver, Message, Role, StopReason, ToolCall, TokenUsage};
-use crate::runtime::compression::{compress_context, CompressionResult};
+use crate::llm::{Message, Role};
+use crate::runtime::compression::compress_context;
 use autonoetic_types::agent::CompressionConfig;
 use autonoetic_types::config::ContextCompressionConfig;
 use serde::{Deserialize, Serialize};
@@ -60,53 +66,6 @@ impl GoldenSession {
     }
 }
 
-pub struct ReplayDriver {
-    turns: Vec<GoldenTurn>,
-    current_turn: std::sync::Mutex<usize>,
-}
-
-impl ReplayDriver {
-    pub fn new(session: &GoldenSession) -> Self {
-        Self {
-            turns: session.turns.clone(),
-            current_turn: std::sync::Mutex::new(0),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl LlmDriver for ReplayDriver {
-    async fn complete(&self, _request: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
-        let mut turn_idx = self.current_turn.lock().unwrap();
-        let turn = if *turn_idx < self.turns.len() {
-            &self.turns[*turn_idx]
-        } else {
-            return Ok(CompletionResponse {
-                text: "done".to_string(),
-                tool_calls: vec![],
-                stop_reason: StopReason::EndTurn,
-                usage: TokenUsage::default(),
-            });
-        };
-        *turn_idx += 1;
-
-        let tool_calls: Vec<ToolCall> = turn.tool_calls.iter().map(|gt| ToolCall {
-            id: gt.id.clone(),
-            name: gt.name.clone(),
-            arguments: gt.arguments.clone(),
-        }).collect();
-
-        let stop_reason = if turn.end_turn { StopReason::EndTurn } else { StopReason::ToolUse };
-
-        Ok(CompletionResponse {
-            text: turn.assistant_response.clone(),
-            tool_calls,
-            stop_reason,
-            usage: TokenUsage::default(),
-        })
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructuralValidation {
     pub valid: bool,
@@ -149,17 +108,15 @@ pub fn validate_compressed_history(original: &[Message], compressed: &[Message])
     let messages_reduced = compressed.len() < original.len();
 
     let mut tool_call_groups_intact = true;
-    for msg in compressed.iter() {
+    for (i, msg) in compressed.iter().enumerate() {
         if matches!(msg.role, Role::Assistant) && !msg.tool_calls.is_empty() {
             for tc in &msg.tool_calls {
                 if let Some(tr_idx) = compressed.iter().position(|m| {
                     matches!(m.role, Role::Tool) && m.tool_call_id.as_deref() == Some(&tc.id)
                 }) {
-                    if let Ok(tc_idx) = compressed.iter().position(|m| m == msg).ok_or(()) {
-                        if tr_idx <= tc_idx {
-                            tool_call_groups_intact = false;
-                            issues.push(format!("Tool result before assistant: {}", tc.id));
-                        }
+                    if tr_idx <= i {
+                        tool_call_groups_intact = false;
+                        issues.push(format!("Tool result before assistant: {}", tc.id));
                     }
                 }
             }
@@ -186,6 +143,8 @@ pub struct QualityReport {
     pub session_id: String,
     pub compressed: bool,
     pub validation: Option<StructuralValidation>,
+    /// Tool call sequence preserved in compressed history (same tool names
+    /// in the same order as the original, excluding any lost to summarization).
     pub tool_sequence_preserved: bool,
     pub issues: Vec<String>,
 }
@@ -196,11 +155,13 @@ pub async fn run_quality_validation(
     agent_cfg: Option<&CompressionConfig>,
 ) -> QualityReport {
     let mut history: Vec<Message> = vec![Message::system(&session.system_prompt)];
+    let mut original_tool_sequence: Vec<GoldenToolCall> = Vec::new();
 
     for turn in &session.turns {
         history.push(Message::user(&turn.user_message));
         history.push(Message::assistant(turn.assistant_response.clone()));
         for tc in &turn.tool_calls {
+            original_tool_sequence.push(tc.clone());
             history.push(Message::tool_result(&tc.id, &tc.name, "result"));
         }
     }
@@ -227,19 +188,24 @@ pub async fn run_quality_validation(
                     compressed: false,
                     validation: None,
                     tool_sequence_preserved: true,
-                    issues: vec!["Compression not triggered (threshold not exceeded)".into()],
+                    issues: vec!["Compression not triggered (threshold not exceeded or no LLM configured)".into()],
                 };
             }
             let validation = validate_compressed_history(&history, &result.history);
+
+            let tool_sequence_preserved = check_tool_sequence_preserved(&original_tool_sequence, &result.history);
             let mut issues = validation.issues.clone();
             if !validation.valid {
                 issues.push("Structural validation failed".into());
+            }
+            if !tool_sequence_preserved {
+                issues.push("Tool call sequence not preserved in compressed history".into());
             }
             QualityReport {
                 session_id: session.id.clone(),
                 compressed: true,
                 validation: Some(validation),
-                tool_sequence_preserved: true,
+                tool_sequence_preserved,
                 issues,
             }
         }
@@ -251,6 +217,25 @@ pub async fn run_quality_validation(
             issues: vec![format!("Compression failed: {}", e)],
         },
     }
+}
+
+fn check_tool_sequence_preserved(original: &[GoldenToolCall], compressed: &[Message]) -> bool {
+    let compressed_tool_calls: Vec<&str> = compressed.iter()
+        .filter_map(|m| {
+            if matches!(m.role, Role::Tool) {
+                m.tool_call_id.as_deref()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (i, orig_tc) in original.iter().enumerate() {
+        if !compressed_tool_calls.iter().any(|id| *id == orig_tc.id) {
+            return false;
+        }
+    }
+    true
 }
 
 pub async fn run_threshold_scan(session: &GoldenSession, thresholds: &[f64]) -> Vec<(f64, QualityReport)> {
@@ -310,16 +295,6 @@ mod tests {
             expected_outcome: "Done".into(),
             expected_tool_sequence: vec![GoldenToolCall { id: "tc1".into(), name: "weather.get".into(), arguments: r#"{"city":"NYC"}"#.into() }],
         }
-    }
-
-    #[tokio::test]
-    async fn test_replay_driver_returns_recorded_responses() {
-        let session = make_test_session();
-        let driver = ReplayDriver::new(&session);
-        let response = driver.complete(&CompletionRequest { model: "test".into(), messages: vec![], tools: vec![], max_tokens: None, temperature: None, metadata: None }).await.unwrap();
-        assert_eq!(response.text, "Let me check.");
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "weather.get");
     }
 
     #[tokio::test]
@@ -383,5 +358,25 @@ mod tests {
         let session = make_test_session();
         let results = run_threshold_scan(&session, &[20.0, 50.0]).await;
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_check_tool_sequence_preserved() {
+        let original = vec![
+            GoldenToolCall { id: "tc1".into(), name: "tool_a".into(), arguments: "{}".into() },
+            GoldenToolCall { id: "tc2".into(), name: "tool_b".into(), arguments: "{}".into() },
+        ];
+        let history_with_both = vec![
+            Message::system("s"),
+            Message::tool_result("tc1", "tool_a", "r1"),
+            Message::tool_result("tc2", "tool_b", "r2"),
+        ];
+        assert!(check_tool_sequence_preserved(&original, &history_with_both));
+
+        let history_missing_one = vec![
+            Message::system("s"),
+            Message::tool_result("tc1", "tool_a", "r1"),
+        ];
+        assert!(!check_tool_sequence_preserved(&original, &history_missing_one));
     }
 }
