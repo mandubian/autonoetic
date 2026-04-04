@@ -18,7 +18,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 | 4 | FTS session search | — / 915 | Medium | Biggest learning infrastructure unlock |
 | 5 | Agent Skills compatibility | — / 820 | Low | Ecosystem growth enabler |
 | 6 | User modeling | — / 500 | Medium | Lower urgency until multi-user is live |
-| 7 | Context compression | ~590 / ~600 | Med-High | Phases A, B, C complete. Phase D (quality regression framework) remains |
+| 7 | Context compression | ~590 / ~1000 | Med-High | All phases (A, B, C, D) complete |
 
 ---
 
@@ -330,7 +330,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 **Autonoetic constraints:** Turn continuation state must be restorable exactly, multi-agent child sessions, checkpoint resume.
 
-**Status (2026-04-04):** Phases 7A, 7B, and 7C fully implemented.
+**Status (2026-04-04):** All phases (7A, 7B, 7C, 7D) complete.
 - Core compression module (`compression.rs`) with LLM-based summarization of old turns
 - `CompressionMetadata` tracked across turns, stored in checkpoints, restored on resume
 - `CompressionResult` carries both compressed and original history (original persisted to content store for audit/restore)
@@ -343,7 +343,8 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - Budget enforcement ordering documented: budget trim runs before compression; recommended to set compression threshold slightly below budget trim threshold
 - Per-agent overrides via `compression` field in `AgentManifest` (threshold, preset, recent_turns_to_keep)
 - Child agent context handoff: `context` field on `agent.spawn` for bounded context summary from parent
-- 17 unit tests covering split logic, config merging, LLM resolution, tool-call groups, re-compression safety, minimum interval, and persist roundtrip
+- Quality regression framework: `GoldenSession` fixtures, `ReplayDriver`, structural comparison, threshold scanning
+- 23 unit tests (17 compression + 6 quality) covering split logic, config merging, LLM resolution, tool-call groups, re-compression safety, minimum interval, persist roundtrip, replay, comparison, and threshold scanning
 
 **Known limitations / deferred:**
 - Token estimation uses ~4 chars/token heuristic (cross-cutting with Feature 1; should be fixed separately)
@@ -351,7 +352,6 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - No per-agent opt-out — gateway `enabled` flag is the sole gate; agent `compression` field only overrides parameters
 - Content store growth — every compression writes a full snapshot; no retention/cleanup mechanism
 - Compression LLM call has no explicit timeout beyond driver defaults
-- No quality regression framework (Phase D)
 
 ### Tasks
 
@@ -389,12 +389,16 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 **Design note:** The `[Context]` / `[Task]` / `[Metadata]` markers are plain text injected into the user message. The child agent's LLM interprets them semantically but has no typed access to the fields. If a child ever needs programmatic access to context vs. task, `context` could be injected as a separate system message instead — but for MVP the textual markers are sufficient and simpler.
 
-#### Phase D — Quality Regression Framework (~400 lines)
+#### Phase D — Quality Regression Framework
 
-- [ ] **7D.1** Record golden sessions as JSON fixtures
-- [ ] **7D.2** Replay executor: run same session with/without compression (extends existing FixedTextDriver test pattern)
-- [ ] **7D.3** Structural comparison: compare tool call sequences, decisions, final output shape
-- [ ] **7D.4** Threshold scanning: test compression at different trigger points
+- [x] **7D.1** Record golden sessions as JSON fixtures — `GoldenSession` struct with turns, tool calls, expected outcomes; save/load via JSON
+- [x] **7D.2** Replay executor: `ReplayDriver` extends FixedTextDriver pattern — returns pre-recorded responses per turn, supports tool calls and end-turn signals
+- [x] **7D.3** Structural comparison: `compare_results()` checks tool sequence match, turn count match, normal ending — produces diff report
+- [x] **7D.4** Threshold scanning: `run_threshold_scan()` runs same session at different compression thresholds and compares each against baseline
+
+**Key files:** `compression_quality.rs` (new, ~400 lines), `fixtures/golden_sessions/` (JSON fixtures)
+
+**Tests (6):** replay driver returns recorded responses, replay without compression matches baseline, compare equivalent results, compare different tool sequences, threshold scan returns results, golden session save/load roundtrip
 
 ---
 

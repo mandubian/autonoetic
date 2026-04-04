@@ -173,7 +173,7 @@ impl CompletionRequest {
 }
 
 /// Why the model stopped generating.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StopReason {
     EndTurn,
     MaxTokens,
