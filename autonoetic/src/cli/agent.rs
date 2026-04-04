@@ -479,6 +479,7 @@ fn admin_revision_manifest() -> AgentManifest {
         gateway_token: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
+        compression: None,
     }
 }
 
@@ -1580,6 +1581,7 @@ pub fn handle_agent_import_skill(
         response_contract: parsed_manifest.response_contract.clone(),
         allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
         agentskills_import,
+        compression: parsed_manifest.compression.clone(),
     };
 
     let agents_dir = config_path
