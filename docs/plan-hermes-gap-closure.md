@@ -18,7 +18,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 | 4 | FTS session search | — / 915 | Medium | Biggest learning infrastructure unlock |
 | 5 | Agent Skills compatibility | — / 820 | Low | Ecosystem growth enabler |
 | 6 | User modeling | — / 500 | Medium | Lower urgency until multi-user is live |
-| 7 | Context compression | — / 600 | Med-High | Highest risk, needs quality regression framework |
+| 7 | Context compression | ~590 / — | Med-High | Phases A+B done. Phase C (prune) and D (quality regression) remain |
 
 ---
 
@@ -326,29 +326,67 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 **Problem:** No iterative summarization when approaching context limits. Token counting exists but no compression. Highest-risk feature because it deliberately discards information.
 
-**Key files:** `lifecycle.rs` (session execution loop), checkpoint system
+**Key files:** `compression.rs` (new), `lifecycle.rs` (session execution loop), `checkpoint.rs`, `execution.rs`, `autonoetic-types/src/config.rs`, `autonoetic-types/src/agent.rs`
 
 **Autonoetic constraints:** Turn continuation state must be restorable exactly, multi-agent child sessions, checkpoint resume.
 
+**Status (2026-04-04):** Phases 7A and 7B fully implemented.
+- Core compression module (`compression.rs`) with LLM-based summarization of old turns
+- `CompressionMetadata` tracked across turns, stored in checkpoints, restored on resume
+- `CompressionResult` carries both compressed and original history (original persisted to content store for audit/restore)
+- Tool-call group preservation (assistant+tool_calls and their tool results never split across compress/keep boundary)
+- Previous compression summaries (`[COMPRESSED CONTEXT`) skipped during re-summarization to avoid summary-of-summary
+- Empty summary guard — compression skipped if LLM returns whitespace-only output
+- Minimum compression interval (`min_turns_between_compression`, default 3 turns) prevents thrashing when token count oscillates around threshold
+- HTTP client reused from `GatewayExecutionService` (not created per-turn)
+- Presets HashMap borrowed directly (not cloned per-turn)
+- Budget enforcement ordering documented: budget trim runs before compression; recommended to set compression threshold slightly below budget trim threshold
+- Per-agent overrides via `compression` field in `AgentManifest` (threshold, preset, recent_turns_to_keep)
+- 15 unit tests covering split logic, config merging, LLM resolution, tool-call groups, re-compression safety, and minimum interval
+
+**Known limitations / deferred:**
+- Token estimation uses ~4 chars/token heuristic (cross-cutting with Feature 1; should be fixed separately)
+- Tool call arguments (structured JSON) are lost in summarization — only message content text is preserved in the summary
+- No per-agent opt-out — gateway `enabled` flag is the sole gate; agent `compression` field only overrides parameters
+- Content store growth — every compression writes a full snapshot; no retention/cleanup mechanism
+- Compression LLM call has no explicit timeout beyond driver defaults
+- No quality regression framework (Phase D)
+
 ### Tasks
 
-#### Phase A — ContextState + Summarize Strategy (~300 lines)
+#### Phase A — Compression Core (~590 lines)
 
-- [ ] **7A.1** Define `ContextState` struct (messages, summary, archived_turns, checkpoint_handle, token_budget, compression_threshold)
-- [ ] **7A.2** Add `compression_llm_preset` config field (always use cheap model)
-- [ ] **7A.3** Implement summarize flow: identify compressible range (all except last N), LLM summarization with structured output (goals, decisions, open_items, key_facts), replace range with summary message
-- [ ] **7A.4** Write full compressed context to content store for audit/restore
-- [ ] **7A.5** Make compression opt-in per agent via SKILL.md manifest
+- [x] **7A.1** Define `CompressionMetadata` struct (last_compression_turn, messages_summarized, compressed_context_handle, compression_count) — stored in checkpoints for resume awareness
+- [x] **7A.2** Define `CompressionResult` struct (history, original_history, metadata, compressed) — carries both compressed and original for audit
+- [x] **7A.3** Add `ContextCompressionConfig` to `GatewayConfig` (enabled, llm_preset, provider/model inline, threshold_pct, recent_turns_to_keep, max_summary_tokens, min_turns_between_compression)
+- [x] **7A.4** Add `CompressionConfig` to `AgentManifest` (threshold_pct, llm_preset, recent_turns_to_keep — per-agent overrides)
+- [x] **7A.5** Implement `resolve_compression_llm_config()` — resolves from preset name or inline provider/model, agent override takes priority
+- [x] **7A.6** Implement `effective_config()` — merges gateway defaults with agent overrides
+- [x] **7A.7** Implement `split_compressible_messages()` — splits old vs recent messages, tool-call groups kept together, system messages always retained
+- [x] **7A.8** Implement `find_tool_call_parent()` — bidirectional boundary adjustment ensures assistant+tool_calls and corresponding tool results stay on same side of split
+- [x] **7A.9** Implement `build_summarization_prompt()` — skips `[COMPRESSED CONTEXT` messages to avoid summary-of-summary on re-compression
+- [x] **7A.10** Implement `compress_context()` async — threshold check → interval guard → split → LLM summary → empty summary guard → reconstruct history (system msgs → new summary → kept non-system msgs)
+- [x] **7A.11** Implement `persist_compressed_context()` — writes **original uncompressed** history to content store for audit/restore
+- [x] **7A.12** Wire into `AgentExecutor.process()` in `lifecycle.rs` — after budget enforcement, before model routing
+- [x] **7A.13** Add `compression_metadata` field to `AgentExecutor`, persisted to checkpoint when `compression_count > 0`
+- [x] **7A.14** Add `http_client` field to `AgentExecutor`, threaded from `GatewayExecutionService` via `with_http_client()` builder
+- [x] **7A.15** Add `compression: None` to all test manifests (18 files)
+- [x] **7A.16** Parse `compression` from SKILL.md frontmatter in `parser.rs`
+- [x] **7A.17** Tests (15): split logic, config merging, LLM resolution (preset/inline), tool-call group preservation, parent pull-into-kept, summary skipping, re-compression safety, minimum interval, disabled path
 
-#### Phase B — Archive Strategy (~100 lines)
+#### Phase B — Archive Strategy (leveraged existing checkpoint system, no new code)
 
-- [ ] **7B.1** For suspended sessions: full context preserved on disk, only summary in memory
-- [ ] **7B.2** On resume: reload from checkpoint (no compression needed)
+- [x] **7B.1** For suspended sessions: full working history preserved in checkpoint JSON; original uncompressed history preserved in content store via `persist_compressed_context()`
+- [x] **7B.2** On resume: `CompressionMetadata` restored from checkpoint at all three resume points in `execution.rs`; `min_turns_between_compression` prevents re-compression until enough new turns have elapsed
 
-#### Phase C — Prune Strategy (~100 lines)
+**Note:** The original plan described "only summary in memory" for suspended sessions. The actual implementation keeps the full working history (which includes the summary) in the checkpoint. There is no separate memory-only optimization. For MVP this is fine — the checkpoint already has everything needed for restore. A future optimization could load only the summary into memory and lazy-load the full history from the content store on demand.
 
-- [ ] **7C.1** For child agent context handoff: parent summarizes what child needs, discards rest
-- [ ] **7C.2** Wire into `agent.spawn` delegation flow
+#### Phase C — Prune Strategy
+
+- [x] **7C.1** For child agent context handoff: `context` field on `SpawnAgentArgs` for bounded context summary; parent curates what child needs, discards rest
+- [x] **7C.2** Wire into `agent.spawn` delegation flow — `context` injected as structured `[Context]` section in kickoff message; schema enforcement includes `context` field
+
+**Design note:** The `[Context]` / `[Task]` / `[Metadata]` markers are plain text injected into the user message. The child agent's LLM interprets them semantically but has no typed access to the fields. If a child ever needs programmatic access to context vs. task, `context` could be injected as a separate system message instead — but for MVP the textual markers are sufficient and simpler.
 
 #### Phase D — Quality Regression Framework (~400 lines)
 
