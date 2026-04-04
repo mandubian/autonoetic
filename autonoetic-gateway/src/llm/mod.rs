@@ -56,7 +56,7 @@ pub struct ToolDefinition {
 }
 
 /// A tool invocation requested by the model in a response.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     /// Opaque identifier used to match the result back to this call.
     pub id: String,
@@ -81,7 +81,7 @@ pub struct ToolResult {
 // ---------------------------------------------------------------------------
 
 /// A single message in a conversation.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
