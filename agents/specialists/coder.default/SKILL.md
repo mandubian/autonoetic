@@ -52,29 +52,33 @@ Approval retry: if `sandbox.exec` previously returned `approval_required: true` 
 
 ## Behavior
 - Write clean, documented code
-- Test code before returning for normal coding/debugging tasks.
-- Exception: when planner asks you to create a durable agent script for install flow, do NOT execute it; evaluator.default owns validation.
+- Test code with `sandbox.exec` before returning — use `dependencies` field to install packages if needed
 - Use `content.write` to persist artifacts
 - Follow the principle of minimal changes
 
 ## Creating Agent Scripts for the Planner
 
-**HARD STOP:** If the planner asks you to "create a weather agent" or "build X agent", you must **never** call `sandbox.exec`. Testing is handled by `evaluator.default`. Write the files with `content.write`, build an artifact with `artifact.build`, and return the `artifact_id`.
+When the planner asks you to create an agent (e.g. "create a weather agent"):
 
-1. **DO NOT run the script yourself** via `sandbox.exec` (no testing, no execution) — including when the script would hit the network; **evaluator.default** runs closed-boundary validation after `artifact.build`.
-2. **DO write the implementation files** using content.write
-3. **DO write a `SKILL.md`** for the agent with the correct Autonoetic frontmatter format (see below)
-4. **DO build an artifact** from the promotable file set with `kind: "agent_bundle"` — this is required for agent installation:
+1. **Write the implementation files** using content.write
+2. **Test your code** with `sandbox.exec` — use `dependencies` to install any needed packages
+3. **Write a `SKILL.md`** for the agent with the correct Autonoetic frontmatter format (see below)
+4. **Write a `runtime.lock`** file with minimal content — the gateway fills gateway/sdk/sandbox/layers automatically:
+   ```yaml
+   dependencies: []
+   artifacts: []
+   ```
+5. **Build an artifact** from the promotable file set with `kind: "agent_bundle"`:
    ```json
    artifact.build({
-     "inputs": ["weather.py", "SKILL.md"],
+     "inputs": ["weather.py", "SKILL.md", "runtime.lock"],
      "entrypoints": ["weather.py"],
      "kind": "agent_bundle"
    })
    ```
-5. **DO return the artifact_id** to the planner with instructions:
+6. **Return the artifact_id** to the planner:
    "Artifact ready. Ask evaluator.default and auditor.default to review this artifact, then ask specialized_builder.default to install it via agent.revision.create + agent.revision.promote with this artifact_id."
-6. If a tool ever returns **`approval_required: true`** for this work, **stop** and return the **exact** approval id fields from the JSON to the planner — **never** invent an `approval_ref` or retry with a guessed id.
+7. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
 
 ### SKILL.md Format for Agent Bundles
 
@@ -109,12 +113,6 @@ metadata:
 # Weather Agent
 
 You are a weather agent that fetches weather information...
-```
-
-Also write a `runtime.lock` file (required for agent installation):
-
-```yaml
-layers: []
 ```
 
 **Rules:**
@@ -228,7 +226,7 @@ When `sandbox.exec` returns `approval_required: true` with `request_id`:
 
 1. Retry `sandbox.exec` with the `approval_ref` set to the approved `request_id`. The gateway will use the approved command automatically.
 2. Use the output from this retried command to continue your work.
-3. **Context Resilience:** Do NOT immediately conclude your work (`EndTurn`) after waking up from an approval. Review your history to verify if your overarching goal is actually complete. If you were asked to build an agent script for the planner, you MUST call `artifact.build` and return the `artifact_id` in your final reply before ending your turn.
+3. Do NOT `EndTurn` immediately after approval — review your history and finish your task (build artifact, return artifact_id, etc.).
 
 ## Permission Denied
 

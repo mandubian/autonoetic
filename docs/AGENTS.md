@@ -486,13 +486,20 @@ llm_config:
    2. [Step 2]
    ...
    ```
-3. Create `runtime.lock`:
-   ```toml
-   lock_version = "1.0"
-   [[dependencies]]
-   name = "autonoetic_sdk"
-   version = "*"
-   ```
+ 3. Create `runtime.lock`:
+    ```yaml
+    gateway:
+      artifact: "marketplace://gateway/autonoetic-gateway"
+      version: "0.1.0"
+      sha256: "replace-me"
+    sdk:
+      version: "0.1.0"
+    sandbox:
+      backend: "bubblewrap"
+    dependencies: []
+    artifacts: []
+    layers: []
+    ```
 
 ### Activating Agents
 

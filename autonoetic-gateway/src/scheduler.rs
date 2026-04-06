@@ -177,6 +177,11 @@ async fn run_scheduler_tick_at(
         tracing::warn!(error = %e, "Failed to check approval timeouts");
     }
 
+    // Detect and resolve tasks stuck in Running state (child session completed but task status not updated).
+    if let Err(e) = check_stuck_running_tasks(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to check stuck running tasks");
+    }
+
     // Process queued async workflow tasks (Phase 2)
     if let Err(e) = process_queued_workflow_tasks(execution).await {
         tracing::warn!(error = %e, "Failed to process queued workflow tasks");
@@ -284,6 +289,188 @@ async fn check_approval_timeouts(
                 let _ = workflow_store::append_workflow_event(&config, store, &timeout_event);
                 let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
             }
+        }
+    }
+
+    Ok(())
+}
+
+async fn check_stuck_running_tasks(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let config = execution.config();
+    let stale_after_secs = config.stuck_task_timeout_secs.unwrap_or(600);
+    if stale_after_secs == 0 {
+        return Ok(());
+    }
+
+    let store = execution.gateway_store();
+    let store = store.as_deref();
+    let gateway_dir = crate::execution::gateway_root_dir(&config);
+
+    let workflows_root = workflow_store::workflows_root(&config).join("runs");
+    if !workflows_root.is_dir() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now();
+
+    for entry in std::fs::read_dir(&workflows_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let wf_id = entry.file_name().to_string_lossy().to_string();
+        let tasks = workflow_store::list_task_runs_for_workflow(&config, store, &wf_id)?;
+
+        for task in tasks {
+            if task.status != autonoetic_types::workflow::TaskRunStatus::Running {
+                continue;
+            }
+
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&task.updated_at)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+
+            let elapsed_secs = updated_at
+                .map(|ts| (now - ts).num_seconds() as u64)
+                .unwrap_or(0);
+
+            if elapsed_secs < stale_after_secs {
+                continue;
+            }
+
+            let mut evidence = Vec::new();
+            let mut session_completed = false;
+
+            if !task.session_id.is_empty() {
+                let session_dir = gateway_dir.join("sessions").join(&task.session_id);
+                if session_dir.exists() {
+                    let has_manifest = session_dir.join("manifest.json").exists();
+                    let has_digest = session_dir.join("digest.md").exists();
+
+                    if has_manifest {
+                        evidence.push("session manifest exists".to_string());
+                    }
+                    if has_digest {
+                        evidence.push("session digest exists".to_string());
+                    }
+
+                    if let Ok(content) =
+                        std::fs::read_to_string(session_dir.join("manifest.json"))
+                    {
+                        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if let Some(vis) = manifest.get("visibility") {
+                                if let Some(status) = vis.get("status") {
+                                    if let Some(s) = status.as_str() {
+                                        if s == "completed" || s == "done" {
+                                            session_completed = true;
+                                            evidence
+                                                .push("session manifest shows completed status".to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if has_digest {
+                        if let Ok(digest) = std::fs::read_to_string(session_dir.join("digest.md")) {
+                            if digest.contains("Session summary")
+                                || digest.contains("jsonrpc_spawn_complete")
+                            {
+                                session_completed = true;
+                                evidence
+                                    .push("session digest contains completion markers".to_string());
+                            }
+                        }
+                    }
+                } else {
+                    evidence.push("session directory does not exist".to_string());
+                }
+            }
+
+            if let Ok(Some(checkpoint)) =
+                workflow_store::load_task_checkpoint(&config, store, &wf_id, &task.task_id)
+            {
+                evidence.push(format!(
+                    "checkpoint exists (step: {}, version: {})",
+                    checkpoint.step, checkpoint.version
+                ));
+            }
+
+            if let Ok(content_store) = crate::runtime::content_store::ContentStore::new(&gateway_dir)
+            {
+                if !task.session_id.is_empty() {
+                    let implicit_name = format!("impl_{}", task.task_id);
+                    if let Ok(names) = content_store.list_names(&task.session_id) {
+                        if names.contains(&implicit_name) {
+                            session_completed = true;
+                            evidence.push("implicit artifact exists (impl_task)".to_string());
+                        }
+                    }
+                }
+            }
+
+            if !session_completed && evidence.is_empty() {
+                evidence.push("no evidence found — proceeding based on elapsed time".to_string());
+            }
+
+            tracing::warn!(
+                target: "workflow",
+                task_id = %task.task_id,
+                workflow_id = %wf_id,
+                elapsed_secs = elapsed_secs,
+                evidence = ?evidence,
+                "Stuck running task detected; force-completing as Succeeded"
+            );
+
+            let result_summary = format!(
+                "Auto-resolved stuck task: Succeeded (elapsed: {}s, evidence: {})",
+                elapsed_secs,
+                evidence.join("; ")
+            );
+
+            let _ = workflow_store::update_task_run_status(
+                &config,
+                store,
+                &wf_id,
+                &task.task_id,
+                autonoetic_types::workflow::TaskRunStatus::Succeeded,
+                Some(result_summary),
+                None,
+            );
+
+            let _ = workflow_store::checkpoint_task(
+                &config,
+                store,
+                &wf_id,
+                &task.task_id,
+                "stuck_auto_resolved".to_string(),
+                serde_json::json!({
+                    "status": "succeeded",
+                    "evidence": evidence,
+                    "session_completed": session_completed,
+                    "elapsed_secs": elapsed_secs,
+                }),
+            );
+
+            let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
+
+            let event = autonoetic_types::workflow::WorkflowEventRecord {
+                event_id: format!("wevt-stuck-t-{}", &task.task_id),
+                workflow_id: wf_id.clone(),
+                event_type: "task.stuck_resolved".to_string(),
+                task_id: Some(task.task_id.clone()),
+                agent_id: Some(task.agent_id.clone()),
+                payload: serde_json::json!({
+                    "evidence": evidence,
+                    "session_completed": session_completed,
+                    "elapsed_secs": elapsed_secs,
+                }),
+                occurred_at: chrono::Utc::now().to_rfc3339(),
+            };
+            let _ = workflow_store::append_workflow_event(&config, store, &event);
         }
     }
 
