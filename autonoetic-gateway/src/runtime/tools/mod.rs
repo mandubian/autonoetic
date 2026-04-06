@@ -385,11 +385,34 @@ pub(crate) fn tier2_memory_for_native_tool(
     gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     agent_id: &str,
 ) -> anyhow::Result<crate::runtime::memory::Tier2Memory> {
+    let memory_store: Option<std::sync::Arc<dyn crate::runtime::memory::MemoryStore>> =
+        gateway_store.map(|gs| {
+            let store: std::sync::Arc<dyn crate::runtime::memory::MemoryStore> =
+                std::sync::Arc::new(
+                    crate::runtime::memory::SqliteMemoryStore::new(gs.clone()),
+                );
+            store
+        });
     crate::runtime::memory::Tier2Memory::open_for_agent(
         gateway_dir,
-        gateway_store.cloned(),
+        memory_store,
         agent_id,
     )
+}
+
+/// Block on an async memory operation from a synchronous context (e.g. `NativeTool::execute`).
+///
+/// Uses `tokio::task::block_in_place` when inside a tokio runtime, otherwise
+/// creates a new single-thread runtime. Same pattern as `block_on_http`.
+pub(crate) fn block_on_memory<F, T>(fut: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(fut))
+    } else {
+        tokio::runtime::Runtime::new()?.block_on(fut)
+    }
 }
 
 pub(crate) fn resolve_target_to_agent_ref(

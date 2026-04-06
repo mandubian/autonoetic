@@ -3,6 +3,7 @@
 use crate::llm::{CompletionRequest, LlmDriver, Message};
 use crate::runtime::content_store::{ContentStore, ContentVisibility};
 use crate::runtime::live_digest::base_session_id;
+use crate::runtime::memory::MemoryStore;
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::LlmConfig;
 use autonoetic_types::config::{GatewayConfig, LlmPreset};
@@ -156,9 +157,10 @@ fn sanitize_scope_segment(s: &str) -> String {
         .to_string()
 }
 
-fn apply_digest_output(
+async fn apply_digest_output(
     gateway_dir: &Path,
-    store: &GatewayStore,
+    store: &Arc<GatewayStore>,
+    memory_store: &dyn MemoryStore,
     session_id: &str,
     source_agent_id: &str,
     output: &DigestLlmOutput,
@@ -203,7 +205,7 @@ fn apply_digest_output(
         obj.tags = tags;
         obj.confidence = m.confidence;
         obj.visibility = MemoryVisibility::Global;
-        store.memory_upsert(&obj)?;
+        memory_store.upsert(&obj).await?;
     }
     Ok(())
 }
@@ -298,7 +300,8 @@ async fn run_post_session_digest_inner(
     }
     let json_slice = extract_json_object_slice(&resp.text)?;
     let output: DigestLlmOutput = serde_json::from_str(json_slice)?;
-    apply_digest_output(gateway_dir, store, session_id, source_agent_id, &output)?;
+    let sqlite_store = crate::runtime::memory::SqliteMemoryStore::new(store.clone());
+    apply_digest_output(gateway_dir, store, &sqlite_store, session_id, source_agent_id, &output).await?;
     Ok(())
 }
 

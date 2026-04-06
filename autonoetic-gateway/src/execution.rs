@@ -162,13 +162,14 @@ pub fn collect_shared_knowledge(
     target_agent_id: &str,
     writer_agent_id: &str,
 ) -> Vec<SharedKnowledge> {
-    let Ok(mem) = crate::runtime::memory::Tier2Memory::new(gateway_dir, writer_agent_id) else {
+    let Ok(mem) = crate::runtime::memory::Tier2Memory::open_sqlite(gateway_dir, writer_agent_id) else {
         return Vec::new();
     };
 
-    // Get all memories owned by the writer agent
-    let Ok(all_memories) = mem.list_memories() else {
-        return Vec::new();
+    // Get all memories owned by the writer agent (async call, bridge from sync)
+    let all_memories = match crate::runtime::tools::block_on_memory(mem.list_memories()) {
+        Ok(m) => m,
+        _ => return Vec::new(),
     };
 
     // Filter to those shared with the target agent
