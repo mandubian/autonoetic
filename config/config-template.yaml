@@ -221,3 +221,4 @@ llm_preset_mapping:
 #   threshold_pct: 60.0
 #   recent_turns_to_keep: 3
 #   max_summary_tokens: 500
+#   min_turns_between_compression: 3
