@@ -3,6 +3,7 @@
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::SandboxConfig;
+use sha2::{Digest, Sha256};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -21,7 +22,6 @@ pub(crate) const BWRAP_WORKSPACE_DIR: &str = "/tmp";
 const PYTHONPATH_ENV: &str = "PYTHONPATH";
 const PYTHON_SDK_PATH_ENV: &str = "AUTONOETIC_PYTHON_SDK_PATH";
 const CCOS_SOCKET_ENV: &str = "CCOS_SOCKET_PATH";
-const SDK_SOCKET_BASENAME: &str = ".autonoetic_sdk.sock";
 const BWRAP_SHARE_NET_ENV: &str = "AUTONOETIC_BWRAP_SHARE_NET";
 const BWRAP_DEV_MODE_ENV: &str = "AUTONOETIC_BWRAP_DEV_MODE";
 
@@ -252,7 +252,16 @@ struct StartedSdkBridge {
 }
 
 fn start_sdk_bridge(agent_dir: &str) -> anyhow::Result<StartedSdkBridge> {
-    let host_socket_path = PathBuf::from(agent_dir).join(SDK_SOCKET_BASENAME);
+    // Use a short hash-based socket path in /tmp to avoid SUN_LEN (108 byte) limit.
+    // The socket path must be <= 108 bytes on Linux, so we use:
+    //   /tmp/autonoetic-{16_hex_chars}.sock  = 36 bytes (well under limit)
+    let mut hasher = Sha256::new();
+    hasher.update(agent_dir.as_bytes());
+    hasher.update(std::process::id().to_ne_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    let short_hash = &hash[..16];
+    let socket_name = format!("autonoetic-{}.sock", short_hash);
+    let host_socket_path = PathBuf::from("/tmp").join(&socket_name);
     if host_socket_path.exists() {
         fs::remove_file(&host_socket_path)?;
     }
@@ -269,7 +278,7 @@ fn start_sdk_bridge(agent_dir: &str) -> anyhow::Result<StartedSdkBridge> {
     });
 
     Ok(StartedSdkBridge {
-        socket_path_sandbox: format!("{}/{}", BWRAP_WORKSPACE_DIR, SDK_SOCKET_BASENAME),
+        socket_path_sandbox: format!("{}/{}", BWRAP_WORKSPACE_DIR, socket_name),
         guard: SdkBridgeGuard {
             stop,
             handle: Some(handle),

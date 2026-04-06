@@ -896,6 +896,7 @@ impl GatewayExecutionService {
                                 root_session_id: req.root_session_id.clone(),
                                 workflow_id: req.workflow_id.clone(),
                                 task_id: req.task_id.clone(),
+                                approval_level: autonoetic_types::background::ApprovalLevel::Operator,
                             };
                             match crate::runtime::continuation::execute_approved_action(
                                 &decision,
