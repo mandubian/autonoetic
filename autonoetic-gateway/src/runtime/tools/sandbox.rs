@@ -1,6 +1,9 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::{NativeToolRunContext, SandboxPidGuard};
+use crate::runtime::approved_exec_cache::{
+    compute_fingerprint, normalize_targets, ApprovedExecCache,
+};
 use crate::runtime::tools::{
     build_approval_details, dependency_plan_from_args_or_lock, load_session_content_mounts,
     NativeTool, NativeToolRegistry, SandboxExecArgs,
@@ -217,6 +220,58 @@ impl NativeTool for SandboxExecTool {
                                 "Proceeding with approved sandbox execution (command from store)"
                             );
                             approval_validated_for_command = true;
+
+                            // Record to cache immediately upon approval validation,
+                            // before any execution attempt. This ensures retries after
+                            // sandbox failures (e.g. SUN_LEN) still get cached.
+                            let code_to_analyze = extract_code_for_analysis(
+                                &effective_command,
+                                agent_dir,
+                                gateway_dir,
+                                session_id,
+                            );
+                            let dep_packages: Option<Vec<String>> =
+                                args.dependencies.as_ref().map(|d| d.packages.clone());
+                            let remote_analysis =
+                                crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
+                                    &code_to_analyze,
+                                    dep_packages.as_deref(),
+                                );
+                            let normalized_targets =
+                                normalize_targets(&remote_analysis.detected_patterns);
+                            let fingerprint = compute_fingerprint(
+                                &manifest.agent.id,
+                                &normalized_targets,
+                                &code_to_analyze,
+                            );
+                            if let Some(gw_dir) = gateway_dir {
+                                if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                                    if cache.find(&fingerprint).is_none() {
+                                        let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                                            fingerprint: fingerprint.clone(),
+                                            agent_id: manifest.agent.id.clone(),
+                                            remote_targets: normalized_targets,
+                                            code_content: code_to_analyze,
+                                            approval_request_id: approval_ref.clone(),
+                                            approved_at: chrono::Utc::now().to_rfc3339(),
+                                            approved_by: "operator".to_string(),
+                                            last_used_at: chrono::Utc::now().to_rfc3339(),
+                                        };
+                                        if let Err(e) = cache.record(entry) {
+                                            tracing::warn!(
+                                                target: "sandbox.exec", error = %e,
+                                                fingerprint = %fingerprint,
+                                                "Failed to record approved exec cache entry"
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                target: "sandbox.exec", fingerprint = %fingerprint,
+                                                "Cached approved exec on approval_ref validation"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                         _ => {
                             return Err(tagged::Tagged::validation(anyhow::anyhow!(
@@ -285,15 +340,19 @@ impl NativeTool for SandboxExecTool {
                         if let Ok(bundle) = store.inspect(aid) {
                             let content_store =
                                 crate::runtime::content_store::ContentStore::new(gw_dir).ok();
-                            for entry in &bundle.entrypoints {
-                                if let Some(file) = bundle.files.iter().find(|f| f.name == *entry) {
-                                    if let Some(cs) = &content_store {
-                                        if let Ok(content) = cs.read(&file.handle) {
-                                            if let Ok(text) = String::from_utf8(content) {
-                                                artifact_code.push_str("\n");
-                                                artifact_code.push_str(&text);
-                                                needs_analysis = true;
-                                            }
+                            // Analyze ALL files in the artifact, not just entrypoints.
+                            // Network patterns may live in non-entrypoint files (e.g.,
+                            // an API client module imported by the main script).
+                            for file in &bundle.files {
+                                if let Some(cs) = &content_store {
+                                    if let Ok(content) = cs.read(&file.handle) {
+                                        if let Ok(text) = String::from_utf8(content) {
+                                            artifact_code.push_str(&format!(
+                                                "\n# --- {} ---\n",
+                                                file.name
+                                            ));
+                                            artifact_code.push_str(&text);
+                                            needs_analysis = true;
                                         }
                                     }
                                 }
@@ -490,7 +549,7 @@ impl NativeTool for SandboxExecTool {
                         agent_id: manifest.agent.id.clone(),
                         session_id: sid.to_string(),
                         root_session_id: Some(root_session_id.to_string()),
-                        action,
+                        action: action.clone(),
                         created_at: chrono::Utc::now().to_rfc3339(),
                         status: None,
                         decided_at: None,
@@ -498,6 +557,7 @@ impl NativeTool for SandboxExecTool {
                         reason: Some(reason_text),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
+                        approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
                         task_id: match (&approval_workflow_id, session_id) {
                             (Some(wf_id), Some(sid)) => {
                                 crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
@@ -543,8 +603,13 @@ impl NativeTool for SandboxExecTool {
             }
         }
 
+        let dep_packages: Option<Vec<String>> =
+            args.dependencies.as_ref().map(|d| d.packages.clone());
         let remote_analysis =
-            crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&code_to_analyze);
+            crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
+                &code_to_analyze,
+                dep_packages.as_deref(),
+            );
         tracing::info!(
             target: "sandbox.exec",
             agent_id = %manifest.agent.id,
@@ -552,8 +617,9 @@ impl NativeTool for SandboxExecTool {
             approval_ref_validated = approval_validated_for_command,
             will_require_approval = remote_analysis.requires_approval && !approval_validated_for_command,
             pattern_count = remote_analysis.detected_patterns.len(),
+            dep_package_count = dep_packages.as_ref().map(|p| p.len()).unwrap_or(0),
             summary = %remote_analysis.summary,
-            "Remote access scan for sandbox.exec (imports, URL literals, IPs). If will_require_approval=true, execution stops until operator approves and caller retries with approval_ref."
+            "Remote access scan for sandbox.exec (imports, URLs, IPs, network commands, dependencies). If will_require_approval=true, execution stops until operator approves and caller retries with approval_ref."
         );
         if remote_analysis.requires_approval && !approval_validated_for_command {
             tracing::warn!(
@@ -634,139 +700,302 @@ impl NativeTool for SandboxExecTool {
             }
 
             let detected_patterns = remote_analysis.detected_patterns.clone();
-            let normalized_targets =
-                crate::runtime::approved_exec_cache::normalize_targets(&detected_patterns);
+            let normalized_targets = normalize_targets(&detected_patterns);
 
-            if let Some(cfg) = config {
-                let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                let summary = format!(
-                    "Sandbox exec: {}",
-                    &effective_command[..effective_command.len().min(60)]
-                );
-                let action = ScheduledAction::SandboxExec {
-                    command: effective_command.clone(),
-                    dependencies: args.dependencies.as_ref().map(|d| {
-                        autonoetic_types::background::ScheduledActionDependencies {
-                            runtime: d.runtime.clone(),
-                            packages: d.packages.clone(),
-                        }
-                    }),
-                    requires_approval: true,
-                    evidence_ref: None,
-                };
-                let approval_workflow_id = {
-                    let sid = session_id.unwrap_or("");
-                    let root = crate::runtime::content_store::root_session_id(sid);
-                    crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
-                        .ok()
-                        .flatten()
-                };
-                let sid = session_id.unwrap_or("");
-                let root_session_id = crate::runtime::content_store::root_session_id(sid);
-                let request = autonoetic_types::background::ApprovalRequest {
-                    request_id: request_id.clone(),
-                    agent_id: manifest.agent.id.clone(),
-                    session_id: sid.to_string(),
-                    root_session_id: Some(root_session_id.to_string()),
-                    action,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    status: None,
-                    decided_at: None,
-                    decided_by: None,
-                    reason: Some({
-                        let mut r = format!("Remote access detected: {}", remote_analysis.summary);
-                        if !normalized_targets.is_empty() {
-                            r.push_str(&format!(" → hosts: {}", normalized_targets.join(", ")));
-                        }
-                        r
-                    }),
-                    evidence_ref: None,
-                    workflow_id: approval_workflow_id.clone(),
-                    task_id: match (&approval_workflow_id, session_id) {
-                        (Some(wf_id), Some(sid)) => {
-                            crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
-                                .ok()
-                                .flatten()
-                        }
-                        _ => None,
-                    },
-                };
-                if let Some(store) = &gateway_store {
-                    if let Err(e) = store.create_approval(&request) {
-                        tracing::error!(target: "sandbox", error = %e, "Failed to create approval request in store");
+            // Check if this exact execution was previously approved (cache hit).
+            // Only use the cache when we have concrete targets (URLs, IPs).
+            // Import-only and other opaque patterns always require re-approval
+            // because they can resolve to different concrete targets at runtime.
+            let has_concrete = crate::runtime::approved_exec_cache::has_concrete_targets(&detected_patterns);
+            if has_concrete {
+            if let Some(gw_dir) = gateway_dir {
+                let fingerprint =
+                    compute_fingerprint(&manifest.agent.id, &normalized_targets, &code_to_analyze);
+                if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                    if let Some(entry) = cache.find(&fingerprint) {
+                        tracing::info!(
+                            target: "sandbox.exec",
+                            fingerprint = %fingerprint,
+                            previously_approved_by = %entry.approved_by,
+                            previously_approved_at = %entry.approved_at,
+                            "Cache hit: skipping approval for previously approved sandbox exec"
+                        );
+                        let _ = cache.update_last_used(&fingerprint);
+                        approval_validated_for_command = true;
                     }
-                } else {
-                    tracing::error!(target: "sandbox", "GatewayStore missing; cannot create sandbox approval");
+                }
+            }
+
+            // Also check for recently approved requests in the store (not just pending).
+            // This catches cases where the operator approved but the cache hasn't been
+            // populated yet (e.g., first run after cache was cleared).
+            if !approval_validated_for_command {
+                if let (Some(cfg), Some(gw_store), Some(sid)) = (config, &gateway_store, session_id)
+                {
+                    let root_sid = crate::runtime::content_store::root_session_id(sid);
+                    if let Ok(approved) = gw_store.get_approved_approvals_for_root(root_sid) {
+                        for req in &approved {
+                            if let ScheduledAction::SandboxExec { command, .. } = &req.action {
+                                if command == &effective_command {
+                                    tracing::info!(
+                                        target: "sandbox.exec",
+                                        request_id = %req.request_id,
+                                        "Found matching approved request in store, skipping new approval"
+                                    );
+                                    approval_validated_for_command = true;
+
+                                    // Also cache this so future checks hit the fast path
+                                    let dep_packages: Option<Vec<String>> =
+                                        args.dependencies.as_ref().map(|d| d.packages.clone());
+                                    let remote_analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
+                                        &code_to_analyze,
+                                        dep_packages.as_deref(),
+                                    );
+                                    let normalized_targets =
+                                        normalize_targets(&remote_analysis.detected_patterns);
+                                    let fingerprint = compute_fingerprint(
+                                        &manifest.agent.id,
+                                        &normalized_targets,
+                                        &code_to_analyze,
+                                    );
+                                    if let Some(gw_dir) = gateway_dir {
+                                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                                            if cache.find(&fingerprint).is_none() {
+                                                let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                                                    fingerprint: fingerprint.clone(),
+                                                    agent_id: manifest.agent.id.clone(),
+                                                    remote_targets: normalized_targets,
+                                                    code_content: code_to_analyze.clone(),
+                                                    approval_request_id: req.request_id.clone(),
+                                                    approved_at: chrono::Utc::now().to_rfc3339(),
+                                                    approved_by: "operator".to_string(),
+                                                    last_used_at: chrono::Utc::now().to_rfc3339(),
+                                                };
+                                                let _ = cache.record(entry);
+                                            }
+                                        }
+                                    }
+
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            } // end has_concrete guard
+
+            // If still not validated, check for pending approvals
+            if !approval_validated_for_command {
+                if let Some(cfg) = config {
+                    let sid = session_id.unwrap_or("");
+                    let existing =
+                        crate::scheduler::approval::pending_sandbox_exec_requests_for_session(
+                            cfg,
+                            gateway_store.as_deref(),
+                            sid,
+                        )?;
+                    if !existing.is_empty() {
+                        let primary = &existing[0];
+                        let ids: Vec<String> =
+                            existing.iter().map(|r| r.request_id.clone()).collect();
+                        let (cmd, cmd_deps) = match &primary.action {
+                            ScheduledAction::SandboxExec {
+                                command,
+                                dependencies,
+                                ..
+                            } => (command.clone(), dependencies),
+                            _ => {
+                                anyhow::bail!(
+                                    "internal: pending sandbox approval has wrong action type"
+                                )
+                            }
+                        };
+                        let summary = format!("Sandbox exec: {}", &cmd[..cmd.len().min(60)]);
+                        let approval = build_approval_details(
+                            primary,
+                            "sandbox_exec",
+                            summary.clone(),
+                            "approval_ref",
+                            serde_json::json!({
+                                "command": cmd,
+                                "dependencies": cmd_deps.as_ref().map(|d| serde_json::json!({
+                                    "runtime": d.runtime,
+                                    "packages": d.packages,
+                                })),
+                                "approval_already_pending": true,
+                                "note": "A sandbox approval is already pending for this session. After operator approval, retry with approval_ref. The approved command will be used automatically.",
+                            }),
+                        );
+                        let dup_note = if existing.len() > 1 {
+                            format!(
+                                " ({} pending sandbox requests for this session; resolve or reject them.)",
+                                existing.len()
+                            )
+                        } else {
+                            String::new()
+                        };
+                        return serde_json::to_string(&serde_json::json!({
+                            "ok": false,
+                            "exit_code": null,
+                            "stdout": "",
+                            "stderr": format!(
+                                "Sandbox approval already pending for this session (request_id(s): {}). After approval, the persisted command will execute automatically.{}",
+                                ids.join(", "),
+                                dup_note
+                            ),
+                            "approval_required": true,
+                            "approval_already_pending": true,
+                            "suspended": true,
+                            "request_id": primary.request_id,
+                            "pending_request_ids": ids,
+                            "message": format!(
+                                "Execution suspended. Approval {} is pending. The approved command is already persisted and will be used automatically on resume.",
+                                primary.request_id
+                            ),
+                            "approval": approval,
+                        }))
+                        .map_err(Into::into);
+                    }
+                }
+            }
+
+            // Still need approval (no cache hit, no pending)
+            if !approval_validated_for_command {
+                if let Some(cfg) = config {
+                    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                    let summary = format!(
+                        "Sandbox exec: {}",
+                        &effective_command[..effective_command.len().min(60)]
+                    );
+                    let action = ScheduledAction::SandboxExec {
+                        command: effective_command.clone(),
+                        dependencies: args.dependencies.as_ref().map(|d| {
+                            autonoetic_types::background::ScheduledActionDependencies {
+                                runtime: d.runtime.clone(),
+                                packages: d.packages.clone(),
+                            }
+                        }),
+                        requires_approval: true,
+                        evidence_ref: None,
+                    };
+                    let approval_workflow_id = {
+                        let sid = session_id.unwrap_or("");
+                        let root = crate::runtime::content_store::root_session_id(sid);
+                        crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+                            .ok()
+                            .flatten()
+                    };
+                    let sid = session_id.unwrap_or("");
+                    let root_session_id = crate::runtime::content_store::root_session_id(sid);
+                    let request = autonoetic_types::background::ApprovalRequest {
+                        request_id: request_id.clone(),
+                        agent_id: manifest.agent.id.clone(),
+                        session_id: sid.to_string(),
+                        root_session_id: Some(root_session_id.to_string()),
+                        action: action.clone(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        status: None,
+                        decided_at: None,
+                        decided_by: None,
+                        reason: Some({
+                            let mut r =
+                                format!("Remote access detected: {}", remote_analysis.summary);
+                            if !normalized_targets.is_empty() {
+                                r.push_str(&format!(" → hosts: {}", normalized_targets.join(", ")));
+                            }
+                            r
+                        }),
+                        evidence_ref: None,
+                        workflow_id: approval_workflow_id.clone(),
+                        approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+                        task_id: match (&approval_workflow_id, session_id) {
+                            (Some(wf_id), Some(sid)) => {
+                                crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
+                                    .ok()
+                                    .flatten()
+                            }
+                            _ => None,
+                        },
+                    };
+                    if let Some(store) = &gateway_store {
+                        if let Err(e) = store.create_approval(&request) {
+                            tracing::error!(target: "sandbox", error = %e, "Failed to create approval request in store");
+                        }
+                    } else {
+                        tracing::error!(target: "sandbox", "GatewayStore missing; cannot create sandbox approval");
+                    }
+
+                    let approval = build_approval_details(
+                        &request,
+                        "sandbox_exec",
+                        summary.clone(),
+                        "approval_ref",
+                        serde_json::json!({
+                            "command": effective_command,
+                            "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
+                                "runtime": d.runtime,
+                                "packages": d.packages,
+                            })),
+                            "remote_access_detected": true,
+                            "detected_patterns": detected_patterns,
+                            "normalized_targets": normalized_targets,
+                            "hosts": normalized_targets
+                        }),
+                    );
+
+                    return serde_json::to_string(&serde_json::json!({
+                        "ok": false,
+                        "exit_code": null,
+                        "stdout": "",
+                        "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.", remote_analysis.summary),
+                        "approval_required": true,
+                        "request_id": request_id,
+                        "remote_access_detected": true,
+                        "detected_patterns": remote_analysis.detected_patterns,
+                        "suspended": true,
+                        "message": format!("Execution suspended pending operator approval ({}). The approved command is persisted and will be used automatically on resume.", request_id),
+                        "approval": approval
+                    }))
+                    .map_err(Into::into);
                 }
 
-                let approval = build_approval_details(
-                    &request,
-                    "sandbox_exec",
-                    summary.clone(),
-                    "approval_ref",
-                    serde_json::json!({
-                        "command": effective_command,
-                        "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
-                            "runtime": d.runtime,
-                            "packages": d.packages,
-                        })),
-                        "remote_access_detected": true,
-                        "detected_patterns": detected_patterns,
-                        "normalized_targets": normalized_targets,
-                        "hosts": normalized_targets
-                    }),
-                );
-
+                let detected_patterns = remote_analysis.detected_patterns.clone();
+                let normalized_targets = normalize_targets(&detected_patterns);
                 return serde_json::to_string(&serde_json::json!({
                     "ok": false,
                     "exit_code": null,
                     "stdout": "",
                     "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.", remote_analysis.summary),
                     "approval_required": true,
-                    "request_id": request_id,
                     "remote_access_detected": true,
                     "detected_patterns": remote_analysis.detected_patterns,
-                    "suspended": true,
-                    "message": format!("Execution suspended pending operator approval ({}). The approved command is persisted and will be used automatically on resume.", request_id),
-                    "approval": approval
+                    "approval": {
+                        "kind": "sandbox_exec",
+                        "reason": format!("Remote access detected: {}", remote_analysis.summary),
+                        "summary": format!("Sandbox exec: {}", &effective_command[..effective_command.len().min(60)]),
+                        "requested_by_agent_id": manifest.agent.id,
+                        "session_id": session_id.unwrap_or(""),
+                        "retry_field": "approval_ref",
+                        "subject": {
+                            "command": effective_command,
+                            "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
+                                "runtime": d.runtime,
+                                "packages": d.packages,
+                            })),
+                            "remote_access_detected": true,
+                            "detected_patterns": detected_patterns,
+                            "normalized_targets": normalized_targets,
+                            "hosts": normalized_targets
+                        }
+                    }
                 }))
                 .map_err(Into::into);
             }
-
-            let detected_patterns = remote_analysis.detected_patterns.clone();
-            let normalized_targets =
-                crate::runtime::approved_exec_cache::normalize_targets(&detected_patterns);
-            return serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "exit_code": null,
-                "stdout": "",
-                "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.", remote_analysis.summary),
-                "approval_required": true,
-                "remote_access_detected": true,
-                "detected_patterns": remote_analysis.detected_patterns,
-                "approval": {
-                    "kind": "sandbox_exec",
-                    "reason": format!("Remote access detected: {}", remote_analysis.summary),
-                    "summary": format!("Sandbox exec: {}", &effective_command[..effective_command.len().min(60)]),
-                    "requested_by_agent_id": manifest.agent.id,
-                    "session_id": session_id.unwrap_or(""),
-                    "retry_field": "approval_ref",
-                    "subject": {
-                        "command": effective_command,
-                        "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
-                            "runtime": d.runtime,
-                            "packages": d.packages,
-                        })),
-                        "remote_access_detected": true,
-                        "detected_patterns": detected_patterns,
-                        "normalized_targets": normalized_targets,
-                        "hosts": normalized_targets
-                    }
-                }
-            }))
-            .map_err(Into::into);
         }
 
+        let dep_packages: Option<Vec<String>> =
+            args.dependencies.as_ref().map(|d| d.packages.clone());
         let dep_plan = dependency_plan_from_args_or_lock(manifest, agent_dir, args.dependencies)?;
         let driver = SandboxDriverKind::parse(&manifest.runtime.sandbox)?;
         let agent_dir_str = agent_dir
@@ -953,6 +1182,52 @@ impl NativeTool for SandboxExecTool {
                         }
                         Err(e) => {
                             tracing::warn!(target: "sandbox", error = %e, "Failed to create layer store for capture");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Record to approved exec cache when an operator-granted approval was used.
+        // We cache on approval grant, not execution success — the operator's decision
+        // that this code may access these hosts is independent of whether the command
+        // runs correctly.
+        if approval_validated_for_command && args.approval_ref.is_some() {
+            let remote_analysis_cached =
+                crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
+                    &code_to_analyze,
+                    dep_packages.as_deref(),
+                );
+            let normalized_targets = normalize_targets(&remote_analysis_cached.detected_patterns);
+            let fingerprint =
+                compute_fingerprint(&manifest.agent.id, &normalized_targets, &code_to_analyze);
+            if let Some(gw_dir) = gateway_dir {
+                if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                    if cache.find(&fingerprint).is_none() {
+                        let approval_request_id = args.approval_ref.clone().unwrap_or_default();
+                        let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                            fingerprint: fingerprint.clone(),
+                            agent_id: manifest.agent.id.clone(),
+                            remote_targets: normalized_targets,
+                            code_content: code_to_analyze.clone(),
+                            approval_request_id,
+                            approved_at: chrono::Utc::now().to_rfc3339(),
+                            approved_by: "operator".to_string(),
+                            last_used_at: chrono::Utc::now().to_rfc3339(),
+                        };
+                        if let Err(e) = cache.record(entry) {
+                            tracing::warn!(
+                                target: "sandbox.exec",
+                                error = %e,
+                                fingerprint = %fingerprint,
+                                "Failed to record approved exec cache entry"
+                            );
+                        } else {
+                            tracing::info!(
+                                target: "sandbox.exec",
+                                fingerprint = %fingerprint,
+                                "Recorded approved execution in cache (operator-granted approval)"
+                            );
                         }
                     }
                 }
