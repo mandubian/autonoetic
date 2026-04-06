@@ -5,7 +5,9 @@ use crate::runtime::tools::{validate_relative_agent_path, NativeTool, NativeTool
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::runtime_lock::{LockedLayerMount, RuntimeLock};
+use autonoetic_types::runtime_lock::{
+    LockedArtifact, LockedDependencySet, LockedLayerMount, RuntimeLock,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +16,7 @@ use std::sync::Arc;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(AgentRevisionCreateTool));
+    registry.register(Box::new(AgentRevisionSchemaTool));
     registry.register(Box::new(AgentRevisionListTool));
     registry.register(Box::new(AgentRevisionInspectTool));
     registry.register(Box::new(AgentRevisionPromoteTool));
@@ -245,6 +248,24 @@ impl NativeTool for AgentRevisionCreateTool {
             .ok_or_else(|| anyhow::anyhow!("Agent bundle artifact must include SKILL.md"))?
             .clone();
         let skill_text = String::from_utf8_lossy(&skill_content);
+
+        let frontmatter_value =
+            crate::runtime::install_contract::extract_frontmatter_raw(&skill_text)
+                .map_err(|e| anyhow::anyhow!("Failed to extract SKILL.md frontmatter: {}", e))?;
+        let skill_missing =
+            crate::runtime::install_contract::validate_skill_frontmatter_shape(&frontmatter_value);
+        if !skill_missing.is_empty() {
+            let lock_missing_for_error: Option<&[String]> = None;
+            return Err(anyhow::anyhow!(
+                "{}",
+                crate::runtime::install_contract::format_install_validation_error(
+                    &skill_missing,
+                    lock_missing_for_error,
+                    None,
+                )
+            ));
+        }
+
         let (bundle_manifest, _instructions) =
             crate::runtime::parser::SkillParser::parse(&skill_text)
                 .map_err(|e| anyhow::anyhow!("Failed to parse SKILL.md from artifact: {}", e))?;
@@ -258,20 +279,117 @@ impl NativeTool for AgentRevisionCreateTool {
 
         let lock_rel_path = bundle_manifest.runtime.runtime_lock.clone();
         validate_relative_agent_path(&lock_rel_path)?;
-        let lock_content = file_map.get(&lock_rel_path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Agent bundle artifact must include '{}' declared in SKILL.md runtime.runtime_lock",
-                lock_rel_path
-            )
-        })?;
-        let parsed_lock: RuntimeLock = serde_yaml::from_slice(lock_content).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to parse '{}' from artifact '{}': {}",
-                lock_rel_path,
-                args.artifact_id,
-                e
-            )
-        })?;
+        let lock_content = file_map.get(&lock_rel_path);
+
+        let parsed_lock: RuntimeLock = if let Some(lock_content) = lock_content {
+            let lock_value: serde_yaml::Value =
+                serde_yaml::from_slice(lock_content).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse '{}' as YAML: {}", lock_rel_path, e)
+                })?;
+
+            let lock_missing =
+                crate::runtime::install_contract::validate_runtime_lock_shape(&lock_value);
+            if !lock_missing.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    crate::runtime::install_contract::format_install_validation_error(
+                        &[],
+                        Some(&lock_missing),
+                        None,
+                    )
+                ));
+            }
+
+            let partial: crate::runtime::install_contract::RuntimeLockPartial =
+                serde_yaml::from_value(lock_value.clone()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to parse '{}' from artifact '{}': {}",
+                        lock_rel_path,
+                        args.artifact_id,
+                        e
+                    )
+                })?;
+
+            let mut dep_parse_errors = Vec::new();
+            let agent_deps: Vec<LockedDependencySet> = partial
+                .dependencies
+                .map(|deps| {
+                    deps.into_iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| {
+                            match serde_yaml::from_value::<LockedDependencySet>(v) {
+                                Ok(d) => Some(d),
+                                Err(e) => {
+                                    dep_parse_errors.push(format!("dependencies[{}]: {}", i, e));
+                                    None
+                                }
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut art_parse_errors = Vec::new();
+            let agent_arts: Vec<LockedArtifact> = partial
+                .artifacts
+                .map(|arts| {
+                    arts.into_iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| match serde_yaml::from_value::<LockedArtifact>(v) {
+                            Ok(a) => Some(a),
+                            Err(e) => {
+                                art_parse_errors.push(format!("artifacts[{}]: {}", i, e));
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if !dep_parse_errors.is_empty() || !art_parse_errors.is_empty() {
+                let mut all_errors = dep_parse_errors;
+                all_errors.extend(art_parse_errors);
+                return Err(anyhow::anyhow!(
+                    "runtime.lock parse errors:\n{}\n{}",
+                    all_errors
+                        .iter()
+                        .map(|e| format!("  - {}", e))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    crate::runtime::install_contract::render_runtime_lock_example(),
+                ));
+            }
+
+            let expected_layers: Vec<autonoetic_types::layer::ArtifactLayer> = bundle
+                .layers
+                .iter()
+                .map(|l| autonoetic_types::layer::ArtifactLayer {
+                    layer_id: l.layer_id.clone(),
+                    name: l.name.clone(),
+                    mount_path: l.mount_path.clone(),
+                    digest: l.digest.clone(),
+                })
+                .collect();
+
+            let scaffolded = crate::runtime::install_contract::scaffold_runtime_lock(
+                Some(agent_deps),
+                Some(agent_arts),
+                &expected_layers,
+            );
+            scaffolded
+        } else {
+            let expected_layers: Vec<autonoetic_types::layer::ArtifactLayer> = bundle
+                .layers
+                .iter()
+                .map(|l| autonoetic_types::layer::ArtifactLayer {
+                    layer_id: l.layer_id.clone(),
+                    name: l.name.clone(),
+                    mount_path: l.mount_path.clone(),
+                    digest: l.digest.clone(),
+                })
+                .collect();
+            crate::runtime::install_contract::scaffold_runtime_lock(None, None, &expected_layers)
+        };
 
         let expected_layers: Vec<LockedLayerMount> = {
             let mut layers: Vec<LockedLayerMount> = bundle
@@ -376,6 +494,52 @@ impl NativeTool for AgentRevisionCreateTool {
             "agent_id": args.agent_id,
             "artifact_id": args.artifact_id,
             "next_step": "Use agent.revision.promote to activate this revision"
+        })
+        .to_string())
+    }
+}
+
+pub struct AgentRevisionSchemaTool;
+
+impl NativeTool for AgentRevisionSchemaTool {
+    fn name(&self) -> &'static str {
+        "agent.revision.schema"
+    }
+
+    fn is_available(&self, _manifest: &AgentManifest) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Returns the install contract schema for agent revision creation — ownership split, required fields, and canonical examples.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        _arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&GatewayConfig>,
+        _gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        Ok(serde_json::json!({
+            "ok": true,
+            "schema": crate::runtime::install_contract::install_schema_description(),
+            "skill_example": crate::runtime::install_contract::render_skill_metadata_example(),
+            "lock_example": crate::runtime::install_contract::render_runtime_lock_example(),
         })
         .to_string())
     }

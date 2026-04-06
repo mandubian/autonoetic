@@ -441,6 +441,27 @@ pub struct AgentExecutor {
     pub session_started_at: Option<String>,
 }
 
+fn tool_result_counts_as_progress(result: &str) -> bool {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+        if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
+            return ok;
+        }
+        if let Some(approval_required) =
+            parsed.get("approval_required").and_then(|v| v.as_bool())
+        {
+            return !approval_required;
+        }
+        if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
+            return exit_code == 0;
+        }
+        if parsed.get("error").is_some() || parsed.get("error_type").is_some() {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
 impl AgentExecutor {
     pub fn new(
         manifest: AgentManifest,
@@ -1436,7 +1457,7 @@ impl AgentExecutor {
                     )
                     .with_session_context(self.session_id.clone(), Some(turn_id.clone()));
 
-                    let (had_any_success, results) = processor
+                    let (_had_any_success, results) = processor
                         .process_tool_calls(
                             &response.tool_calls,
                             &active_agent_dir,
@@ -1635,7 +1656,10 @@ impl AgentExecutor {
                         }
                     }
 
-                    if had_any_success {
+                    let any_logical_success = results
+                        .iter()
+                        .any(|(_id, _name, result)| tool_result_counts_as_progress(result));
+                    if any_logical_success {
                         self.guard.register_progress();
                     }
 
@@ -3422,5 +3446,70 @@ mod history_persistence_tests {
         assert!(raw.contains("***REDACTED***"));
         assert!(!raw.contains("very-secret-value"));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod loop_guard_tests {
+    use super::tool_result_counts_as_progress;
+
+    #[test]
+    fn test_tool_result_counts_as_progress_ok_true() {
+        assert!(tool_result_counts_as_progress(r#"{"ok": true}"#));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_ok_false() {
+        assert!(!tool_result_counts_as_progress(r#"{"ok": false}"#));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_approval_required_true() {
+        assert!(!tool_result_counts_as_progress(
+            r#"{"approval_required": true}"#
+        ));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_approval_required_false() {
+        assert!(tool_result_counts_as_progress(
+            r#"{"approval_required": false}"#
+        ));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_exit_code_zero() {
+        assert!(tool_result_counts_as_progress(r#"{"exit_code": 0}"#));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_exit_code_nonzero() {
+        assert!(!tool_result_counts_as_progress(r#"{"exit_code": 1}"#));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_error_field() {
+        assert!(!tool_result_counts_as_progress(
+            r#"{"error": "something went wrong"}"#
+        ));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_error_type_field() {
+        assert!(!tool_result_counts_as_progress(
+            r#"{"error_type": "validation", "message": "bad input"}"#
+        ));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_plain_data() {
+        assert!(tool_result_counts_as_progress(
+            r#"{"results": [], "count": 0}"#
+        ));
+    }
+
+    #[test]
+    fn test_tool_result_counts_as_progress_invalid_json() {
+        assert!(!tool_result_counts_as_progress("not json"));
     }
 }

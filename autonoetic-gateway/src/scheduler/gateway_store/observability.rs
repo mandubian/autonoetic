@@ -4,6 +4,20 @@ use anyhow::Result;
 use autonoetic_types::config::RetentionConfig;
 use rusqlite::params;
 
+fn looks_like_fts_syntax(query: &str) -> bool {
+    query
+        .chars()
+        .any(|c| matches!(c, '.' | '(' | ')' | '"' | '*' | '-' | '+' | '&'))
+}
+
+fn should_fallback_to_like(err: &rusqlite::Error, query: &str) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _)
+            if e.extended_code == rusqlite::ffi::SQLITE_ERROR && looks_like_fts_syntax(query)
+    )
+}
+
 impl GatewayStore {
     /// Prune execution_traces older than `days`. 0 = no pruning.
     pub fn prune_execution_traces(&self, days: u32) -> Result<u64> {
@@ -406,15 +420,8 @@ impl GatewayStore {
     ) -> Result<Vec<autonoetic_types::causal_chain::SessionTranscriptRecord>> {
         let conn = self.conn.lock().unwrap();
 
-        let mut conditions = Vec::new();
+        let mut conditions: Vec<String> = Vec::new();
         let mut sql_params: Vec<rusqlite::types::Value> = Vec::new();
-
-        let has_fts = if let Some(q) = query {
-            sql_params.push(rusqlite::types::Value::Text(q.to_string()));
-            true
-        } else {
-            false
-        };
 
         if let Some(aid) = agent_id {
             conditions.push("st.agent_id = ?".to_string());
@@ -442,8 +449,8 @@ impl GatewayStore {
             conditions.join(" AND ")
         };
 
-        let sql = if has_fts {
-            format!(
+        if let Some(q) = query {
+            let fts_sql = format!(
                 "SELECT st.transcript_id, st.session_id, st.root_session_id, st.agent_id,
                         st.revision_id, st.user_id, st.started_at, st.ended_at, st.status,
                         st.turn_count, st.transcript_handle, st.excerpt, st.origin_node_id
@@ -454,24 +461,87 @@ impl GatewayStore {
                  ORDER BY rank ASC
                  LIMIT ?",
                 where_clause = where_clause,
+            );
+
+            let mut fts_params = vec![rusqlite::types::Value::Text(q.to_string())];
+            fts_params.extend(sql_params.clone());
+            fts_params.push(rusqlite::types::Value::Integer(limit));
+
+            let mut stmt = conn.prepare(&fts_sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(fts_params), |row| {
+                Ok(autonoetic_types::causal_chain::SessionTranscriptRecord {
+                    transcript_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    root_session_id: row.get(2)?,
+                    agent_id: row.get(3)?,
+                    revision_id: row.get(4)?,
+                    user_id: row.get(5)?,
+                    started_at: row.get(6)?,
+                    ended_at: row.get(7)?,
+                    status: row.get(8)?,
+                    turn_count: row.get(9)?,
+                    transcript_handle: row.get(10)?,
+                    excerpt: row.get(11)?,
+                    origin_node_id: row.get(12)?,
+                })
+            });
+
+            match rows {
+                Ok(r) => {
+                    let mut results = Vec::new();
+                    for res in r {
+                        results.push(res?);
+                    }
+                    return Ok(results);
+                }
+                Err(ref e) if should_fallback_to_like(e, q) => {
+                    // FTS parse error with FTS-like syntax — fall back to LIKE search
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // Non-FTS path (no query, or FTS fallback)
+        let (sql, like_params) = if let Some(q) = query {
+            let mut fb_conditions = conditions.clone();
+            fb_conditions.push("st.excerpt LIKE ?".to_string());
+            let mut fb_params = sql_params.clone();
+            fb_params.push(rusqlite::types::Value::Text(format!("%{}%", q)));
+            let fb_where = fb_conditions.join(" AND ");
+            (
+                format!(
+                    "SELECT st.transcript_id, st.session_id, st.root_session_id, st.agent_id,
+                        st.revision_id, st.user_id, st.started_at, st.ended_at, st.status,
+                        st.turn_count, st.transcript_handle, st.excerpt, st.origin_node_id
+                 FROM session_transcripts st
+                 WHERE {fb_where}
+                 ORDER BY st.started_at DESC
+                 LIMIT ?",
+                    fb_where = fb_where,
+                ),
+                fb_params,
             )
         } else {
-            format!(
-                "SELECT st.transcript_id, st.session_id, st.root_session_id, st.agent_id,
+            (
+                format!(
+                    "SELECT st.transcript_id, st.session_id, st.root_session_id, st.agent_id,
                         st.revision_id, st.user_id, st.started_at, st.ended_at, st.status,
                         st.turn_count, st.transcript_handle, st.excerpt, st.origin_node_id
                  FROM session_transcripts st
                  WHERE {where_clause}
                  ORDER BY st.started_at DESC
                  LIMIT ?",
-                where_clause = where_clause,
+                    where_clause = where_clause,
+                ),
+                sql_params,
             )
         };
 
-        let mut stmt = conn.prepare(&sql)?;
-        sql_params.push(rusqlite::types::Value::Integer(limit));
+        let mut final_params = like_params;
+        final_params.push(rusqlite::types::Value::Integer(limit));
 
-        let rows = stmt.query_map(rusqlite::params_from_iter(sql_params), |row| {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(final_params), |row| {
             Ok(autonoetic_types::causal_chain::SessionTranscriptRecord {
                 transcript_id: row.get(0)?,
                 session_id: row.get(1)?,
@@ -490,9 +560,68 @@ impl GatewayStore {
         })?;
 
         let mut results = Vec::new();
-        for r in rows {
-            results.push(r?);
+        for res in rows {
+            results.push(res?);
         }
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod fts_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn test_looks_like_fts_syntax_dot() {
+        assert!(looks_like_fts_syntax("runtime.lock"));
+    }
+
+    #[test]
+    fn test_looks_like_fts_syntax_parens() {
+        assert!(looks_like_fts_syntax("config)"));
+        assert!(looks_like_fts_syntax("(config"));
+    }
+
+    #[test]
+    fn test_looks_like_fts_syntax_wildcard() {
+        assert!(looks_like_fts_syntax("config*"));
+    }
+
+    #[test]
+    fn test_looks_like_fts_syntax_operators() {
+        assert!(looks_like_fts_syntax("a-b"));
+        assert!(looks_like_fts_syntax("a+b"));
+        assert!(looks_like_fts_syntax("a&b"));
+        assert!(looks_like_fts_syntax("a\"b"));
+    }
+
+    #[test]
+    fn test_looks_like_fts_syntax_plain() {
+        assert!(!looks_like_fts_syntax("config"));
+        assert!(!looks_like_fts_syntax("runtime lock"));
+    }
+
+    #[test]
+    fn test_should_fallback_true_on_sqlite_error() {
+        let err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR as i32),
+            None,
+        );
+        assert!(should_fallback_to_like(&err, "runtime.lock"));
+    }
+
+    #[test]
+    fn test_should_fallback_false_on_non_fts_syntax() {
+        let err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR as i32),
+            None,
+        );
+        assert!(!should_fallback_to_like(&err, "plain query"));
+    }
+
+    #[test]
+    fn test_should_fallback_false_on_other_error() {
+        let err = rusqlite::Error::InvalidParameterName("test".into());
+        assert!(!should_fallback_to_like(&err, "runtime.lock"));
     }
 }

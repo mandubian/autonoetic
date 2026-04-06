@@ -296,6 +296,7 @@ sandbox:
   backend: "bubblewrap"
 dependencies: []
 artifacts: []
+layers: []
 "#
 }
 
@@ -1773,6 +1774,9 @@ pub fn handle_agent_import_skill(
 
     let output_skill = format!("---\n{}\n---\n\n{}", yaml_frontmatter, body.trim());
     std::fs::write(target_dir.join("SKILL.md"), &output_skill)?;
+
+    let runtime_lock_content = default_runtime_lock_contents();
+    std::fs::write(target_dir.join("runtime.lock"), runtime_lock_content)?;
 
     for subdir in &["scripts", "references", "assets"] {
         let src = skill_dir.join(subdir);

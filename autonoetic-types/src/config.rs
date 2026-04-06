@@ -490,6 +490,14 @@ pub struct GatewayConfig {
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
 
+    /// Maximum seconds a workflow task may remain in `Running` state without progress
+    /// before it is automatically force-completed as `Succeeded`. The sweeper checks
+    /// whether the child session has actually completed (via session manifest, digest,
+    /// or implicit artifact) before resolving. Set to 0 to disable.
+    /// Default: 600 (10 minutes).
+    #[serde(default = "default_stuck_task_timeout_secs_val")]
+    pub stuck_task_timeout_secs: Option<u64>,
+
     /// Evidence mode configuration.
     /// Controls how much tool/LLM execution data is saved to evidence files for debugging.
     /// "full": all tool results and LLM completions (default for development)
@@ -802,6 +810,10 @@ fn default_approval_timeout_secs() -> u64 {
     600
 }
 
+fn default_stuck_task_timeout_secs_val() -> Option<u64> {
+    Some(600)
+}
+
 fn default_max_session_turns() -> u32 {
     12
 }
@@ -897,6 +909,7 @@ impl Default for GatewayConfig {
             code_analysis: CodeAnalysisConfig::default(),
             session_budget: SessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
+            stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
             evidence_mode: default_evidence_mode(),
             digest_agent: DigestAgentConfig::default(),
             retention: RetentionConfig::default(),

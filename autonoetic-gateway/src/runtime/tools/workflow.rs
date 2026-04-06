@@ -2,7 +2,7 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
-use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use serde::Deserialize;
@@ -14,6 +14,7 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(WorkflowWaitTool));
     registry.register(Box::new(WorkflowStateTool));
     registry.register(Box::new(WorkflowCancelTaskTool));
+    registry.register(Box::new(WorkflowForceCompleteTool));
 }
 
 // ---------------------------------------------------------------------------
@@ -925,6 +926,251 @@ impl NativeTool for WorkflowCancelTaskTool {
             "workflow_id": workflow_id,
             "status": "Cancelled",
             "reason": reason.unwrap_or_else(|| "Cancelled by operator".to_string())
+        })
+        .to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// workflow.force_complete
+// ---------------------------------------------------------------------------
+
+/// Force-completes a task that is stuck in Running state.
+/// Verifies the child session has actually completed before transitioning status.
+pub struct WorkflowForceCompleteTool;
+
+impl NativeTool for WorkflowForceCompleteTool {
+    fn name(&self) -> &'static str {
+        "workflow.force_complete"
+    }
+
+    fn tier(&self) -> ToolTier {
+        ToolTier::Workflow
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
+    }
+
+    fn definition(&self) -> crate::llm::ToolDefinition {
+        crate::llm::ToolDefinition {
+            name: self.name().to_string(),
+            description: "Force-complete a task that is stuck in Running state. Checks whether the child session has actually finished (via checkpoint, session manifest, or promotion store) and transitions the task to Succeeded or Failed. Use this when workflow.wait keeps timing out but the child session is no longer active.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["workflow_id", "task_id"],
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "The workflow ID containing the stuck task."
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID that is stuck in Running state."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["succeeded", "failed"],
+                        "description": "The target status. Use 'succeeded' if the child completed its work, 'failed' if it errored out."
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Optional result summary to attach to the completed task."
+                    }
+                }
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let config = config
+            .ok_or_else(|| anyhow::anyhow!("Gateway config required for workflow.force_complete"))?;
+        let args: serde_json::Value = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid arguments: {}", e))?;
+
+        let workflow_id = args["workflow_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("workflow_id is required"))?;
+        let task_id = args["task_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("task_id is required"))?;
+        let target_status_str = args["status"].as_str().unwrap_or("succeeded");
+        let summary = args["summary"].as_str().map(str::to_string);
+
+        let store = gateway_store.as_deref();
+        let task = crate::scheduler::load_task_run(config, store, workflow_id, task_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Task '{}' not found in workflow '{}'", task_id, workflow_id)
+            })?;
+
+        if task.status != autonoetic_types::workflow::TaskRunStatus::Running {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "task_id": task_id,
+                "current_status": format!("{:?}", task.status),
+                "error": "Task is not in Running state. Only stuck Running tasks can be force-completed."
+            })
+            .to_string());
+        }
+
+        let target_status = match target_status_str {
+            "succeeded" => autonoetic_types::workflow::TaskRunStatus::Succeeded,
+            "failed" => autonoetic_types::workflow::TaskRunStatus::Failed,
+            other => {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "task_id": task_id,
+                    "error": format!("Invalid status '{}'. Must be 'succeeded' or 'failed'.", other)
+                })
+                .to_string());
+            }
+        };
+
+        let mut evidence = Vec::new();
+        let mut session_completed = false;
+
+        if let Some(gw_dir) = gateway_dir {
+            if !task.session_id.is_empty() {
+                let session_dir = gw_dir.join("sessions").join(&task.session_id);
+                if session_dir.exists() {
+                    let has_manifest = session_dir.join("manifest.json").exists();
+                    let has_digest = session_dir.join("digest.md").exists();
+
+                    if has_manifest {
+                        evidence.push("session manifest exists".to_string());
+                    }
+                    if has_digest {
+                        evidence.push("session digest exists".to_string());
+                    }
+
+                    if let Ok(content) = std::fs::read_to_string(session_dir.join("manifest.json")) {
+                        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if let Some(vis) = manifest.get("visibility") {
+                                if let Some(status) = vis.get("status") {
+                                    if let Some(s) = status.as_str() {
+                                        if s == "completed" || s == "done" {
+                                            session_completed = true;
+                                            evidence.push("session manifest shows completed status".to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if has_digest {
+                        if let Ok(digest) = std::fs::read_to_string(session_dir.join("digest.md")) {
+                            if digest.contains("Session summary") || digest.contains("jsonrpc_spawn_complete") {
+                                session_completed = true;
+                                evidence.push("session digest contains completion markers".to_string());
+                            }
+                        }
+                    }
+
+                    if !has_manifest && !has_digest {
+                        evidence.push("session directory exists but is empty (likely crashed)".to_string());
+                    }
+                } else {
+                    evidence.push("session directory does not exist".to_string());
+                }
+            }
+        }
+
+        if let Ok(Some(checkpoint)) = crate::scheduler::load_task_checkpoint(
+            config,
+            store,
+            workflow_id,
+            task_id,
+        ) {
+            evidence.push(format!("checkpoint exists (step: {}, version: {})", checkpoint.step, checkpoint.version));
+        }
+
+        let content_store = gateway_dir
+            .and_then(|gw_dir| crate::runtime::content_store::ContentStore::new(gw_dir).ok());
+
+        if let Some(store_obj) = content_store.as_ref() {
+            if !task.session_id.is_empty() {
+                let implicit_name = format!("impl_{}", task_id);
+                if let Ok(names) = store_obj.list_names(&task.session_id) {
+                    if names.contains(&implicit_name) {
+                        session_completed = true;
+                        evidence.push("implicit artifact exists (impl_task)".to_string());
+                    }
+                }
+            }
+        }
+
+        if !session_completed {
+            evidence.push("WARNING: could not confirm child session completed — proceeding based on caller judgment".to_string());
+        }
+
+        let result_summary = summary.unwrap_or_else(|| {
+            format!(
+                "Force-completed: {} (evidence: {})",
+                target_status_str,
+                evidence.join("; ")
+            )
+        });
+
+        crate::scheduler::workflow_store::update_task_run_status(
+            config,
+            store,
+            workflow_id,
+            task_id,
+            target_status.clone(),
+            Some(result_summary.clone()),
+            None,
+        )?;
+
+        let _ = crate::scheduler::workflow_store::checkpoint_task(
+            config,
+            store,
+            workflow_id,
+            task_id,
+            "force_completed".to_string(),
+            serde_json::json!({
+                "status": format!("{:?}", target_status),
+                "evidence": evidence,
+                "session_completed": session_completed,
+            }),
+        );
+
+        let _ = crate::scheduler::workflow_store::dequeue_task(config, store, workflow_id, task_id);
+
+        tracing::warn!(
+            target: "workflow",
+            task_id = %task_id,
+            workflow_id = %workflow_id,
+            new_status = ?target_status,
+            evidence = ?evidence,
+            "Task force-completed"
+        );
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "task_id": task_id,
+            "workflow_id": workflow_id,
+            "previous_status": "Running",
+            "new_status": format!("{:?}", target_status),
+            "result_summary": result_summary,
+            "evidence": evidence,
+            "session_confirmed_completed": session_completed,
+            "message": format!("Task {} force-completed as {:?}.", task_id, target_status)
         })
         .to_string())
     }

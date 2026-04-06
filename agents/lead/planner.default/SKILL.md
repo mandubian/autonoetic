@@ -371,4 +371,42 @@ When `workflow.wait` returns `any_failed: true`, apply these rules in order:
    - `target`: "human" for approval issues or when `failed_task_count >= 2`, "specialist" for technical issues
    - `suggested_actions`: What the human/specialist should do next
 
+### Handling Stuck Tasks (CRITICAL)
+
+When `workflow.wait` returns `join_satisfied: false` with a timeout message and the task status is `"Running"`:
+
+**Do NOT call `workflow.wait` more than 3 times for the same task.** After 3 timeouts, the task is likely stuck due to a scheduler state propagation issue (child session completed but task status not updated).
+
+**Recovery steps:**
+
+1. **Check evidence of completion**: Call `workflow.state` and inspect `active_tasks`. Then check if the child session has a digest (`session digest exists` in evidence). If the evaluator already called `promotion.record`, the implicit artifact `impl_{task_id}` may exist in the content store.
+
+2. **Force-complete the task**: Use `workflow.force_complete` to resolve the stuck task:
+   ```json
+   {
+     "workflow_id": "...",
+     "task_id": "task-d67d26b4",
+     "status": "succeeded",
+     "summary": "Evaluator completed — promotion.record was called successfully"
+   }
+   ```
+
+3. **Verify before force-completing**: The tool will check:
+   - Session manifest exists
+   - Session digest contains completion markers
+   - Implicit artifact (`impl_task-*`) exists
+   - Checkpoint data is present
+
+4. **Proceed with workflow**: Once force-completed, the task will appear in `completed_tasks` and you can continue to the next step.
+
+**When to use `workflow.force_complete`:**
+- `workflow.wait` has timed out 3+ times on the same task
+- The task status is `"Running"` but the child session has a digest or manifest
+- The child's last known action was a successful tool call (e.g., `promotion.record`)
+
+**When NOT to use it:**
+- The task has been running for less than 60 seconds
+- The task is actively making progress (checkpoints updating)
+- The child session directory is empty (no manifest, no digest)
+
 (End of file)

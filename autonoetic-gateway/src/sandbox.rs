@@ -155,7 +155,9 @@ impl SandboxRunner {
                 if dependencies.is_some() {
                     bubblewrap_shell_command(agent_dir, &composed_entrypoint, &[], overrides)?
                 } else {
-                    bubblewrap_command(agent_dir, entrypoint, overrides)?
+                    // Always use shell command — user-provided entrypoints can contain
+                    // shell features (&&, ||, pipes, redirects, cd, etc.)
+                    bubblewrap_shell_command(agent_dir, entrypoint, &[], overrides)?
                 }
             }
             SandboxDriverKind::Docker => docker_command(agent_dir, &composed_entrypoint)?,
