@@ -9,10 +9,64 @@
 use crate::execution::{gateway_actor_id, init_gateway_causal_logger};
 use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalRequest, ApprovalStatus, ScheduledAction,
+    ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
 };
-use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::config::{ApprovalLevelConfig, GatewayConfig};
 use std::sync::Arc;
+
+/// Determine the required approval level for a given action based on config.
+pub fn resolve_approval_level(
+    config: &GatewayConfig,
+    action: &ScheduledAction,
+) -> ApprovalLevel {
+    let level_config = &config.approval_levels;
+    let action_kind = action.kind();
+
+    // Check action_overrides first
+    if let Some(level_str) = level_config.action_overrides.get(action_kind) {
+        return parse_approval_level(level_str);
+    }
+
+    // For SandboxExec, check host_overrides against the command
+    if let ScheduledAction::SandboxExec { command, .. } = action {
+        for (pattern, level_str) in &level_config.host_overrides {
+            if command.contains(pattern) {
+                return parse_approval_level(level_str);
+            }
+        }
+    }
+
+    // Fall back to default
+    level_config
+        .default
+        .as_deref()
+        .map(parse_approval_level)
+        .unwrap_or(ApprovalLevel::Operator)
+}
+
+fn parse_approval_level(s: &str) -> ApprovalLevel {
+    match s {
+        "admin" => ApprovalLevel::Admin,
+        s if s.starts_with("agent:") => {
+            ApprovalLevel::Agent(s.strip_prefix("agent:").unwrap_or(s).to_string())
+        }
+        _ => ApprovalLevel::Operator,
+    }
+}
+
+/// Check whether the provided approver level satisfies the required level.
+pub fn level_satisfies(provided: &ApprovalLevel, required: &ApprovalLevel) -> bool {
+    match (provided, required) {
+        // Admin satisfies any level
+        (ApprovalLevel::Admin, _) => true,
+        // Operator satisfies Operator only
+        (ApprovalLevel::Operator, ApprovalLevel::Operator) => true,
+        (ApprovalLevel::Operator, _) => false,
+        // Agent(x) satisfies Agent(x) exactly
+        (ApprovalLevel::Agent(a), ApprovalLevel::Agent(b)) => a == b,
+        (ApprovalLevel::Agent(_), _) => false,
+    }
+}
 
 /// Load approval requests from the gateway store for a specific session.
 ///
@@ -91,6 +145,7 @@ pub fn approve_request(
     decided_by: &str,
     reason: Option<String>,
     secrets: Option<Vec<(String, String)>>,
+    approver_level: Option<&ApprovalLevel>,
 ) -> anyhow::Result<ApprovalDecision> {
     // If secrets are provided, store them in the vault before approving
     // and create the CredentialRecord so the caller can resume.
@@ -200,6 +255,19 @@ pub fn approve_request(
                     credential_id = %credential_id,
                     secrets_stored = secret_pairs.len(),
                     "Stored secrets and created credential record for credential prompt"
+                );
+            }
+        }
+    }
+
+    // Level validation: check that the approver has sufficient privileges
+    if let (Some(store), Some(provided_level)) = (gateway_store, approver_level) {
+        if let Some(req) = store.get_approval(request_id)? {
+            if !level_satisfies(provided_level, &req.approval_level) {
+                anyhow::bail!(
+                    "Insufficient approval level: this request requires {:?} but you have {:?}",
+                    req.approval_level,
+                    provided_level
                 );
             }
         }
@@ -346,6 +414,7 @@ fn cancel_approval_request(
         root_session_id: request.root_session_id.clone(),
         workflow_id: request.workflow_id.clone(),
         task_id: request.task_id.clone(),
+        approval_level: request.approval_level,
     };
 
     // Clean up reevaluation state
@@ -641,6 +710,7 @@ fn unblock_task_on_approval(
         t_id,
         new_status,
         None,
+        None,
     ) {
         tracing::warn!(
             target: "approval",
@@ -761,6 +831,7 @@ fn decide_request(
         root_session_id: request.root_session_id.clone(),
         workflow_id: request.workflow_id.clone(),
         task_id: request.task_id.clone(),
+        approval_level: request.approval_level,
     };
     // Persist decision in GatewayStore
     if let Some(store) = gateway_store {
@@ -847,7 +918,7 @@ mod tests {
     use super::{should_notify_parent_session, should_resume_waiting_session};
     use crate::scheduler::workflow_store::{ensure_workflow_for_root_session, save_task_run};
     use autonoetic_types::background::{
-        ApprovalDecision, ApprovalRequest, ApprovalStatus, ScheduledAction,
+        ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
     };
     use autonoetic_types::config::GatewayConfig;
     use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
@@ -884,6 +955,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&req).unwrap();
 
@@ -914,6 +986,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
             },
+            approval_level: ApprovalLevel::Operator,
             created_at: "2020-01-01T00:00:00Z".to_string(),
             reason: None,
             evidence_ref: None,
@@ -959,6 +1032,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
             },
+            approval_level: ApprovalLevel::Operator,
             created_at: created.to_string(),
             reason: None,
             evidence_ref: None,
@@ -996,6 +1070,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&install).unwrap();
 
@@ -1030,6 +1105,7 @@ mod tests {
             workflow_id: None,
             task_id: None,
             root_session_id: Some("demo-session".to_string()),
+            approval_level: ApprovalLevel::Operator,
         };
         assert!(should_notify_parent_session(&decision));
     }
@@ -1053,6 +1129,7 @@ mod tests {
             workflow_id: None,
             task_id: None,
             root_session_id: Some("demo-session".to_string()),
+            approval_level: ApprovalLevel::Operator,
         };
         assert!(should_notify_parent_session(&decision));
     }
@@ -1076,6 +1153,7 @@ mod tests {
             workflow_id: None,
             task_id: None,
             root_session_id: Some("demo-session".to_string()),
+            approval_level: ApprovalLevel::Operator,
         };
         assert!(!should_notify_parent_session(&decision));
     }
@@ -1099,6 +1177,7 @@ mod tests {
             workflow_id: None,
             task_id: None,
             root_session_id: None,
+            approval_level: ApprovalLevel::Operator,
         };
         assert!(!should_notify_parent_session(&decision));
     }
@@ -1122,6 +1201,7 @@ mod tests {
             workflow_id: Some("wf-demo".to_string()),
             task_id: Some("task-demo".to_string()),
             root_session_id: Some("demo-session".to_string()),
+            approval_level: ApprovalLevel::Operator,
         };
 
         assert!(!should_resume_waiting_session(&decision));
@@ -1146,6 +1226,7 @@ mod tests {
             workflow_id: None,
             task_id: None,
             root_session_id: None,
+            approval_level: ApprovalLevel::Operator,
         };
 
         assert!(should_resume_waiting_session(&decision));
@@ -1203,6 +1284,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&request).unwrap();
 
@@ -1211,6 +1293,7 @@ mod tests {
             Some(&store),
             &request.request_id,
             "operator",
+            None,
             None,
             None,
         )
@@ -1254,6 +1337,7 @@ mod tests {
             workflow_id: None,
             task_id: None,
             root_session_id: None,
+            approval_level: ApprovalLevel::Operator,
         };
 
         // SandboxExec is no longer auto-executed; agent retries with approval_ref.
@@ -1294,17 +1378,18 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&request).unwrap();
 
         // First approve succeeds
         let result =
-            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None, None);
+            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None, None, None);
         assert!(result.is_ok(), "first approve should succeed");
 
         // Second approve fails with idempotency error
         let result =
-            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None, None);
+            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None, None, None);
         assert!(result.is_err(), "second approve should be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(

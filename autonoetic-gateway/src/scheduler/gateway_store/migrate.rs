@@ -32,6 +32,10 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
+    if current_version >= SCHEMA_VERSION_LATEST {
+        return Ok(());
+    }
+
     let tx = conn.transaction()?;
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS approvals (
@@ -48,7 +52,8 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
             decided_at TEXT,
-            decided_by TEXT
+            decided_by TEXT,
+            approval_level TEXT NOT NULL DEFAULT 'operator'
         );
 
         CREATE TABLE IF NOT EXISTS notifications (

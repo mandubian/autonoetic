@@ -1,5 +1,5 @@
 use anyhow::Result;
-use autonoetic_types::background::ApprovalRequest;
+use autonoetic_types::background::{ApprovalLevel, ApprovalRequest};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::GatewayStore;
@@ -11,8 +11,9 @@ impl GatewayStore {
         conn.execute(
             "INSERT INTO approvals (
                 request_id, agent_id, session_id, root_session_id, workflow_id, task_id,
-                action_type, action_payload, reason, evidence_ref, status, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                action_type, action_payload, reason, evidence_ref, status, created_at,
+                approval_level
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 request.request_id,
                 request.agent_id,
@@ -25,7 +26,8 @@ impl GatewayStore {
                 request.reason,
                 request.evidence_ref,
                 "pending",
-                request.created_at
+                request.created_at,
+                serde_json::to_string(&request.approval_level)?
             ],
         )?;
         Ok(())
@@ -36,7 +38,7 @@ impl GatewayStore {
         request_id: &str,
     ) -> Result<Option<ApprovalRequest>> {
         conn.query_row(
-            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref FROM approvals WHERE request_id = ?1",
+            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level FROM approvals WHERE request_id = ?1",
             params![request_id],
             |row| {
                 let action_payload: String = row.get(3)?;
@@ -50,6 +52,8 @@ impl GatewayStore {
                 let action = serde_json::from_str(&action_payload).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
                 })?;
+                let level_str: String = row.get(13)?;
+                let approval_level: ApprovalLevel = serde_json::from_str(&level_str).unwrap_or(ApprovalLevel::Operator);
                 Ok(ApprovalRequest {
                     request_id: row.get(0)?,
                     agent_id: row.get(1)?,
@@ -64,6 +68,7 @@ impl GatewayStore {
                     decided_by: row.get(10)?,
                     reason: row.get(11)?,
                     evidence_ref: row.get(12)?,
+                    approval_level,
                 })
             },
         ).optional().map_err(Into::into)
