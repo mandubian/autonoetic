@@ -913,6 +913,7 @@ impl NativeTool for WorkflowCancelTaskTool {
             reason
                 .clone()
                 .or_else(|| Some("Cancelled by operator".to_string())),
+            None,
         )?;
 
         // Remove from queue if present.

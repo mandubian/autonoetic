@@ -11,7 +11,7 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentManifest, CredentialRecord, CredentialSetupStep};
-use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
+use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -727,7 +727,7 @@ impl NativeTool for CredentialSetupTool {
                         request_id: request_id.clone(),
                         agent_id: manifest.agent.id.clone(),
                         session_id: _session_id.unwrap_or("").to_string(),
-                        action: approval_action,
+                        action: approval_action.clone(),
                         created_at: chrono::Utc::now().to_rfc3339(),
                         reason: Some(format!(
                             "Credential setup for '{}' requires human input for secret fields",
@@ -740,6 +740,9 @@ impl NativeTool for CredentialSetupTool {
                         status: None,
                         decided_at: None,
                         decided_by: None,
+                        approval_level: _config
+                            .map(|c| crate::scheduler::approval::resolve_approval_level(c, &approval_action))
+                            .unwrap_or(ApprovalLevel::Operator),
                     };
                     store.create_approval(&approval_req)?;
 

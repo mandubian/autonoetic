@@ -234,6 +234,7 @@ pub async fn handle_gateway_approvals(
                 "cli",
                 reason.clone(),
                 if secrets.is_empty() { None } else { Some(secrets.clone()) },
+                None,
             )?;
             println!(
                 "Approved {} for agent {} ({})",
@@ -573,6 +574,7 @@ async fn run_interactive_approvals(
                                 "cli-interactive",
                                 None,
                                 secrets,
+                                None,
                             ) {
                                 Ok(decision) => {
                                     status_msg = format!(

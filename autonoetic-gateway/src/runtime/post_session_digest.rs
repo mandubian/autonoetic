@@ -90,7 +90,8 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         chat_only: true,
         context_window_tokens: None,
         base_url: None,
-        routing_preset: None,
+        api_key_env: None,
+            routing_preset: None,
     })
 }
 
@@ -104,7 +105,8 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
         chat_only: p.chat_only.unwrap_or(false),
         context_window_tokens: p.context_window_tokens,
         base_url: p.base_url.clone(),
-        routing_preset: None,
+        api_key_env: None,
+            routing_preset: None,
     }
 }
 

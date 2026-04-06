@@ -6,8 +6,8 @@ use crate::execution::{gateway_actor_id, init_gateway_causal_logger, GatewayExec
 use crate::runtime::reevaluation_state::persist_reevaluation_state;
 use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalRequest, BackgroundMode, BackgroundPolicy, BackgroundState,
-    ReevaluationState, WakeReason,
+    ApprovalDecision, ApprovalLevel, ApprovalRequest, BackgroundMode, BackgroundPolicy,
+    BackgroundState, ReevaluationState, WakeReason,
 };
 use chrono::{DateTime, Duration, Utc};
 use std::path::Path;
@@ -128,9 +128,10 @@ pub async fn handle_due_wake(
                     request_id: uuid::Uuid::new_v4().to_string(),
                     agent_id: agent_id.to_string(),
                     session_id: session_id.to_string(),
-                    action,
+                    action: action.clone(),
                     created_at: now.to_rfc3339(),
                     reason: Some(format!("Wake reason: {:?}", reason)),
+                    approval_level: super::approval::resolve_approval_level(config.as_ref(), &action),
                     evidence_ref: reevaluation
                         .pending_scheduled_action
                         .as_ref()

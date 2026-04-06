@@ -67,6 +67,7 @@ fn test_manifest() -> AgentManifest {
             chat_only: false,
             context_window_tokens: None,
             base_url: None,
+            api_key_env: None,
             routing_preset: None,
         }),
         limits: None,

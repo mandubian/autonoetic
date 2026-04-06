@@ -41,6 +41,7 @@ impl RemoteAccessAnalyzer {
     /// 2. Function/method calls for network operations
     /// 3. URL literals (http://, https://, ftp://)
     /// 4. IP address literals
+    /// 5. Network shell commands (pip install, curl, git clone, etc.)
     pub fn analyze_code(code: &str) -> RemoteAccessAnalysis {
         let mut patterns = Vec::new();
 
@@ -55,6 +56,9 @@ impl RemoteAccessAnalyzer {
 
         // Check for IP address literals
         patterns.extend(Self::detect_ip_addresses(code));
+
+        // Check for network shell commands
+        patterns.extend(Self::detect_network_commands(code));
 
         let requires_approval = !patterns.is_empty();
 
@@ -238,6 +242,208 @@ impl RemoteAccessAnalyzer {
 
         patterns
     }
+
+    /// Detects shell commands that require network access.
+    ///
+    /// Catches package managers, download tools, and VCS network operations
+    /// regardless of language. This is a generic capability detection mechanism —
+    /// these commands *always* need network, so their presence means the sandbox
+    /// must have network access (via approval or agent capability).
+    fn detect_network_commands(code: &str) -> Vec<DetectedPattern> {
+        let mut patterns = Vec::new();
+
+        let command_patterns: &[(&str, &str)] = &[
+            // Language package managers
+            ("pip install", "pip install downloads packages from the network"),
+            ("pip3 install", "pip3 install downloads packages from the network"),
+            ("npm install", "npm install downloads packages from the network"),
+            ("yarn install", "yarn install downloads packages from the network"),
+            ("yarn add", "yarn add downloads packages from the network"),
+            ("pnpm install", "pnpm install downloads packages from the network"),
+            ("bun install", "bun install downloads packages from the network"),
+            ("go get", "go get downloads modules from the network"),
+            ("go mod download", "go mod download fetches modules from the network"),
+            ("cargo install", "cargo install downloads crates from the network"),
+            ("gem install", "gem install downloads gems from the network"),
+            ("composer install", "composer install downloads packages from the network"),
+            ("composer require", "composer require downloads packages from the network"),
+            // Download tools
+            ("curl ", "curl makes network requests"),
+            ("wget ", "wget downloads files from the network"),
+            // System package managers
+            ("apt-get install", "apt-get install downloads packages from the network"),
+            ("apt-get update", "apt-get update fetches package lists from the network"),
+            ("apk add", "apk add downloads packages from the network"),
+            ("yum install", "yum install downloads packages from the network"),
+            ("dnf install", "dnf install downloads packages from the network"),
+            ("pacman -S", "pacman -S downloads packages from the network"),
+            // VCS network operations
+            ("git clone", "git clone fetches a repository from the network"),
+            ("git fetch", "git fetch contacts a remote repository"),
+            ("git pull", "git pull fetches and merges from a remote"),
+            ("git push", "git push sends commits to a remote"),
+        ];
+
+        for (pattern_str, reason) in command_patterns {
+            if let Some(line_num) = code.lines().enumerate().find_map(|(i, line)| {
+                if line.contains(pattern_str) {
+                    Some(i + 1)
+                } else {
+                    None
+                }
+            }) {
+                // Deduplicate: only one detection per unique command pattern
+                let pat = pattern_str.trim().to_string();
+                if !patterns
+                    .iter()
+                    .any(|p: &DetectedPattern| p.pattern == pat)
+                {
+                    patterns.push(DetectedPattern {
+                        category: "network_command".to_string(),
+                        pattern: pat,
+                        line_number: Some(line_num),
+                        reason: reason.to_string(),
+                    });
+                }
+            }
+        }
+
+        patterns
+    }
+
+    /// Analyzes a sandbox exec command together with its declared dependency packages.
+    ///
+    /// This is the primary entry point for sandbox exec analysis. It combines:
+    /// - Code-level pattern detection (imports, function calls, URLs, IPs, network commands)
+    /// - Dependency awareness: non-empty `dep_packages` implies a package install step
+    ///   that requires network access (pip install / npm install / etc.)
+    ///
+    /// The dependency check is a generic mechanism: if the agent declares packages,
+    /// the sandbox MUST install them, which requires network. No intelligence needed.
+    pub fn analyze_command_and_dependencies(
+        code: &str,
+        dep_packages: Option<&[String]>,
+    ) -> RemoteAccessAnalysis {
+        let mut patterns = Self::analyze_code(code);
+
+        if let Some(packages) = dep_packages {
+            if !packages.is_empty() {
+                patterns.detected_patterns.push(DetectedPattern {
+                    category: "dependency_install".to_string(),
+                    pattern: format!(
+                        "packages: [{}]",
+                        packages.join(", ")
+                    ),
+                    line_number: None,
+                    reason: format!(
+                        "Package installation ({} package(s)) requires network access",
+                        packages.len()
+                    ),
+                });
+                patterns.requires_approval = true;
+            }
+        }
+
+        if !patterns.detected_patterns.is_empty() {
+            let categories: Vec<&str> = patterns
+                .detected_patterns
+                .iter()
+                .map(|p| p.category.as_str())
+                .collect();
+            let unique_categories: Vec<&str> = categories
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            patterns.summary = format!(
+                "Detected {} remote access pattern(s) in categories: {}",
+                patterns.detected_patterns.len(),
+                unique_categories.join(", ")
+            );
+        }
+
+        patterns
+    }
+
+    /// Analyzes code including transitively imported workspace files.
+    ///
+    /// Parses `import X` / `from X import` from the primary code, matches module names
+    /// against workspace files (e.g., `import mymod` → `mymod.py`), and recursively
+    /// analyzes each matched file. Results are merged (union of detected patterns).
+    pub fn analyze_code_with_workspace(
+        code: &str,
+        workspace_files: &[(String, String)],
+    ) -> RemoteAccessAnalysis {
+        let mut patterns = Self::analyze_code(code);
+
+        // Parse import module names from the primary code
+        let import_re = Regex::new(r"(?m)^\s*(?:import\s+(\w+)|from\s+(\w+)\s+import)")
+            .unwrap();
+
+        let module_names: std::collections::HashSet<String> = import_re
+            .captures_iter(code)
+            .filter_map(|cap| cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str().to_string()))
+            .collect();
+
+        if module_names.is_empty() || workspace_files.is_empty() {
+            return patterns;
+        }
+
+        // Build filename → content lookup from workspace
+        let workspace_map: std::collections::HashMap<String, &str> = workspace_files
+            .iter()
+            .map(|(name, content)| {
+                // Strip directory prefix and extension for matching
+                let base = std::path::Path::new(name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(name)
+                    .to_string();
+                (base, content.as_str())
+            })
+            .collect();
+
+        // Analyze each imported module found in workspace
+        let mut analyzed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for module in &module_names {
+            if analyzed.contains(module) {
+                continue;
+            }
+            if let Some(content) = workspace_map.get(module) {
+                analyzed.insert(module.clone());
+                let transitive = Self::analyze_code(content);
+                for pat in transitive.detected_patterns {
+                    // Avoid duplicates
+                    if !patterns.detected_patterns.iter().any(|p| {
+                        p.pattern == pat.pattern && p.category == pat.category
+                    }) {
+                        patterns.detected_patterns.push(pat);
+                    }
+                }
+            }
+        }
+
+        if !patterns.detected_patterns.is_empty() {
+            patterns.requires_approval = true;
+            let categories: Vec<&str> = patterns
+                .detected_patterns
+                .iter()
+                .map(|p| p.category.as_str())
+                .collect();
+            let unique_categories: Vec<&str> = categories
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            patterns.summary = format!(
+                "Detected {} remote access pattern(s) in categories: {}",
+                patterns.detected_patterns.len(),
+                unique_categories.join(", ")
+            );
+        }
+
+        patterns
+    }
 }
 
 #[cfg(test)]
@@ -375,5 +581,165 @@ async def fetch():
 "#;
         let analysis = RemoteAccessAnalyzer::analyze_code(code);
         assert!(analysis.requires_approval);
+    }
+
+    // --- Network command detection tests ---
+
+    #[test]
+    fn test_pip_install_detected() {
+        let code = "cd /tmp && pip install requests pydantic && python3 app.py";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_command" && p.pattern.contains("pip install")));
+    }
+
+    #[test]
+    fn test_npm_install_detected() {
+        let code = "cd /tmp && npm install express && node server.js";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_command" && p.pattern.contains("npm install")));
+    }
+
+    #[test]
+    fn test_curl_detected() {
+        let code = "curl https://api.example.com/data";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_command" && p.pattern.contains("curl")));
+    }
+
+    #[test]
+    fn test_wget_detected() {
+        let code = "wget https://example.com/file.tar.gz";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_command" && p.pattern.contains("wget")));
+    }
+
+    #[test]
+    fn test_git_clone_detected() {
+        let code = "git clone https://github.com/example/repo.git /tmp/repo";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_command" && p.pattern.contains("git clone")));
+    }
+
+    #[test]
+    fn test_apt_get_install_detected() {
+        let code = "apt-get update && apt-get install -y build-essential";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_command" && p.pattern.contains("apt-get")));
+    }
+
+    // --- Dependency-aware analysis tests ---
+
+    #[test]
+    fn test_dependencies_imply_network() {
+        let code = "print('hello')";
+        let packages = vec!["requests".to_string(), "pydantic".to_string()];
+        let analysis =
+            RemoteAccessAnalyzer::analyze_command_and_dependencies(code, Some(&packages));
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "dependency_install"));
+    }
+
+    #[test]
+    fn test_dependencies_empty_no_flag() {
+        let code = "print('hello')";
+        let packages: Vec<String> = vec![];
+        let analysis =
+            RemoteAccessAnalyzer::analyze_command_and_dependencies(code, Some(&packages));
+        assert!(!analysis.requires_approval);
+    }
+
+    #[test]
+    fn test_dependencies_none_no_flag() {
+        let code = "print('hello')";
+        let analysis = RemoteAccessAnalyzer::analyze_command_and_dependencies(code, None);
+        assert!(!analysis.requires_approval);
+    }
+
+    #[test]
+    fn test_dependencies_combine_with_code_patterns() {
+        let code = r#"
+import socket
+s = socket.socket()
+"#;
+        let packages = vec!["requests".to_string()];
+        let analysis =
+            RemoteAccessAnalyzer::analyze_command_and_dependencies(code, Some(&packages));
+        assert!(analysis.requires_approval);
+        // Should have both import and dependency_install
+        assert!(analysis.detected_patterns.len() >= 2);
+    }
+
+    // --- Transitive workspace analysis tests ---
+
+    #[test]
+    fn test_transitive_import_detected() {
+        let main_code = r#"
+import mymod
+mymod.do_thing()
+"#;
+        let mymod_content = r#"
+import requests
+def do_thing():
+    return requests.get("https://example.com")
+"#;
+        let workspace = vec![
+            ("mymod.py".to_string(), mymod_content.to_string()),
+            ("other.py".to_string(), "import os".to_string()),
+        ];
+        let analysis = RemoteAccessAnalyzer::analyze_code_with_workspace(main_code, &workspace);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "import" && p.pattern.contains("requests")));
+    }
+
+    #[test]
+    fn test_transitive_no_match() {
+        let main_code = r#"
+import nonexistent
+print("hello")
+"#;
+        let workspace = vec![("other.py".to_string(), "import os".to_string())];
+        let analysis = RemoteAccessAnalyzer::analyze_code_with_workspace(main_code, &workspace);
+        assert!(!analysis.requires_approval);
+    }
+
+    #[test]
+    fn test_transitive_empty_workspace() {
+        let main_code = r#"
+import mymod
+mymod.do_thing()
+"#;
+        let workspace: Vec<(String, String)> = vec![];
+        let analysis = RemoteAccessAnalyzer::analyze_code_with_workspace(main_code, &workspace);
+        assert!(!analysis.requires_approval);
     }
 }

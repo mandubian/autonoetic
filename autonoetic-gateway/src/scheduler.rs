@@ -11,6 +11,8 @@
 use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 
+use crate::runtime::continuation;
+
 pub mod approval;
 pub mod decision;
 pub mod eval_runner;
@@ -252,6 +254,7 @@ async fn check_approval_timeouts(
                     &task.task_id,
                     autonoetic_types::workflow::TaskRunStatus::Failed,
                     Some(reason.clone()),
+                    None,
                 );
                 let _ = workflow_store::checkpoint_task(
                     &config,
@@ -680,6 +683,33 @@ async fn spawn_task_execution(
             // Check if the turn was suspended at an approval gate (continuation already on disk).
             if let Some(ref request_id) = spawn_result.suspended_for_approval {
                 let summary = format!("awaiting approval {}", request_id);
+
+                // Load continuation to get approval details (tool name, etc.)
+                let approval_metadata = continuation::load_continuation(&cfg, &t_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|cont| {
+                        let tool_name = cont.pending_tool_call.tool_name.clone();
+                        // Derive approval kind from tool name
+                        let kind = if tool_name.contains("sandbox") {
+                            "sandbox".to_string()
+                        } else if tool_name.contains("install") {
+                            "agent_install".to_string()
+                        } else {
+                            "tool_execution".to_string()
+                        };
+                        // Try to extract reason from approval_response
+                        let reason = serde_json::from_str::<serde_json::Value>(&cont.pending_tool_call.approval_response)
+                            .ok()
+                            .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from));
+
+                        Some(workflow_store::ApprovalMetadata {
+                            request_id: cont.approval_request_id,
+                            kind,
+                            reason,
+                        })
+                    });
+
                 if let Err(e) = workflow_store::update_task_run_status(
                     &cfg,
                     store,
@@ -687,6 +717,7 @@ async fn spawn_task_execution(
                     &t_id,
                     autonoetic_types::workflow::TaskRunStatus::AwaitingApproval,
                     Some(summary),
+                    approval_metadata,
                 ) {
                     tracing::warn!(
                         target: "workflow",
@@ -732,6 +763,7 @@ async fn spawn_task_execution(
                 &t_id,
                 autonoetic_types::workflow::TaskRunStatus::Succeeded,
                 summary,
+                None,
             ) {
                 tracing::warn!(target: "workflow", error = %e, "Failed to persist async task completion");
             }
@@ -758,6 +790,7 @@ async fn spawn_task_execution(
                 &t_id,
                 autonoetic_types::workflow::TaskRunStatus::Failed,
                 Some(e.to_string()),
+                None,
             ) {
                 tracing::warn!(target: "workflow", error = %inner, "Failed to persist async task failure");
             }

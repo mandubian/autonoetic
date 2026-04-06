@@ -148,8 +148,8 @@ pub fn parse_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
 mod tests {
     use super::should_wake;
     use autonoetic_types::background::{
-        ApprovalRequest, BackgroundPolicy, BackgroundState, ReevaluationState, ScheduledAction,
-        WakePredicates,
+        ApprovalLevel, ApprovalRequest, BackgroundPolicy, BackgroundState, ReevaluationState,
+        ScheduledAction, WakePredicates,
     };
     use autonoetic_types::config::GatewayConfig;
     use chrono::Utc;
@@ -187,6 +187,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&req).unwrap();
 

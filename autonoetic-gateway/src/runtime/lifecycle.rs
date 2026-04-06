@@ -1063,7 +1063,8 @@ impl AgentExecutor {
                 chat_only: false,
                 context_window_tokens: None,
                 base_url: None,
-                routing_preset: None,
+                api_key_env: None,
+            routing_preset: None,
             };
             let mut routed_llm_cfg = self.manifest.llm_config.clone().unwrap_or(default_cfg);
 

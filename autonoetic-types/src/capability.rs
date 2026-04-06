@@ -40,7 +40,10 @@ pub enum Capability {
     AgentSpawn { max_children: u32 },
 
     /// Send messages to other agents.
-    AgentMessage { patterns: Vec<String> },
+    AgentMessage {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 
     /// Periodic wake-ups for background processing.
     BackgroundReevaluation {
@@ -50,25 +53,51 @@ pub enum Capability {
 
     /// Execute scripts/code in the sandbox.
     /// The `patterns` field limits which commands can be run.
-    CodeExecution { patterns: Vec<String> },
+    CodeExecution {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 
     /// Request a gateway-level emergency stop for a root session (dedicated responders only).
     EmergencyStop,
 
     /// Access to agent revision operations (create, promote, rollback).
-    AgentRevision { patterns: Vec<String> },
+    AgentRevision {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 
     /// Access to evaluation operations (suite publish, run, report).
-    Evaluation { patterns: Vec<String> },
+    Evaluation {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 
     /// Access to approval queue operations.
-    ApprovalQueue { patterns: Vec<String> },
+    ApprovalQueue {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 
     /// Access to scheduler signal operations.
-    SchedulerSignal { patterns: Vec<String> },
+    SchedulerSignal {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 
     /// Access to credential operations (check, request, setup).
     /// The `services` field restricts which services can be accessed.
     /// Use ["*"] for all services, or specific service names.
-    CredentialAccess { services: Vec<String> },
+    CredentialAccess {
+        #[serde(default = "default_services_all")]
+        services: Vec<String>,
+    },
+}
+
+fn default_patterns_all() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+fn default_services_all() -> Vec<String> {
+    vec!["*".to_string()]
 }

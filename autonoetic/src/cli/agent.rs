@@ -21,6 +21,7 @@ pub struct LlmTemplateConfig {
     pub temperature: f64,
     pub chat_only: bool,
     pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
     pub routing_preset: Option<String>,
 }
 
@@ -40,7 +41,8 @@ pub fn resolve_llm_config(
             temperature: 0.2,
             chat_only: false,
             base_url: None,
-            routing_preset: None,
+            api_key_env: None,
+                routing_preset: None,
         };
     }
 
@@ -60,7 +62,8 @@ pub fn resolve_llm_config(
                         temperature: preset.temperature.unwrap_or(0.2),
                         chat_only: preset.chat_only.unwrap_or(false),
                         base_url: preset.base_url.clone(),
-                        routing_preset: Some(preset_name.to_string()),
+                        api_key_env: preset.api_key_env.clone().or(first_preset.api_key_env.clone()),
+                routing_preset: Some(preset_name.to_string()),
                     };
                 }
             }
@@ -71,6 +74,7 @@ pub fn resolve_llm_config(
                 temperature: preset.temperature.unwrap_or(0.2),
                 chat_only: preset.chat_only.unwrap_or(false),
                 base_url: preset.base_url.clone(),
+                api_key_env: preset.api_key_env.clone(),
                 routing_preset: Some(preset_name.to_string()),
             }
         } else {
@@ -81,6 +85,7 @@ pub fn resolve_llm_config(
                 temperature: preset.temperature.unwrap_or(0.2),
                 chat_only: preset.chat_only.unwrap_or(false),
                 base_url: preset.base_url.clone(),
+                api_key_env: preset.api_key_env.clone(),
                 routing_preset: None,
             }
         }
@@ -110,7 +115,8 @@ pub fn resolve_llm_config(
             temperature: 0.2,
             chat_only: false,
             base_url: None,
-            routing_preset: None,
+            api_key_env: None,
+                routing_preset: None,
         },
         "coder" => LlmTemplateConfig {
             provider: "anthropic".to_string(),
@@ -118,7 +124,8 @@ pub fn resolve_llm_config(
             temperature: 0.1,
             chat_only: false,
             base_url: None,
-            routing_preset: None,
+            api_key_env: None,
+                routing_preset: None,
         },
         "researcher" => LlmTemplateConfig {
             provider: "openai".to_string(),
@@ -126,7 +133,8 @@ pub fn resolve_llm_config(
             temperature: 0.3,
             chat_only: false,
             base_url: None,
-            routing_preset: None,
+            api_key_env: None,
+                routing_preset: None,
         },
         "evaluator" | "auditor" => LlmTemplateConfig {
             provider: "openrouter".to_string(),
@@ -134,7 +142,8 @@ pub fn resolve_llm_config(
             temperature: 0.1,
             chat_only: false,
             base_url: None,
-            routing_preset: None,
+            api_key_env: None,
+                routing_preset: None,
         },
         _ => LlmTemplateConfig {
             provider: "openai".to_string(),
@@ -142,7 +151,8 @@ pub fn resolve_llm_config(
             temperature: 0.2,
             chat_only: false,
             base_url: None,
-            routing_preset: None,
+            api_key_env: None,
+                routing_preset: None,
         },
     }
 }
@@ -233,6 +243,11 @@ pub fn render_skill_template(
         .as_ref()
         .map(|u| format!("\n      base_url: \"{u}\""))
         .unwrap_or_default();
+    let api_key_env_line = llm_config
+        .api_key_env
+        .as_ref()
+        .map(|e| format!("\n      api_key_env: \"{e}\""))
+        .unwrap_or_default();
 
     format!(
         r#"---
@@ -255,7 +270,7 @@ metadata:
     llm_config:
       provider: "{provider}"
       model: "{model}"
-      temperature: {temperature}{chat_only}{base_url}
+      temperature: {temperature}{chat_only}{base_url}{api_key_env}
 ---
 # {agent_id}
 
@@ -266,6 +281,7 @@ metadata:
         temperature = llm_config.temperature,
         chat_only = chat_only_line,
         base_url = base_url_line,
+        api_key_env = api_key_env_line,
     )
 }
 
@@ -888,7 +904,7 @@ pub fn handle_agent_bootstrap(
         }
     }
 
-    let activated = autonoetic_gateway::scheduler::bootstrap_agents(
+    let activated = autonoetic_gateway::bootstrap_agents(
         &config,
         &gateway_dir,
     )?;
@@ -923,11 +939,16 @@ fn apply_llm_preset_to_skill(
     if content.contains(&format!("model: \"{}\"", llm.model))
         && content.contains(&format!("provider: \"{}\"", llm.provider))
     {
-        // Even if model/provider match, check chat_only and base_url
+        // Even if model/provider match, check chat_only, base_url, and api_key_env
         let chat_only_match = !llm.chat_only || content.contains("chat_only");
         let base_url_match =
             llm.base_url.is_none() || llm.base_url.as_ref().map_or(true, |u| content.contains(u));
-        if chat_only_match && base_url_match {
+        let api_key_env_match = llm.api_key_env.is_none()
+            || llm
+                .api_key_env
+                .as_ref()
+                .map_or(true, |e| content.contains(&format!("api_key_env: \"{e}\"")));
+        if chat_only_match && base_url_match && api_key_env_match {
             return None; // Already correct
         }
     }
@@ -979,6 +1000,32 @@ fn apply_llm_preset_to_skill(
                 if let Some(re_after) = insert_after {
                     updated = re_after
                         .replace(&updated, format!("${{1}}      base_url: \"{}\"\n", url))
+                        .to_string();
+                }
+            }
+        }
+    }
+
+    // Handle api_key_env
+    if let Some(ref env_var) = llm.api_key_env {
+        let re_api_key = regex::Regex::new(r#"(api_key_env:\s*)"[^"]*""#).ok();
+        if let Some(re) = re_api_key {
+            if updated.contains("api_key_env:") {
+                updated = re
+                    .replace(&updated, format!("${{1}}\"{}\"", env_var))
+                    .to_string();
+            } else {
+                // Add api_key_env after base_url, chat_only, or temperature line
+                let insert_after = if updated.contains("base_url:") {
+                    regex::Regex::new(r#"(base_url:\s*"[^"]*"\s*\n)"#).ok()
+                } else if updated.contains("chat_only") {
+                    regex::Regex::new(r#"(chat_only:\s*(?:true|false)\s*\n)"#).ok()
+                } else {
+                    regex::Regex::new(r#"(temperature:\s*[0-9.]+\s*\n)"#).ok()
+                };
+                if let Some(re_after) = insert_after {
+                    updated = re_after
+                        .replace(&updated, format!("${{1}}      api_key_env: \"{}\"\n", env_var))
                         .to_string();
                 }
             }
@@ -1477,7 +1524,8 @@ pub fn handle_agent_import_skill(
             chat_only: false,
             context_window_tokens: None,
             base_url: None,
-            routing_preset: None,
+            api_key_env: None,
+                routing_preset: None,
         })
     } else {
         let resolved = resolve_llm_config(&config, None, None, provider, model);
@@ -1490,6 +1538,7 @@ pub fn handle_agent_import_skill(
             chat_only: resolved.chat_only,
             context_window_tokens: None,
             base_url: resolved.base_url,
+            api_key_env: resolved.api_key_env,
             routing_preset: resolved.routing_preset,
         })
     };
@@ -1960,6 +2009,7 @@ Use tools when needed.
                 tier: None,
                 cost: None,
                 latency: None,
+                api_key_env: None,
                 routing: None,
             },
         );

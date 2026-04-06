@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability::Capability;
 
+fn default_version() -> String {
+    "1.0".to_string()
+}
+
 /// Runtime declaration block from the SKILL.md frontmatter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeDeclaration {
@@ -46,6 +50,11 @@ pub struct LlmConfig {
     /// Optional base URL override for OpenAI-compatible providers (e.g., LM Studio, Ollama).
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Optional env var name for the API key. Overrides the provider's default.
+    /// E.g., set to "STREAMLAKE_API_KEY" for a custom OpenAI-compatible provider
+    /// instead of the default "OPENAI_API_KEY".
+    #[serde(default)]
+    pub api_key_env: Option<String>,
     /// When set, this agent's LLM is resolved via the named routing preset
     /// at call time. provider/model are the fallback if routing is unavailable.
     #[serde(default)]
@@ -80,6 +89,7 @@ pub struct ResourceLimits {
 /// The full parsed Agent Manifest (SKILL.md frontmatter).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentManifest {
+    #[serde(default = "default_version")]
     pub version: String,
     pub runtime: RuntimeDeclaration,
     pub agent: AgentIdentity,

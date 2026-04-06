@@ -1,6 +1,7 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::continuation;
 use crate::runtime::tools::{capability_type_name, validate_agent_id, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
@@ -323,6 +324,7 @@ impl NativeTool for AgentSpawnTool {
                 &task_id,
                 TaskRunStatus::Pending,
                 Some("queued".to_string()),
+                None,
             );
 
             return serde_json::to_string(&serde_json::json!({
@@ -367,6 +369,33 @@ impl NativeTool for AgentSpawnTool {
             Ok(result) => {
                 if let Some(request_id) = &result.suspended_for_approval {
                     let summary = format!("awaiting approval {}", request_id);
+
+                    // Load continuation to get approval details (tool name, etc.)
+                    let approval_metadata = continuation::load_continuation(gw_config, &task_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|cont| {
+                            let tool_name = cont.pending_tool_call.tool_name.clone();
+                            // Derive approval kind from tool name
+                            let kind = if tool_name.contains("sandbox") {
+                                "sandbox".to_string()
+                            } else if tool_name.contains("install") {
+                                "agent_install".to_string()
+                            } else {
+                                "tool_execution".to_string()
+                            };
+                            // Try to extract reason from approval_response
+                            let reason = serde_json::from_str::<serde_json::Value>(&cont.pending_tool_call.approval_response)
+                                .ok()
+                                .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from));
+
+                            Some(crate::scheduler::ApprovalMetadata {
+                                request_id: cont.approval_request_id,
+                                kind,
+                                reason,
+                            })
+                        });
+
                     if let Err(e) = crate::scheduler::update_task_run_status(
                         gw_config,
                         gateway_store.as_deref(),
@@ -374,6 +403,7 @@ impl NativeTool for AgentSpawnTool {
                         &task_id,
                         TaskRunStatus::AwaitingApproval,
                         Some(summary),
+                        approval_metadata,
                     ) {
                         tracing::warn!(
                             target: "workflow",
@@ -431,6 +461,7 @@ impl NativeTool for AgentSpawnTool {
                     &task_id,
                     TaskRunStatus::Succeeded,
                     summary,
+                    None,
                 ) {
                     tracing::warn!(
                         target: "workflow",
@@ -464,6 +495,7 @@ impl NativeTool for AgentSpawnTool {
                     &task_id,
                     TaskRunStatus::Failed,
                     Some(e.to_string()),
+                    None,
                 ) {
                     tracing::warn!(
                         target: "workflow",
