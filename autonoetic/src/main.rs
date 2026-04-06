@@ -2,20 +2,65 @@ mod cli;
 
 use clap::Parser;
 use cli::common::{dirs_or_default, mcp_registry_path, Cli, Commands};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let log_level = cli.log_level.as_deref().unwrap_or("info");
-    tracing_subscriber::fmt()
-        .with_env_filter(format!("autonoetic={log_level},{log_level}"))
-        .init();
+    let env_filter = tracing_subscriber::EnvFilter::try_new(format!("autonoetic={log_level},{log_level}"))
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("autonoetic=info,info"));
 
     let config_path = cli
         .config
         .map(|s| std::path::PathBuf::from(s))
         .unwrap_or_else(|| dirs_or_default().join("config.yaml"));
+
+    // For gateway start, set up rolling file logs in {agents_dir}/.gateway/logs/
+    // For all other commands, just log to stderr.
+    let is_gateway_start = matches!(
+        &cli.command,
+        Commands::Gateway(args) if matches!(args.command, cli::common::GatewayCommands::Start { .. })
+    );
+
+    if is_gateway_start {
+        let config = autonoetic_gateway::config::load_config(&config_path)?;
+        let log_dir = config.agents_dir.join(".gateway").join("logs");
+        std::fs::create_dir_all(&log_dir)?;
+        let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .max_log_files(5)
+            .filename_prefix("gateway")
+            .filename_suffix("log")
+            .build(&log_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to create log appender: {}", e))?;
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false),
+            )
+            .init();
+
+        // Keep the guard alive for the process lifetime
+        // (it gets dropped when main returns, which flushes remaining logs)
+        std::mem::forget(_guard);
+    } else {
+        let base_dir = dirs_or_default();
+        std::fs::create_dir_all(&base_dir)?;
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
     std::env::set_var(
         "AUTONOETIC_MCP_REGISTRY_PATH",
         mcp_registry_path(&config_path).display().to_string(),
