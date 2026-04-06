@@ -40,6 +40,21 @@ response_validation:
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
 approval_timeout_secs: 600
 
+# ── Chat TUI ──────────────────────────────────────────────────────────
+# Inline approval from the chat interface (Ctrl+A).
+chat:
+  inline_approvals: true   # Allow Ctrl+A to approve the latest pending approval
+
+# ── Approval Levels ───────────────────────────────────────────────────
+# Escalation: require higher authority for sensitive actions.
+# Levels: operator (default) | admin | agent:<agent_id>
+# approval_levels:
+#   default: operator
+#   action_overrides:
+#     SandboxExec: admin          # sandbox execution requires admin approval
+#   host_overrides:
+#     "prod-*": admin             # any action targeting prod-* requires admin
+
 # ── Schema Enforcement ────────────────────────────────────────────────
 # Validates agent.spawn payloads against declared schemas.
 # mode: disabled | deterministic | llm
@@ -195,6 +210,11 @@ llm_presets:
     model: "minimax/minimax-m2.7"
     temperature: 0.3
 
+  qwen36:
+    provider: "openrouter"
+    model: "qwen/qwen3.6-plus:free"
+    temperature: 1.0
+
   fallback:
     provider: "openai"
     model: "gpt-4o"
@@ -204,11 +224,25 @@ llm_presets:
 # Used during 'agent bootstrap' and 'agent init --template <name>'.
 # Values can be fixed preset names or routing preset names.
 llm_preset_mapping:
-  planner: smart             # routed
-  coder: smart               # routed
-  researcher: sonnet         # fixed
-  debugger: haiku            # fixed
-  evaluator: budget          # routed
-  architect: opus            # fixed
-  specialized_builder: agentic
-  default: sonnet
+  planner: qwen36             # routed
+  coder: qwen36               # routed
+  researcher: qwen36         # fixed
+  debugger: qwen36            # fixed
+  evaluator: qwen36          # routed
+  architect: qwen36            # fixed
+  specialized_builder: qwen36
+  default: qwen36
+
+
+# # ── Template → Preset Mapping ────────────────────────────────────────
+# # Used during 'agent bootstrap' and 'agent init --template <name>'.
+# # Values can be fixed preset names or routing preset names.
+# llm_preset_mapping:
+#   planner: smart             # routed
+#   coder: smart               # routed
+#   researcher: sonnet         # fixed
+#   debugger: haiku            # fixed
+#   evaluator: budget          # routed
+#   architect: opus            # fixed
+#   specialized_builder: agentic
+#   default: sonnet

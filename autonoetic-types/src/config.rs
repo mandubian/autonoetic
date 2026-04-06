@@ -30,6 +30,11 @@ pub struct LlmPreset {
     /// Optional base URL override for OpenAI-compatible providers (e.g., LM Studio, Ollama).
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Optional environment variable name for the API key.
+    /// Overrides the provider's default env var (e.g., set to "STREAMLAKE_API_KEY"
+    /// for a custom OpenAI-compatible provider instead of the default "OPENAI_API_KEY").
+    #[serde(default)]
+    pub api_key_env: Option<String>,
 
     // ── Tier/cost (used by fixed presets when referenced by routing presets) ──
     #[serde(default)]
@@ -526,6 +531,40 @@ pub struct GatewayConfig {
     /// task complexity, and cost constraints.
     #[serde(default)]
     pub llm_routing: Option<LlmRoutingConfig>,
+
+    /// Chat TUI settings.
+    #[serde(default)]
+    pub chat: ChatConfig,
+
+    /// Approval level / escalation settings.
+    #[serde(default)]
+    pub approval_levels: ApprovalLevelConfig,
+}
+
+/// Chat TUI configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatConfig {
+    /// Allow inline approval of pending requests from the chat TUI (Ctrl+A).
+    /// Disabled by default — the approval channel may be separated from chat.
+    #[serde(default)]
+    pub inline_approvals: bool,
+}
+
+/// Approval level / escalation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ApprovalLevelConfig {
+    /// Map action kind → required level. e.g. {"SandboxExec": "admin"}
+    /// Omitted = all actions require "operator" (no escalation).
+    #[serde(default)]
+    pub action_overrides: std::collections::HashMap<String, String>,
+
+    /// Map host pattern → required level. e.g. {"prod-*": "admin"}
+    #[serde(default)]
+    pub host_overrides: std::collections::HashMap<String, String>,
+
+    /// Default approval level when no override matches. Defaults to "operator".
+    #[serde(default)]
+    pub default: Option<String>,
 }
 
 /// Configuration for evidence storage.
@@ -866,6 +905,8 @@ impl Default for GatewayConfig {
             max_session_turns: default_max_session_turns(),
             prompt_budget: PromptBudgetConfig::default(),
             llm_routing: None,
+            chat: ChatConfig::default(),
+            approval_levels: ApprovalLevelConfig::default(),
         }
     }
 }

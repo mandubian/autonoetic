@@ -567,7 +567,8 @@ pub fn create_router_from_preset(
                 chat_only: false,
                 context_window_tokens: None,
                 base_url: None,
-                routing_preset: None,
+                api_key_env: None,
+            routing_preset: None,
             });
             (
                 Box::new(LlmClassifierRouter::new(
@@ -588,7 +589,8 @@ pub fn create_router_from_preset(
                 chat_only: false,
                 context_window_tokens: None,
                 base_url: None,
-                routing_preset: None,
+                api_key_env: None,
+            routing_preset: None,
             });
             (
                 Box::new(HybridRouter::new(
@@ -623,6 +625,7 @@ pub fn decision_to_llm_config(
         base_url: model_entry
             .and_then(|e| e.config.base_url.clone())
             .or(base_config.base_url.clone()),
+        api_key_env: base_config.api_key_env.clone(),
         routing_preset: base_config.routing_preset.clone(),
     }
 }
@@ -649,7 +652,8 @@ mod tests {
                     chat_only: false,
                     context_window_tokens: None,
                     base_url: None,
-                    routing_preset: None,
+                    api_key_env: None,
+            routing_preset: None,
                 },
                 tier: CapabilityTier::Premium,
             },
@@ -664,7 +668,8 @@ mod tests {
                     chat_only: false,
                     context_window_tokens: None,
                     base_url: None,
-                    routing_preset: None,
+                    api_key_env: None,
+            routing_preset: None,
                 },
                 tier: CapabilityTier::Standard,
             },
@@ -679,7 +684,8 @@ mod tests {
                     chat_only: false,
                     context_window_tokens: None,
                     base_url: None,
-                    routing_preset: None,
+                    api_key_env: None,
+            routing_preset: None,
                 },
                 tier: CapabilityTier::Economy,
             },
@@ -696,6 +702,7 @@ mod tests {
             chat_only: false,
             context_window_tokens: None,
             base_url: None,
+            api_key_env: None,
             routing_preset: None,
         }
     }
