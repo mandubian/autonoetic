@@ -21,6 +21,7 @@ pub fn resolve_fixed_preset(preset: &LlmPreset) -> Option<LlmConfig> {
         chat_only: preset.chat_only.unwrap_or(false),
         context_window_tokens: preset.context_window_tokens,
         base_url: preset.base_url.clone(),
+        api_key_env: preset.api_key_env.clone(),
         routing_preset: None,
     })
 }
@@ -95,6 +96,7 @@ mod tests {
             chat_only: None,
             context_window_tokens: None,
             base_url: None,
+            api_key_env: None,
             tier: Some(tier),
             cost: None,
             latency: None,
@@ -112,6 +114,7 @@ mod tests {
             chat_only: None,
             context_window_tokens: None,
             base_url: None,
+            api_key_env: None,
             tier: None,
             cost: None,
             latency: None,
