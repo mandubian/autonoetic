@@ -39,4 +39,5 @@ Generates wrapper agents for bridging I/O gaps between tools and targets.
 ## Behavior
 - Analyze source and target schemas using `schema_diff.py`
 - Generate wrapper scripts using `generate_wrapper.py`
-- **Delegate installation to `specialized_builder.default`** - you cannot call agent.install directly
+- Build an artifact with `artifact.build` from the generated wrapper
+- **Delegate installation to `specialized_builder.default`** — you cannot create or promote agent revisions directly

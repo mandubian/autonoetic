@@ -63,10 +63,67 @@ Approval retry: if `sandbox.exec` previously returned `approval_required: true` 
 
 1. **DO NOT run the script yourself** via `sandbox.exec` (no testing, no execution) — including when the script would hit the network; **evaluator.default** runs closed-boundary validation after `artifact.build`.
 2. **DO write the implementation files** using content.write
-3. **DO build an artifact** from the promotable file set
-4. **DO return the artifact_id** to the planner with instructions:
-   "Artifact ready. Ask evaluator.default and auditor.default to review this artifact, then ask specialized_builder.default to install it using agent.install with this artifact_id."
-5. If a tool ever returns **`approval_required: true`** for this work, **stop** and return the **exact** approval id fields from the JSON to the planner — **never** invent an `approval_ref` or retry with a guessed id.
+3. **DO write a `SKILL.md`** for the agent with the correct Autonoetic frontmatter format (see below)
+4. **DO build an artifact** from the promotable file set with `kind: "agent_bundle"` — this is required for agent installation:
+   ```json
+   artifact.build({
+     "inputs": ["weather.py", "SKILL.md"],
+     "entrypoints": ["weather.py"],
+     "kind": "agent_bundle"
+   })
+   ```
+5. **DO return the artifact_id** to the planner with instructions:
+   "Artifact ready. Ask evaluator.default and auditor.default to review this artifact, then ask specialized_builder.default to install it via agent.revision.create + agent.revision.promote with this artifact_id."
+6. If a tool ever returns **`approval_required: true`** for this work, **stop** and return the **exact** approval id fields from the JSON to the planner — **never** invent an `approval_ref` or retry with a guessed id.
+
+### SKILL.md Format for Agent Bundles
+
+When creating an agent, write a `SKILL.md` file with this **exact frontmatter format**. The `name` must match the `agent_id` (lowercase with hyphens):
+
+```yaml
+---
+name: "weather-agent"
+description: "Fetches weather information for any location."
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "weather-agent"
+      name: "Weather Agent"
+      description: "Fetches weather information for any location."
+    llm_config:
+      provider: "openrouter"
+      model: "google/gemini-3-flash-preview"
+    capabilities:
+      - type: "NetworkAccess"
+        hosts: ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
+    validation: "soft"
+---
+# Weather Agent
+
+You are a weather agent that fetches weather information...
+```
+
+Also write a `runtime.lock` file (required for agent installation):
+
+```yaml
+layers: []
+```
+
+**Rules:**
+- `name` must be lowercase with hyphens — this becomes `agent.id`
+- `metadata.autonoetic.agent.id` must match `name` exactly
+- `metadata.autonoetic.runtime.runtime_lock` must be `"runtime.lock"`
+- Include a `runtime.lock` file in the artifact alongside SKILL.md
+- `capabilities` must use full typed format (`- type: "NetworkAccess"`)
+- The artifact `inputs` must include: `["weather.py", "SKILL.md", "runtime.lock"]`
 
 ## If Evaluator/Auditor Finds Issues
 
