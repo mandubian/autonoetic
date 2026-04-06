@@ -63,6 +63,7 @@ pub fn resolve_compression_llm_config(
                 chat_only: preset.chat_only.unwrap_or(false),
                 context_window_tokens: preset.context_window_tokens,
                 base_url: preset.base_url.clone(),
+                api_key_env: preset.api_key_env.clone(),
                 routing_preset: None,
             });
         }
@@ -79,6 +80,7 @@ pub fn resolve_compression_llm_config(
             chat_only: false,
             context_window_tokens: None,
             base_url: None,
+            api_key_env: None,
             routing_preset: None,
         });
     }
@@ -564,6 +566,7 @@ mod tests {
             chat_only: None,
             context_window_tokens: None,
             base_url: None,
+            api_key_env: None,
             tier: None,
             cost: None,
             latency: None,
