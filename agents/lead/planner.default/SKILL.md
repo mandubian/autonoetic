@@ -123,7 +123,7 @@ Never write files that match ANY of these patterns:
 5. Is it debugging / root cause analysis?    → debugger.default
 6. Is it testing / validation?               → evaluator.default
 7. Is it security / governance review?       → auditor.default
-8. Does it have dependency files (requirements.txt, package.json, etc.)? → builder.default (layer artifacts) → evaluator.default (test)
+8. Does it have dependency files (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.)? → coder.default (implement) → **builder.default** (install deps + layer) → evaluator.default (test). **NEVER skip the builder step when external dependencies exist.**
 9. Is it pure prose, analysis, or non-executable documentation? → OK to do directly
 ```
 
@@ -174,13 +174,27 @@ When asked to create a new agent, choose the route based on complexity. **All st
 
 **External access or critical operations** (network calls, file writes, code execution): After implementation, always run `evaluator.default` (behavioral validation) and `auditor.default` (security review) before install. Both must call `promotion.record` with pass=true. If either fails functionally (couldn't run tests, no promotion record), iterate with coder. If the task completed but has output schema validation errors (LLM response format issues), proceed based on the actual work done — check if promotion.record was called and use its result.
 
-**Dependencies** (requirements.txt, package.json, etc.): Insert `builder.default` between coder and evaluator to layer dependencies into the artifact.
+**Dependencies** (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.): **MUST** insert `builder.default` between coder and evaluator. The builder has `NetworkAccess` to install deps and captures them as layers. Without this step, the evaluator runs in a network-isolated sandbox and pip/npm install silently fails. The builder must produce an artifact WITHOUT the `dependencies` field (deps are in layers, not re-installed at runtime).
 
-**Install**: Always delegate to `specialized_builder.default` — you cannot call `agent.install` directly. The gateway verifies promotion records before allowing install.
+**Install**: Always delegate to `specialized_builder.default` — you cannot create or promote agent revisions directly. The gateway runs code analysis on `agent.revision.create` regardless of promotion evidence.
+
+### Promotion Gate Decision Matrix
+
+Not every agent needs full evaluator + auditor review. Use this matrix:
+
+| Agent behavior | Evaluator | Auditor | Why |
+|---|---|---|---|
+| **Network access** (APIs, HTTP, web scraping) | ✅ Required | ✅ Required | External calls = behavioral correctness + attack surface |
+| **File system writes** (creates/modifies files beyond self.*) | ✅ Required | ❌ Skip | Verify it works; static analysis covers security |
+| **Pure transform/utility** (no I/O beyond self.*) | ❌ Skip | ❌ Skip | Code analysis on `revision.create` is sufficient |
+| **Agent spawning/delegation** | ✅ Required | ✅ Required | High privilege, needs full review |
+| **Code execution** (runs subprocesses) | ✅ Required | ✅ Required | Execution boundary = security risk |
+
+**When skipping gates**, tell specialized_builder `"gating: none"` — the gateway's built-in code analysis on `revision.create` still validates capabilities and detects security threats.
 
 **Key constraints:**
 - All steps in a chain must be sequential (no `async=true` for dependent tasks)
-- Never proceed to install without evaluator + auditor pass records
+- When gates are required, never proceed to install without evaluator + auditor pass records
 - Never use the agent before a post-install smoke test
 - If coder fails to provide an `artifact_id`, inspect the `files` array and call `artifact.build` yourself
 
@@ -188,12 +202,23 @@ When asked to create a new agent, choose the route based on complexity. **All st
 
 To install, delegate to `specialized_builder.default`:
 
+**With full gates (network/execution agents):**
 ```
 agent.spawn("specialized_builder.default", message="Install a new agent called 'my-agent':
 - Purpose: [what it does]
 - Capabilities: [NetworkAccess, ReadAccess, etc.]
 - Execution mode: script or reasoning
 - Promotion evidence: evaluator_pass=true, auditor_pass=true
+")
+```
+
+**Without gates (simple utility agents):**
+```
+agent.spawn("specialized_builder.default", message="Install a new agent called 'my-agent':
+- Purpose: [what it does]
+- Capabilities: [ReadAccess]
+- Execution mode: script or reasoning
+- Gating: none (pure transform, no external I/O)
 ")
 ```
 
@@ -239,26 +264,14 @@ When `agent.spawn` returns `status: "queued"` with a message about pending appro
 - **Call `workflow.wait(task_ids=[...], timeout_secs=300)`** to block until the child completes.
 - You do NOT need to call `user.ask` or take any other action. The gateway handles approval transparently.
 
-### Handling approval_resolved Messages (CRITICAL)
+### Handling approval_resolved Messages
 
-After operator approval, you may receive a message like:
-```json
-{
-  "type": "approval_resolved",
-  "status": "approved",
-  "install_completed": true,
-  "message": "Agent 'X' has been approved and installed successfully..."
-}
-```
+After operator approval, you may receive an `ApprovalResolved` signal. This means a pending approval was resolved — the affected child session will resume automatically.
 
-**If `install_completed: true`:**
-- Run evaluator smoke tests against the installed agent before user-facing execution
-- If smoke tests pass, inform the user the agent is ready and offer to use it
-- The agent can be used with `agent.spawn("X", message="...")`
-
-**If `install_completed: false`:**
-- Inform the user the install needs manual retry
-- Tell them to run: `autonoetic gateway approvals approve [request_id] --retry --config [config_path]`
+**What to do:**
+- Check `workflow.state` or call `workflow.wait` to see the updated task status
+- If a child task was blocked on approval, it should now be progressing or completed
+- Do NOT restart the child task — it will resume from its checkpoint
 
 ### Handling Child Agent Clarification Requests (CRITICAL)
 
