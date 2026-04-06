@@ -2,6 +2,7 @@
 
 use autonoetic_gateway::execution::extract_artifacts_from_content_store;
 use autonoetic_gateway::runtime::content_store::ContentStore;
+use autonoetic_gateway::runtime::memory::{Tier2Memory, SqliteMemoryStore};
 use tempfile::tempdir;
 
 /// Helper to create a test gateway directory
@@ -191,12 +192,12 @@ fn test_content_store_deduplication() {
 // Knowledge Store Tests (via Tier2Memory)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_knowledge_store_and_recall() {
+#[tokio::test]
+async fn test_knowledge_store_and_recall() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     let mem =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "test-agent").unwrap();
+        Tier2Memory::open_sqlite(&gateway_dir, "test-agent").unwrap();
 
     let memory = mem
         .remember(
@@ -206,6 +207,7 @@ fn test_knowledge_store_and_recall() {
             "session:test:turn:1",
             "Tokyo is the capital of Japan",
         )
+        .await
         .unwrap();
 
     assert_eq!(memory.memory_id, "fact_001");
@@ -213,21 +215,23 @@ fn test_knowledge_store_and_recall() {
     assert_eq!(memory.scope, "geography");
 
     // Recall the fact
-    let recalled = mem.recall("fact_001").unwrap();
+    let recalled = mem.recall("fact_001").await.unwrap();
     assert_eq!(recalled.content, "Tokyo is the capital of Japan");
 }
 
-#[test]
-fn test_knowledge_search_by_scope() {
+#[tokio::test]
+async fn test_knowledge_search_by_scope() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     let mem =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "test-agent").unwrap();
+        Tier2Memory::open_sqlite(&gateway_dir, "test-agent").unwrap();
 
     // Store multiple facts in same scope
     mem.remember("fact_a", "cities", "test-agent", "s1", "Paris is in France")
+        .await
         .unwrap();
     mem.remember("fact_b", "cities", "test-agent", "s1", "Tokyo is in Japan")
+        .await
         .unwrap();
     mem.remember(
         "fact_c",
@@ -236,25 +240,26 @@ fn test_knowledge_search_by_scope() {
         "s1",
         "France is in Europe",
     )
+    .await
     .unwrap();
 
     // Search cities scope
-    let results = mem.search("cities", None).unwrap();
+    let results = mem.search("cities", None).await.unwrap();
     assert_eq!(results.len(), 2);
 
     // Search with query
-    let results = mem.search("cities", Some("Paris")).unwrap();
+    let results = mem.search("cities", Some("Paris")).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].content, "Paris is in France");
 }
 
-#[test]
-fn test_knowledge_share_between_agents() {
+#[tokio::test]
+async fn test_knowledge_share_between_agents() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     // Agent A stores a fact
     let mem_a =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "agent-a").unwrap();
+        Tier2Memory::open_sqlite(&gateway_dir, "agent-a").unwrap();
 
     mem_a
         .remember(
@@ -264,21 +269,23 @@ fn test_knowledge_share_between_agents() {
             "s1",
             "Project deadline is March 20",
         )
+        .await
         .unwrap();
 
     // Agent B cannot access it yet
     let mem_b =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "agent-b").unwrap();
-    assert!(mem_b.recall("shared_fact").is_err());
+        Tier2Memory::open_sqlite(&gateway_dir, "agent-b").unwrap();
+    assert!(mem_b.recall("shared_fact").await.is_err());
 
     // Agent A shares with Agent B
     let shared = mem_a
         .share_with("shared_fact", vec!["agent-b".to_string()])
+        .await
         .unwrap();
     assert!(shared.allowed_agents.contains(&"agent-b".to_string()));
 
     // Agent B can now access it
-    let recalled = mem_b.recall("shared_fact").unwrap();
+    let recalled = mem_b.recall("shared_fact").await.unwrap();
     assert_eq!(recalled.content, "Project deadline is March 20");
 }
 
@@ -375,13 +382,13 @@ fn test_content_store_statistics() {
 // Shared Knowledge in Execution
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_collect_shared_knowledge_finds_shared_records() {
+#[tokio::test(flavor = "multi_thread")]
+async fn test_collect_shared_knowledge_finds_shared_records() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     // Writer agent stores and shares a fact
     let writer_mem =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "writer-agent")
+        Tier2Memory::open_sqlite(&gateway_dir, "writer-agent")
             .unwrap();
 
     writer_mem
@@ -392,11 +399,13 @@ fn test_collect_shared_knowledge_finds_shared_records() {
             "session:test",
             "Deployment requires approval",
         )
+        .await
         .unwrap();
 
     // Share with reader agent
     writer_mem
         .share_with("shared_fact", vec!["reader-agent".to_string()])
+        .await
         .unwrap();
 
     // Collect shared knowledge for the reader
@@ -412,13 +421,13 @@ fn test_collect_shared_knowledge_finds_shared_records() {
     assert!(shared[0].content_preview.contains("Deployment"));
 }
 
-#[test]
-fn test_collect_shared_knowledge_excludes_private() {
+#[tokio::test(flavor = "multi_thread")]
+async fn test_collect_shared_knowledge_excludes_private() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     // Writer agent stores a private fact
     let writer_mem =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "writer-agent")
+        Tier2Memory::open_sqlite(&gateway_dir, "writer-agent")
             .unwrap();
 
     writer_mem
@@ -429,6 +438,7 @@ fn test_collect_shared_knowledge_excludes_private() {
             "session:test",
             "This is private",
         )
+        .await
         .unwrap();
 
     // Collect knowledge for reader - should not include private facts
@@ -441,13 +451,13 @@ fn test_collect_shared_knowledge_excludes_private() {
     assert_eq!(shared.len(), 0);
 }
 
-#[test]
-fn test_collect_shared_knowledge_includes_global() {
+#[tokio::test(flavor = "multi_thread")]
+async fn test_collect_shared_knowledge_includes_global() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     // Writer agent stores a global fact
     let writer_mem =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "writer-agent")
+        Tier2Memory::open_sqlite(&gateway_dir, "writer-agent")
             .unwrap();
 
     let memory = writer_mem
@@ -458,10 +468,11 @@ fn test_collect_shared_knowledge_includes_global() {
             "session:test",
             "Public knowledge for all",
         )
+        .await
         .unwrap();
 
     // Make it global
-    writer_mem.make_global(&memory.memory_id).unwrap();
+    writer_mem.make_global(&memory.memory_id).await.unwrap();
 
     // Collect knowledge for any reader - should include global facts
     let shared = autonoetic_gateway::execution::collect_shared_knowledge(

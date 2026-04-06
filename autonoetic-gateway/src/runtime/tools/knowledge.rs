@@ -1,7 +1,7 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
-use crate::runtime::tools::{tier2_memory_for_native_tool, NativeTool, NativeToolRegistry};
+use crate::runtime::tools::{block_on_memory, tier2_memory_for_native_tool, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use serde::Deserialize;
@@ -112,7 +112,7 @@ impl NativeTool for KnowledgeStoreTool {
         );
         memory.confidence = Some(args.confidence);
         memory.tags = args.tags.clone();
-        let memory = mem.save_memory(&memory)?;
+        let memory = block_on_memory(mem.save_memory(&memory))?;
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -181,7 +181,7 @@ impl NativeTool for KnowledgeRecallTool {
         };
 
         let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
-        let memory = mem.recall(&args.id)?;
+        let memory = block_on_memory(mem.recall(&args.id))?;
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -254,7 +254,7 @@ impl NativeTool for KnowledgeSearchTool {
         };
 
         let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
-        let results = mem.search(&args.scope, args.query.as_deref())?;
+        let results = block_on_memory(mem.search(&args.scope, args.query.as_deref()))?;
 
         let items: Vec<serde_json::Value> = results
             .iter()
@@ -352,7 +352,7 @@ impl NativeTool for KnowledgeSearchByTagsTool {
         };
 
         let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
-        let results = mem.search_by_tags(&args.scope, &args.tags, args.text.as_deref(), limit)?;
+        let results = block_on_memory(mem.search_by_tags(&args.scope, &args.tags, args.text.as_deref(), limit))?;
 
         let items: Vec<serde_json::Value> = results
             .iter()
@@ -450,7 +450,7 @@ impl NativeTool for KnowledgeShareTool {
         };
 
         let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
-        let memory = mem.share_with(&args.id, args.with_agents.clone())?;
+        let memory = block_on_memory(mem.share_with(&args.id, args.with_agents.clone()))?;
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -561,12 +561,12 @@ impl NativeTool for DigestQueryTool {
         };
 
         let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
-        let results = mem.search_by_tags(
+        let results = block_on_memory(mem.search_by_tags(
             &args.scope,
             &args.tags,
             args.text.as_deref(),
             args.limit as usize,
-        )?;
+        ))?;
 
         let items: Vec<serde_json::Value> = results
             .iter()
