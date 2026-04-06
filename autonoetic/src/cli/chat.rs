@@ -163,6 +163,11 @@ struct App {
     // Persistent clipboard — must stay alive so arboard's background ownership
     // thread keeps running and clipboard managers have time to capture the content.
     clipboard: Option<arboard::Clipboard>,
+    /// Inline approvals: pending approval request IDs tracked from workflow events.
+    /// Populated when `chat.inline_approvals` is enabled in config.
+    pending_approval_ids: Vec<String>,
+    /// Whether inline approvals are enabled (from `config.chat.inline_approvals`).
+    inline_approvals_enabled: bool,
 }
 
 impl App {
@@ -191,6 +196,8 @@ impl App {
             seen_user_interaction_prompts: HashSet::new(),
             // Safe clipboard initialization - arboard can panic on headless/SSH systems
             clipboard: std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None),
+            pending_approval_ids: Vec::new(),
+            inline_approvals_enabled: false,
         }
     }
 
@@ -640,10 +647,27 @@ fn format_workflow_event_card(
                 .get("urgency")
                 .and_then(|v| v.as_str())
                 .unwrap_or("medium");
-            Some(format!(
+            let reason = event
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let context = event
+                .payload
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let mut line = format!(
                 "🆘 [{}] Escalated to {} (urgency: {})",
                 ts_short, target, urgency
-            ))
+            );
+            if !reason.is_empty() {
+                line.push_str(&format!("\n   Reason: {}", reason));
+            }
+            if !context.is_empty() {
+                line.push_str(&format!("\n   Context: {}", context));
+            }
+            Some(line)
         }
         "task.started" => Some(format!(
             "▶ [{}] Task started: {}{}",
@@ -1058,19 +1082,28 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let workflow = app.session_overview.status_line();
+    let approve_hint = if app.inline_approvals_enabled
+        && !app.pending_approval_ids.is_empty()
+    {
+        " | Approve: Ctrl+A"
+    } else {
+        ""
+    };
     let text = if !app.pending.is_empty() {
         format!(
-            "{} {} pending | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C",
+            "{} {} pending | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
             app.spinner(),
             app.pending.len(),
             workflow,
+            approve_hint,
         )
     } else {
         format!(
-            "Session: {} | Target: {} | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C",
+            "Session: {} | Target: {} | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
             &app.session_id[..20.min(app.session_id.len())],
             app.target_hint,
             workflow,
+            approve_hint,
         )
     };
 
@@ -1171,6 +1204,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     terminal.clear()?;
 
     let mut app = App::new(session_id.clone(), target_hint.to_string());
+    app.inline_approvals_enabled = config.chat.inline_approvals;
     if let Ok(restored) = hydrate_session_history(&mut app, config.as_ref(), &session_id) {
         if restored > 0 {
             app.add_message(
@@ -1535,8 +1569,41 @@ async fn run_loop<B: ratatui::backend::Backend>(
                 while event::poll(Duration::ZERO)? {
                     match event::read()? {
                         Event::Key(key) => {
-                            if !handle_key(key, app, tx)? {
-                                return Ok(false); // Clean Quit
+                            match handle_key(key, app, tx)? {
+                                HandleKeyAction::Quit => return Ok(false),
+                                HandleKeyAction::ApproveInline(apr_id) => {
+                                    // Handle inline approval
+                                    if let Some(store) = gateway_store {
+                                        match autonoetic_gateway::scheduler::approve_request(
+                                            config,
+                                            Some(store),
+                                            &apr_id,
+                                            "chat-tui",
+                                            None,
+                                            None,
+                                            None,
+                                        ) {
+                                            Ok(_decision) => {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!("Approved: {}", apr_id),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!("Failed to approve: {}", e),
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        app.add_message(
+                                            MessageRole::System,
+                                            "Gateway store not available for inline approval.".to_string(),
+                                        );
+                                    }
+                                }
+                                HandleKeyAction::Continue => {}
                             }
                             needs_redraw = true;
                         }
@@ -1630,14 +1697,20 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
     }
 }
 
+enum HandleKeyAction {
+    Continue,
+    Quit,
+    ApproveInline(String),
+}
+
 fn handle_key(
     key: crossterm::event::KeyEvent,
     app: &mut App,
     tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<HandleKeyAction> {
     match key.code {
         // Quit
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(false),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(HandleKeyAction::Quit),
 
         // Send
         KeyCode::Enter => {
@@ -1684,10 +1757,30 @@ fn handle_key(
             app.scroll_messages_down(3);
         }
 
+        // Inline approval: Ctrl+A approves the latest pending approval
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if !app.inline_approvals_enabled {
+                app.add_message(
+                    MessageRole::System,
+                    "Inline approvals not enabled. Set chat.inline_approvals: true in gateway config.".to_string(),
+                );
+            } else if app.pending_approval_ids.is_empty() {
+                app.add_message(
+                    MessageRole::System,
+                    "No pending approvals to approve.".to_string(),
+                );
+            } else {
+                // Pop the latest pending approval ID
+                let apr_id = app.pending_approval_ids.pop().unwrap();
+                return Ok(HandleKeyAction::ApproveInline(apr_id));
+            }
+        }
+
         _ => {}
     }
 
-    Ok(true)
+    Ok(HandleKeyAction::Continue)
+
 }
 
 /// Check for signals and inject into app. Returns true if signals were processed.
@@ -1822,6 +1915,25 @@ async fn check_signals(
                                     }
                                     app.session_overview.latest_signal = Some(card.clone());
                                     app.add_message(MessageRole::Signal, card);
+
+                                    // Track pending approval IDs for inline approval (Ctrl+A)
+                                    if app.inline_approvals_enabled {
+                                        if event.event_type == "task.awaiting_approval" {
+                                            if let Some(apr_id) = event.payload.get("approval_request_id").and_then(|v| v.as_str()) {
+                                                if !app.pending_approval_ids.contains(&apr_id.to_string()) {
+                                                    app.pending_approval_ids.push(apr_id.to_string());
+                                                }
+                                            }
+                                        } else if event.event_type == "task.approved"
+                                            || event.event_type == "task.rejected"
+                                            || event.event_type == "task.cancelled"
+                                        {
+                                            if let Some(apr_id) = event.payload.get("request_id").and_then(|v| v.as_str()) {
+                                                app.pending_approval_ids.retain(|id| id != apr_id);
+                                            }
+                                        }
+                                    }
+
                                     processed_any = true;
                                 } else {
                                     tracing::warn!(

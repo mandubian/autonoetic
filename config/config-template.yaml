@@ -40,6 +40,21 @@ response_validation:
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
 approval_timeout_secs: 600
 
+# ── Chat TUI ──────────────────────────────────────────────────────────
+# Inline approval from the chat interface (Ctrl+A).
+chat:
+  inline_approvals: true   # Allow Ctrl+A to approve the latest pending approval
+
+# ── Approval Levels ───────────────────────────────────────────────────
+# Escalation: require higher authority for sensitive actions.
+# Levels: operator (default) | admin | agent:<agent_id>
+# approval_levels:
+#   default: operator
+#   action_overrides:
+#     SandboxExec: admin          # sandbox execution requires admin approval
+#   host_overrides:
+#     "prod-*": admin             # any action targeting prod-* requires admin
+
 # ── Schema Enforcement ────────────────────────────────────────────────
 # Validates agent.spawn payloads against declared schemas.
 # mode: disabled | deterministic | llm
@@ -194,6 +209,11 @@ llm_presets:
     provider: "openrouter"
     model: "minimax/minimax-m2.7"
     temperature: 0.3
+
+  qwen36:
+    provider: "openrouter"
+    model: "qwen/qwen3.6-plus:free"
+    temperature: 1.0
 
   fallback:
     provider: "openai"

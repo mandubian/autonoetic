@@ -238,6 +238,10 @@ pub struct ApprovalRequest {
     pub decided_at: Option<String>,
     #[serde(default)]
     pub decided_by: Option<String>,
+    /// Required approval level for this request (operator, admin, agent:xyz).
+    /// Defaults to Operator. Set by the gateway based on config escalation rules.
+    #[serde(default)]
+    pub approval_level: ApprovalLevel,
 }
 
 impl ApprovalRequest {
@@ -264,7 +268,42 @@ impl ApprovalRequest {
             root_session_id: self.root_session_id,
             workflow_id: self.workflow_id,
             task_id: self.task_id,
+            approval_level: self.approval_level,
         })
+    }
+}
+
+/// Approval level for escalation control.
+/// Determines who is authorized to resolve an approval request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalLevel {
+    /// Standard operator approval (default).
+    #[default]
+    Operator,
+    /// Requires admin-level authorization.
+    Admin,
+    /// Only a specific agent can approve. e.g. Agent("auditor.default")
+    Agent(String),
+}
+
+impl ApprovalLevel {
+    /// Parse from config string. Returns Operator for unrecognized values.
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "admin" => Self::Admin,
+            s if s.starts_with("agent:") => Self::Agent(s[6..].to_string()),
+            _ => Self::Operator,
+        }
+    }
+
+    /// Serialize to config string.
+    pub fn to_config(&self) -> String {
+        match self {
+            Self::Operator => "operator".to_string(),
+            Self::Admin => "admin".to_string(),
+            Self::Agent(id) => format!("agent:{}", id),
+        }
     }
 }
 
@@ -295,6 +334,9 @@ pub struct ApprovalDecision {
     /// Task this approval blocks (copied from ApprovalRequest).
     #[serde(default)]
     pub task_id: Option<String>,
+    /// Required approval level for this request (copied from ApprovalRequest).
+    #[serde(default)]
+    pub approval_level: ApprovalLevel,
 }
 
 fn default_true() -> bool {

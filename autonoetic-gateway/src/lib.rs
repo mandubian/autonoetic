@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod artifact_store;
+pub mod bootstrap;
 pub mod causal_chain;
 pub mod config;
 pub mod execution;
@@ -22,6 +23,7 @@ pub mod server;
 pub mod tracing;
 pub mod vault;
 
+pub use bootstrap::bootstrap_agents;
 pub use agent::{cached, scan_agents, AgentRepository, LoadedAgent};
 pub use artifact_store::ArtifactStore;
 pub use autonoetic_types::agent::AgentMeta;

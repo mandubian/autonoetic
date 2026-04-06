@@ -11,7 +11,8 @@ use autonoetic_gateway::scheduler::workflow_store::{
     save_task_run, save_workflow_run,
 };
 use autonoetic_types::background::{
-    ApprovalRequest, ScheduledAction, UserInteraction, UserInteractionKind, UserInteractionStatus,
+    ApprovalLevel, ApprovalRequest, ScheduledAction, UserInteraction, UserInteractionKind,
+    UserInteractionStatus,
 };
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use chrono::Utc;
@@ -306,6 +307,7 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
         status: None,
         decided_at: None,
         decided_by: None,
+        approval_level: ApprovalLevel::Operator,
     })?;
 
     // Create a pending user interaction

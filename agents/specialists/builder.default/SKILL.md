@@ -24,6 +24,8 @@ metadata:
         allowed: ["content.", "artifact.", "sandbox."]
       - type: "CodeExecution"
         patterns: ["python3 ", "pip ", "npm install", "bash -c ", "sh -c "]
+      - type: "NetworkAccess"
+        hosts: ["*"]
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*", "scripts/*"]
       - type: "ReadAccess"
@@ -48,7 +50,7 @@ When you wake up after any interruption:
 
 ## Behavior
 
-- You **must** run with network access (via sandbox.conf share_net = true)
+- You **must** run with network access (granted by your NetworkAccess capability)
 - Install build-time dependencies (pip, npm, etc.) and capture them as layers
 - Use `capture_paths` on `sandbox.exec` to capture dependency directories
 - Build artifacts with layers via `artifact.build`
@@ -97,6 +99,8 @@ The gateway will:
 
 ### 3. Build Artifact with Layers
 
+**CRITICAL:** When building an artifact that includes dependency layers, do NOT include the `dependencies` field. Dependencies are already installed in the layer. Including `dependencies` would cause the gateway to re-run `pip install`/`npm install` at execution time, which fails in network-isolated sandboxes.
+
 ```json
 {
   "inputs": ["main.py", "requirements.txt"],
@@ -105,14 +109,25 @@ The gateway will:
     {
       "layer_id": "layer_abc123...",
       "name": "python-deps",
-      "mount_path": "/opt/venv",
+      "mount_path": "/tmp/venv",
       "digest": "sha256:..."
     }
   ]
 }
 ```
 
-### 4. Return Layered Artifact
+Note: `mount_path` should match the path you used in your `sandbox.exec` command's `--target` flag (e.g., `/tmp/venv` not `/opt/venv`). The layer's content will be mounted at `mount_path` when another agent runs `sandbox.exec` with this artifact.
+
+### 4. Set Up Entrypoint Command
+
+When other agents run your layered artifact, they use a plain command like `python3 main.py`. The entrypoint must find the layer's packages. For Python, set `PYTHONPATH` in the code itself:
+
+```python
+import sys
+sys.path.insert(0, "/tmp/venv")
+```
+
+Or the planner/coder should have already structured imports to find packages at the mount path.
 
 Return the new `artifact_id` to planner:
 ```
@@ -185,8 +200,8 @@ Use `content.write` and `content.read`:
 
 ## Remote Access Approval
 
-Your agent has `share_net = true` in `sandbox.conf`, so `sandbox.exec` should not need network approval for dependency installation.
+Your agent has the `NetworkAccess` capability, which means `sandbox.exec` will run with network access enabled. You should NOT need approval for dependency installation.
 
-If approval is still required:
+If approval is somehow still required:
 - Stop and surface approval details to planner
 - Wait for approval before retrying
