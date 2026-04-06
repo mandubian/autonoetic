@@ -323,6 +323,64 @@ pub struct AgentMeta {
     pub dir: std::path::PathBuf,
 }
 
+/// A stored user profile for cross-session personalization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserProfileRecord {
+    /// Unique user identifier.
+    pub user_id: String,
+    /// Human-readable display name.
+    pub display_name: Option<String>,
+    /// Trust domain: `local`, `partner`, `foreign`, `untrusted`.
+    pub trust_domain: String,
+    /// Origin node for federation provenance.
+    pub origin_node_id: Option<String>,
+    /// Arbitrary JSON blob containing profile data (preferences, constraints, context).
+    pub profile_json: Option<String>,
+    /// Monotonically increasing version for optimistic concurrency.
+    pub profile_version: i64,
+    /// ISO 8601 creation timestamp.
+    pub created_at: String,
+    /// ISO 8601 last-update timestamp.
+    pub updated_at: String,
+}
+
+/// Scope of visibility an agent has into a user's profile.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingScope {
+    /// Full profile injected into system prompt.
+    Full,
+    /// Only preferences and constraints injected.
+    Restricted,
+    /// No profile data injected (binding exists but no wake injection).
+    TaskOnly,
+}
+
+impl std::fmt::Display for BindingScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => write!(f, "full"),
+            Self::Restricted => write!(f, "restricted"),
+            Self::TaskOnly => write!(f, "task_only"),
+        }
+    }
+}
+
+/// A binding between a user and an agent, controlling profile visibility scope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserAgentBinding {
+    /// The user whose profile is accessible.
+    pub user_id: String,
+    /// The agent that can access the profile.
+    pub agent_id: String,
+    /// What level of profile data the agent can see.
+    pub scope: BindingScope,
+    /// ISO 8601 timestamp when the binding was granted.
+    pub granted_at: String,
+    /// Who approved the binding (user, admin, or agent via approval queue).
+    pub granted_by: Option<String>,
+}
+
 /// Metadata attached when an agent is imported from the AgentSkills.io format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentSkillsImportMetadata {

@@ -71,4 +71,9 @@ pub enum Capability {
     /// The `services` field restricts which services can be accessed.
     /// Use ["*"] for all services, or specific service names.
     CredentialAccess { services: Vec<String> },
+
+    /// Access to user profile operations (read, update, share, revoke).
+    /// The `scopes` field controls which operations are allowed.
+    /// Use ["read"] for read-only, ["read", "write"] for full access.
+    UserProfileAccess { scopes: Vec<String> },
 }

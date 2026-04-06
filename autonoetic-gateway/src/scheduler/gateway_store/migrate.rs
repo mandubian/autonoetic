@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 1;
+const SCHEMA_VERSION_LATEST: i64 = 2;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -32,9 +32,11 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
-    let tx = conn.transaction()?;
-    tx.execute_batch(
-        "CREATE TABLE IF NOT EXISTS approvals (
+    // Version 1: initial schema
+    if current_version < 1 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS approvals (
             request_id TEXT PRIMARY KEY,
             agent_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
@@ -473,12 +475,52 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     tx.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![
-            SCHEMA_VERSION_LATEST,
+            1i64,
             "initial_schema",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;
     tx.commit()?;
+    }
+
+    // Version 2: user profiles and agent bindings
+    if current_version < 2 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id        TEXT PRIMARY KEY,
+                display_name   TEXT,
+                trust_domain   TEXT NOT NULL DEFAULT 'local',
+                origin_node_id TEXT,
+                profile_json   TEXT,
+                profile_version INTEGER NOT NULL DEFAULT 1,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_agent_bindings (
+                user_id    TEXT NOT NULL,
+                agent_id   TEXT NOT NULL,
+                scope      TEXT NOT NULL DEFAULT 'restricted',
+                granted_at TEXT NOT NULL,
+                granted_by TEXT,
+                PRIMARY KEY (user_id, agent_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_user_agent_bindings_agent ON user_agent_bindings(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_user_profiles_trust ON user_profiles(trust_domain);
+            ",
+        )?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+            params![
+                2i64,
+                "user_profiles",
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        tx.commit()?;
+    }
 
     Ok(())
 }

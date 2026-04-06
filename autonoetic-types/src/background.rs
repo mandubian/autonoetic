@@ -105,6 +105,13 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+    /// Approval subject only: "this approval request is for sharing a user profile with an agent."
+    /// Not executed by the scheduler; the operator approves/denies, then the caller creates the binding.
+    ProfileShare {
+        user_id: String,
+        agent_id: String,
+        scope: String,
+    },
 }
 
 impl ScheduledAction {
@@ -113,7 +120,7 @@ impl ScheduledAction {
     pub fn is_executable_by_scheduler(&self) -> bool {
         !matches!(
             self,
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. }
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } | Self::ProfileShare { .. }
         )
     }
 
@@ -125,7 +132,7 @@ impl ScheduledAction {
             | Self::SandboxExec {
                 requires_approval, ..
             } => *requires_approval,
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => true,
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } | Self::ProfileShare { .. } => true,
         }
     }
 
@@ -135,6 +142,7 @@ impl ScheduledAction {
             Self::SandboxExec { .. } => "sandbox_exec",
             Self::AgentInstall { .. } => "agent_install",
             Self::CredentialPrompt { .. } => "credential_prompt",
+            Self::ProfileShare { .. } => "profile_share",
         }
     }
 
@@ -142,7 +150,7 @@ impl ScheduledAction {
         match self {
             Self::WriteFile { evidence_ref, .. } => evidence_ref.clone(),
             Self::SandboxExec { evidence_ref, .. } => evidence_ref.clone(),
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => None,
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } | Self::ProfileShare { .. } => None,
         }
     }
 
@@ -154,7 +162,7 @@ impl ScheduledAction {
             Self::SandboxExec {
                 evidence_ref: r, ..
             } => *r = evidence_ref,
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => {}
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } | Self::ProfileShare { .. } => {}
         }
         self
     }
