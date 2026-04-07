@@ -254,31 +254,76 @@ impl RemoteAccessAnalyzer {
 
         let command_patterns: &[(&str, &str)] = &[
             // Language package managers
-            ("pip install", "pip install downloads packages from the network"),
-            ("pip3 install", "pip3 install downloads packages from the network"),
-            ("npm install", "npm install downloads packages from the network"),
-            ("yarn install", "yarn install downloads packages from the network"),
+            (
+                "pip install",
+                "pip install downloads packages from the network",
+            ),
+            (
+                "pip3 install",
+                "pip3 install downloads packages from the network",
+            ),
+            (
+                "npm install",
+                "npm install downloads packages from the network",
+            ),
+            (
+                "yarn install",
+                "yarn install downloads packages from the network",
+            ),
             ("yarn add", "yarn add downloads packages from the network"),
-            ("pnpm install", "pnpm install downloads packages from the network"),
-            ("bun install", "bun install downloads packages from the network"),
+            (
+                "pnpm install",
+                "pnpm install downloads packages from the network",
+            ),
+            (
+                "bun install",
+                "bun install downloads packages from the network",
+            ),
             ("go get", "go get downloads modules from the network"),
-            ("go mod download", "go mod download fetches modules from the network"),
-            ("cargo install", "cargo install downloads crates from the network"),
+            (
+                "go mod download",
+                "go mod download fetches modules from the network",
+            ),
+            (
+                "cargo install",
+                "cargo install downloads crates from the network",
+            ),
             ("gem install", "gem install downloads gems from the network"),
-            ("composer install", "composer install downloads packages from the network"),
-            ("composer require", "composer require downloads packages from the network"),
+            (
+                "composer install",
+                "composer install downloads packages from the network",
+            ),
+            (
+                "composer require",
+                "composer require downloads packages from the network",
+            ),
             // Download tools
             ("curl ", "curl makes network requests"),
             ("wget ", "wget downloads files from the network"),
             // System package managers
-            ("apt-get install", "apt-get install downloads packages from the network"),
-            ("apt-get update", "apt-get update fetches package lists from the network"),
+            (
+                "apt-get install",
+                "apt-get install downloads packages from the network",
+            ),
+            (
+                "apt-get update",
+                "apt-get update fetches package lists from the network",
+            ),
             ("apk add", "apk add downloads packages from the network"),
-            ("yum install", "yum install downloads packages from the network"),
-            ("dnf install", "dnf install downloads packages from the network"),
+            (
+                "yum install",
+                "yum install downloads packages from the network",
+            ),
+            (
+                "dnf install",
+                "dnf install downloads packages from the network",
+            ),
             ("pacman -S", "pacman -S downloads packages from the network"),
             // VCS network operations
-            ("git clone", "git clone fetches a repository from the network"),
+            (
+                "git clone",
+                "git clone fetches a repository from the network",
+            ),
             ("git fetch", "git fetch contacts a remote repository"),
             ("git pull", "git pull fetches and merges from a remote"),
             ("git push", "git push sends commits to a remote"),
@@ -294,10 +339,7 @@ impl RemoteAccessAnalyzer {
             }) {
                 // Deduplicate: only one detection per unique command pattern
                 let pat = pattern_str.trim().to_string();
-                if !patterns
-                    .iter()
-                    .any(|p: &DetectedPattern| p.pattern == pat)
-                {
+                if !patterns.iter().any(|p: &DetectedPattern| p.pattern == pat) {
                     patterns.push(DetectedPattern {
                         category: "network_command".to_string(),
                         pattern: pat,
@@ -330,10 +372,7 @@ impl RemoteAccessAnalyzer {
             if !packages.is_empty() {
                 patterns.detected_patterns.push(DetectedPattern {
                     category: "dependency_install".to_string(),
-                    pattern: format!(
-                        "packages: [{}]",
-                        packages.join(", ")
-                    ),
+                    pattern: format!("packages: [{}]", packages.join(", ")),
                     line_number: None,
                     reason: format!(
                         "Package installation ({} package(s)) requires network access",
@@ -377,12 +416,15 @@ impl RemoteAccessAnalyzer {
         let mut patterns = Self::analyze_code(code);
 
         // Parse import module names from the primary code
-        let import_re = Regex::new(r"(?m)^\s*(?:import\s+(\w+)|from\s+(\w+)\s+import)")
-            .unwrap();
+        let import_re = Regex::new(r"(?m)^\s*(?:import\s+(\w+)|from\s+(\w+)\s+import)").unwrap();
 
         let module_names: std::collections::HashSet<String> = import_re
             .captures_iter(code)
-            .filter_map(|cap| cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str().to_string()))
+            .filter_map(|cap| {
+                cap.get(1)
+                    .or_else(|| cap.get(2))
+                    .map(|m| m.as_str().to_string())
+            })
             .collect();
 
         if module_names.is_empty() || workspace_files.is_empty() {
@@ -414,9 +456,11 @@ impl RemoteAccessAnalyzer {
                 let transitive = Self::analyze_code(content);
                 for pat in transitive.detected_patterns {
                     // Avoid duplicates
-                    if !patterns.detected_patterns.iter().any(|p| {
-                        p.pattern == pat.pattern && p.category == pat.category
-                    }) {
+                    if !patterns
+                        .detected_patterns
+                        .iter()
+                        .any(|p| p.pattern == pat.pattern && p.category == pat.category)
+                    {
                         patterns.detected_patterns.push(pat);
                     }
                 }

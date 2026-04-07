@@ -998,8 +998,9 @@ impl NativeTool for WorkflowForceCompleteTool {
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
-        let config = config
-            .ok_or_else(|| anyhow::anyhow!("Gateway config required for workflow.force_complete"))?;
+        let config = config.ok_or_else(|| {
+            anyhow::anyhow!("Gateway config required for workflow.force_complete")
+        })?;
         let args: serde_json::Value = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid arguments: {}", e))?;
 
@@ -1058,14 +1059,18 @@ impl NativeTool for WorkflowForceCompleteTool {
                         evidence.push("session digest exists".to_string());
                     }
 
-                    if let Ok(content) = std::fs::read_to_string(session_dir.join("manifest.json")) {
+                    if let Ok(content) = std::fs::read_to_string(session_dir.join("manifest.json"))
+                    {
                         if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
                             if let Some(vis) = manifest.get("visibility") {
                                 if let Some(status) = vis.get("status") {
                                     if let Some(s) = status.as_str() {
                                         if s == "completed" || s == "done" {
                                             session_completed = true;
-                                            evidence.push("session manifest shows completed status".to_string());
+                                            evidence.push(
+                                                "session manifest shows completed status"
+                                                    .to_string(),
+                                            );
                                         }
                                     }
                                 }
@@ -1075,15 +1080,20 @@ impl NativeTool for WorkflowForceCompleteTool {
 
                     if has_digest {
                         if let Ok(digest) = std::fs::read_to_string(session_dir.join("digest.md")) {
-                            if digest.contains("Session summary") || digest.contains("jsonrpc_spawn_complete") {
+                            if digest.contains("Session summary")
+                                || digest.contains("jsonrpc_spawn_complete")
+                            {
                                 session_completed = true;
-                                evidence.push("session digest contains completion markers".to_string());
+                                evidence
+                                    .push("session digest contains completion markers".to_string());
                             }
                         }
                     }
 
                     if !has_manifest && !has_digest {
-                        evidence.push("session directory exists but is empty (likely crashed)".to_string());
+                        evidence.push(
+                            "session directory exists but is empty (likely crashed)".to_string(),
+                        );
                     }
                 } else {
                     evidence.push("session directory does not exist".to_string());
@@ -1091,13 +1101,13 @@ impl NativeTool for WorkflowForceCompleteTool {
             }
         }
 
-        if let Ok(Some(checkpoint)) = crate::scheduler::load_task_checkpoint(
-            config,
-            store,
-            workflow_id,
-            task_id,
-        ) {
-            evidence.push(format!("checkpoint exists (step: {}, version: {})", checkpoint.step, checkpoint.version));
+        if let Ok(Some(checkpoint)) =
+            crate::scheduler::load_task_checkpoint(config, store, workflow_id, task_id)
+        {
+            evidence.push(format!(
+                "checkpoint exists (step: {}, version: {})",
+                checkpoint.step, checkpoint.version
+            ));
         }
 
         let content_store = gateway_dir

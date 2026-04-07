@@ -175,7 +175,11 @@ impl OpenRouterCatalog {
         self.inner
             .try_read()
             .ok()
-            .and_then(|g| g.by_id.get(model_id).map(|m| m.context_length.map(|n| n as usize)))
+            .and_then(|g| {
+                g.by_id
+                    .get(model_id)
+                    .map(|m| m.context_length.map(|n| n as usize))
+            })
             .flatten()
     }
 

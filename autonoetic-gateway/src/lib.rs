@@ -23,13 +23,13 @@ pub mod server;
 pub mod tracing;
 pub mod vault;
 
-pub use bootstrap::bootstrap_agents;
 pub use agent::{cached, scan_agents, AgentRepository, LoadedAgent};
 pub use artifact_store::ArtifactStore;
 pub use autonoetic_types::agent::AgentMeta;
 pub use autonoetic_types::config::GatewayConfig;
 pub use autonoetic_types::layer::{ArtifactLayer, CapturedLayer, LayerManifest};
 pub use autonoetic_types::runtime_lock::RuntimeLock;
+pub use bootstrap::bootstrap_agents;
 pub use causal_chain::CausalLogger;
 pub use execution::{GatewayExecutionService, SpawnResult};
 pub use layer_store::LayerStore;

@@ -131,7 +131,10 @@ pub async fn handle_due_wake(
                     action: action.clone(),
                     created_at: now.to_rfc3339(),
                     reason: Some(format!("Wake reason: {:?}", reason)),
-                    approval_level: super::approval::resolve_approval_level(config.as_ref(), &action),
+                    approval_level: super::approval::resolve_approval_level(
+                        config.as_ref(),
+                        &action,
+                    ),
                     evidence_ref: reevaluation
                         .pending_scheduled_action
                         .as_ref()

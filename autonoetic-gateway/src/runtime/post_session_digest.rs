@@ -91,7 +91,7 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         context_window_tokens: None,
         base_url: None,
         api_key_env: None,
-            routing_preset: None,
+        routing_preset: None,
     })
 }
 
@@ -106,7 +106,7 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
         context_window_tokens: p.context_window_tokens,
         base_url: p.base_url.clone(),
         api_key_env: None,
-            routing_preset: None,
+        routing_preset: None,
     }
 }
 

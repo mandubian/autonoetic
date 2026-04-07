@@ -347,10 +347,8 @@ impl NativeTool for SandboxExecTool {
                                 if let Some(cs) = &content_store {
                                     if let Ok(content) = cs.read(&file.handle) {
                                         if let Ok(text) = String::from_utf8(content) {
-                                            artifact_code.push_str(&format!(
-                                                "\n# --- {} ---\n",
-                                                file.name
-                                            ));
+                                            artifact_code
+                                                .push_str(&format!("\n# --- {} ---\n", file.name));
                                             artifact_code.push_str(&text);
                                             needs_analysis = true;
                                         }
@@ -557,7 +555,9 @@ impl NativeTool for SandboxExecTool {
                         reason: Some(reason_text),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
-                        approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+                        approval_level: crate::scheduler::approval::resolve_approval_level(
+                            cfg, &action,
+                        ),
                         task_id: match (&approval_workflow_id, session_id) {
                             (Some(wf_id), Some(sid)) => {
                                 crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
@@ -706,62 +706,67 @@ impl NativeTool for SandboxExecTool {
             // Only use the cache when we have concrete targets (URLs, IPs).
             // Import-only and other opaque patterns always require re-approval
             // because they can resolve to different concrete targets at runtime.
-            let has_concrete = crate::runtime::approved_exec_cache::has_concrete_targets(&detected_patterns);
+            let has_concrete =
+                crate::runtime::approved_exec_cache::has_concrete_targets(&detected_patterns);
             if has_concrete {
-            if let Some(gw_dir) = gateway_dir {
-                let fingerprint =
-                    compute_fingerprint(&manifest.agent.id, &normalized_targets, &code_to_analyze);
-                if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                    if let Some(entry) = cache.find(&fingerprint) {
-                        tracing::info!(
-                            target: "sandbox.exec",
-                            fingerprint = %fingerprint,
-                            previously_approved_by = %entry.approved_by,
-                            previously_approved_at = %entry.approved_at,
-                            "Cache hit: skipping approval for previously approved sandbox exec"
-                        );
-                        let _ = cache.update_last_used(&fingerprint);
-                        approval_validated_for_command = true;
+                if let Some(gw_dir) = gateway_dir {
+                    let fingerprint = compute_fingerprint(
+                        &manifest.agent.id,
+                        &normalized_targets,
+                        &code_to_analyze,
+                    );
+                    if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                        if let Some(entry) = cache.find(&fingerprint) {
+                            tracing::info!(
+                                target: "sandbox.exec",
+                                fingerprint = %fingerprint,
+                                previously_approved_by = %entry.approved_by,
+                                previously_approved_at = %entry.approved_at,
+                                "Cache hit: skipping approval for previously approved sandbox exec"
+                            );
+                            let _ = cache.update_last_used(&fingerprint);
+                            approval_validated_for_command = true;
+                        }
                     }
                 }
-            }
 
-            // Also check for recently approved requests in the store (not just pending).
-            // This catches cases where the operator approved but the cache hasn't been
-            // populated yet (e.g., first run after cache was cleared).
-            if !approval_validated_for_command {
-                if let (Some(cfg), Some(gw_store), Some(sid)) = (config, &gateway_store, session_id)
-                {
-                    let root_sid = crate::runtime::content_store::root_session_id(sid);
-                    if let Ok(approved) = gw_store.get_approved_approvals_for_root(root_sid) {
-                        for req in &approved {
-                            if let ScheduledAction::SandboxExec { command, .. } = &req.action {
-                                if command == &effective_command {
-                                    tracing::info!(
-                                        target: "sandbox.exec",
-                                        request_id = %req.request_id,
-                                        "Found matching approved request in store, skipping new approval"
-                                    );
-                                    approval_validated_for_command = true;
+                // Also check for recently approved requests in the store (not just pending).
+                // This catches cases where the operator approved but the cache hasn't been
+                // populated yet (e.g., first run after cache was cleared).
+                if !approval_validated_for_command {
+                    if let (Some(cfg), Some(gw_store), Some(sid)) =
+                        (config, &gateway_store, session_id)
+                    {
+                        let root_sid = crate::runtime::content_store::root_session_id(sid);
+                        if let Ok(approved) = gw_store.get_approved_approvals_for_root(root_sid) {
+                            for req in &approved {
+                                if let ScheduledAction::SandboxExec { command, .. } = &req.action {
+                                    if command == &effective_command {
+                                        tracing::info!(
+                                            target: "sandbox.exec",
+                                            request_id = %req.request_id,
+                                            "Found matching approved request in store, skipping new approval"
+                                        );
+                                        approval_validated_for_command = true;
 
-                                    // Also cache this so future checks hit the fast path
-                                    let dep_packages: Option<Vec<String>> =
-                                        args.dependencies.as_ref().map(|d| d.packages.clone());
-                                    let remote_analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
+                                        // Also cache this so future checks hit the fast path
+                                        let dep_packages: Option<Vec<String>> =
+                                            args.dependencies.as_ref().map(|d| d.packages.clone());
+                                        let remote_analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
                                         &code_to_analyze,
                                         dep_packages.as_deref(),
                                     );
-                                    let normalized_targets =
-                                        normalize_targets(&remote_analysis.detected_patterns);
-                                    let fingerprint = compute_fingerprint(
-                                        &manifest.agent.id,
-                                        &normalized_targets,
-                                        &code_to_analyze,
-                                    );
-                                    if let Some(gw_dir) = gateway_dir {
-                                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                                            if cache.find(&fingerprint).is_none() {
-                                                let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                                        let normalized_targets =
+                                            normalize_targets(&remote_analysis.detected_patterns);
+                                        let fingerprint = compute_fingerprint(
+                                            &manifest.agent.id,
+                                            &normalized_targets,
+                                            &code_to_analyze,
+                                        );
+                                        if let Some(gw_dir) = gateway_dir {
+                                            if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                                                if cache.find(&fingerprint).is_none() {
+                                                    let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
                                                     fingerprint: fingerprint.clone(),
                                                     agent_id: manifest.agent.id.clone(),
                                                     remote_targets: normalized_targets,
@@ -771,18 +776,18 @@ impl NativeTool for SandboxExecTool {
                                                     approved_by: "operator".to_string(),
                                                     last_used_at: chrono::Utc::now().to_rfc3339(),
                                                 };
-                                                let _ = cache.record(entry);
+                                                    let _ = cache.record(entry);
+                                                }
                                             }
                                         }
-                                    }
 
-                                    break;
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
             } // end has_concrete guard
 
             // If still not validated, check for pending approvals
@@ -908,7 +913,9 @@ impl NativeTool for SandboxExecTool {
                         }),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
-                        approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+                        approval_level: crate::scheduler::approval::resolve_approval_level(
+                            cfg, &action,
+                        ),
                         task_id: match (&approval_workflow_id, session_id) {
                             (Some(wf_id), Some(sid)) => {
                                 crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
