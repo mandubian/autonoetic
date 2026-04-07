@@ -145,6 +145,119 @@ fn collect_revision_files(root: &Path) -> anyhow::Result<BTreeMap<String, Vec<u8
     Ok(files)
 }
 
+/// LLMs often emit invalid shapes (bare strings, `scopes` instead of `hosts` on NetworkAccess).
+/// Try strict [`Capability`] first, then apply a small set of normalizations, then error.
+fn normalize_capability_from_llm(v: serde_json::Value) -> anyhow::Result<Capability> {
+    if let Ok(c) = serde_json::from_value::<Capability>(v.clone()) {
+        return Ok(c);
+    }
+    if let Some(s) = v.as_str() {
+        return capability_from_shorthand(s);
+    }
+    if let Some(obj) = v.as_object() {
+        let mut map = obj.clone();
+        if let Some(typ) = map.get("type").and_then(|t| t.as_str()) {
+            match typ {
+                "NetworkAccess" => {
+                    if map.contains_key("scopes") {
+                        if !map.contains_key("hosts") {
+                            if let Some(sc) = map.remove("scopes") {
+                                map.insert("hosts".to_string(), sc);
+                            }
+                        } else {
+                            map.remove("scopes");
+                        }
+                    }
+                }
+                "CredentialAccess" => {
+                    if map.contains_key("scopes") {
+                        if !map.contains_key("services") {
+                            if let Some(sc) = map.remove("scopes") {
+                                map.insert("services".to_string(), sc);
+                            }
+                        } else {
+                            map.remove("scopes");
+                        }
+                    }
+                }
+                "ReadAccess" | "WriteAccess" => {
+                    if map.contains_key("hosts") && !map.contains_key("scopes") {
+                        if let Some(h) = map.remove("hosts") {
+                            map.insert("scopes".to_string(), h);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Ok(c) = serde_json::from_value::<Capability>(serde_json::Value::Object(map)) {
+            return Ok(c);
+        }
+    }
+    serde_json::from_value::<Capability>(v).map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+fn capability_from_shorthand(s: &str) -> anyhow::Result<Capability> {
+    match s.trim() {
+        "SandboxFunctions" => Ok(Capability::SandboxFunctions {
+            allowed: vec!["*".to_string()],
+        }),
+        "ReadAccess" => Ok(Capability::ReadAccess {
+            scopes: vec!["*".to_string()],
+        }),
+        "WriteAccess" => Ok(Capability::WriteAccess {
+            scopes: vec!["*".to_string()],
+        }),
+        "NetworkAccess" => Ok(Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }),
+        "CodeExecution" => Ok(Capability::CodeExecution {
+            patterns: vec!["*".to_string()],
+        }),
+        "AgentMessage" => Ok(Capability::AgentMessage {
+            patterns: vec!["*".to_string()],
+        }),
+        "AgentRevision" => Ok(Capability::AgentRevision {
+            patterns: vec!["*".to_string()],
+        }),
+        "Evaluation" => Ok(Capability::Evaluation {
+            patterns: vec!["*".to_string()],
+        }),
+        "ApprovalQueue" => Ok(Capability::ApprovalQueue {
+            patterns: vec!["*".to_string()],
+        }),
+        "SchedulerSignal" => Ok(Capability::SchedulerSignal {
+            patterns: vec!["*".to_string()],
+        }),
+        "CredentialAccess" => Ok(Capability::CredentialAccess {
+            services: vec!["*".to_string()],
+        }),
+        "EmergencyStop" => Ok(Capability::EmergencyStop),
+        "AgentSpawn" | "BackgroundReevaluation" => Err(anyhow::anyhow!(
+            "capability '{s}' cannot be a bare string; use a JSON object with required fields (see Capability schema)"
+        )),
+        other => Err(anyhow::anyhow!(
+            "unknown capability shorthand '{other}'; use {{ \"type\": \"ReadAccess\", \"scopes\": [\"*\"] }} or another tagged Capability object"
+        )),
+    }
+}
+
+fn deserialize_capabilities_lenient<'de, D>(deserializer: D) -> Result<Vec<Capability>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let items = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            normalize_capability_from_llm(v).map_err(|e| {
+                serde::de::Error::custom(format!("capabilities[{i}]: {e}"))
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize)]
 struct RevisionCreateArgs {
     agent_id: String,
@@ -163,6 +276,7 @@ struct RevisionCreateFromIntentArgs {
     artifact_id: String,
     instructions: String,
     description: String,
+    #[serde(deserialize_with = "deserialize_capabilities_lenient")]
     capabilities: Vec<Capability>,
     #[serde(default)]
     execution_mode: Option<ExecutionMode>,
@@ -626,7 +740,10 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "execution_mode": { "type": "string", "enum": ["reasoning", "script"] },
                     "script_entry": { "type": "string" },
                     "llm_config": { "type": "object" },
-                    "capabilities": { "type": "array" },
+                    "capabilities": {
+                        "type": "array",
+                        "description": "Each item is a tagged Capability object, e.g. {\"type\":\"NetworkAccess\",\"hosts\":[\"*\"]} (not scopes); {\"type\":\"ReadAccess\",\"scopes\":[\"*\"]}; or a string shorthand for simple caps: \"ReadAccess\", \"NetworkAccess\", \"CodeExecution\". AgentSpawn and BackgroundReevaluation must be full objects."
+                    },
                     "io": { "type": "object" },
                     "middleware": { "type": "object" },
                     "response_contract": { "type": "object" },
@@ -1504,5 +1621,54 @@ impl NativeTool for AgentRevisionDiffTool {
             "modified": modified,
         })
         .to_string())
+    }
+}
+
+#[cfg(test)]
+mod capability_lenient_deser_tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct CapsOnly {
+        #[serde(deserialize_with = "deserialize_capabilities_lenient")]
+        capabilities: Vec<Capability>,
+    }
+
+    #[test]
+    fn network_access_mistyped_scopes_normalized() {
+        let j = r#"{"capabilities":[{"type":"NetworkAccess","scopes":["api.example.com"]}]}"#;
+        let c: CapsOnly = serde_json::from_str(j).unwrap();
+        assert!(matches!(
+            c.capabilities.as_slice(),
+            [Capability::NetworkAccess { hosts }] if hosts == &["api.example.com".to_string()]
+        ));
+    }
+
+    #[test]
+    fn read_access_hosts_normalized_to_scopes() {
+        let j = r#"{"capabilities":[{"type":"ReadAccess","hosts":["/tmp"]}]}"#;
+        let c: CapsOnly = serde_json::from_str(j).unwrap();
+        assert!(matches!(
+            c.capabilities.as_slice(),
+            [Capability::ReadAccess { scopes }] if scopes == &["/tmp".to_string()]
+        ));
+    }
+
+    #[test]
+    fn string_shorthand_network_access() {
+        let j = r#"{"capabilities":["NetworkAccess"]}"#;
+        let c: CapsOnly = serde_json::from_str(j).unwrap();
+        assert!(matches!(
+            c.capabilities.as_slice(),
+            [Capability::NetworkAccess { hosts }] if hosts == &["*".to_string()]
+        ));
+    }
+
+    #[test]
+    fn agent_spawn_string_rejected() {
+        let j = r#"{"capabilities":["AgentSpawn"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        assert!(e.to_string().contains("capabilities[0]"));
     }
 }
