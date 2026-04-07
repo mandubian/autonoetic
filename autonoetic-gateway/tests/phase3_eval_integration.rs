@@ -1141,6 +1141,267 @@ fn test_revision_create_from_intent_materializes_canonical_skill_and_lock() {
 }
 
 #[test]
+fn test_revision_create_accepts_agentskills_compatible_skill_bundle() {
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_gateway::runtime::content_store::ContentStore;
+    use autonoetic_types::artifact::ArtifactKind;
+
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let session_id = "compat-session";
+
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+
+    let skill_md = r#"---
+name: "compat-agent"
+description: "Compatibility test agent"
+license: "MIT"
+compatibility: "agentskills.io"
+allowed-tools:
+  - Read
+  - WebFetch
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "compat-agent"
+      name: "Compat Agent"
+      description: "Compatibility test agent"
+    llm_config:
+      provider: "openrouter"
+      model: "google/gemini-3-flash-preview"
+---
+# Compat Agent
+
+Use web fetch when needed.
+"#;
+    let runtime_lock = r#"gateway:
+  artifact: "marketplace://gateway/autonoetic-gateway"
+  version: "0.1.0"
+  sha256: "replace-me"
+sdk:
+  version: "0.1.0"
+sandbox:
+  backend: "bubblewrap"
+dependencies: []
+artifacts: []
+layers: []
+"#;
+
+    for (name, bytes) in [
+        ("SKILL.md", skill_md.as_bytes()),
+        ("runtime.lock", runtime_lock.as_bytes()),
+        ("main.py", b"print('compat workflow')".as_ref()),
+    ] {
+        let handle = content_store.write(bytes).unwrap();
+        content_store.register_name(session_id, name, &handle).unwrap();
+    }
+
+    let bundle = artifact_store
+        .build_with_kind(
+            &[
+                "SKILL.md".to_string(),
+                "runtime.lock".to_string(),
+                "main.py".to_string(),
+            ],
+            Some(&["main.py".to_string()]),
+            None,
+            ArtifactKind::AgentBundle,
+            session_id,
+        )
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["compat-agent".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateTool;
+    let args = json!({
+        "agent_id": "compat-agent",
+        "artifact_id": bundle.artifact_id,
+        "summary": "compatibility install test"
+    });
+
+    let out = tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &args.to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["ok"], true);
+    let revision_id = parsed["revision_id"].as_str().unwrap();
+
+    let revision_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join("compat-agent")
+        .join(revision_id);
+    assert!(revision_dir.join("SKILL.md").exists());
+    assert!(revision_dir.join("runtime.lock").exists());
+    assert!(revision_dir.join("main.py").exists());
+
+    let skill_text = std::fs::read_to_string(revision_dir.join("SKILL.md")).unwrap();
+    let (parsed_manifest, _body) =
+        autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_text).unwrap();
+    assert_eq!(parsed_manifest.agent.id, "compat-agent");
+    let import = parsed_manifest
+        .agentskills_import
+        .clone()
+        .expect("agentskills import metadata should be preserved");
+    assert_eq!(import.license.as_deref(), Some("MIT"));
+    assert!(import.allowed_tools.iter().any(|t| t == "WebFetch"));
+    assert!(
+        parsed_manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::NetworkAccess { .. })),
+        "allowed-tools WebFetch should infer NetworkAccess"
+    );
+}
+
+#[tokio::test]
+async fn test_revision_create_from_intent_live_openrouter_smoke_if_key_available()
+-> anyhow::Result<()> {
+    if std::env::var("OPENROUTER_API_KEY").is_err() {
+        eprintln!("Skipping live smoke test: OPENROUTER_API_KEY not set");
+        return Ok(());
+    }
+
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_gateway::llm::Message;
+    use autonoetic_gateway::runtime::content_store::ContentStore;
+    use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
+    use autonoetic_types::artifact::ArtifactKind;
+
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let session_id = "intent-live-openrouter";
+
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+    let handle = content_store
+        .write(b"print('runtime artifact for reasoning mode')".as_ref())
+        .unwrap();
+    content_store
+        .register_name(session_id, "main.py", &handle)
+        .unwrap();
+    let bundle = artifact_store
+        .build_with_kind(
+            &["main.py".to_string()],
+            Some(&["main.py".to_string()]),
+            None,
+            ArtifactKind::AgentBundle,
+            session_id,
+        )
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["live.intent.agent*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateFromIntentTool;
+    let args = json!({
+        "agent_id": "live.intent.agent",
+        "artifact_id": bundle.artifact_id,
+        "instructions": "# Live Intent Agent\n\nYou are concise. Reply with only the final number.",
+        "description": "Live OpenRouter smoke agent",
+        "capabilities": [{"type": "ReadAccess", "scopes": ["self.*"]}],
+        "execution_mode": "reasoning",
+        "llm_config": {
+            "provider": "openrouter",
+            "model": "google/gemini-3-flash-preview",
+            "temperature": 0.0,
+            "fallback_provider": null,
+            "fallback_model": null,
+            "chat_only": false
+        }
+    });
+
+    let out = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
+    )?;
+    let parsed: serde_json::Value = serde_json::from_str(&out)?;
+    let revision_id = parsed["revision_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("revision_id missing in response"))?;
+
+    let revision_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join("live.intent.agent")
+        .join(revision_id);
+    let skill_text = std::fs::read_to_string(revision_dir.join("SKILL.md"))?;
+    let (skill_manifest, instructions) =
+        autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_text)?;
+
+    let llm_cfg = skill_manifest
+        .llm_config
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("llm_config missing from canonical skill"))?;
+    let driver = autonoetic_gateway::llm::build_driver(llm_cfg, reqwest::Client::new())?;
+
+    let agent_dir = tmp.path().join("live-agent-runtime");
+    std::fs::create_dir_all(&agent_dir)?;
+
+    let prompt = "What is 2 + 2? Reply with only the number.";
+    let mut history = vec![Message::user(prompt.to_string())];
+    let mut executor = AgentExecutor::new(
+        skill_manifest,
+        instructions,
+        driver,
+        agent_dir,
+        autonoetic_gateway::runtime::tools::default_registry(),
+        None,
+    )
+    .with_initial_user_message(prompt.to_string())
+    .with_session_id("live-openrouter-smoke-session".to_string());
+
+    let result = executor.execute_with_history(&mut history).await?;
+    let reply = match result {
+        TurnOutcome::Completed(Some(text)) => text,
+        TurnOutcome::Completed(None) => String::new(),
+        other => anyhow::bail!("unexpected turn outcome for live smoke: {:?}", other),
+    };
+    assert!(
+        reply.contains('4'),
+        "Expected live reply to include 4, got: {}",
+        reply
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_revision_create_rejects_non_agent_bundle_kind() {
     use autonoetic_gateway::artifact_store::ArtifactStore;
     use autonoetic_gateway::runtime::content_store::ContentStore;
