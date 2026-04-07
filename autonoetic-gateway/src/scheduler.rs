@@ -356,8 +356,7 @@ async fn check_stuck_running_tasks(
                         evidence.push("session digest exists".to_string());
                     }
 
-                    if let Ok(content) =
-                        std::fs::read_to_string(session_dir.join("manifest.json"))
+                    if let Ok(content) = std::fs::read_to_string(session_dir.join("manifest.json"))
                     {
                         if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
                             if let Some(vis) = manifest.get("visibility") {
@@ -365,8 +364,10 @@ async fn check_stuck_running_tasks(
                                     if let Some(s) = status.as_str() {
                                         if s == "completed" || s == "done" {
                                             session_completed = true;
-                                            evidence
-                                                .push("session manifest shows completed status".to_string());
+                                            evidence.push(
+                                                "session manifest shows completed status"
+                                                    .to_string(),
+                                            );
                                         }
                                     }
                                 }
@@ -399,7 +400,8 @@ async fn check_stuck_running_tasks(
                 ));
             }
 
-            if let Ok(content_store) = crate::runtime::content_store::ContentStore::new(&gateway_dir)
+            if let Ok(content_store) =
+                crate::runtime::content_store::ContentStore::new(&gateway_dir)
             {
                 if !task.session_id.is_empty() {
                     let implicit_name = format!("impl_{}", task.task_id);
@@ -886,9 +888,11 @@ async fn spawn_task_execution(
                             "tool_execution".to_string()
                         };
                         // Try to extract reason from approval_response
-                        let reason = serde_json::from_str::<serde_json::Value>(&cont.pending_tool_call.approval_response)
-                            .ok()
-                            .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from));
+                        let reason = serde_json::from_str::<serde_json::Value>(
+                            &cont.pending_tool_call.approval_response,
+                        )
+                        .ok()
+                        .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from));
 
                         Some(workflow_store::ApprovalMetadata {
                             request_id: cont.approval_request_id,

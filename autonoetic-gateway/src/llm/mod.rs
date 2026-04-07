@@ -285,17 +285,15 @@ pub fn build_driver(
     let base_url_override = std::env::var(LLM_BASE_URL_OVERRIDE_ENV)
         .ok()
         .or(config.base_url.clone());
-    let api_key_override = std::env::var(LLM_API_KEY_OVERRIDE_ENV)
-        .ok()
-        .or_else(|| {
-            // If the preset specifies a custom env var name, read from that.
-            // This lets OpenAI-compatible providers (StreamLake, etc.) use their
-            // own key env var instead of the provider's default (e.g., OPENAI_API_KEY).
-            config
-                .api_key_env
-                .as_ref()
-                .and_then(|env_name| std::env::var(env_name).ok())
-        });
+    let api_key_override = std::env::var(LLM_API_KEY_OVERRIDE_ENV).ok().or_else(|| {
+        // If the preset specifies a custom env var name, read from that.
+        // This lets OpenAI-compatible providers (StreamLake, etc.) use their
+        // own key env var instead of the provider's default (e.g., OPENAI_API_KEY).
+        config
+            .api_key_env
+            .as_ref()
+            .and_then(|env_name| std::env::var(env_name).ok())
+    });
     let resolved = provider::resolve(
         &config.provider,
         &config.model,

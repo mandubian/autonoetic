@@ -15,10 +15,7 @@ use autonoetic_types::config::{ApprovalLevelConfig, GatewayConfig};
 use std::sync::Arc;
 
 /// Determine the required approval level for a given action based on config.
-pub fn resolve_approval_level(
-    config: &GatewayConfig,
-    action: &ScheduledAction,
-) -> ApprovalLevel {
+pub fn resolve_approval_level(config: &GatewayConfig, action: &ScheduledAction) -> ApprovalLevel {
     let level_config = &config.approval_levels;
     let action_kind = action.kind();
 
@@ -1383,13 +1380,27 @@ mod tests {
         store.create_approval(&request).unwrap();
 
         // First approve succeeds
-        let result =
-            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None, None, None);
+        let result = super::approve_request(
+            &cfg,
+            Some(&store),
+            "apr-double",
+            "operator",
+            None,
+            None,
+            None,
+        );
         assert!(result.is_ok(), "first approve should succeed");
 
         // Second approve fails with idempotency error
-        let result =
-            super::approve_request(&cfg, Some(&store), "apr-double", "operator", None, None, None);
+        let result = super::approve_request(
+            &cfg,
+            Some(&store),
+            "apr-double",
+            "operator",
+            None,
+            None,
+            None,
+        );
         assert!(result.is_err(), "second approve should be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(

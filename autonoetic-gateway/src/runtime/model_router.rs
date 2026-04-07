@@ -4,12 +4,12 @@
 //! task complexity, and cost constraints. Falls back through a
 //! configured chain on failure.
 
+use crate::llm::{CompletionRequest, Message, Role};
 use autonoetic_types::agent::LlmConfig;
 use autonoetic_types::config::{
-    ApprovalGatesConfig, CapabilityTier, DeterministicRoutingConfig,
-    HybridRoutingConfig, LlmRoutingConfig, RoutingContext, RoutingPresetConfig, RoutingStrategy,
+    ApprovalGatesConfig, CapabilityTier, DeterministicRoutingConfig, HybridRoutingConfig,
+    LlmRoutingConfig, RoutingContext, RoutingPresetConfig, RoutingStrategy,
 };
-use crate::llm::{CompletionRequest, Message, Role};
 use serde::{Deserialize, Serialize};
 
 /// A resolved model entry from a fixed preset, carrying all metadata
@@ -143,9 +143,16 @@ fn build_fallback_chain(
     models
         .iter()
         .filter(|m| {
-            m.tier <= max_tier && !(m.config.provider == primary_provider && m.config.model == primary_model)
+            m.tier <= max_tier
+                && !(m.config.provider == primary_provider && m.config.model == primary_model)
         })
-        .map(|m| (m.preset_name.clone(), m.config.provider.clone(), m.config.model.clone()))
+        .map(|m| {
+            (
+                m.preset_name.clone(),
+                m.config.provider.clone(),
+                m.config.model.clone(),
+            )
+        })
         .collect()
 }
 
@@ -173,13 +180,15 @@ impl ModelRouter for DeterministicRouter {
                 }
             }
             if let Some(ref model) = override_entry.model {
-                let override_valid = models
-                    .iter()
-                    .any(|m| m.config.model == *model && m.config.provider == primary_config.provider);
+                let override_valid = models.iter().any(|m| {
+                    m.config.model == *model && m.config.provider == primary_config.provider
+                });
                 if override_valid {
                     let override_tier = models
                         .iter()
-                        .find(|m| m.config.model == *model && m.config.provider == primary_config.provider)
+                        .find(|m| {
+                            m.config.model == *model && m.config.provider == primary_config.provider
+                        })
                         .map(|m| m.tier);
                     return RoutingDecision {
                         provider: primary_config.provider.clone(),
@@ -200,9 +209,9 @@ impl ModelRouter for DeterministicRouter {
         let (effective_max_tier, was_downgraded) =
             self.compute_effective_tier(ctx, &det_config, max_tier);
 
-        let primary_entry = models
-            .iter()
-            .find(|m| m.config.provider == primary_config.provider && m.config.model == primary_config.model);
+        let primary_entry = models.iter().find(|m| {
+            m.config.provider == primary_config.provider && m.config.model == primary_config.model
+        });
 
         let (provider, model) = if let Some(entry) = primary_entry {
             if entry.tier <= effective_max_tier {
@@ -228,8 +237,13 @@ impl ModelRouter for DeterministicRouter {
             )
         };
 
-        let fallback_chain =
-            build_fallback_chain(models, effective_max_tier, &provider, &model, det_config.enable_fallback_chain);
+        let fallback_chain = build_fallback_chain(
+            models,
+            effective_max_tier,
+            &provider,
+            &model,
+            det_config.enable_fallback_chain,
+        );
 
         let rationale = format!(
             "deterministic: effective_tier={}, budget_used={:.0}%, cost=${:.2}, downgraded={}",
@@ -482,11 +496,24 @@ pub struct HybridRouter {
 }
 
 impl HybridRouter {
-    pub fn new(classifier_config: LlmConfig, classifier_timeout: u64, classifier_skip: f32, ambiguity_threshold: f32) -> Self {
+    pub fn new(
+        classifier_config: LlmConfig,
+        classifier_timeout: u64,
+        classifier_skip: f32,
+        ambiguity_threshold: f32,
+    ) -> Self {
         Self {
             deterministic: DeterministicRouter::new(),
-            classifier: LlmClassifierRouter::new(classifier_config, classifier_timeout, classifier_skip),
-            ambiguity_threshold: if ambiguity_threshold == 0.0 { 0.5 } else { ambiguity_threshold },
+            classifier: LlmClassifierRouter::new(
+                classifier_config,
+                classifier_timeout,
+                classifier_skip,
+            ),
+            ambiguity_threshold: if ambiguity_threshold == 0.0 {
+                0.5
+            } else {
+                ambiguity_threshold
+            },
         }
     }
 
@@ -568,7 +595,7 @@ pub fn create_router_from_preset(
                 context_window_tokens: None,
                 base_url: None,
                 api_key_env: None,
-            routing_preset: None,
+                routing_preset: None,
             });
             (
                 Box::new(LlmClassifierRouter::new(
@@ -590,7 +617,7 @@ pub fn create_router_from_preset(
                 context_window_tokens: None,
                 base_url: None,
                 api_key_env: None,
-            routing_preset: None,
+                routing_preset: None,
             });
             (
                 Box::new(HybridRouter::new(
@@ -634,9 +661,8 @@ pub fn decision_to_llm_config(
 mod tests {
     use super::*;
     use autonoetic_types::config::{
-        ApprovalGatesConfig, BudgetState, ComplexitySignals,
-        DeterministicRoutingConfig, RoutingStrategy,
-        TimeSignals, ModelCost, CapabilityTier,
+        ApprovalGatesConfig, BudgetState, CapabilityTier, ComplexitySignals,
+        DeterministicRoutingConfig, ModelCost, RoutingStrategy, TimeSignals,
     };
 
     fn resolved_models() -> Vec<ResolvedModelEntry> {
@@ -653,7 +679,7 @@ mod tests {
                     context_window_tokens: None,
                     base_url: None,
                     api_key_env: None,
-            routing_preset: None,
+                    routing_preset: None,
                 },
                 tier: CapabilityTier::Premium,
             },
@@ -669,7 +695,7 @@ mod tests {
                     context_window_tokens: None,
                     base_url: None,
                     api_key_env: None,
-            routing_preset: None,
+                    routing_preset: None,
                 },
                 tier: CapabilityTier::Standard,
             },
@@ -685,7 +711,7 @@ mod tests {
                     context_window_tokens: None,
                     base_url: None,
                     api_key_env: None,
-            routing_preset: None,
+                    routing_preset: None,
                 },
                 tier: CapabilityTier::Economy,
             },
@@ -726,7 +752,9 @@ mod tests {
             time: TimeSignals::default(),
         };
         let models = resolved_models();
-        let decision = router.route(&ctx, &primary_config(), &models, &routing_config()).await;
+        let decision = router
+            .route(&ctx, &primary_config(), &models, &routing_config())
+            .await;
 
         assert_eq!(decision.provider, "anthropic");
         assert_eq!(decision.model, "claude-opus-4-20250514");
@@ -749,7 +777,9 @@ mod tests {
             time: TimeSignals::default(),
         };
         let models = resolved_models();
-        let decision = router.route(&ctx, &primary_config(), &models, &routing_config()).await;
+        let decision = router
+            .route(&ctx, &primary_config(), &models, &routing_config())
+            .await;
 
         assert_eq!(decision.model, "claude-haiku-3-20250307");
         assert!(decision.was_downgraded);
@@ -760,7 +790,9 @@ mod tests {
         let router = DisabledRouter;
         let ctx = RoutingContext::default();
         let models = resolved_models();
-        let decision = router.route(&ctx, &primary_config(), &models, &routing_config()).await;
+        let decision = router
+            .route(&ctx, &primary_config(), &models, &routing_config())
+            .await;
 
         assert_eq!(decision.provider, "anthropic");
         assert_eq!(decision.model, "claude-opus-4-20250514");
@@ -782,7 +814,9 @@ mod tests {
             time: TimeSignals::default(),
         };
         let models = resolved_models();
-        let decision = router.route(&ctx, &primary_config(), &models, &routing_config()).await;
+        let decision = router
+            .route(&ctx, &primary_config(), &models, &routing_config())
+            .await;
 
         assert_eq!(decision.model, "claude-haiku-3-20250307");
         assert!(decision.was_downgraded);
@@ -800,7 +834,9 @@ mod tests {
         );
 
         assert_eq!(chain.len(), 2);
-        assert!(!chain.iter().any(|(_, p, m)| p == "anthropic" && m == "claude-opus-4-20250514"));
+        assert!(!chain
+            .iter()
+            .any(|(_, p, m)| p == "anthropic" && m == "claude-opus-4-20250514"));
     }
 
     #[tokio::test]
@@ -820,10 +856,13 @@ mod tests {
         let models = resolved_models();
         let mut rc = routing_config();
         let mut overrides = std::collections::HashMap::new();
-        overrides.insert("coder.default".to_string(), autonoetic_types::config::ModelOverride {
-            model: Some("claude-sonnet-4-20250514".to_string()),
-            min_tier: None,
-        });
+        overrides.insert(
+            "coder.default".to_string(),
+            autonoetic_types::config::ModelOverride {
+                model: Some("claude-sonnet-4-20250514".to_string()),
+                min_tier: None,
+            },
+        );
         rc.agent_overrides = overrides;
 
         let decision = router.route(&ctx, &primary_config(), &models, &rc).await;

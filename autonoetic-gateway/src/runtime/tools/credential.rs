@@ -741,7 +741,12 @@ impl NativeTool for CredentialSetupTool {
                         decided_at: None,
                         decided_by: None,
                         approval_level: _config
-                            .map(|c| crate::scheduler::approval::resolve_approval_level(c, &approval_action))
+                            .map(|c| {
+                                crate::scheduler::approval::resolve_approval_level(
+                                    c,
+                                    &approval_action,
+                                )
+                            })
                             .unwrap_or(ApprovalLevel::Operator),
                     };
                     store.create_approval(&approval_req)?;

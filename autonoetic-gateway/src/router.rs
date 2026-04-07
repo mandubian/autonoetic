@@ -775,7 +775,7 @@ fn append_delegation_task_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-        use crate::scheduler::{inbox_path, task_board_path};
+    use crate::scheduler::{inbox_path, task_board_path};
     use autonoetic_types::task_board::TaskBoardEntry;
     use tempfile::TempDir;
 
@@ -885,7 +885,8 @@ mod tests {
         std::fs::write(
             target_dir.join("SKILL.md"),
             "---\nname: target\ndescription: test\n---\nbody\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
