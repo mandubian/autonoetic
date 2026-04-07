@@ -9,7 +9,7 @@
 //! Design rule: This is deterministic infrastructure, not a policy engine.
 //! No inference from code meaning, no guessing agent intent.
 
-use autonoetic_types::agent::RuntimeDeclaration;
+use autonoetic_types::agent::{AgentManifest, RuntimeDeclaration};
 use autonoetic_types::layer::ArtifactLayer;
 use autonoetic_types::runtime_lock::{
     LockedArtifact, LockedDependencySet, LockedGateway, LockedLayerMount, LockedSandbox, LockedSdk,
@@ -131,6 +131,35 @@ artifacts: []
 layers: []
 "#
     .to_string()
+}
+
+pub fn render_skill_document(
+    manifest: &AgentManifest,
+    instructions: &str,
+) -> anyhow::Result<String> {
+    let mut frontmatter = serde_yaml::to_string(manifest).map_err(|e| {
+        anyhow::anyhow!("Failed to serialize canonical SKILL.md frontmatter: {}", e)
+    })?;
+    if let Some(stripped) = frontmatter.strip_prefix("---\n") {
+        frontmatter = stripped.to_string();
+    }
+    if !frontmatter.ends_with('\n') {
+        frontmatter.push('\n');
+    }
+    let body = instructions.trim();
+    Ok(format!("---\n{}---\n\n{}\n", frontmatter, body))
+}
+
+pub fn render_runtime_lock_document(lock: &RuntimeLock) -> anyhow::Result<String> {
+    let mut doc = serde_yaml::to_string(lock)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize canonical runtime.lock: {}", e))?;
+    if let Some(stripped) = doc.strip_prefix("---\n") {
+        doc = stripped.to_string();
+    }
+    if !doc.ends_with('\n') {
+        doc.push('\n');
+    }
+    Ok(doc)
 }
 
 // ─── Schema description for agent.revision.schema tool ─────────
@@ -303,9 +332,23 @@ pub fn validate_skill_frontmatter_shape(frontmatter: &serde_yaml::Value) -> Vec<
         let desc_key = serde_yaml::Value::String("description".into());
         if obj.get(&name_key).is_none() {
             missing.push("name".to_string());
+        } else if !obj
+            .get(&name_key)
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            missing.push("name (must be a non-empty string)".to_string());
         }
         if obj.get(&desc_key).is_none() {
             missing.push("description".to_string());
+        } else if !obj
+            .get(&desc_key)
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            missing.push("description (must be a non-empty string)".to_string());
         }
     }
 
@@ -315,18 +358,53 @@ pub fn validate_skill_frontmatter_shape(frontmatter: &serde_yaml::Value) -> Vec<
         let sdk_ver_key = serde_yaml::Value::String("sdk_version".into());
         if rt.get(&engine_key).is_none() {
             missing.push("runtime.engine".to_string());
+        } else if !rt
+            .get(&engine_key)
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            missing.push("runtime.engine (must be a non-empty string)".to_string());
         }
         if rt.get(&gw_ver_key).is_none() {
             missing.push("runtime.gateway_version".to_string());
+        } else if !rt
+            .get(&gw_ver_key)
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            missing.push("runtime.gateway_version (must be a non-empty string)".to_string());
         }
         if rt.get(&sdk_ver_key).is_none() {
             missing.push("runtime.sdk_version".to_string());
+        } else if !rt
+            .get(&sdk_ver_key)
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            missing.push("runtime.sdk_version (must be a non-empty string)".to_string());
         }
         if rt.get(&type_key).is_none() {
             missing.push("runtime.type".to_string());
+        } else if !rt
+            .get(&type_key)
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            missing.push("runtime.type (must be a non-empty string)".to_string());
         }
         if rt.get(&runtime_lock_key).is_none() {
             missing.push("runtime.runtime_lock".to_string());
+        } else if !rt
+            .get(&runtime_lock_key)
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            missing.push("runtime.runtime_lock (must be a non-empty string)".to_string());
         }
     } else if !missing.iter().any(|m| m.contains("runtime")) {
         missing.push("runtime (must be a mapping)".to_string());
@@ -335,6 +413,13 @@ pub fn validate_skill_frontmatter_shape(frontmatter: &serde_yaml::Value) -> Vec<
     if let Some(ag) = agent_map {
         if ag.get(&id_key).is_none() {
             missing.push("agent.id".to_string());
+        } else if !ag
+            .get(&id_key)
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            missing.push("agent.id (must be a non-empty string)".to_string());
         }
     } else if obj
         .get(&serde_yaml::Value::String("agent".into()))
@@ -695,5 +780,36 @@ artifacts: "not_a_sequence"
         assert!(desc.contains("Gateway-autofilled"));
         assert!(desc.contains("dependencies"));
         assert!(!desc.contains("`gateway` (object, required)"));
+    }
+
+    #[test]
+    fn test_render_skill_document_round_trip() {
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: default_runtime_declaration(),
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "roundtrip.agent".to_string(),
+                name: "Roundtrip Agent".to_string(),
+                description: "Round trip".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            response_contract: None,
+            execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
+            script_entry: None,
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+        };
+        let rendered = render_skill_document(&manifest, "# Instructions").unwrap();
+        assert!(rendered.starts_with("---\n"));
+        assert!(rendered.contains("agent:\n  id: roundtrip.agent"));
+        assert!(rendered.contains("# Instructions"));
     }
 }

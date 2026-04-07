@@ -156,7 +156,7 @@ autonoetic agent init my_agent --provider anthropic --model claude-sonnet-4-2025
 
 Creates:
 - `SKILL.md` with manifest frontmatter and LLM config
-- `runtime.lock` with dependencies
+- canonical `runtime.lock` scaffold (`gateway`/`sdk`/`sandbox` + empty agent-owned sections)
 - `state/`, `history/`, `skills/`, `scripts/` directories
 
 ### `autonoetic agent presets`
@@ -237,6 +237,12 @@ Create an immutable revision from an `agent_bundle` artifact.
 ```bash
 autonoetic agent revision create <agent_id> <artifact_id> [--base-revision-id <REV>] [--summary <TEXT>] [--json]
 ```
+
+Notes:
+- This path expects the artifact to already contain `SKILL.md` and the referenced `runtime.lock`.
+- The gateway validates shape, scaffolds gateway-owned lock fields, and stores canonicalized lock bytes.
+- For schema help from inside agent tooling, use the runtime tool `agent.revision.schema`.
+- For intent-driven installs (gateway renders canonical manifest/lock), agents can use `agent.revision.create_from_intent`.
 
 ### `autonoetic agent revision promote`
 

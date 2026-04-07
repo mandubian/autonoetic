@@ -1006,6 +1006,51 @@ fn test_revision_directory_materialization_on_create() {
 }
 
 #[test]
+fn test_revision_create_from_intent_requires_reasoning_llm_config() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateFromIntentTool;
+    let args = json!({
+        "agent_id": "intent-agent",
+        "artifact_id": "art_nonexistent",
+        "instructions": "# Intent Agent\nBuild from intent.",
+        "description": "Intent-driven install test",
+        "capabilities": [],
+        "execution_mode": "reasoning"
+    });
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        Some(gateway_dir.as_path()),
+        &args.to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
+    );
+
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("llm_config is required"),
+        "reasoning mode should enforce llm_config"
+    );
+}
+
+#[test]
 fn test_revision_create_rejects_non_agent_bundle_kind() {
     use autonoetic_gateway::artifact_store::ArtifactStore;
     use autonoetic_gateway::runtime::content_store::ContentStore;
@@ -1053,7 +1098,9 @@ layers: []
         ("main.py", b"print('hello')".as_ref()),
     ] {
         let handle = content_store.write(content).unwrap();
-        content_store.register_name(session_id, name, &handle).unwrap();
+        content_store
+            .register_name(session_id, name, &handle)
+            .unwrap();
     }
     // Intentionally build with default kind ("binary"), not agent_bundle.
     let bundle = artifact_store
@@ -1145,7 +1192,9 @@ layers: []
         ("main.py", b"print('hello')".as_ref()),
     ] {
         let handle = content_store.write(content).unwrap();
-        content_store.register_name(session_id, name, &handle).unwrap();
+        content_store
+            .register_name(session_id, name, &handle)
+            .unwrap();
     }
     let bundle = artifact_store
         .build_with_kind(
@@ -1271,7 +1320,9 @@ agent:
         ];
         for (name, bytes) in entries {
             let handle = content_store.write(&bytes).unwrap();
-            content_store.register_name(session_id, &name, &handle).unwrap();
+            content_store
+                .register_name(session_id, &name, &handle)
+                .unwrap();
         }
         let layers = vec![ArtifactLayer {
             layer_id: captured.layer_id.clone(),
@@ -1298,7 +1349,10 @@ agent:
     assert_ne!(runtime_lock_a, runtime_lock_b);
     let artifact_a = build_bundle("test-session-a", &runtime_lock_a, "/opt/deps-a");
     let artifact_b = build_bundle("test-session-b", &runtime_lock_b, "/opt/deps-b");
-    assert_ne!(artifact_a, artifact_b, "artifacts should differ when runtime.lock differs");
+    assert_ne!(
+        artifact_a, artifact_b,
+        "artifacts should differ when runtime.lock differs"
+    );
 
     let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
         patterns: vec!["layer.identity*".into()],
