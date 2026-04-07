@@ -233,7 +233,11 @@ pub async fn handle_gateway_approvals(
                 request_id,
                 "cli",
                 reason.clone(),
-                if secrets.is_empty() { None } else { Some(secrets.clone()) },
+                if secrets.is_empty() {
+                    None
+                } else {
+                    Some(secrets.clone())
+                },
                 None,
             )?;
             println!(

@@ -10,8 +10,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let log_level = cli.log_level.as_deref().unwrap_or("info");
-    let env_filter = tracing_subscriber::EnvFilter::try_new(format!("autonoetic={log_level},{log_level}"))
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("autonoetic=info,info"));
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_new(format!("autonoetic={log_level},{log_level}"))
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("autonoetic=info,info"));
 
     let config_path = cli
         .config
@@ -166,7 +167,11 @@ async fn main() -> anyhow::Result<()> {
                 cli::agent::handle_agent_revision(&config_path, command)?;
             }
             cli::common::AgentCommands::PromotionHistory { agent_id, json } => {
-                cli::agent::handle_agent_promotion_history(&config_path, agent_id.as_deref(), *json)?;
+                cli::agent::handle_agent_promotion_history(
+                    &config_path,
+                    agent_id.as_deref(),
+                    *json,
+                )?;
             }
             cli::common::AgentCommands::ImportSkill {
                 from,
