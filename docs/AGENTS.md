@@ -295,6 +295,8 @@ For facts with provenance across sessions:
 | Tool | Signature | Description |
 |------|-----------|-------------|
 | `agent.revision.create` | `(artifact_id: string, agent_id: string, ...) → revision` | Create immutable revision from an AgentBundle artifact |
+| `agent.revision.create_from_intent` | `(agent_id, artifact_id, instructions, description, capabilities, ...) → revision` | Create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` and `runtime.lock` |
+| `agent.revision.schema` | `() → schema` | Return install contract ownership split, required fields, and canonical examples |
 | `agent.revision.list` | `(agent_id: string) → [revisions]` | List revisions for an agent |
 | `agent.revision.inspect` | `(agent_ref: string) → revision` | Inspect revision metadata and status |
 | `agent.revision.promote` | `(agent_ref: string, alias: string, ...) → promotion` | Move alias to a revision (activates it) |

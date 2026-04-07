@@ -73,10 +73,23 @@ If the artifact is malformed, missing files, or has wrong metadata, tell the pla
 
 Agent installation is a two-step workflow:
 
-### Step 1: `agent.revision.create`
+### Step 1: create a revision
 
-Creates a new revision of an agent from an artifact bundle.
+Use one of these install paths:
 
+1. `agent.revision.create` (artifact already has valid `SKILL.md` + `runtime.lock`)
+2. `agent.revision.create_from_intent` (render canonical `SKILL.md` + `runtime.lock` from intent)
+
+`agent.revision.create` example:
+```json
+{
+  "agent_id": "weather-fetcher",
+  "artifact_id": "art_a1b2c3d4",
+  "summary": "Install weather-fetcher revision from reviewed bundle"
+}
+```
+
+`agent.revision.create_from_intent` example:
 ```json
 {
   "agent_id": "weather-fetcher",
@@ -89,7 +102,11 @@ Creates a new revision of an agent from an artifact bundle.
   ],
   "llm_config": {
     "provider": "openrouter",
-    "model": "google/gemini-3-flash-preview"
+    "model": "google/gemini-3-flash-preview",
+    "temperature": 0.1,
+    "fallback_provider": null,
+    "fallback_model": null,
+    "chat_only": false
   }
 }
 ```
@@ -110,12 +127,12 @@ Activates the created revision.
 | Field | Description |
 |---|---|
 | `agent_id` | lowercase with hyphens |
-| `name` | display name |
-| `description` | what it does |
-| `instructions` | the markdown body of SKILL.md (everything after `---` frontmatter) |
 | `artifact_id` | REQUIRED: reviewed artifact to install from |
+| `summary` | optional note for `agent.revision.create` |
+| `description` | required for `agent.revision.create_from_intent` |
+| `instructions` | required for `agent.revision.create_from_intent` |
 | `capabilities` | declared capabilities for the agent |
-| `llm_config` | LLM provider and model |
+| `llm_config` | required for `create_from_intent` when `execution_mode=reasoning` |
 
 ### Key Rules:
 1. **`artifact_id` is required** - install from the reviewed artifact, not from loose content handles
@@ -151,7 +168,7 @@ Add these capabilities to your install request.
 
 ### Script Agent Requirements
 
-For `execution_mode: "script"`, you MUST include ALL of:
+For `execution_mode: "script"` on `agent.revision.create_from_intent`, you MUST include ALL of:
 ```json
 {
   "agent_id": "my-script",

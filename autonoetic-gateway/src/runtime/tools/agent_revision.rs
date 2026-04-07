@@ -2,7 +2,10 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{validate_relative_agent_path, NativeTool, NativeToolRegistry};
-use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::agent::{
+    AgentIO, AgentIdentity, AgentManifest, ExecutionMode, LlmConfig, Middleware,
+};
+use autonoetic_types::artifact::{ArtifactBundle, ArtifactKind};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::runtime_lock::{
@@ -16,6 +19,7 @@ use std::sync::Arc;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(AgentRevisionCreateTool));
+    registry.register(Box::new(AgentRevisionCreateFromIntentTool));
     registry.register(Box::new(AgentRevisionSchemaTool));
     registry.register(Box::new(AgentRevisionListTool));
     registry.register(Box::new(AgentRevisionInspectTool));
@@ -153,6 +157,241 @@ struct RevisionCreateArgs {
     metadata: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RevisionCreateFromIntentArgs {
+    agent_id: String,
+    artifact_id: String,
+    instructions: String,
+    description: String,
+    capabilities: Vec<Capability>,
+    #[serde(default)]
+    execution_mode: Option<ExecutionMode>,
+    #[serde(default)]
+    script_entry: Option<String>,
+    #[serde(default)]
+    llm_config: Option<LlmConfig>,
+    #[serde(default)]
+    io: Option<AgentIO>,
+    #[serde(default)]
+    middleware: Option<Middleware>,
+    #[serde(default)]
+    response_contract: Option<serde_json::Value>,
+    #[serde(default, alias = "base_ref")]
+    base_revision_id: Option<String>,
+    #[serde(default, alias = "change_summary")]
+    summary: Option<String>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+struct RevisionCreateCommonArgs {
+    agent_id: String,
+    artifact_id: String,
+    base_revision_id: Option<String>,
+    summary: Option<String>,
+    metadata: Option<serde_json::Value>,
+    source_kind: String,
+    source_ref: Option<String>,
+}
+
+#[derive(Debug)]
+struct PersistedRevisionResult {
+    response: serde_json::Value,
+    normalized_lock: RuntimeLock,
+}
+
+fn artifact_layers_from_bundle(
+    bundle: &ArtifactBundle,
+) -> Vec<autonoetic_types::layer::ArtifactLayer> {
+    bundle
+        .layers
+        .iter()
+        .map(|l| autonoetic_types::layer::ArtifactLayer {
+            layer_id: l.layer_id.clone(),
+            name: l.name.clone(),
+            mount_path: l.mount_path.clone(),
+            digest: l.digest.clone(),
+        })
+        .collect()
+}
+
+fn expected_locked_layers(bundle: &ArtifactBundle) -> Vec<LockedLayerMount> {
+    let mut layers: Vec<LockedLayerMount> = bundle
+        .layers
+        .iter()
+        .map(|layer| LockedLayerMount {
+            layer_id: layer.layer_id.clone(),
+            digest: layer.digest.clone(),
+            mount_path: layer.mount_path.clone(),
+        })
+        .collect();
+    layers.sort_by(|a, b| {
+        (&a.mount_path, &a.layer_id, &a.digest).cmp(&(&b.mount_path, &b.layer_id, &b.digest))
+    });
+    layers
+}
+
+fn parse_agent_owned_lock_sections_strict(
+    lock_value: serde_yaml::Value,
+) -> anyhow::Result<(Vec<LockedDependencySet>, Vec<LockedArtifact>)> {
+    let partial: crate::runtime::install_contract::RuntimeLockPartial =
+        serde_yaml::from_value(lock_value.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to parse runtime.lock partial shape: {}", e))?;
+
+    let mut dep_parse_errors = Vec::new();
+    let agent_deps: Vec<LockedDependencySet> = partial
+        .dependencies
+        .map(|deps| {
+            deps.into_iter()
+                .enumerate()
+                .filter_map(
+                    |(i, v)| match serde_yaml::from_value::<LockedDependencySet>(v) {
+                        Ok(d) => Some(d),
+                        Err(e) => {
+                            dep_parse_errors.push(format!("dependencies[{}]: {}", i, e));
+                            None
+                        }
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut art_parse_errors = Vec::new();
+    let agent_arts: Vec<LockedArtifact> = partial
+        .artifacts
+        .map(|arts| {
+            arts.into_iter()
+                .enumerate()
+                .filter_map(|(i, v)| match serde_yaml::from_value::<LockedArtifact>(v) {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        art_parse_errors.push(format!("artifacts[{}]: {}", i, e));
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !dep_parse_errors.is_empty() || !art_parse_errors.is_empty() {
+        let mut all_errors = dep_parse_errors;
+        all_errors.extend(art_parse_errors);
+        return Err(anyhow::anyhow!(
+            "runtime.lock parse errors:\n{}\n{}",
+            all_errors
+                .iter()
+                .map(|e| format!("  - {}", e))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            crate::runtime::install_contract::render_runtime_lock_example(),
+        ));
+    }
+
+    Ok((agent_deps, agent_arts))
+}
+
+fn create_revision_from_files(
+    common: &RevisionCreateCommonArgs,
+    created_by_id: &str,
+    gateway_dir: &Path,
+    gateway_store: &Arc<crate::scheduler::gateway_store::GatewayStore>,
+    bundle: &ArtifactBundle,
+    file_map: &mut BTreeMap<String, Vec<u8>>,
+    lock_rel_path: &str,
+    parsed_lock: RuntimeLock,
+    skill_content: &[u8],
+) -> anyhow::Result<PersistedRevisionResult> {
+    let expected_layers = expected_locked_layers(bundle);
+    let normalized_lock = normalize_runtime_lock(parsed_lock);
+    anyhow::ensure!(
+        normalized_lock.layers == expected_layers,
+        "runtime.lock layer closure does not match artifact layers: runtime.lock has {} layer(s), artifact has {} layer(s)",
+        normalized_lock.layers.len(),
+        expected_layers.len()
+    );
+
+    let canonical_lock_bytes = canonical_runtime_lock_bytes(normalized_lock.clone())?;
+    file_map.insert(lock_rel_path.to_string(), canonical_lock_bytes.clone());
+
+    let manifest_hash = format!("sha256:{}", sha256_hex(skill_content));
+    let runtime_lock_hash = format!("sha256:{}", sha256_hex(&canonical_lock_bytes));
+    let revision_digest_hex = compute_revision_content_digest_hex(file_map);
+    let revision_id = format!("rev_sha256:{}", revision_digest_hex);
+    let content_digest = format!("sha256:{}", revision_digest_hex);
+
+    if let Some(existing_rev) = gateway_store.get_agent_revision(&revision_id)? {
+        let _ =
+            materialize_revision_directory(gateway_dir, &common.agent_id, &revision_id, file_map)?;
+        return Ok(PersistedRevisionResult {
+            response: serde_json::json!({
+                "ok": true,
+                "status": "already_exists",
+                "revision_id": revision_id,
+                "agent_id": common.agent_id,
+                "artifact_id": common.artifact_id,
+                "agent_ref": format!("{}@{}", common.agent_id, revision_id),
+                "short_ref": format!("{}@rev_{}", common.agent_id, existing_rev.short_id),
+            }),
+            normalized_lock,
+        });
+    }
+
+    let _revision_dir =
+        materialize_revision_directory(gateway_dir, &common.agent_id, &revision_id, file_map)?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let base_revision_id = common.base_revision_id.as_ref().map(|value| {
+        if let Some(parsed) = autonoetic_types::agent_revision::AgentRef::parse(value) {
+            parsed.revision_id
+        } else {
+            value.to_string()
+        }
+    });
+
+    let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
+        revision_id: revision_id.clone(),
+        agent_id: common.agent_id.clone(),
+        base_revision_id,
+        artifact_id: Some(common.artifact_id.clone()),
+        content_digest,
+        runtime_lock_hash,
+        manifest_hash,
+        created_at: now,
+        created_by_type: "agent".to_string(),
+        created_by_id: created_by_id.to_string(),
+        source_kind: common.source_kind.clone(),
+        source_ref: common.source_ref.clone(),
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+        metadata_json: serde_json::json!({
+            "summary": common.summary,
+            "metadata": common.metadata,
+        }),
+        short_id: String::new(),
+    };
+
+    let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
+    let short_ref = format!("{}@rev_{}", common.agent_id, short_id);
+
+    Ok(PersistedRevisionResult {
+        response: serde_json::json!({
+            "ok": true,
+            "status": "created",
+            "revision_id": revision_id,
+            "agent_ref": format!("{}@{}", common.agent_id, revision_id),
+            "short_ref": short_ref,
+            "agent_id": common.agent_id,
+            "artifact_id": common.artifact_id,
+            "next_step": "Use agent.revision.promote to activate this revision"
+        }),
+        normalized_lock,
+    })
+}
+
 pub struct AgentRevisionCreateTool;
 
 impl NativeTool for AgentRevisionCreateTool {
@@ -226,7 +465,7 @@ impl NativeTool for AgentRevisionCreateTool {
             .inspect(&args.artifact_id)
             .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", args.artifact_id, e))?;
         anyhow::ensure!(
-            bundle.kind == autonoetic_types::artifact::ArtifactKind::AgentBundle,
+            bundle.kind == ArtifactKind::AgentBundle,
             "Artifact '{}' has kind '{:?}'. agent.revision.create requires kind 'agent_bundle'.",
             args.artifact_id,
             bundle.kind
@@ -243,15 +482,35 @@ impl NativeTool for AgentRevisionCreateTool {
             );
         }
 
-        let skill_content = file_map
-            .get("SKILL.md")
-            .ok_or_else(|| anyhow::anyhow!("Agent bundle artifact must include SKILL.md"))?
-            .clone();
+        let Some(skill_content) = file_map.get("SKILL.md").cloned() else {
+            let skill_missing = vec!["SKILL.md at artifact root".to_string()];
+            return Err(anyhow::anyhow!(
+                "{}",
+                crate::runtime::install_contract::format_install_validation_error(
+                    &skill_missing,
+                    None,
+                    None
+                )
+            ));
+        };
         let skill_text = String::from_utf8_lossy(&skill_content);
 
         let frontmatter_value =
-            crate::runtime::install_contract::extract_frontmatter_raw(&skill_text)
-                .map_err(|e| anyhow::anyhow!("Failed to extract SKILL.md frontmatter: {}", e))?;
+            match crate::runtime::install_contract::extract_frontmatter_raw(&skill_text) {
+                Ok(v) => v,
+                Err(e) => {
+                    let parse_error = e.to_string();
+                    let skill_missing = vec!["YAML frontmatter".to_string()];
+                    return Err(anyhow::anyhow!(
+                        "{}",
+                        crate::runtime::install_contract::format_install_validation_error(
+                            &skill_missing,
+                            None,
+                            Some(&parse_error)
+                        )
+                    ));
+                }
+            };
         let skill_missing =
             crate::runtime::install_contract::validate_skill_frontmatter_shape(&frontmatter_value);
         if !skill_missing.is_empty() {
@@ -300,202 +559,257 @@ impl NativeTool for AgentRevisionCreateTool {
                 ));
             }
 
-            let partial: crate::runtime::install_contract::RuntimeLockPartial =
-                serde_yaml::from_value(lock_value.clone()).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to parse '{}' from artifact '{}': {}",
-                        lock_rel_path,
-                        args.artifact_id,
-                        e
-                    )
-                })?;
-
-            let mut dep_parse_errors = Vec::new();
-            let agent_deps: Vec<LockedDependencySet> = partial
-                .dependencies
-                .map(|deps| {
-                    deps.into_iter()
-                        .enumerate()
-                        .filter_map(|(i, v)| {
-                            match serde_yaml::from_value::<LockedDependencySet>(v) {
-                                Ok(d) => Some(d),
-                                Err(e) => {
-                                    dep_parse_errors.push(format!("dependencies[{}]: {}", i, e));
-                                    None
-                                }
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let mut art_parse_errors = Vec::new();
-            let agent_arts: Vec<LockedArtifact> = partial
-                .artifacts
-                .map(|arts| {
-                    arts.into_iter()
-                        .enumerate()
-                        .filter_map(|(i, v)| match serde_yaml::from_value::<LockedArtifact>(v) {
-                            Ok(a) => Some(a),
-                            Err(e) => {
-                                art_parse_errors.push(format!("artifacts[{}]: {}", i, e));
-                                None
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            if !dep_parse_errors.is_empty() || !art_parse_errors.is_empty() {
-                let mut all_errors = dep_parse_errors;
-                all_errors.extend(art_parse_errors);
-                return Err(anyhow::anyhow!(
-                    "runtime.lock parse errors:\n{}\n{}",
-                    all_errors
-                        .iter()
-                        .map(|e| format!("  - {}", e))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    crate::runtime::install_contract::render_runtime_lock_example(),
-                ));
-            }
-
-            let expected_layers: Vec<autonoetic_types::layer::ArtifactLayer> = bundle
-                .layers
-                .iter()
-                .map(|l| autonoetic_types::layer::ArtifactLayer {
-                    layer_id: l.layer_id.clone(),
-                    name: l.name.clone(),
-                    mount_path: l.mount_path.clone(),
-                    digest: l.digest.clone(),
-                })
-                .collect();
-
+            let (agent_deps, agent_arts) = parse_agent_owned_lock_sections_strict(lock_value)?;
             let scaffolded = crate::runtime::install_contract::scaffold_runtime_lock(
                 Some(agent_deps),
                 Some(agent_arts),
-                &expected_layers,
+                &artifact_layers_from_bundle(&bundle),
             );
             scaffolded
         } else {
-            let expected_layers: Vec<autonoetic_types::layer::ArtifactLayer> = bundle
-                .layers
-                .iter()
-                .map(|l| autonoetic_types::layer::ArtifactLayer {
-                    layer_id: l.layer_id.clone(),
-                    name: l.name.clone(),
-                    mount_path: l.mount_path.clone(),
-                    digest: l.digest.clone(),
-                })
-                .collect();
-            crate::runtime::install_contract::scaffold_runtime_lock(None, None, &expected_layers)
+            crate::runtime::install_contract::scaffold_runtime_lock(
+                None,
+                None,
+                &artifact_layers_from_bundle(&bundle),
+            )
         };
 
-        let expected_layers: Vec<LockedLayerMount> = {
-            let mut layers: Vec<LockedLayerMount> = bundle
-                .layers
-                .iter()
-                .map(|layer| LockedLayerMount {
-                    layer_id: layer.layer_id.clone(),
-                    digest: layer.digest.clone(),
-                    mount_path: layer.mount_path.clone(),
-                })
-                .collect();
-            layers.sort_by(|a, b| {
-                (&a.mount_path, &a.layer_id, &a.digest).cmp(&(
-                    &b.mount_path,
-                    &b.layer_id,
-                    &b.digest,
-                ))
-            });
-            layers
-        };
-
-        let normalized_lock = normalize_runtime_lock(parsed_lock);
-        anyhow::ensure!(
-            normalized_lock.layers == expected_layers,
-            "runtime.lock layer closure does not match artifact layers: runtime.lock has {} layer(s), artifact has {} layer(s)",
-            normalized_lock.layers.len(),
-            expected_layers.len()
-        );
-
-        let canonical_lock_bytes = canonical_runtime_lock_bytes(normalized_lock.clone())?;
-        file_map.insert(lock_rel_path, canonical_lock_bytes.clone());
-
-        let manifest_hash = format!("sha256:{}", sha256_hex(&skill_content));
-        let runtime_lock_hash = format!("sha256:{}", sha256_hex(&canonical_lock_bytes));
-        let revision_digest_hex = compute_revision_content_digest_hex(&file_map);
-        let revision_id = format!("rev_sha256:{}", revision_digest_hex);
-        let content_digest = format!("sha256:{}", revision_digest_hex);
-
-        if let Some(existing_rev) = gateway_store.get_agent_revision(&revision_id)? {
-            let _ = materialize_revision_directory(
-                gateway_dir,
-                &args.agent_id,
-                &revision_id,
-                &file_map,
-            )?;
-            return Ok(serde_json::json!({
-                "ok": true,
-                "status": "already_exists",
-                "revision_id": revision_id,
-                "agent_id": args.agent_id,
-                "agent_ref": format!("{}@{}", args.agent_id, revision_id),
-                "short_ref": format!("{}@rev_{}", args.agent_id, existing_rev.short_id),
-            })
-            .to_string());
-        }
-
-        let _revision_dir =
-            materialize_revision_directory(gateway_dir, &args.agent_id, &revision_id, &file_map)?;
-
-        let now = chrono::Utc::now().to_rfc3339();
-
-        let base_revision_id = args.base_revision_id.as_ref().map(|value| {
-            if let Some(parsed) = autonoetic_types::agent_revision::AgentRef::parse(value) {
-                parsed.revision_id
-            } else {
-                value.to_string()
-            }
-        });
-
-        let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
-            revision_id: revision_id.clone(),
+        let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
-            base_revision_id,
-            artifact_id: Some(args.artifact_id.clone()),
-            content_digest,
-            runtime_lock_hash,
-            manifest_hash,
-            created_at: now,
-            created_by_type: "agent".to_string(),
-            created_by_id: manifest.agent.id.clone(),
+            artifact_id: args.artifact_id.clone(),
+            base_revision_id: args.base_revision_id.clone(),
+            summary: args.summary.clone(),
+            metadata: args.metadata.clone(),
             source_kind: "artifact".to_string(),
             source_ref: Some(args.artifact_id.clone()),
-            origin_node_id: "gateway".to_string(),
-            trust_domain: "local".to_string(),
-            status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
-            metadata_json: serde_json::json!({
-                "summary": args.summary,
-                "metadata": args.metadata,
+        };
+        let persisted = create_revision_from_files(
+            &common,
+            &manifest.agent.id,
+            gateway_dir,
+            &gateway_store,
+            &bundle,
+            &mut file_map,
+            &lock_rel_path,
+            parsed_lock,
+            &skill_content,
+        )?;
+        Ok(persisted.response.to_string())
+    }
+}
+
+pub struct AgentRevisionCreateFromIntentTool;
+
+impl NativeTool for AgentRevisionCreateFromIntentTool {
+    fn name(&self) -> &'static str {
+        "agent.revision.create_from_intent"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentRevision { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Create a new immutable agent revision from semantic intent and an artifact bundle, while canonicalizing SKILL.md and runtime.lock server-side.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string" },
+                    "artifact_id": { "type": "string" },
+                    "instructions": { "type": "string", "description": "Markdown instruction body for SKILL.md" },
+                    "description": { "type": "string", "description": "Agent description for metadata.agent.description" },
+                    "execution_mode": { "type": "string", "enum": ["reasoning", "script"] },
+                    "script_entry": { "type": "string" },
+                    "llm_config": { "type": "object" },
+                    "capabilities": { "type": "array" },
+                    "io": { "type": "object" },
+                    "middleware": { "type": "object" },
+                    "response_contract": { "type": "object" },
+                    "base_revision_id": { "type": "string" },
+                    "summary": { "type": "string" }
+                },
+                "required": ["agent_id", "artifact_id", "instructions", "description", "capabilities"],
+                "additionalProperties": false
             }),
-            short_id: String::new(),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&GatewayConfig>,
+        gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: RevisionCreateFromIntentArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        crate::runtime::tools::validate_agent_id(&args.agent_id)?;
+        anyhow::ensure!(
+            !args.artifact_id.trim().is_empty(),
+            "artifact_id must not be empty"
+        );
+        anyhow::ensure!(
+            !args.instructions.trim().is_empty(),
+            "instructions must not be empty"
+        );
+        anyhow::ensure!(
+            !args.description.trim().is_empty(),
+            "description must not be empty"
+        );
+        anyhow::ensure!(
+            policy.can_agent_revision(&args.agent_id),
+            "Permission Denied: agent '{}' lacks AgentRevision capability for '{}'",
+            manifest.agent.id,
+            args.agent_id
+        );
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!(
+                "GatewayStore is required for revision creation"
+            ));
+        };
+        let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
+        let artifact_store = crate::ArtifactStore::new(gateway_dir)?;
+
+        let mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
+        match mode {
+            ExecutionMode::Script => anyhow::ensure!(
+                args.script_entry
+                    .as_ref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false),
+                "script_entry is required when execution_mode is 'script'"
+            ),
+            ExecutionMode::Reasoning => anyhow::ensure!(
+                args.llm_config.is_some(),
+                "llm_config is required when execution_mode is 'reasoning'"
+            ),
+        }
+
+        let bundle = artifact_store
+            .inspect(&args.artifact_id)
+            .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", args.artifact_id, e))?;
+        anyhow::ensure!(
+            bundle.kind == ArtifactKind::AgentBundle,
+            "Artifact '{}' has kind '{:?}'. agent.revision.create_from_intent requires kind 'agent_bundle'.",
+            args.artifact_id,
+            bundle.kind
+        );
+
+        let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for (path, bytes) in artifact_store.resolve_files(&args.artifact_id)? {
+            validate_relative_agent_path(&path)?;
+            anyhow::ensure!(
+                file_map.insert(path.clone(), bytes).is_none(),
+                "Artifact contains duplicate file path '{}'",
+                path
+            );
+        }
+
+        let target_manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: crate::runtime::install_contract::default_runtime_declaration(),
+            agent: AgentIdentity {
+                id: args.agent_id.clone(),
+                name: args.agent_id.clone(),
+                description: args.description.clone(),
+            },
+            capabilities: args.capabilities.clone(),
+            llm_config: args.llm_config.clone(),
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: args.io.clone(),
+            middleware: args.middleware.clone(),
+            response_contract: args.response_contract.clone(),
+            execution_mode: mode,
+            script_entry: args.script_entry.clone(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
         };
 
-        let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
+        let canonical_skill = crate::runtime::install_contract::render_skill_document(
+            &target_manifest,
+            &args.instructions,
+        )?;
+        let skill_content = canonical_skill.as_bytes().to_vec();
+        file_map.insert("SKILL.md".to_string(), skill_content.clone());
 
-        let short_ref = format!("{}@rev_{}", args.agent_id, short_id);
-        Ok(serde_json::json!({
-            "ok": true,
-            "status": "created",
-            "revision_id": revision_id,
-            "agent_ref": format!("{}@{}", args.agent_id, revision_id),
-            "short_ref": short_ref,
-            "agent_id": args.agent_id,
-            "artifact_id": args.artifact_id,
-            "next_step": "Use agent.revision.promote to activate this revision"
-        })
-        .to_string())
+        let lock_rel_path = target_manifest.runtime.runtime_lock.clone();
+        validate_relative_agent_path(&lock_rel_path)?;
+        let parsed_lock = crate::runtime::install_contract::scaffold_runtime_lock(
+            None,
+            None,
+            &artifact_layers_from_bundle(&bundle),
+        );
+
+        let common = RevisionCreateCommonArgs {
+            agent_id: args.agent_id.clone(),
+            artifact_id: args.artifact_id.clone(),
+            base_revision_id: args.base_revision_id.clone(),
+            summary: args.summary.clone(),
+            metadata: args.metadata.clone(),
+            source_kind: "intent_artifact".to_string(),
+            source_ref: Some(args.artifact_id.clone()),
+        };
+        let persisted = create_revision_from_files(
+            &common,
+            &manifest.agent.id,
+            gateway_dir,
+            &gateway_store,
+            &bundle,
+            &mut file_map,
+            &lock_rel_path,
+            parsed_lock,
+            &skill_content,
+        )?;
+
+        let mut response = persisted.response;
+        let normalized_lock = serde_json::to_value(&persisted.normalized_lock)?;
+        let canonical_skill_metadata = serde_json::to_value(&target_manifest)?;
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "canonical_skill_metadata".to_string(),
+                canonical_skill_metadata,
+            );
+            obj.insert("canonical_runtime_lock".to_string(), normalized_lock);
+            obj.insert(
+                "autofilled_fields".to_string(),
+                serde_json::json!([
+                    "runtime.engine",
+                    "runtime.gateway_version",
+                    "runtime.sdk_version",
+                    "runtime.runtime_lock",
+                    "runtime.lock.gateway",
+                    "runtime.lock.sdk",
+                    "runtime.lock.sandbox",
+                    "runtime.lock.layers"
+                ]),
+            );
+            obj.insert(
+                "normalized_fields".to_string(),
+                serde_json::json!([
+                    "runtime.lock.dependencies",
+                    "runtime.lock.artifacts",
+                    "runtime.lock.layers"
+                ]),
+            );
+        }
+        Ok(response.to_string())
     }
 }
 

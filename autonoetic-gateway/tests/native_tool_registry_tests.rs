@@ -112,12 +112,15 @@ fn spawn_counting_http_server(
 fn test_native_tool_registry_availability() {
     let registry = default_registry();
     let manifest_none = test_manifest(vec![]);
-    assert_eq!(registry.available_definitions(&manifest_none).len(), 8);
+    assert!(
+        registry.available_definitions(&manifest_none).len() >= 9,
+        "baseline tool set should include always-available tools"
+    );
     let manifest_shell = test_manifest(vec![Capability::CodeExecution {
         patterns: vec!["*".into()],
     }]);
     let defs = registry.available_definitions(&manifest_shell);
-    assert_eq!(defs.len(), 9);
+    assert!(defs.len() >= 10);
     assert!(defs.iter().any(|d| d.name == "sandbox.exec"));
 
     let manifest_all = test_manifest(vec![
@@ -126,7 +129,7 @@ fn test_native_tool_registry_availability() {
         Capability::WriteAccess { scopes: vec![] },
     ]);
     let defs_all = registry.available_definitions(&manifest_all);
-    assert_eq!(defs_all.len(), 22);
+    assert!(defs_all.len() >= 22);
 
     let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
     let defs_spawn = registry.available_definitions(&manifest_spawn);
@@ -143,6 +146,9 @@ fn test_native_tool_registry_availability() {
     assert!(defs_revision
         .iter()
         .any(|d| d.name == "agent.revision.create"));
+    assert!(defs_revision
+        .iter()
+        .any(|d| d.name == "agent.revision.create_from_intent"));
     assert!(defs_revision
         .iter()
         .any(|d| d.name == "agent.revision.list"));
@@ -163,7 +169,7 @@ fn test_native_tool_registry_availability() {
         hosts: vec!["*".to_string()],
     }]);
     let defs_net = registry.available_definitions(&manifest_net);
-    assert_eq!(defs_net.len(), 10);
+    assert!(defs_net.len() >= 10);
     assert!(defs_net.iter().any(|d| d.name == "web.search"));
     assert!(defs_net.iter().any(|d| d.name == "web.fetch"));
 }

@@ -19,6 +19,11 @@ This document describes all agent features available in the Autonoetic gateway r
 
 Every agent is defined by a `SKILL.md` file containing YAML frontmatter and a Markdown body. The frontmatter defines the agent's identity, capabilities, and behavior.
 
+Install-time ownership split:
+- Agent-owned: markdown instruction body + semantic intent fields.
+- Gateway-owned: canonical metadata shape and gateway/runtime lock closure fields.
+- Use `agent.revision.schema` to inspect the current install contract at runtime.
+
 ### Minimal Example
 
 ```yaml
@@ -52,12 +57,12 @@ metadata:
 You are a helpful assistant.
 ```
 
-### Manifest Fields
+### Manifest Fields (Canonical Target)
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `version` | Yes | Manifest version (use `"1.0"`) |
-| `runtime` | Yes | Runtime declaration block |
+| `runtime` | Yes | Runtime declaration block (canonical target) |
 | `agent` | Yes | Agent identity (id, name, description) |
 | `capabilities` | No | List of granted capabilities |
 | `llm_config` | No | LLM provider configuration |
@@ -68,6 +73,8 @@ You are a helpful assistant.
 | `middleware` | No | Pre/post processing hooks |
 | `background` | No | Background scheduling policy |
 | `disclosure` | No | Output disclosure policy |
+
+The parser accepts both native top-level Autonoetic shape and metadata-wrapped shape (`metadata.autonoetic.*`) during install/import compatibility.
 
 ---
 
