@@ -2,7 +2,9 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::continuation;
-use crate::runtime::tools::{capability_type_name, validate_agent_id, NativeTool, NativeToolRegistry};
+use crate::runtime::tools::{
+    capability_type_name, validate_agent_id, NativeTool, NativeToolRegistry,
+};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::{GatewayConfig, SchemaEnforcementConfig, SchemaEnforcementMode};
@@ -89,9 +91,9 @@ impl NativeTool for AgentSpawnTool {
             .unwrap_or(&default_enforcement_config);
 
         if enforcement_config.mode != SchemaEnforcementMode::Disabled {
-            let agents_dir = config
-                .map(|c| &c.agents_dir)
-                .ok_or_else(|| anyhow::anyhow!("config is required for agent.spawn schema enforcement"))?;
+            let agents_dir = config.map(|c| &c.agents_dir).ok_or_else(|| {
+                anyhow::anyhow!("config is required for agent.spawn schema enforcement")
+            })?;
             let target_agent_path = agents_dir.join(&args.agent_id).join("SKILL.md");
 
             if target_agent_path.exists() {
@@ -153,24 +155,40 @@ impl NativeTool for AgentSpawnTool {
         };
         let gw_config = config.unwrap_or(&fallback_gateway_config);
 
+        let root_for_approval_check =
+            crate::runtime::content_store::root_session_id(&resolved_session_id);
+        let pending = crate::scheduler::approval::pending_approval_requests_for_root(
+            gw_config,
+            gateway_store.as_deref(),
+            &root_for_approval_check,
+        )?;
+        let pending_session_continue: Vec<String> = pending
+            .iter()
+            .filter_map(|r| {
+                if matches!(
+                    r.action,
+                    autonoetic_types::background::ScheduledAction::SessionContinue { .. }
+                ) {
+                    Some(r.request_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !pending_session_continue.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Cannot delegate (agent.spawn): max-session-turn continuation approval is pending for this session. Pending request id(s): {}. Approve or reject first, then continue.",
+                pending_session_continue.join(", ")
+            ));
+        }
         // Role-agnostic: block synchronous delegation while any approval for this *root*
-        // session is still pending. Async spawn (args.async) is NOT blocked — it queues
-        // independently and the scheduler picks it up regardless of approval state.
-        if !args.r#async {
-            let root_for_approval_check =
-                crate::runtime::content_store::root_session_id(&resolved_session_id);
-            let pending = crate::scheduler::approval::pending_approval_requests_for_root(
-                gw_config,
-                gateway_store.as_deref(),
-                &root_for_approval_check,
-            )?;
-            if !pending.is_empty() {
-                let ids: Vec<String> = pending.iter().map(|r| r.request_id.clone()).collect();
-                return Err(anyhow::anyhow!(
-                    "Cannot delegate (agent.spawn) while approval(s) are pending for this session. Pending request id(s): {}. Approve or reject with `autonoetic gateway approvals approve|reject <id> --config <path>`, then continue.",
-                    ids.join(", ")
-                ));
-            }
+        // session is still pending.
+        if !args.r#async && !pending.is_empty() {
+            let ids: Vec<String> = pending.iter().map(|r| r.request_id.clone()).collect();
+            return Err(anyhow::anyhow!(
+                "Cannot delegate (agent.spawn) while approval(s) are pending for this session. Pending request id(s): {}. Approve or reject with `autonoetic gateway approvals approve|reject <id> --config <path>`, then continue.",
+                ids.join(", ")
+            ));
         }
 
         let root = crate::runtime::content_store::root_session_id(&resolved_session_id);
@@ -366,9 +384,13 @@ impl NativeTool for AgentSpawnTool {
                                 "tool_execution".to_string()
                             };
                             // Try to extract reason from approval_response
-                            let reason = serde_json::from_str::<serde_json::Value>(&cont.pending_tool_call.approval_response)
-                                .ok()
-                                .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from));
+                            let reason = serde_json::from_str::<serde_json::Value>(
+                                &cont.pending_tool_call.approval_response,
+                            )
+                            .ok()
+                            .and_then(|v| {
+                                v.get("reason").and_then(|r| r.as_str()).map(String::from)
+                            });
 
                             Some(crate::scheduler::ApprovalMetadata {
                                 request_id: cont.approval_request_id,

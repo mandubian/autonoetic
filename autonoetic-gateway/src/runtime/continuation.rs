@@ -239,6 +239,22 @@ pub fn execute_approved_action(
             agent_id
         ),
 
+        ScheduledAction::SessionContinue {
+            session_id,
+            turn_counter,
+            max_turns,
+            ..
+        } => Ok(serde_json::json!({
+            "ok": true,
+            "approval_required": false,
+            "continued": true,
+            "session_id": session_id,
+            "turn_counter": turn_counter,
+            "max_turns": max_turns,
+            "request_id": decision.request_id,
+        })
+        .to_string()),
+
         other => {
             anyhow::bail!(
                 "execute_approved_action: unsupported ScheduledAction variant {:?}",

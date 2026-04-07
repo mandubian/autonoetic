@@ -105,6 +105,17 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+    /// Approval subject only: continue a session after max-turn circuit breaker trips.
+    /// Not executed by the scheduler; once approved, the next resume attempt proceeds.
+    SessionContinue {
+        session_id: String,
+        root_session_id: String,
+        requested_by_agent_id: String,
+        turn_counter: u64,
+        max_turns: u32,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
 }
 
 impl ScheduledAction {
@@ -113,7 +124,7 @@ impl ScheduledAction {
     pub fn is_executable_by_scheduler(&self) -> bool {
         !matches!(
             self,
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. }
+            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } | Self::SessionContinue { .. }
         )
     }
 
@@ -125,7 +136,9 @@ impl ScheduledAction {
             | Self::SandboxExec {
                 requires_approval, ..
             } => *requires_approval,
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => true,
+            Self::AgentInstall { .. }
+            | Self::CredentialPrompt { .. }
+            | Self::SessionContinue { .. } => true,
         }
     }
 
@@ -135,6 +148,7 @@ impl ScheduledAction {
             Self::SandboxExec { .. } => "sandbox_exec",
             Self::AgentInstall { .. } => "agent_install",
             Self::CredentialPrompt { .. } => "credential_prompt",
+            Self::SessionContinue { .. } => "session_continue",
         }
     }
 
@@ -142,7 +156,9 @@ impl ScheduledAction {
         match self {
             Self::WriteFile { evidence_ref, .. } => evidence_ref.clone(),
             Self::SandboxExec { evidence_ref, .. } => evidence_ref.clone(),
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => None,
+            Self::AgentInstall { .. }
+            | Self::CredentialPrompt { .. }
+            | Self::SessionContinue { .. } => None,
         }
     }
 
@@ -154,7 +170,9 @@ impl ScheduledAction {
             Self::SandboxExec {
                 evidence_ref: r, ..
             } => *r = evidence_ref,
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } => {}
+            Self::AgentInstall { .. }
+            | Self::CredentialPrompt { .. }
+            | Self::SessionContinue { .. } => {}
         }
         self
     }

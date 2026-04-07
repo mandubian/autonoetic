@@ -19,6 +19,7 @@ use crate::runtime::session_tracer::{EvidenceMode, SessionTracer};
 use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tool_call_processor::ToolCallProcessor;
 use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware};
+use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::disclosure::DisclosurePolicy;
 use std::path::{Path, PathBuf};
@@ -45,10 +46,16 @@ fn compose_foundation(manifest: &AgentManifest) -> String {
     parts.push(FOUNDATION_CORE.trim());
 
     let has_workflow_caps = manifest.capabilities.iter().any(|c| {
-        matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. })
+        matches!(
+            c,
+            autonoetic_types::capability::Capability::AgentSpawn { .. }
+        )
     });
     let has_artifact_caps = manifest.capabilities.iter().any(|c| {
-        matches!(c, autonoetic_types::capability::Capability::WriteAccess { .. })
+        matches!(
+            c,
+            autonoetic_types::capability::Capability::WriteAccess { .. }
+        )
     });
     let is_script_mode = manifest.execution_mode == autonoetic_types::agent::ExecutionMode::Script;
     let has_digest_cap = manifest.capabilities.iter().any(|c| {
@@ -125,9 +132,9 @@ pub enum TurnOutcome {
     /// need to be held while waiting for the operator.
     Suspended {
         approval_request_id: String,
-        /// The full continuation, returned so the caller can attach
-        /// `workflow_id` / `task_id` and persist it with `save_continuation`.
-        continuation: Box<crate::runtime::continuation::TurnContinuation>,
+        /// The full continuation, when suspension happened mid-tool batch.
+        /// `None` means a non-tool approval boundary (e.g. max-turn continuation gate).
+        continuation: Option<Box<crate::runtime::continuation::TurnContinuation>>,
     },
 
     /// The turn was suspended because a user interaction is pending.
@@ -274,11 +281,7 @@ mod agentskills_bridging_tests {
     #[test]
     fn no_tool_bridging_without_agentskills_import() {
         let manifest = default_test_manifest();
-        let output = compose_system_instructions_with_metadata(
-            "Do things.",
-            &manifest,
-            None,
-        );
+        let output = compose_system_instructions_with_metadata("Do things.", &manifest, None);
         assert!(
             !output.contains("Tool Compatibility Notes"),
             "should not include tool bridging for native agents"
@@ -446,9 +449,7 @@ fn tool_result_counts_as_progress(result: &str) -> bool {
         if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
             return ok;
         }
-        if let Some(approval_required) =
-            parsed.get("approval_required").and_then(|v| v.as_bool())
-        {
+        if let Some(approval_required) = parsed.get("approval_required").and_then(|v| v.as_bool()) {
             return !approval_required;
         }
         if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
@@ -573,6 +574,98 @@ impl AgentExecutor {
     fn next_turn_id(&mut self) -> String {
         self.turn_counter += 1;
         format!("turn-{:06}", self.turn_counter)
+    }
+
+    fn approved_session_continue_count(&self, session_id: &str) -> anyhow::Result<u64> {
+        let Some(store) = self.gateway_store.as_ref() else {
+            return Ok(0);
+        };
+        let approved = store.get_approved_approvals_for_session(session_id)?;
+        Ok(approved
+            .iter()
+            .filter(|r| matches!(r.action, ScheduledAction::SessionContinue { .. }))
+            .count() as u64)
+    }
+
+    fn pending_session_continue_request_id(
+        &self,
+        cfg: &GatewayConfig,
+        session_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let pending = crate::scheduler::approval::pending_approval_requests_for_session(
+            cfg,
+            self.gateway_store.as_deref(),
+            session_id,
+        )?;
+        Ok(pending.into_iter().find_map(|r| {
+            if matches!(r.action, ScheduledAction::SessionContinue { .. }) {
+                Some(r.request_id)
+            } else {
+                None
+            }
+        }))
+    }
+
+    fn create_session_continue_approval(
+        &self,
+        cfg: &GatewayConfig,
+        session_id: &str,
+        max_turns: u32,
+        blocked_turn: u64,
+    ) -> anyhow::Result<String> {
+        let Some(store) = self.gateway_store.as_ref() else {
+            anyhow::bail!("GatewayStore is required for max-session-turn approval gating");
+        };
+        let root_session_id = crate::runtime::content_store::root_session_id(session_id).to_string();
+        let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let action = ScheduledAction::SessionContinue {
+            session_id: session_id.to_string(),
+            root_session_id: root_session_id.clone(),
+            requested_by_agent_id: self.manifest.agent.id.clone(),
+            turn_counter: blocked_turn,
+            max_turns,
+            payload: Some(serde_json::json!({
+                "reason": "max_session_turns_reached",
+            })),
+        };
+        let workflow_id = self.workflow_id.clone().or_else(|| {
+            crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root_session_id)
+                .ok()
+                .flatten()
+        });
+        let task_id = self.task_id.clone().or_else(|| {
+            workflow_id.as_ref().and_then(|wf_id| {
+                crate::scheduler::resolve_task_id_for_session(
+                    cfg,
+                    None,
+                    wf_id,
+                    session_id,
+                )
+                .ok()
+                .flatten()
+            })
+        });
+        let request = ApprovalRequest {
+            request_id: request_id.clone(),
+            agent_id: self.manifest.agent.id.clone(),
+            session_id: session_id.to_string(),
+            action: action.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: Some(format!(
+                "Session '{}' reached max_session_turns={} at turn {}. Approve to continue for another window of {} turns.",
+                session_id, max_turns, blocked_turn, max_turns
+            )),
+            evidence_ref: None,
+            root_session_id: Some(root_session_id),
+            workflow_id,
+            task_id,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+        };
+        store.create_approval(&request)?;
+        Ok(request_id)
     }
 
     pub fn close_session(&mut self, reason: &str) -> anyhow::Result<()> {
@@ -742,19 +835,53 @@ impl AgentExecutor {
         let session_id = self.ensure_session_id();
         let turn_id = self.next_turn_id();
 
-        // Hard session-level turn limit — circuit breaker for runaway loops
+        // Hard session-level turn limit with explicit approval gate.
+        // Each approval grants one additional window of `max_session_turns`.
         if let Some(cfg) = &self.config {
-            if self.turn_counter >= cfg.max_session_turns as u64 {
-                tracing::warn!(
-                    agent_id = %self.manifest.agent.id,
-                    turn_counter = self.turn_counter,
-                    max_turns = cfg.max_session_turns,
-                    "Session reached max turns limit"
-                );
-                let cp =
-                    self.build_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached, None);
-                self.save_checkpoint_if_possible(&cp);
-                return Ok(TurnOutcome::Completed(None));
+            if cfg.max_session_turns > 0 {
+                let approved_windows = self.approved_session_continue_count(&session_id)?;
+                let allowed_turns = (cfg.max_session_turns as u64).saturating_mul(1 + approved_windows);
+                // turn_counter already includes the in-flight turn (next_turn_id incremented above),
+                // so we trip only when attempting turn N+1 for an allowance of N.
+                if self.turn_counter > allowed_turns {
+                    let blocked_turn = self.turn_counter;
+                    // Do not consume a turn when execution is blocked at the approval gate.
+                    self.turn_counter = self.turn_counter.saturating_sub(1);
+                    let request_id = if let Some(existing) =
+                        self.pending_session_continue_request_id(cfg, &session_id)?
+                    {
+                        existing
+                    } else {
+                        self.create_session_continue_approval(
+                            cfg,
+                            &session_id,
+                            cfg.max_session_turns,
+                            blocked_turn,
+                        )?
+                    };
+                    tracing::warn!(
+                        agent_id = %self.manifest.agent.id,
+                        session_id = %session_id,
+                        turn_counter = blocked_turn,
+                        max_turns = cfg.max_session_turns,
+                        approved_windows = approved_windows,
+                        approval_request_id = %request_id,
+                        "Session reached max turns limit; approval required to continue"
+                    );
+                    let cp = self.build_checkpoint(
+                        history,
+                        &turn_id,
+                        YieldReason::ApprovalRequired {
+                            approval_request_id: request_id.clone(),
+                        },
+                        None,
+                    );
+                    self.save_checkpoint_if_possible(&cp);
+                    return Ok(TurnOutcome::Suspended {
+                        approval_request_id: request_id,
+                        continuation: None,
+                    });
+                }
             }
         }
 
@@ -981,7 +1108,9 @@ impl AgentExecutor {
             *history = trimmed_history;
 
             // --- Model Routing: select model based on budget/complexity signals ---
-            use crate::runtime::llm_preset_resolver::{resolve_model_list, resolve_classifier_config, is_routing_preset};
+            use crate::runtime::llm_preset_resolver::{
+                is_routing_preset, resolve_classifier_config, resolve_model_list,
+            };
             let default_cfg = autonoetic_types::agent::LlmConfig {
                 provider: "openai".to_string(),
                 model: "gpt-4o".to_string(),
@@ -992,121 +1121,168 @@ impl AgentExecutor {
                 context_window_tokens: None,
                 base_url: None,
                 api_key_env: None,
-            routing_preset: None,
+                routing_preset: None,
             };
             let mut routed_llm_cfg = self.manifest.llm_config.clone().unwrap_or(default_cfg);
 
-            let presets = &self.config.as_ref().map(|c| &c.llm_presets).cloned()
+            let presets = &self
+                .config
+                .as_ref()
+                .map(|c| &c.llm_presets)
+                .cloned()
                 .unwrap_or_default();
             let routing_cfg = self.config.as_ref().and_then(|c| c.llm_routing.as_ref());
-            let preset_name = self.manifest.llm_config.as_ref().and_then(|c| c.routing_preset.clone());
+            let preset_name = self
+                .manifest
+                .llm_config
+                .as_ref()
+                .and_then(|c| c.routing_preset.clone());
 
-            let (routed_model, routing_decision_json, matched_entry) =
-                if let (Some(routing_cfg), Some(llm_cfg), Some(ref name)) = (routing_cfg, self.manifest.llm_config.as_ref(), preset_name) {
-                    if let Some(preset) = presets.get(name) {
-                        if is_routing_preset(preset) {
-                            let routing = preset.routing.as_ref().unwrap();
-                            let resolved_models = resolve_model_list(routing, presets);
-                            if resolved_models.is_empty() {
-                                (model.clone(), None, None)
-                            } else {
-                                let budget_state = self.session_budget.as_ref().and_then(|sb| {
-                                    sb.snapshot_counters(&session_id).and_then(|(rounds, _tokens, cost)| {
-                                        let config = self.config.as_ref()?;
-                                        let max_rounds = config.session_budget.max_llm_rounds? as f32;
-                                        Some(autonoetic_types::config::BudgetState {
-                                            session_budget_used_pct: Some(rounds as f32 / max_rounds),
-                                            prompt_budget_used_pct: budget_breakdown.utilization_pct.map(|v| v as f32),
-                                            session_cost_usd: Some(cost),
-                                        })
-                                    })
-                                }).unwrap_or_default();
+            let (routed_model, routing_decision_json, matched_entry) = if let (
+                Some(routing_cfg),
+                Some(llm_cfg),
+                Some(ref name),
+            ) =
+                (routing_cfg, self.manifest.llm_config.as_ref(), preset_name)
+            {
+                if let Some(preset) = presets.get(name) {
+                    if is_routing_preset(preset) {
+                        let routing = preset.routing.as_ref().unwrap();
+                        let resolved_models = resolve_model_list(routing, presets);
+                        if resolved_models.is_empty() {
+                            (model.clone(), None, None)
+                        } else {
+                            let budget_state = self
+                                .session_budget
+                                .as_ref()
+                                .and_then(|sb| {
+                                    sb.snapshot_counters(&session_id).and_then(
+                                        |(rounds, _tokens, cost)| {
+                                            let config = self.config.as_ref()?;
+                                            let max_rounds =
+                                                config.session_budget.max_llm_rounds? as f32;
+                                            Some(autonoetic_types::config::BudgetState {
+                                                session_budget_used_pct: Some(
+                                                    rounds as f32 / max_rounds,
+                                                ),
+                                                prompt_budget_used_pct: budget_breakdown
+                                                    .utilization_pct
+                                                    .map(|v| v as f32),
+                                                session_cost_usd: Some(cost),
+                                            })
+                                        },
+                                    )
+                                })
+                                .unwrap_or_default();
 
-                                let complexity = autonoetic_types::config::ComplexitySignals {
-                                    tool_count: Some(tools.len() as u32),
-                                    recent_tool_use_count: None,
-                                    has_workflow_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. })),
-                                    has_artifact_caps: self.manifest.capabilities.iter().any(|c| matches!(c, autonoetic_types::capability::Capability::WriteAccess { .. })),
-                                    is_script_mode: self.manifest.execution_mode == autonoetic_types::agent::ExecutionMode::Script,
-                                };
+                            let complexity = autonoetic_types::config::ComplexitySignals {
+                                tool_count: Some(tools.len() as u32),
+                                recent_tool_use_count: None,
+                                has_workflow_caps: self.manifest.capabilities.iter().any(|c| {
+                                    matches!(
+                                        c,
+                                        autonoetic_types::capability::Capability::AgentSpawn { .. }
+                                    )
+                                }),
+                                has_artifact_caps: self.manifest.capabilities.iter().any(|c| {
+                                    matches!(
+                                        c,
+                                        autonoetic_types::capability::Capability::WriteAccess { .. }
+                                    )
+                                }),
+                                is_script_mode: self.manifest.execution_mode
+                                    == autonoetic_types::agent::ExecutionMode::Script,
+                            };
 
-                                let ctx = autonoetic_types::config::RoutingContext {
-                                    agent_id: self.manifest.agent.id.clone(),
-                                    session_id: session_id.clone(),
-                                    budget: budget_state,
-                                    complexity,
-                                    time: autonoetic_types::config::TimeSignals {
-                                        turn_number: Some(self.turn_counter as u32),
-                                        session_turn_count: Some(self.turn_counter as u32),
-                                        elapsed_secs: None,
-                                    },
-                                };
+                            let ctx = autonoetic_types::config::RoutingContext {
+                                agent_id: self.manifest.agent.id.clone(),
+                                session_id: session_id.clone(),
+                                budget: budget_state,
+                                complexity,
+                                time: autonoetic_types::config::TimeSignals {
+                                    turn_number: Some(self.turn_counter as u32),
+                                    session_turn_count: Some(self.turn_counter as u32),
+                                    elapsed_secs: None,
+                                },
+                            };
 
-                                let classifier_config = routing.classifier_preset.as_ref()
-                                    .and_then(|cp| resolve_classifier_config(cp, presets));
+                            let classifier_config = routing
+                                .classifier_preset
+                                .as_ref()
+                                .and_then(|cp| resolve_classifier_config(cp, presets));
 
-                                let (router, _) = crate::runtime::model_router::create_router_from_preset(
+                            let (router, _) =
+                                crate::runtime::model_router::create_router_from_preset(
                                     routing,
                                     resolved_models.clone(),
                                     classifier_config,
                                 );
-                                let decision = router.route(&ctx, llm_cfg, &resolved_models, routing_cfg).await;
-                                let matched_entry = resolved_models.iter().find(|m| {
-                                    m.config.provider == decision.provider && m.config.model == decision.model
-                                }).cloned();
+                            let decision = router
+                                .route(&ctx, llm_cfg, &resolved_models, routing_cfg)
+                                .await;
+                            let matched_entry = resolved_models
+                                .iter()
+                                .find(|m| {
+                                    m.config.provider == decision.provider
+                                        && m.config.model == decision.model
+                                })
+                                .cloned();
 
-                                if decision.provider != llm_cfg.provider {
+                            if decision.provider != llm_cfg.provider {
+                                tracing::warn!(
+                                    target: "autonoetic::model_routing",
+                                    original_provider = %llm_cfg.provider,
+                                    routed_provider = %decision.provider,
+                                    routed_model = %decision.model,
+                                    "Cross-provider routing requested but not supported — staying with original provider"
+                                );
+                                (llm_cfg.model.clone(), Some(decision), matched_entry)
+                            } else {
+                                routed_llm_cfg =
+                                    crate::runtime::model_router::decision_to_llm_config(
+                                        &decision,
+                                        llm_cfg,
+                                        matched_entry.as_ref(),
+                                    );
+                                if decision.model != llm_cfg.model {
+                                    tracing::info!(
+                                        target: "autonoetic::model_routing",
+                                        original_model = %llm_cfg.model,
+                                        routed_model = %decision.model,
+                                        strategy = %decision.strategy_name,
+                                        rationale = %decision.rationale,
+                                        was_downgraded = decision.was_downgraded,
+                                        context_window = ?routed_llm_cfg.context_window_tokens,
+                                        base_url = ?routed_llm_cfg.base_url,
+                                        "Model routing decision"
+                                    );
+                                }
+                                if routed_llm_cfg.base_url != llm_cfg.base_url {
                                     tracing::warn!(
                                         target: "autonoetic::model_routing",
-                                        original_provider = %llm_cfg.provider,
-                                        routed_provider = %decision.provider,
-                                        routed_model = %decision.model,
-                                        "Cross-provider routing requested but not supported — staying with original provider"
+                                        original_base_url = ?llm_cfg.base_url,
+                                        routed_base_url = ?routed_llm_cfg.base_url,
+                                        "Model-specific base_url override cannot be applied — driver already built"
                                     );
-                                    (llm_cfg.model.clone(), Some(decision), matched_entry)
-                                } else {
-                                    routed_llm_cfg = crate::runtime::model_router::decision_to_llm_config(
-                                        &decision, llm_cfg, matched_entry.as_ref(),
-                                    );
-                                    if decision.model != llm_cfg.model {
-                                        tracing::info!(
-                                            target: "autonoetic::model_routing",
-                                            original_model = %llm_cfg.model,
-                                            routed_model = %decision.model,
-                                            strategy = %decision.strategy_name,
-                                            rationale = %decision.rationale,
-                                            was_downgraded = decision.was_downgraded,
-                                            context_window = ?routed_llm_cfg.context_window_tokens,
-                                            base_url = ?routed_llm_cfg.base_url,
-                                            "Model routing decision"
-                                        );
-                                    }
-                                    if routed_llm_cfg.base_url != llm_cfg.base_url {
-                                        tracing::warn!(
-                                            target: "autonoetic::model_routing",
-                                            original_base_url = ?llm_cfg.base_url,
-                                            routed_base_url = ?routed_llm_cfg.base_url,
-                                            "Model-specific base_url override cannot be applied — driver already built"
-                                        );
-                                    }
-                                    (decision.model.clone(), Some(decision), matched_entry)
                                 }
+                                (decision.model.clone(), Some(decision), matched_entry)
                             }
-                        } else {
-                            // Fixed preset — no routing needed
-                            (llm_cfg.model.clone(), None, None)
                         }
                     } else {
-                        tracing::warn!(
-                            target: "autonoetic::model_routing",
-                            preset_name = %name,
-                            "Routing preset not found, using primary model"
-                        );
-                        (model.clone(), None, None)
+                        // Fixed preset — no routing needed
+                        (llm_cfg.model.clone(), None, None)
                     }
                 } else {
+                    tracing::warn!(
+                        target: "autonoetic::model_routing",
+                        preset_name = %name,
+                        "Routing preset not found, using primary model"
+                    );
                     (model.clone(), None, None)
-                };
+                }
+            } else {
+                (model.clone(), None, None)
+            };
 
             // Log routing decision to causal chain
             if let Some(ref decision) = routing_decision_json {
@@ -1553,7 +1729,7 @@ impl AgentExecutor {
                         let _ = tracer.end_digest_turn();
                         return Ok(TurnOutcome::Suspended {
                             approval_request_id: request_id,
-                            continuation: Box::new(continuation),
+                            continuation: Some(Box::new(continuation)),
                         });
                     }
 
@@ -2242,7 +2418,8 @@ mod tests {
             utilization_pct: Some(114.5),
         };
         let mut config = GatewayConfig::default();
-        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::DemoteTools;
+        config.prompt_budget.on_exceeded =
+            autonoetic_types::config::PromptBudgetAction::DemoteTools;
         config.prompt_budget.margin_tokens = 0;
 
         let temp = tempdir().expect("tempdir should create");
@@ -2332,7 +2509,8 @@ mod tests {
             utilization_pct: Some(190.0),
         };
         let mut config = GatewayConfig::default();
-        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::TrimHistory;
+        config.prompt_budget.on_exceeded =
+            autonoetic_types::config::PromptBudgetAction::TrimHistory;
         config.prompt_budget.margin_tokens = 0;
 
         let temp = tempdir().expect("tempdir should create");
@@ -2351,7 +2529,9 @@ mod tests {
 
         assert_eq!(result_tools.len(), tools.len());
         assert!(result_history.len() < 7);
-        assert!(result_history.iter().any(|m| m.role == crate::llm::Role::System));
+        assert!(result_history
+            .iter()
+            .any(|m| m.role == crate::llm::Role::System));
     }
 
     #[test]
@@ -2401,7 +2581,8 @@ mod tests {
             utilization_pct: Some(426.0),
         };
         let mut config = GatewayConfig::default();
-        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::TrimHistory;
+        config.prompt_budget.on_exceeded =
+            autonoetic_types::config::PromptBudgetAction::TrimHistory;
         config.prompt_budget.margin_tokens = 0;
 
         let temp = tempdir().expect("tempdir should create");
@@ -2419,13 +2600,18 @@ mod tests {
         .expect("trim history should not fail");
 
         // Verify system message is preserved
-        assert!(result_history.iter().any(|m| m.role == crate::llm::Role::System));
+        assert!(result_history
+            .iter()
+            .any(|m| m.role == crate::llm::Role::System));
 
         // Verify no orphaned tool results: every tool result must have a preceding
         // assistant message with a matching tool call ID
         for msg in &result_history {
             if msg.role == crate::llm::Role::Tool {
-                let tc_id = msg.tool_call_id.as_ref().expect("tool result must have call id");
+                let tc_id = msg
+                    .tool_call_id
+                    .as_ref()
+                    .expect("tool result must have call id");
                 let has_matching_assistant = result_history.iter().any(|m| {
                     m.role == crate::llm::Role::Assistant
                         && m.tool_calls.iter().any(|tc| &tc.id == tc_id)
@@ -2470,7 +2656,8 @@ mod tests {
             utilization_pct: Some(2.3),
         };
         let mut config = GatewayConfig::default();
-        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::DemoteTools;
+        config.prompt_budget.on_exceeded =
+            autonoetic_types::config::PromptBudgetAction::DemoteTools;
         config.prompt_budget.tool_definitions_max_tokens = 100;
         config.prompt_budget.margin_tokens = 0;
 
@@ -2511,7 +2698,8 @@ mod tests {
             utilization_pct: Some(5.6),
         };
         let mut config = GatewayConfig::default();
-        config.prompt_budget.on_exceeded = autonoetic_types::config::PromptBudgetAction::TrimHistory;
+        config.prompt_budget.on_exceeded =
+            autonoetic_types::config::PromptBudgetAction::TrimHistory;
         config.prompt_budget.system_prompt_max_tokens = 200;
         config.prompt_budget.margin_tokens = 0;
 
@@ -2529,7 +2717,10 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("System prompt exceeds configured limit"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("System prompt exceeds configured limit"));
     }
 
     #[test]
@@ -2537,10 +2728,22 @@ mod tests {
         use crate::runtime::prompt_budget::enforcement_strategy;
         use autonoetic_types::config::PromptBudgetAction;
 
-        assert_eq!(enforcement_strategy(PromptBudgetAction::Warn).name(), "warn");
-        assert_eq!(enforcement_strategy(PromptBudgetAction::TrimHistory).name(), "trim_history");
-        assert_eq!(enforcement_strategy(PromptBudgetAction::DemoteTools).name(), "demote_tools");
-        assert_eq!(enforcement_strategy(PromptBudgetAction::Fail).name(), "fail");
+        assert_eq!(
+            enforcement_strategy(PromptBudgetAction::Warn).name(),
+            "warn"
+        );
+        assert_eq!(
+            enforcement_strategy(PromptBudgetAction::TrimHistory).name(),
+            "trim_history"
+        );
+        assert_eq!(
+            enforcement_strategy(PromptBudgetAction::DemoteTools).name(),
+            "demote_tools"
+        );
+        assert_eq!(
+            enforcement_strategy(PromptBudgetAction::Fail).name(),
+            "fail"
+        );
     }
 
     #[test]
@@ -2585,7 +2788,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("System prompt exceeds configured limit"),
+            err.to_string()
+                .contains("System prompt exceeds configured limit"),
             "Expected section-cap error, got: {}",
             err
         );
@@ -2637,9 +2841,7 @@ mod tests {
 
     #[test]
     fn test_compose_foundation_includes_workflow_for_agent_spawn() {
-        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn {
-            max_children: 5,
-        }]);
+        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn { max_children: 5 }]);
         let foundation = compose_foundation(&manifest);
         assert!(foundation.contains("# Foundation Workflow"));
     }
@@ -2969,6 +3171,140 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_max_session_turns_creates_approval_and_suspends() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("gateway store should open"),
+        );
+
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = temp.path().to_path_buf();
+        cfg.max_session_turns = 1;
+
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            Some(store.clone()),
+        )
+        .with_config(Arc::new(cfg))
+        .with_session_id("root-loop/coder.default-abcd1234");
+
+        let mut history = vec![Message::system("System prompt"), Message::user("Hello")];
+        let first = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("first turn should execute");
+        assert!(matches!(first, TurnOutcome::Completed(_)));
+
+        history.push(Message::user("Continue"));
+        let second = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("second turn should suspend on max-turn gate");
+        let request_id = match second {
+            TurnOutcome::Suspended {
+                approval_request_id,
+                continuation,
+            } => {
+                assert!(
+                    continuation.is_none(),
+                    "max-turn suspension should not require tool continuation"
+                );
+                approval_request_id
+            }
+            other => panic!("expected Suspended, got {:?}", other),
+        };
+        assert!(request_id.starts_with("apr-"));
+
+        let approval = store
+            .get_approval(&request_id)
+            .expect("approval lookup should succeed")
+            .expect("approval should exist");
+        assert!(matches!(
+            approval.action,
+            ScheduledAction::SessionContinue {
+                max_turns: 1,
+                ..
+            }
+        ));
+        assert!(
+            approval.reason.unwrap_or_default().contains("max_session_turns=1"),
+            "reason should mention configured max_session_turns"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_session_turns_approved_window_allows_one_more_turn() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("gateway store should open"),
+        );
+
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = temp.path().to_path_buf();
+        cfg.max_session_turns = 1;
+
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            Some(store.clone()),
+        )
+        .with_config(Arc::new(cfg))
+        .with_session_id("root-loop/evaluator.default-efgh5678");
+
+        let mut history = vec![Message::system("System prompt"), Message::user("Turn 1")];
+        let first = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("first turn should execute");
+        assert!(matches!(first, TurnOutcome::Completed(_)));
+
+        history.push(Message::user("Turn 2"));
+        let second = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("second call should suspend");
+        let request_id = match second {
+            TurnOutcome::Suspended {
+                approval_request_id,
+                ..
+            } => approval_request_id,
+            other => panic!("expected Suspended, got {:?}", other),
+        };
+
+        store
+            .record_decision(
+                &request_id,
+                "approved",
+                "operator",
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .expect("decision should record");
+
+        // After approval, one additional window (1 turn here) should be granted.
+        history.push(Message::user("Turn 2 retry after approval"));
+        let third = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("third call should execute after approval grant");
+        assert!(matches!(third, TurnOutcome::Completed(_)));
+    }
+
     #[test]
     fn test_native_disclosure_path_extraction() {
         let registry = crate::runtime::tools::default_registry();
@@ -3245,7 +3581,10 @@ Hope this helps!"#;
         )
         .with_session_id("preassigned-session-123");
 
-        assert_eq!(executor.session_id.as_deref(), Some("preassigned-session-123"));
+        assert_eq!(
+            executor.session_id.as_deref(),
+            Some("preassigned-session-123")
+        );
         assert!(
             executor.session_started_at.is_some(),
             "with_session_id must initialize session_started_at"
@@ -3341,7 +3680,9 @@ fn persist_history_to_content_store(
             agent_id: agent_id.unwrap_or("unknown").to_string(),
             revision_id: None,
             user_id: None,
-            started_at: session_started_at.map(|s| s.to_string()).unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            started_at: session_started_at
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             ended_at: None,
             status: "active".to_string(),
             turn_count: merged_history.len() as i64,
