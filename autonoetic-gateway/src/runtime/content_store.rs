@@ -520,6 +520,7 @@ impl ContentStore {
     /// Reads content by name, handle, or short alias with root-based lookup.
     ///
     /// Resolution order:
+    /// 0. Trim whitespace; if `cnt_<8 hex>` or `cnt:<8 hex>` → alias lookup (agent-facing ref)
     /// 1. If starts with "sha256:" → check visibility, then read
     ///    - Exception: if followed by exactly SHORT_ALIAS_LEN chars, treat as alias
     /// 2. If 8 hex chars → short alias lookup (session, then root)
@@ -529,6 +530,24 @@ impl ContentStore {
         session_id: &str,
         name_or_handle: &str,
     ) -> anyhow::Result<Vec<u8>> {
+        let name_or_handle = name_or_handle.trim();
+
+        // Agent-facing short ref from content.write / SpawnResult (`cnt_<8 hex>`)
+        if let Some(rest) = name_or_handle.strip_prefix("cnt_") {
+            if rest.len() == SHORT_ALIAS_LEN && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                return self
+                    .resolve_alias_with_root(session_id, rest)
+                    .and_then(|handle| self.read(&handle));
+            }
+        }
+        if let Some(rest) = name_or_handle.strip_prefix("cnt:") {
+            if rest.len() == SHORT_ALIAS_LEN && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                return self
+                    .resolve_alias_with_root(session_id, rest)
+                    .and_then(|handle| self.read(&handle));
+            }
+        }
+
         // Check for "sha256:SHORT_ALIAS" pattern (e.g., "sha256:8b40c8e1")
         // This happens when LLMs mistakenly use the alias value as a full handle
         if name_or_handle.starts_with("sha256:") {
@@ -750,6 +769,12 @@ mod tests {
         // Read by handle
         let by_handle = store.read_by_name_or_handle("session-1", &handle).unwrap();
         assert_eq!(by_handle, content);
+
+        let alias = ContentStore::get_short_alias(&handle);
+        let by_cnt = store
+            .read_by_name_or_handle("session-1", &format!("cnt_{}", alias))
+            .unwrap();
+        assert_eq!(by_cnt, content);
     }
 
     #[test]
