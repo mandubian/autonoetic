@@ -22,10 +22,8 @@ mod tests {
         let id = mint_hashed_prefixed_id("prom-", "agent-a@rev-1@time");
         assert!(id.starts_with("prom-"));
         assert_eq!(id.len(), "prom-".len() + STABLE_ID_HEX_LEN);
-        assert!(
-            id["prom-".len()..]
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-        );
+        assert!(id["prom-".len()..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }

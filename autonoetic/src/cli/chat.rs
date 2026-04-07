@@ -1082,9 +1082,7 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let workflow = app.session_overview.status_line();
-    let approve_hint = if app.inline_approvals_enabled
-        && !app.pending_approval_ids.is_empty()
-    {
+    let approve_hint = if app.inline_approvals_enabled && !app.pending_approval_ids.is_empty() {
         " | Approve: Ctrl+A"
     } else {
         ""
@@ -1710,7 +1708,9 @@ fn handle_key(
 ) -> anyhow::Result<HandleKeyAction> {
     match key.code {
         // Quit
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(HandleKeyAction::Quit),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Ok(HandleKeyAction::Quit)
+        }
 
         // Send
         KeyCode::Enter => {
@@ -1780,7 +1780,6 @@ fn handle_key(
     }
 
     Ok(HandleKeyAction::Continue)
-
 }
 
 /// Check for signals and inject into app. Returns true if signals were processed.
@@ -1919,16 +1918,28 @@ async fn check_signals(
                                     // Track pending approval IDs for inline approval (Ctrl+A)
                                     if app.inline_approvals_enabled {
                                         if event.event_type == "task.awaiting_approval" {
-                                            if let Some(apr_id) = event.payload.get("approval_request_id").and_then(|v| v.as_str()) {
-                                                if !app.pending_approval_ids.contains(&apr_id.to_string()) {
-                                                    app.pending_approval_ids.push(apr_id.to_string());
+                                            if let Some(apr_id) = event
+                                                .payload
+                                                .get("approval_request_id")
+                                                .and_then(|v| v.as_str())
+                                            {
+                                                if !app
+                                                    .pending_approval_ids
+                                                    .contains(&apr_id.to_string())
+                                                {
+                                                    app.pending_approval_ids
+                                                        .push(apr_id.to_string());
                                                 }
                                             }
                                         } else if event.event_type == "task.approved"
                                             || event.event_type == "task.rejected"
                                             || event.event_type == "task.cancelled"
                                         {
-                                            if let Some(apr_id) = event.payload.get("request_id").and_then(|v| v.as_str()) {
+                                            if let Some(apr_id) = event
+                                                .payload
+                                                .get("request_id")
+                                                .and_then(|v| v.as_str())
+                                            {
                                                 app.pending_approval_ids.retain(|id| id != apr_id);
                                             }
                                         }

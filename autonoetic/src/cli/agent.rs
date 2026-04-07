@@ -42,7 +42,7 @@ pub fn resolve_llm_config(
             chat_only: false,
             base_url: None,
             api_key_env: None,
-                routing_preset: None,
+            routing_preset: None,
         };
     }
 
@@ -62,8 +62,11 @@ pub fn resolve_llm_config(
                         temperature: preset.temperature.unwrap_or(0.2),
                         chat_only: preset.chat_only.unwrap_or(false),
                         base_url: preset.base_url.clone(),
-                        api_key_env: preset.api_key_env.clone().or(first_preset.api_key_env.clone()),
-                routing_preset: Some(preset_name.to_string()),
+                        api_key_env: preset
+                            .api_key_env
+                            .clone()
+                            .or(first_preset.api_key_env.clone()),
+                        routing_preset: Some(preset_name.to_string()),
                     };
                 }
             }
@@ -116,7 +119,7 @@ pub fn resolve_llm_config(
             chat_only: false,
             base_url: None,
             api_key_env: None,
-                routing_preset: None,
+            routing_preset: None,
         },
         "coder" => LlmTemplateConfig {
             provider: "anthropic".to_string(),
@@ -125,7 +128,7 @@ pub fn resolve_llm_config(
             chat_only: false,
             base_url: None,
             api_key_env: None,
-                routing_preset: None,
+            routing_preset: None,
         },
         "researcher" => LlmTemplateConfig {
             provider: "openai".to_string(),
@@ -134,7 +137,7 @@ pub fn resolve_llm_config(
             chat_only: false,
             base_url: None,
             api_key_env: None,
-                routing_preset: None,
+            routing_preset: None,
         },
         "evaluator" | "auditor" => LlmTemplateConfig {
             provider: "openrouter".to_string(),
@@ -143,7 +146,7 @@ pub fn resolve_llm_config(
             chat_only: false,
             base_url: None,
             api_key_env: None,
-                routing_preset: None,
+            routing_preset: None,
         },
         _ => LlmTemplateConfig {
             provider: "openai".to_string(),
@@ -152,7 +155,7 @@ pub fn resolve_llm_config(
             chat_only: false,
             base_url: None,
             api_key_env: None,
-                routing_preset: None,
+            routing_preset: None,
         },
     }
 }
@@ -335,9 +338,18 @@ pub fn handle_agent_presets(config_path: &Path) -> anyhow::Result<()> {
         let temp = preset.temperature.unwrap_or(0.0);
         let provider = preset.provider.as_deref().unwrap_or("(routing preset)");
         let model = preset.model.as_deref().unwrap_or_else(|| {
-            preset.routing.as_ref().and_then(|r| r.models.first()).map(|s| s.as_str()).unwrap_or("")
+            preset
+                .routing
+                .as_ref()
+                .and_then(|r| r.models.first())
+                .map(|s| s.as_str())
+                .unwrap_or("")
         });
-        let type_tag = if preset.routing.is_some() { " [routing]" } else { "" };
+        let type_tag = if preset.routing.is_some() {
+            " [routing]"
+        } else {
+            ""
+        };
         println!(
             "{:<20} {:<30} {:<15} {:.1}{}",
             name, provider, model, temp, type_tag
@@ -441,13 +453,15 @@ fn list_alias_rows_from_registry(config: &GatewayConfig) -> anyhow::Result<Vec<A
     let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
     let mut rows = Vec::new();
     for alias in store.list_agent_aliases(None)? {
-        let revision = store.get_agent_revision(&alias.revision_id)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Alias '{}' points to missing revision '{}'",
-                alias.alias_id,
-                alias.revision_id
-            )
-        })?;
+        let revision = store
+            .get_agent_revision(&alias.revision_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Alias '{}' points to missing revision '{}'",
+                    alias.alias_id,
+                    alias.revision_id
+                )
+            })?;
         let active_revision = if revision.short_id.is_empty() {
             alias.revision_id.clone()
         } else {
@@ -601,13 +615,16 @@ pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> a
             if *json {
                 let mut rows = Vec::new();
                 for alias in aliases {
-                    let revision = store.get_agent_revision(&alias.revision_id)?.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Alias '{}' points to missing revision '{}'",
-                            alias.alias_id,
-                            alias.revision_id
-                        )
-                    })?;
+                    let revision =
+                        store
+                            .get_agent_revision(&alias.revision_id)?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Alias '{}' points to missing revision '{}'",
+                                    alias.alias_id,
+                                    alias.revision_id
+                                )
+                            })?;
                     rows.push(serde_json::json!({
                         "alias_id": alias.alias_id,
                         "agent_id": alias.agent_id,
@@ -634,13 +651,15 @@ pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> a
                 "ALIAS ID", "AGENT ID", "ACTIVE REVISION", "STATUS"
             );
             for alias in aliases {
-                let revision = store.get_agent_revision(&alias.revision_id)?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Alias '{}' points to missing revision '{}'",
-                        alias.alias_id,
-                        alias.revision_id
-                    )
-                })?;
+                let revision = store
+                    .get_agent_revision(&alias.revision_id)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Alias '{}' points to missing revision '{}'",
+                            alias.alias_id,
+                            alias.revision_id
+                        )
+                    })?;
                 let rev_display = if revision.short_id.is_empty() {
                     alias.revision_id.clone()
                 } else {
@@ -660,13 +679,15 @@ pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> a
             let alias = store.resolve_alias(alias_id)?.ok_or_else(|| {
                 anyhow::anyhow!("Alias '{}' not found. Promote a revision first.", alias_id)
             })?;
-            let revision = store.get_agent_revision(&alias.revision_id)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Alias '{}' points to missing revision '{}'",
-                    alias.alias_id,
-                    alias.revision_id
-                )
-            })?;
+            let revision = store
+                .get_agent_revision(&alias.revision_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Alias '{}' points to missing revision '{}'",
+                        alias.alias_id,
+                        alias.revision_id
+                    )
+                })?;
             let payload = serde_json::json!({
                 "alias_id": alias.alias_id,
                 "agent_id": alias.agent_id,
@@ -693,7 +714,10 @@ pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> a
                     "status: {}",
                     payload["active_revision_status"].as_str().unwrap_or("")
                 );
-                println!("updated_at: {}", payload["updated_at"].as_str().unwrap_or(""));
+                println!(
+                    "updated_at: {}",
+                    payload["updated_at"].as_str().unwrap_or("")
+                );
                 println!(
                     "updated_by: {}:{}",
                     payload["updated_by_type"].as_str().unwrap_or(""),
@@ -780,18 +804,16 @@ pub fn handle_agent_seed(
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
     let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
 
-    let promotion_id = promotion_id
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| {
-            let now_nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            autonoetic_types::id_format::mint_hashed_prefixed_id(
-                "prom-",
-                &format!("{}-{}-{}", agent_id, revision_id, now_nanos),
-            )
-        });
+    let promotion_id = promotion_id.map(|id| id.to_string()).unwrap_or_else(|| {
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        autonoetic_types::id_format::mint_hashed_prefixed_id(
+            "prom-",
+            &format!("{}-{}-{}", agent_id, revision_id, now_nanos),
+        )
+    });
 
     let previous_revision_id = store.atomic_promote(
         agent_id,
@@ -815,7 +837,9 @@ pub fn handle_agent_seed(
     } else {
         println!(
             "Seeded alias '{}' to revision '{}' (promotion_id: {})",
-            agent_id, revision_id, payload["promotion_id"].as_str().unwrap_or("")
+            agent_id,
+            revision_id,
+            payload["promotion_id"].as_str().unwrap_or("")
         );
         if let Some(prev) = payload["previous_revision_id"].as_str() {
             println!("Previous revision: {}", prev);
@@ -904,10 +928,7 @@ pub fn handle_agent_bootstrap(
         }
     }
 
-    let activated = autonoetic_gateway::bootstrap_agents(
-        &config,
-        &gateway_dir,
-    )?;
+    let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
 
     println!(
         "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} patched, {} activated (target: {}).",
@@ -1025,7 +1046,10 @@ fn apply_llm_preset_to_skill(
                 };
                 if let Some(re_after) = insert_after {
                     updated = re_after
-                        .replace(&updated, format!("${{1}}      api_key_env: \"{}\"\n", env_var))
+                        .replace(
+                            &updated,
+                            format!("${{1}}      api_key_env: \"{}\"\n", env_var),
+                        )
                         .to_string();
                 }
             }
@@ -1525,7 +1549,7 @@ pub fn handle_agent_import_skill(
             context_window_tokens: None,
             base_url: None,
             api_key_env: None,
-                routing_preset: None,
+            routing_preset: None,
         })
     } else {
         let resolved = resolve_llm_config(&config, None, None, provider, model);
@@ -1579,11 +1603,9 @@ pub fn handle_agent_import_skill(
                     .map(|m| m.allowed_tools.clone())
                     .unwrap_or_default();
                 if allowed_tools.is_empty() {
-                    vec![
-                        autonoetic_types::capability::Capability::ReadAccess {
-                            scopes: vec!["self.*".to_string()],
-                        },
-                    ]
+                    vec![autonoetic_types::capability::Capability::ReadAccess {
+                        scopes: vec!["self.*".to_string()],
+                    }]
                 } else {
                     autonoetic_gateway::runtime::parser::infer_capabilities(&allowed_tools)
                 }
@@ -1596,11 +1618,9 @@ pub fn handle_agent_import_skill(
             (caps, true)
         }
         TrustMode::Audit => {
-            let mut caps = vec![
-                autonoetic_types::capability::Capability::ReadAccess {
-                    scopes: vec!["self.*".to_string()],
-                },
-            ];
+            let mut caps = vec![autonoetic_types::capability::Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            }];
             caps.push(autonoetic_types::capability::Capability::ApprovalQueue {
                 patterns: vec!["*".to_string()],
             });
@@ -1642,7 +1662,10 @@ pub fn handle_agent_import_skill(
     let yaml_frontmatter = {
         let mut lines = Vec::new();
         lines.push(format!("name: \"{}\"", agent_id));
-        lines.push(format!("description: \"{}\"", target_manifest.agent.description));
+        lines.push(format!(
+            "description: \"{}\"",
+            target_manifest.agent.description
+        ));
         if let Some(ref l) = import_license {
             lines.push(format!("license: \"{}\"", l));
         }
@@ -1659,16 +1682,37 @@ pub fn handle_agent_import_skill(
         lines.push("  autonoetic:".to_string());
         lines.push(format!("    version: \"{}\"", target_manifest.version));
         lines.push("    runtime:".to_string());
-        lines.push(format!("      engine: \"{}\"", target_manifest.runtime.engine));
-        lines.push(format!("      gateway_version: \"{}\"", target_manifest.runtime.gateway_version));
-        lines.push(format!("      sdk_version: \"{}\"", target_manifest.runtime.sdk_version));
-        lines.push(format!("      type: \"{}\"", target_manifest.runtime.runtime_type));
-        lines.push(format!("      sandbox: \"{}\"", target_manifest.runtime.sandbox));
-        lines.push(format!("      runtime_lock: \"{}\"", target_manifest.runtime.runtime_lock));
+        lines.push(format!(
+            "      engine: \"{}\"",
+            target_manifest.runtime.engine
+        ));
+        lines.push(format!(
+            "      gateway_version: \"{}\"",
+            target_manifest.runtime.gateway_version
+        ));
+        lines.push(format!(
+            "      sdk_version: \"{}\"",
+            target_manifest.runtime.sdk_version
+        ));
+        lines.push(format!(
+            "      type: \"{}\"",
+            target_manifest.runtime.runtime_type
+        ));
+        lines.push(format!(
+            "      sandbox: \"{}\"",
+            target_manifest.runtime.sandbox
+        ));
+        lines.push(format!(
+            "      runtime_lock: \"{}\"",
+            target_manifest.runtime.runtime_lock
+        ));
         lines.push("    agent:".to_string());
         lines.push(format!("      id: \"{}\"", target_manifest.agent.id));
         lines.push(format!("      name: \"{}\"", target_manifest.agent.name));
-        lines.push(format!("      description: \"{}\"", target_manifest.agent.description));
+        lines.push(format!(
+            "      description: \"{}\"",
+            target_manifest.agent.description
+        ));
         if !target_manifest.capabilities.is_empty() {
             lines.push("    capabilities:".to_string());
             for cap in &target_manifest.capabilities {
@@ -1698,7 +1742,10 @@ pub fn handle_agent_import_skill(
         if let Some(ref limits) = target_manifest.limits {
             lines.push("    limits:".to_string());
             lines.push(format!("      max_memory_mb: {}", limits.max_memory_mb));
-            lines.push(format!("      max_execution_time_sec: {}", limits.max_execution_time_sec));
+            lines.push(format!(
+                "      max_execution_time_sec: {}",
+                limits.max_execution_time_sec
+            ));
             if let Some(tb) = limits.token_budget_monthly {
                 lines.push(format!("      token_budget_monthly: {}", tb));
             }
@@ -1707,14 +1754,23 @@ pub fn handle_agent_import_skill(
             lines.push("    background:".to_string());
             lines.push(format!("      enabled: {}", bg.enabled));
             lines.push(format!("      interval_secs: {}", bg.interval_secs));
-            lines.push(format!("      mode: {}", match bg.mode {
-                autonoetic_types::background::BackgroundMode::Deterministic => "deterministic",
-                autonoetic_types::background::BackgroundMode::Reasoning => "reasoning",
-            }));
+            lines.push(format!(
+                "      mode: {}",
+                match bg.mode {
+                    autonoetic_types::background::BackgroundMode::Deterministic => "deterministic",
+                    autonoetic_types::background::BackgroundMode::Reasoning => "reasoning",
+                }
+            ));
             lines.push("      wake_predicates:".to_string());
             lines.push(format!("        timer: {}", bg.wake_predicates.timer));
-            lines.push(format!("        approval_resolved: {}", bg.wake_predicates.approval_resolved));
-            lines.push(format!("      validate_on_install: {}", bg.validate_on_install));
+            lines.push(format!(
+                "        approval_resolved: {}",
+                bg.wake_predicates.approval_resolved
+            ));
+            lines.push(format!(
+                "      validate_on_install: {}",
+                bg.validate_on_install
+            ));
         }
         if let Some(ref disclosure) = target_manifest.disclosure {
             lines.push("    disclosure:".to_string());
@@ -1732,10 +1788,16 @@ pub fn handle_agent_import_skill(
         if let Some(ref io) = target_manifest.io {
             lines.push("    io:".to_string());
             if let Some(ref accepts) = io.accepts {
-                lines.push(format!("      accepts: {}", serde_json::to_string(accepts).unwrap_or_default()));
+                lines.push(format!(
+                    "      accepts: {}",
+                    serde_json::to_string(accepts).unwrap_or_default()
+                ));
             }
             if let Some(ref returns) = io.returns {
-                lines.push(format!("      returns: {}", serde_json::to_string(returns).unwrap_or_default()));
+                lines.push(format!(
+                    "      returns: {}",
+                    serde_json::to_string(returns).unwrap_or_default()
+                ));
             }
         }
         if let Some(ref mw) = target_manifest.middleware {
@@ -1749,24 +1811,33 @@ pub fn handle_agent_import_skill(
                 }
             }
         }
-        lines.push(format!("    execution_mode: {}", match target_manifest.execution_mode {
-            autonoetic_types::agent::ExecutionMode::Script => "script",
-            autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
-        }));
+        lines.push(format!(
+            "    execution_mode: {}",
+            match target_manifest.execution_mode {
+                autonoetic_types::agent::ExecutionMode::Script => "script",
+                autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
+            }
+        ));
         if let Some(ref se) = target_manifest.script_entry {
             lines.push(format!("    script_entry: \"{}\"", se));
         }
         if let Some(ref rc) = target_manifest.response_contract {
-            lines.push(format!("    response_contract: {}", serde_json::to_string(rc).unwrap_or_default()));
+            lines.push(format!(
+                "    response_contract: {}",
+                serde_json::to_string(rc).unwrap_or_default()
+            ));
         }
         if !target_manifest.allowed_tool_tiers.is_empty() {
             lines.push("    allowed_tool_tiers:".to_string());
             for tier in &target_manifest.allowed_tool_tiers {
-                lines.push(format!("      - {}", match tier {
-                    autonoetic_types::agent::ToolTier::Core => "core",
-                    autonoetic_types::agent::ToolTier::Workflow => "workflow",
-                    autonoetic_types::agent::ToolTier::Specialized => "specialized",
-                }));
+                lines.push(format!(
+                    "      - {}",
+                    match tier {
+                        autonoetic_types::agent::ToolTier::Core => "core",
+                        autonoetic_types::agent::ToolTier::Workflow => "workflow",
+                        autonoetic_types::agent::ToolTier::Specialized => "specialized",
+                    }
+                ));
             }
         }
         lines.join("\n")
@@ -1782,7 +1853,10 @@ pub fn handle_agent_import_skill(
         let src = skill_dir.join(subdir);
         let dst = target_dir.join(subdir);
         if src.is_dir() {
-            fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+            fn copy_dir_recursive(
+                src: &std::path::Path,
+                dst: &std::path::Path,
+            ) -> std::io::Result<()> {
                 std::fs::create_dir_all(dst)?;
                 for entry in std::fs::read_dir(src)? {
                     let entry = entry?;
@@ -1837,16 +1911,16 @@ pub fn handle_agent_import_skill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use autonoetic_gateway::artifact_store::ArtifactStore;
     use autonoetic_gateway::llm::{
         CompletionRequest, CompletionResponse, LlmDriver, StopReason, TokenUsage, ToolCall,
     };
     use autonoetic_gateway::runtime::content_store::ContentStore;
     use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-    use autonoetic_gateway::artifact_store::ArtifactStore;
-    use autonoetic_types::artifact::ArtifactKind;
     use autonoetic_types::agent_revision::{
         AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus, PromotionKind, PromotionRecord,
     };
+    use autonoetic_types::artifact::ArtifactKind;
     use tempfile::tempdir;
 
     struct DenySandboxExecDriver;
@@ -2357,7 +2431,9 @@ Use tools when needed.
             .list_promotion_history("seed.agent")
             .expect("history should list");
         assert!(
-            history.iter().any(|row| row.promotion_id == "prom_seed_test"),
+            history
+                .iter()
+                .any(|row| row.promotion_id == "prom_seed_test"),
             "expected deterministic promotion id in history"
         );
     }
@@ -2524,7 +2600,9 @@ llm_presets:
         );
         assert!(result.is_ok(), "import should succeed: {:?}", result.err());
 
-        let target_skill_path = target_agents_dir.join("imported-git-helper").join("SKILL.md");
+        let target_skill_path = target_agents_dir
+            .join("imported-git-helper")
+            .join("SKILL.md");
         assert!(target_skill_path.exists(), "imported SKILL.md should exist");
 
         let written = std::fs::read_to_string(&target_skill_path).unwrap();
@@ -2578,7 +2656,11 @@ llm_presets:
         let skill_dir = temp.path().join("external-skill");
         std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
         std::fs::create_dir_all(skill_dir.join("references")).unwrap();
-        std::fs::write(skill_dir.join("scripts/helper.sh"), "#!/bin/bash\necho hello\n").unwrap();
+        std::fs::write(
+            skill_dir.join("scripts/helper.sh"),
+            "#!/bin/bash\necho hello\n",
+        )
+        .unwrap();
         std::fs::write(skill_dir.join("references/doc.txt"), "Reference docs\n").unwrap();
 
         let skill_content = r#"---
@@ -2617,14 +2699,20 @@ llm_presets:
         assert!(result.is_ok(), "import should succeed: {:?}", result.err());
 
         let target_dir = target_agents_dir.join("imported-resource-skill");
-        assert!(target_dir.join("scripts/helper.sh").exists(), "scripts/ should be copied");
+        assert!(
+            target_dir.join("scripts/helper.sh").exists(),
+            "scripts/ should be copied"
+        );
         assert!(
             target_dir.join("references/doc.txt").exists(),
             "references/ should be copied"
         );
 
         let script_content = std::fs::read_to_string(target_dir.join("scripts/helper.sh")).unwrap();
-        assert!(script_content.contains("echo hello"), "file content should be preserved");
+        assert!(
+            script_content.contains("echo hello"),
+            "file content should be preserved"
+        );
     }
 
     #[test]
@@ -2674,7 +2762,9 @@ llm_presets:
         );
         assert!(result.is_ok(), "import should succeed: {:?}", result.err());
 
-        let target_skill_path = target_agents_dir.join("imported-strict-skill").join("SKILL.md");
+        let target_skill_path = target_agents_dir
+            .join("imported-strict-skill")
+            .join("SKILL.md");
         let written = std::fs::read_to_string(&target_skill_path).unwrap();
 
         assert!(
