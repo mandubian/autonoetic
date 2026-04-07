@@ -397,7 +397,8 @@ impl GatewayExecutionService {
         if let Some(aid) = source_agent_id {
             let repo = AgentRepository::from_config(self.config.as_ref());
             let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
-            let loaded = repo.get_sync_from_store(aid, &gateway_dir, self.gateway_store.as_deref())?;
+            let loaded =
+                repo.get_sync_from_store(aid, &gateway_dir, self.gateway_store.as_deref())?;
             let policy = crate::policy::PolicyEngine::new(loaded.manifest);
             anyhow::ensure!(
                 policy.can_request_emergency_stop(),
@@ -1028,7 +1029,66 @@ impl GatewayExecutionService {
                                 session_id
                             );
                         }
-                        if let crate::runtime::checkpoint::YieldReason::UserInputRequired {
+                        if let crate::runtime::checkpoint::YieldReason::ApprovalRequired {
+                            approval_request_id: ref rid,
+                        } = &checkpoint.yield_reason
+                        {
+                            let store = self.gateway_store.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "GatewayStore is required to resume approval-required checkpoints"
+                                )
+                            })?;
+                            let req = store.get_approval(rid)?.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Approval request '{}' from checkpoint not found in store",
+                                    rid
+                                )
+                            })?;
+                            let status = req.status.clone();
+                            match status {
+                                None => {
+                                    anyhow::bail!(
+                                        "Session '{}' is waiting for approval '{}'; approve or reject it before continuing",
+                                        session_id,
+                                        rid
+                                    );
+                                }
+                                Some(autonoetic_types::background::ApprovalStatus::Rejected)
+                                | Some(autonoetic_types::background::ApprovalStatus::Cancelled) => {
+                                    anyhow::bail!(
+                                        "Approval '{}' was {:?}; session '{}' cannot continue",
+                                        rid,
+                                        status,
+                                        session_id
+                                    );
+                                }
+                                Some(autonoetic_types::background::ApprovalStatus::Approved) => {
+                                    tracing::info!(
+                                        target: "checkpoint",
+                                        agent_id = %runtime.manifest.agent.id,
+                                        session_id = %session_id,
+                                        turn_counter = checkpoint.turn_counter,
+                                        approval_request_id = %rid,
+                                        "Resuming session from approval-required checkpoint"
+                                    );
+                                    runtime.guard = crate::runtime::guard::LoopGuard::restore(
+                                        checkpoint.loop_guard_state.clone(),
+                                    );
+                                    runtime.session_started = true;
+                                    runtime.turn_counter = checkpoint.turn_counter;
+                                    runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+                                    let mut history = checkpoint.history.clone();
+                                    let initial_msg = checkpoint
+                                        .history
+                                        .iter()
+                                        .find(|m| matches!(m.role, crate::llm::Role::User))
+                                        .map(|m| m.content.clone())
+                                        .unwrap_or_default();
+                                    let outcome = runtime.execute_with_history(&mut history).await?;
+                                    (outcome, initial_msg, Some(checkpoint.turn_id))
+                                }
+                            }
+                        } else if let crate::runtime::checkpoint::YieldReason::UserInputRequired {
                             interaction_id: ref iid,
                         } = &checkpoint.yield_reason
                         {
@@ -1141,7 +1201,66 @@ impl GatewayExecutionService {
                             session_id
                         );
                     }
-                    if let crate::runtime::checkpoint::YieldReason::UserInputRequired {
+                    if let crate::runtime::checkpoint::YieldReason::ApprovalRequired {
+                        approval_request_id: ref rid,
+                    } = &checkpoint.yield_reason
+                    {
+                        let store = self.gateway_store.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "GatewayStore is required to resume approval-required checkpoints"
+                            )
+                        })?;
+                        let req = store.get_approval(rid)?.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Approval request '{}' from checkpoint not found in store",
+                                rid
+                            )
+                        })?;
+                        let status = req.status.clone();
+                        match status {
+                            None => {
+                                anyhow::bail!(
+                                    "Session '{}' is waiting for approval '{}'; approve or reject it before continuing",
+                                    session_id,
+                                    rid
+                                );
+                            }
+                            Some(autonoetic_types::background::ApprovalStatus::Rejected)
+                            | Some(autonoetic_types::background::ApprovalStatus::Cancelled) => {
+                                anyhow::bail!(
+                                    "Approval '{}' was {:?}; session '{}' cannot continue",
+                                    rid,
+                                    status,
+                                    session_id
+                                );
+                            }
+                            Some(autonoetic_types::background::ApprovalStatus::Approved) => {
+                                tracing::info!(
+                                    target: "checkpoint",
+                                    agent_id = %runtime.manifest.agent.id,
+                                    session_id = %session_id,
+                                    turn_counter = checkpoint.turn_counter,
+                                    approval_request_id = %rid,
+                                    "Resuming session from approval-required checkpoint"
+                                );
+                                runtime.guard = crate::runtime::guard::LoopGuard::restore(
+                                    checkpoint.loop_guard_state.clone(),
+                                );
+                                runtime.session_started = true;
+                                runtime.turn_counter = checkpoint.turn_counter;
+                                runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+                                let mut history = checkpoint.history.clone();
+                                let initial_msg = checkpoint
+                                    .history
+                                    .iter()
+                                    .find(|m| matches!(m.role, crate::llm::Role::User))
+                                    .map(|m| m.content.clone())
+                                    .unwrap_or_default();
+                                let outcome = runtime.execute_with_history(&mut history).await?;
+                                (outcome, initial_msg, Some(checkpoint.turn_id))
+                            }
+                        }
+                    } else if let crate::runtime::checkpoint::YieldReason::UserInputRequired {
                         interaction_id: ref iid,
                     } = &checkpoint.yield_reason
                     {
@@ -1890,12 +2009,13 @@ impl GatewayExecutionService {
 
         let repo = AgentRepository::from_config(&self.config);
         let loaded = if let Some(ref gs) = self.gateway_store {
-            let binding = gs.get_session_agent_binding(session_id)?
-                .ok_or_else(|| anyhow::anyhow!(
+            let binding = gs.get_session_agent_binding(session_id)?.ok_or_else(|| {
+                anyhow::anyhow!(
                     "No session binding found for checkpoint respawn of session '{}'. \
                      The session may have been started before binding was introduced.",
                     session_id
-                ))?;
+                )
+            })?;
             let gateway_dir = crate::execution::gateway_root_dir(&self.config);
             repo.load_from_revision_dir(&gateway_dir, &binding.agent_id, &binding.revision_id)?
         } else {
@@ -2079,7 +2199,8 @@ impl GatewayExecutionService {
     ) -> anyhow::Result<(AgentManifest, std::path::PathBuf)> {
         let repo = AgentRepository::from_config(&self.config);
         let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-        let loaded = repo.get_sync_from_store(agent_id, &gateway_dir, self.gateway_store.as_deref())?;
+        let loaded =
+            repo.get_sync_from_store(agent_id, &gateway_dir, self.gateway_store.as_deref())?;
         Ok((loaded.manifest, loaded.dir))
     }
 
@@ -2360,7 +2481,6 @@ fn should_auto_resume_checkpoint_yield_reason(
         yield_reason,
         YieldReason::Hibernation
             | YieldReason::BudgetExhausted
-            | YieldReason::MaxTurnsReached
             | YieldReason::ManualStop
             | YieldReason::Error(_)
     )
@@ -2725,9 +2845,7 @@ mod tests {
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].role.as_str(), "system");
         assert_eq!(history[2].role.as_str(), "user");
-        assert!(history[0]
-            .content
-            .contains("Foundation Core"));
+        assert!(history[0].content.contains("Foundation Core"));
         assert!(history[0].content.contains("System prompt"));
         assert!(history[1]
             .content

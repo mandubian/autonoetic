@@ -120,6 +120,9 @@ pub fn execute_scheduled_action(
         ScheduledAction::CredentialPrompt { .. } => anyhow::bail!(
             "CredentialPrompt is not directly executable; secrets must be provided through the approval channel"
         ),
+        ScheduledAction::SessionContinue { .. } => anyhow::bail!(
+            "SessionContinue is not directly executable; it only gates session continuation by approval"
+        ),
     }
 }
 
