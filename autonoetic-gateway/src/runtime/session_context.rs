@@ -177,8 +177,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let truncated = chars.by_ref().take(max_chars).collect::<String>();
     if chars.next().is_some() && max_chars >= 3 {
-        let mut shortened = truncated;
-        shortened.truncate(shortened.len().saturating_sub(3));
+        // Remove three trailing *characters* (not bytes) to keep room for the ellipsis.
+        // Using byte truncation can panic on UTF-8 multi-byte boundaries.
+        let keep_chars = truncated.chars().count().saturating_sub(3);
+        let mut shortened = truncated.chars().take(keep_chars).collect::<String>();
         shortened.push_str("...");
         shortened
     } else {
@@ -234,5 +236,13 @@ mod tests {
             .expect("file name should be valid utf-8");
         assert!(name.ends_with(".json"));
         assert!(name.contains("terminal_you_demo"));
+    }
+
+    #[test]
+    fn test_truncate_chars_handles_multibyte_without_panic() {
+        let value = "áéíóú🙂🙂🙂";
+        let truncated = truncate_chars(value, 5);
+        assert_eq!(truncated, "áé...");
+        assert!(std::panic::catch_unwind(|| truncate_chars(value, 5)).is_ok());
     }
 }
