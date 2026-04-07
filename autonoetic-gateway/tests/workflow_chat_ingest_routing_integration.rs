@@ -7,7 +7,10 @@ use autonoetic_gateway::scheduler::workflow_store::{
 };
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use chrono::Utc;
-use support::{seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
+use support::{
+    seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub,
+    TestWorkspace,
+};
 
 fn write_minimal_reasoning_agent(
     agents_dir: &std::path::Path,
@@ -104,8 +107,18 @@ async fn test_chat_ingest_from_child_session_routes_to_planner_root_while_tasks_
     save_task_run(&config, None, &task)?;
 
     let (listen_addr, store, _server) = spawn_gateway_server_with_store(config.clone()).await?;
-    seed_agent_revision(&store, &config, "planner.default", &agents_dir.join("planner.default"))?;
-    seed_agent_revision(&store, &config, "coder.default", &agents_dir.join("coder.default"))?;
+    seed_agent_revision(
+        &store,
+        &config,
+        "planner.default",
+        &agents_dir.join("planner.default"),
+    )?;
+    seed_agent_revision(
+        &store,
+        &config,
+        "coder.default",
+        &agents_dir.join("coder.default"),
+    )?;
     let mut client = JsonRpcClient::connect(listen_addr).await?;
 
     let user_line = "User update while parallel work runs";

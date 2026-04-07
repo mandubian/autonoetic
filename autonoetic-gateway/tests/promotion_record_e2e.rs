@@ -125,7 +125,7 @@ fn builder_manifest() -> AgentManifest {
         gateway_token: None,
 
         response_contract: None,
-            allowed_tool_tiers: vec![],
+        allowed_tool_tiers: vec![],
         agentskills_import: None,
     }
 }
@@ -161,7 +161,7 @@ fn evaluator_manifest() -> AgentManifest {
         gateway_token: None,
 
         response_contract: None,
-            allowed_tool_tiers: vec![],
+        allowed_tool_tiers: vec![],
         agentskills_import: None,
     }
 }
@@ -197,7 +197,7 @@ fn auditor_manifest() -> AgentManifest {
         gateway_token: None,
 
         response_contract: None,
-            allowed_tool_tiers: vec![],
+        allowed_tool_tiers: vec![],
         agentskills_import: None,
     }
 }

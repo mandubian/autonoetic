@@ -8,7 +8,10 @@
 mod support;
 
 use autonoetic_types::config::GatewayConfig;
-use support::{seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
+use support::{
+    seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub,
+    TestWorkspace,
+};
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
@@ -86,7 +89,12 @@ async fn test_schema_enforcement_hook_in_place() -> anyhow::Result<()> {
     let _key = EnvGuard::set(LLM_API_KEY_OVERRIDE_ENV, "test-key");
 
     let (server_addr, store, _shutdown) = spawn_gateway_server_with_store(config.clone()).await?;
-    seed_agent_revision(&store, &config, target_id, &workspace.agents_dir.join(target_id))?;
+    seed_agent_revision(
+        &store,
+        &config,
+        target_id,
+        &workspace.agents_dir.join(target_id),
+    )?;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 

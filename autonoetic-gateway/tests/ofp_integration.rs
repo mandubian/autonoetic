@@ -990,7 +990,8 @@ metadata:
         WireMessageKind::Response(WireResponse::Error { code, message }) => {
             assert_eq!(code, 500);
             assert!(
-                message.contains("GatewayStore is required") || message.contains("Unknown provider"),
+                message.contains("GatewayStore is required")
+                    || message.contains("Unknown provider"),
                 "Expected gateway error, got: {}",
                 message
             );

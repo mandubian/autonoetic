@@ -180,7 +180,10 @@ async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
     let resp_turn0 = driver.complete(&req_turn0).await?;
     println!("=== Turn 0 (full schema) ===");
     println!("Tool calls: {:?}", resp_turn0.tool_calls);
-    assert!(!resp_turn0.tool_calls.is_empty(), "Turn 0: expected tool call");
+    assert!(
+        !resp_turn0.tool_calls.is_empty(),
+        "Turn 0: expected tool call"
+    );
     assert_eq!(resp_turn0.tool_calls[0].name, "get_weather");
 
     // Turn 1: compressed tool schema (empty `{}`) — this is what compress_tool_definitions does

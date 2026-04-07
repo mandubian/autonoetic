@@ -53,12 +53,7 @@ fn setup_store_for_script(
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
-    seed_agent_revision(
-        &store,
-        config,
-        agent_id,
-        &agents_dir.join(agent_id),
-    )?;
+    seed_agent_revision(&store, config, agent_id, &agents_dir.join(agent_id))?;
     Ok(Some(store))
 }
 

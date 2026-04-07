@@ -6,7 +6,10 @@
 mod support;
 
 use support::agents::install_content_agent;
-use support::{seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
+use support::{
+    seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub,
+    TestWorkspace,
+};
 
 /// Test: Coder generates files via content.write tool calls.
 /// This verifies the tool execution is properly integrated into the agent lifecycle.
@@ -93,7 +96,9 @@ async fn test_coder_content_write_via_tool_calls() {
         ..Default::default()
     };
 
-    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone()).await.unwrap();
+    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone())
+        .await
+        .unwrap();
 
     // Seed the agent as a revision + alias
     let revision_id = seed_agent_revision(&store, &config, agent_id, &agent_dir).unwrap();
@@ -276,7 +281,9 @@ async fn test_coder_multiple_tool_calls_single_turn() {
         ..Default::default()
     };
 
-    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone()).await.unwrap();
+    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone())
+        .await
+        .unwrap();
 
     // Seed the agent as a revision + alias
     let revision_id = seed_agent_revision(&store, &config, agent_id, &agent_dir).unwrap();

@@ -10,8 +10,7 @@ use autonoetic_gateway::vault::Vault;
 use secrecy::ExposeSecret;
 use tempfile::tempdir;
 
-const TEST_VAULT_KEY_HEX: &str =
-    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const TEST_VAULT_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 #[test]
 fn test_response_secret_is_persisted_and_redacted() -> anyhow::Result<()> {

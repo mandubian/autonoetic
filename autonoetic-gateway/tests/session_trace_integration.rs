@@ -3,7 +3,8 @@
 mod support;
 
 use support::{
-    read_causal_entries, seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace,
+    read_causal_entries, seed_agent_revision, spawn_gateway_server_with_store, EnvGuard,
+    JsonRpcClient, OpenAiStub, TestWorkspace,
 };
 
 fn install_parent_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
@@ -141,8 +142,18 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
     let (server_addr, store, shutdown) = spawn_gateway_server_with_store(config.clone()).await?;
-    let parent_rev = seed_agent_revision(&store, &config, parent_id, &workspace.agents_dir.join(parent_id))?;
-    let child_rev = seed_agent_revision(&store, &config, child_id, &workspace.agents_dir.join(child_id))?;
+    let parent_rev = seed_agent_revision(
+        &store,
+        &config,
+        parent_id,
+        &workspace.agents_dir.join(parent_id),
+    )?;
+    let child_rev = seed_agent_revision(
+        &store,
+        &config,
+        child_id,
+        &workspace.agents_dir.join(child_id),
+    )?;
     let mut client = JsonRpcClient::connect(server_addr).await?;
 
     let session_id = "session-multi-agent-test";
@@ -288,7 +299,12 @@ Reply with "Done".
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
     let (server_addr, store, _shutdown) = spawn_gateway_server_with_store(config.clone()).await?;
-    let rev_id = seed_agent_revision(&store, &config, agent_id, &workspace.agents_dir.join(agent_id))?;
+    let rev_id = seed_agent_revision(
+        &store,
+        &config,
+        agent_id,
+        &workspace.agents_dir.join(agent_id),
+    )?;
     let mut client = JsonRpcClient::connect(server_addr).await?;
 
     let session_id = "session-deterministic-1";

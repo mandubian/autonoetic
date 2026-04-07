@@ -3,10 +3,14 @@
 pub mod agents;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcResponse, JsonRpcRouter};
-use autonoetic_gateway::scheduler::{approve_request, gateway_store::GatewayStore, load_approval_requests, run_scheduler_tick};
-use autonoetic_types::agent_revision::{AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus};
+use autonoetic_gateway::scheduler::{
+    approve_request, gateway_store::GatewayStore, load_approval_requests, run_scheduler_tick,
+};
 use autonoetic_gateway::server::jsonrpc::start_jsonrpc_server;
 use autonoetic_gateway::GatewayExecutionService;
+use autonoetic_types::agent_revision::{
+    AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
+};
 use autonoetic_types::background::{ApprovalDecision, ApprovalRequest};
 use autonoetic_types::causal_chain::CausalChainEntry;
 use autonoetic_types::config::GatewayConfig;
@@ -224,7 +228,11 @@ pub async fn spawn_gateway_server(
 
 pub async fn spawn_gateway_server_with_store(
     mut config: GatewayConfig,
-) -> anyhow::Result<(SocketAddr, Arc<GatewayStore>, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+) -> anyhow::Result<(
+    SocketAddr,
+    Arc<GatewayStore>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     drop(listener);
