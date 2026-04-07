@@ -44,10 +44,17 @@ pub struct ArtifactMetadata {
 pub struct ContentFile {
     /// The name the child registered the content under (e.g. "weather_fetcher.py").
     pub name: String,
-    /// Full SHA-256 content handle (e.g. "sha256:838ddf76...").
+    /// Canonical SHA-256 content handle — kept for gateway logic; omitted from JSON for agents.
+    #[serde(skip_serializing)]
     pub handle: String,
-    /// Short 8-hex-char alias for LLM-friendly lookup (e.g. "838ddf76").
+    /// Short 8-hex-char alias for lookup (e.g. "838ddf76").
     pub alias: String,
+    /// Stable short ref for agents (`cnt_<alias>`); use with `content.read`, not as a shell path.
+    #[serde(default, rename = "ref")]
+    pub content_ref: String,
+    /// Path where this named file is mounted for `sandbox.exec` (session mounts): `/tmp/<name>`.
+    #[serde(default)]
+    pub sandbox_path: String,
 }
 
 /// Knowledge shared during execution that the caller can access.
@@ -111,8 +118,7 @@ pub fn extract_artifacts_from_content_store(
 /// because those are parent-propagation copies, not original child outputs.
 ///
 /// This gives the calling agent (planner) a structured manifest of everything the
-/// child produced — with names, handles, and short aliases — without having to parse
-/// the child's free-text reply.
+/// child produced — names, short refs, and sandbox paths — without long digests in JSON.
 pub fn collect_named_content(gateway_dir: &std::path::Path, session_id: &str) -> Vec<ContentFile> {
     let Ok(store) = crate::runtime::content_store::ContentStore::new(gateway_dir) else {
         return Vec::new();
@@ -142,10 +148,14 @@ pub fn collect_named_content(gateway_dir: &std::path::Path, session_id: &str) ->
                 }
             }
             let alias = crate::runtime::content_store::ContentStore::get_short_alias(&handle);
+            let content_ref = format!("cnt_{}", alias);
+            let sandbox_path = format!("/tmp/{}", name);
             Some(ContentFile {
                 name,
                 handle,
                 alias,
+                content_ref,
+                sandbox_path,
             })
         })
         .collect()

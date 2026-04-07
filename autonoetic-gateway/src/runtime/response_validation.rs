@@ -815,6 +815,8 @@ mod tests {
                 name: "big.bin".into(),
                 handle,
                 alias: "deadbeef".into(),
+                content_ref: "cnt_deadbeef".into(),
+                sandbox_path: "/tmp/big.bin".into(),
             }],
             Some("done"),
         );

@@ -29,7 +29,7 @@ impl NativeTool for ContentWriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Write content to the session's content store. Returns a content handle (SHA-256) that can be used to retrieve the content later. Content is automatically named in the session for easy retrieval.".to_string(),
+            description: "Write content to the session's content store. Returns the registered name, a short ref (`cnt_<8 hex>`), and `sandbox_path` (`/tmp/<name>`) for sandbox.exec. Use `content.read` with the name, 8-char alias, or ref — not the digest as a shell path. Optional `include_canonical_digest` adds the sha256 digest for debugging.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -45,6 +45,10 @@ impl NativeTool for ContentWriteTool {
                         "type": "string",
                         "enum": ["private", "session", "global"],
                         "description": "Visibility scope: 'private' (only this session), 'session' (all sessions under same root, default), 'global' (cross-session)."
+                    },
+                    "include_canonical_digest": {
+                        "type": "boolean",
+                        "description": "If true, include `canonical_digest` (sha256:...) in the response. Default false — omit to save tokens and avoid models misusing digests as paths."
                     }
                 },
                 "required": ["name", "content"],
@@ -72,6 +76,8 @@ impl NativeTool for ContentWriteTool {
             content: String,
             #[serde(default)]
             visibility: Option<String>,
+            #[serde(default)]
+            include_canonical_digest: bool,
         }
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -103,20 +109,27 @@ impl NativeTool for ContentWriteTool {
         store.register_name_with_visibility(sid, &args.name, &handle, content_visibility)?;
 
         let short_alias = crate::runtime::content_store::ContentStore::get_short_alias(&handle);
+        let content_ref = format!("cnt_{}", short_alias);
+        let sandbox_path = format!("/tmp/{}", args.name);
 
-        serde_json::to_string(&serde_json::json!({
+        let mut out = serde_json::json!({
             "ok": true,
-            "handle": handle,
-            "alias": short_alias,
             "name": args.name,
+            "alias": short_alias,
+            "ref": content_ref,
+            "sandbox_path": sandbox_path,
             "bytes_written": args.content.len(),
             "visibility": match content_visibility {
                 crate::runtime::content_store::ContentVisibility::Private => "private",
                 crate::runtime::content_store::ContentVisibility::Session => "session",
                 crate::runtime::content_store::ContentVisibility::Global => "global",
             },
-        }))
-        .map_err(Into::into)
+        });
+        if args.include_canonical_digest {
+            out["canonical_digest"] = serde_json::Value::String(handle);
+        }
+
+        serde_json::to_string(&out).map_err(Into::into)
     }
 
     fn extract_metadata(&self, arguments_json: &str) -> ToolMetadata {
@@ -147,13 +160,13 @@ impl NativeTool for ContentReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Read content from the session's content store. Can read by name (e.g., 'main.py') or by content handle (e.g., 'sha256:abc123...').".to_string(),
+            description: "Read content from the session's content store. Prefer `name`, 8-char `alias`, or `cnt_<alias>` ref from content.write. Full `sha256:...` digest still works for backward compatibility.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name_or_handle": {
                         "type": "string",
-                        "description": "The content name (e.g., 'main.py') or content handle (e.g., 'sha256:abc123...') to read"
+                        "description": "Content name (e.g. 'main.py'), 8-hex alias, cnt_<alias> ref, or sha256 digest — not a sandbox path"
                     }
                 },
                 "required": ["name_or_handle"],
@@ -194,7 +207,7 @@ impl NativeTool for ContentReadTool {
         let sid = _session_id.unwrap_or(&_manifest.agent.id);
         let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
 
-        let content_result = store.read_by_name_or_handle(sid, &args.name_or_handle);
+        let content_result = store.read_by_name_or_handle(sid, args.name_or_handle.trim());
 
         let content = match content_result {
             Ok(c) => c,
