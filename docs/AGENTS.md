@@ -294,8 +294,8 @@ For facts with provenance across sessions:
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `agent.revision.create` | `(artifact_id: string, agent_id: string, ...) → revision` | Create immutable revision from an AgentBundle artifact |
-| `agent.revision.create_from_intent` | `(agent_id, artifact_id, instructions, description, capabilities, ...) → revision` | Create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` and `runtime.lock` |
+| `agent.revision.create` | `(artifact_id: string, agent_id: string, ...) → revision` | Low-level strict artifact path (expects manifest/lock already present in artifact) |
+| `agent.revision.create_from_intent` | `(agent_id, artifact_id, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock` |
 | `agent.revision.schema` | `() → schema` | Return install contract ownership split, required fields, and canonical examples |
 | `agent.revision.list` | `(agent_id: string) → [revisions]` | List revisions for an agent |
 | `agent.revision.inspect` | `(agent_ref: string) → revision` | Inspect revision metadata and status |
@@ -523,8 +523,8 @@ autonoetic agent revision promote <rev-id> --alias myagent.default
 ```
 Planner: "Create a weather agent"
   → Spawns specialized_builder
-  → specialized_builder writes SKILL.md + code via content.write / artifact.build
-  → specialized_builder calls agent.revision.create (from artifact)
+  → coder/builder provide artifact + semantic install intent + free-form instructions
+  → specialized_builder calls agent.revision.create_from_intent
   → specialized_builder calls agent.revision.promote
   → Agent is active and discoverable
 ```

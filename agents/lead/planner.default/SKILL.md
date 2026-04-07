@@ -168,7 +168,11 @@ workflow.wait(task_ids=[...], timeout_secs=300)
 
 When asked to create a new agent, choose the route based on complexity. **All steps below are STRICTLY SEQUENTIAL — never spawn two steps in the same turn.**
 
-**Simple tasks** (utility scripts, data transforms): Spawn `coder.default` directly. Have it write files with `content.write`, build an artifact with `artifact.build`, and return the `artifact_id`. Then delegate install to `specialized_builder.default`.
+**Simple tasks** (utility scripts, data transforms): Spawn `coder.default` directly. Have it write implementation files with `content.write`, build an artifact with `artifact.build`, and return:
+- `artifact_id`
+- free-form `instructions`
+- semantic install intent fields (`agent_id`, `description`, `execution_mode`, `script_entry`, `llm_config`, `capabilities`, optional `io`/`middleware`/`response_contract`)
+Then delegate install to `specialized_builder.default`.
 
 **Design-heavy tasks** (multi-file projects, APIs, agents with complex behavior): Start with `architect.default` for structure, wait for the design, then spawn `coder.default` for implementation.
 
@@ -176,7 +180,7 @@ When asked to create a new agent, choose the route based on complexity. **All st
 
 **Dependencies** (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.): **MUST** insert `builder.default` between coder and evaluator. The builder has `NetworkAccess` to install deps and captures them as layers. Without this step, the evaluator runs in a network-isolated sandbox and pip/npm install silently fails. The builder must produce an artifact WITHOUT the `dependencies` field (deps are in layers, not re-installed at runtime).
 
-**Install**: Always delegate to `specialized_builder.default` — you cannot create or promote agent revisions directly. The gateway runs code analysis on `agent.revision.create` regardless of promotion evidence.
+**Install**: Always delegate to `specialized_builder.default` — you cannot create or promote agent revisions directly. Specialized builder should install via `agent.revision.create_from_intent` so gateway writes canonical SKILL metadata and runtime.lock deterministically.
 
 ### Promotion Gate Decision Matrix
 
@@ -190,7 +194,7 @@ Not every agent needs full evaluator + auditor review. Use this matrix:
 | **Agent spawning/delegation** | ✅ Required | ✅ Required | High privilege, needs full review |
 | **Code execution** (runs subprocesses) | ✅ Required | ✅ Required | Execution boundary = security risk |
 
-**When skipping gates**, tell specialized_builder `"gating: none"` — the gateway's built-in code analysis on `revision.create` still validates capabilities and detects security threats.
+**When skipping gates**, tell specialized_builder `"gating: none"` — the gateway's built-in code analysis on revision creation still validates capabilities and detects security threats.
 
 **Key constraints:**
 - All steps in a chain must be sequential (no `async=true` for dependent tasks)
@@ -206,8 +210,13 @@ To install, delegate to `specialized_builder.default`:
 ```
 agent.spawn("specialized_builder.default", message="Install a new agent called 'my-agent':
 - Purpose: [what it does]
+- artifact_id: [art_xxxxxxxx]
+- instructions: [free-form markdown body from coder]
+- description: [semantic description]
 - Capabilities: [NetworkAccess, ReadAccess, etc.]
 - Execution mode: script or reasoning
+- script_entry: [required for script mode]
+- llm_config: [required for reasoning mode]
 - Promotion evidence: evaluator_pass=true, auditor_pass=true
 ")
 ```
@@ -216,8 +225,13 @@ agent.spawn("specialized_builder.default", message="Install a new agent called '
 ```
 agent.spawn("specialized_builder.default", message="Install a new agent called 'my-agent':
 - Purpose: [what it does]
+- artifact_id: [art_xxxxxxxx]
+- instructions: [free-form markdown body from coder]
+- description: [semantic description]
 - Capabilities: [ReadAccess]
 - Execution mode: script or reasoning
+- script_entry: [required for script mode]
+- llm_config: [required for reasoning mode]
 - Gating: none (pure transform, no external I/O)
 ")
 ```

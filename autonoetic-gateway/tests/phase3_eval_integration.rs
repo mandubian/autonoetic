@@ -1051,6 +1051,96 @@ fn test_revision_create_from_intent_requires_reasoning_llm_config() {
 }
 
 #[test]
+fn test_revision_create_from_intent_materializes_canonical_skill_and_lock() {
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_gateway::runtime::content_store::ContentStore;
+    use autonoetic_types::artifact::ArtifactKind;
+
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let session_id = "intent-session";
+
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+    let main_py = b"print('hello from intent')";
+    let main_handle = content_store.write(main_py).unwrap();
+    content_store
+        .register_name(session_id, "main.py", &main_handle)
+        .unwrap();
+
+    let bundle = artifact_store
+        .build_with_kind(
+            &["main.py".to_string()],
+            Some(&["main.py".to_string()]),
+            None,
+            ArtifactKind::AgentBundle,
+            session_id,
+        )
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["intent.agent*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateFromIntentTool;
+    let args = json!({
+        "agent_id": "intent.agent",
+        "artifact_id": bundle.artifact_id,
+        "instructions": "# Intent Agent\n\nUse deterministic install intent.",
+        "description": "Intent install agent",
+        "capabilities": [{"type": "ReadAccess", "scopes": ["self.*"]}],
+        "execution_mode": "reasoning",
+        "llm_config": {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "temperature": 0.1,
+            "fallback_provider": null,
+            "fallback_model": null,
+            "chat_only": false
+        }
+    });
+
+    let out = tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &args.to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["ok"], true);
+    let revision_id = parsed["revision_id"].as_str().unwrap();
+
+    let revision_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join("intent.agent")
+        .join(revision_id);
+    assert!(revision_dir.join("main.py").exists());
+    assert!(revision_dir.join("SKILL.md").exists());
+    assert!(revision_dir.join("runtime.lock").exists());
+
+    let skill_text = std::fs::read_to_string(revision_dir.join("SKILL.md")).unwrap();
+    let (parsed_manifest, body) = autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_text).unwrap();
+    assert_eq!(parsed_manifest.agent.id, "intent.agent");
+    assert!(body.contains("Use deterministic install intent."));
+
+    let lock_text = std::fs::read_to_string(revision_dir.join("runtime.lock")).unwrap();
+    let lock: autonoetic_types::runtime_lock::RuntimeLock = serde_yaml::from_str(&lock_text).unwrap();
+    assert_eq!(lock.gateway.artifact, "marketplace://gateway/autonoetic-gateway");
+    assert_eq!(lock.dependencies.len(), 0);
+}
+
+#[test]
 fn test_revision_create_rejects_non_agent_bundle_kind() {
     use autonoetic_gateway::artifact_store::ArtifactStore;
     use autonoetic_gateway::runtime::content_store::ContentStore;

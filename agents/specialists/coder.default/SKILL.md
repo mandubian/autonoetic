@@ -62,66 +62,28 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
 
 1. **Write the implementation files** using content.write
 2. **Test your code** with `sandbox.exec` — use `dependencies` to install any needed packages
-3. **Write a `SKILL.md`** for the agent with the correct Autonoetic frontmatter format (see below)
-4. **Write a `runtime.lock`** file with minimal content — the gateway fills gateway/sdk/sandbox/layers automatically:
-   ```yaml
-   dependencies: []
-   artifacts: []
-   ```
-5. **Build an artifact** from the promotable file set with `kind: "agent_bundle"`:
+3. **Write free-form instructions content only** (for example `agent_instructions.md`). Do NOT write SKILL metadata/frontmatter.
+4. **Do NOT write `runtime.lock`**. The gateway generates canonical runtime lock content.
+5. **Build an artifact** from implementation files (and optional free-form instructions) with `kind: "agent_bundle"`:
    ```json
    artifact.build({
-     "inputs": ["weather.py", "SKILL.md", "runtime.lock"],
+     "inputs": ["weather.py", "agent_instructions.md"],
      "entrypoints": ["weather.py"],
      "kind": "agent_bundle"
    })
    ```
-6. **Return the artifact_id** to the planner:
-   "Artifact ready. Ask evaluator.default and auditor.default to review this artifact, then ask specialized_builder.default to install it via agent.revision.create + agent.revision.promote with this artifact_id."
-7. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
-
-### SKILL.md Format for Agent Bundles
-
-When creating an agent, write a `SKILL.md` file with this **exact frontmatter format**. The `name` must match the `agent_id` (lowercase with hyphens):
-
-```yaml
----
-name: "weather-agent"
-description: "Fetches weather information for any location."
-metadata:
-  autonoetic:
-    version: "1.0"
-    runtime:
-      engine: "autonoetic"
-      gateway_version: "0.1.0"
-      sdk_version: "0.1.0"
-      type: "stateful"
-      sandbox: "bubblewrap"
-      runtime_lock: "runtime.lock"
-    agent:
-      id: "weather-agent"
-      name: "Weather Agent"
-      description: "Fetches weather information for any location."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-    capabilities:
-      - type: "NetworkAccess"
-        hosts: ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
-    validation: "soft"
----
-# Weather Agent
-
-You are a weather agent that fetches weather information...
-```
-
-**Rules:**
-- `name` must be lowercase with hyphens — this becomes `agent.id`
-- `metadata.autonoetic.agent.id` must match `name` exactly
-- `metadata.autonoetic.runtime.runtime_lock` must be `"runtime.lock"`
-- Include a `runtime.lock` file in the artifact alongside SKILL.md
-- `capabilities` must use full typed format (`- type: "NetworkAccess"`)
-- The artifact `inputs` must include: `["weather.py", "SKILL.md", "runtime.lock"]`
+6. **Return the artifact_id + install intent payload** to the planner. Include:
+   - `agent_id`
+   - `description`
+   - `instructions` (free-form markdown body)
+   - `execution_mode`
+   - `script_entry` (required for script mode)
+   - `llm_config` (required for reasoning mode)
+   - `capabilities`
+   - optional `io` / `middleware` / `response_contract`
+7. Suggested handoff text:
+   "Artifact ready with semantic install intent. Ask specialized_builder.default to call agent.revision.create_from_intent then agent.revision.promote."
+8. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
 
 ## If Evaluator/Auditor Finds Issues
 
