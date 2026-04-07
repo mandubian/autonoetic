@@ -21,6 +21,26 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 
 pub struct SandboxExecTool;
 
+/// True if `command` uses a content-store digest (`sha256:` + hex) like a shell path.
+/// Session files are mounted at `/tmp/<name>`; digests must only go to `content.read`, not `cp`/`python` argv.
+fn sandbox_command_misuses_content_digest_as_path(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let mut search_from = 0usize;
+    while let Some(rel) = lower[search_from..].find("sha256:") {
+        let after_prefix = search_from + rel + "sha256:".len();
+        let rest = &lower[after_prefix..];
+        let hex_len = rest
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .count();
+        if hex_len >= 8 {
+            return true;
+        }
+        search_from = after_prefix;
+    }
+    false
+}
+
 fn extract_code_for_analysis(
     command: &str,
     agent_dir: &Path,
@@ -294,6 +314,13 @@ impl NativeTool for SandboxExecTool {
                 ))
                 .into());
             }
+        }
+
+        if sandbox_command_misuses_content_digest_as_path(&effective_command) {
+            anyhow::bail!(
+                "sandbox.exec: content digests (sha256:...) are not filesystem paths in the sandbox. \
+Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass artifact_id so artifact files are mounted under /tmp/."
+            );
         }
 
         let (allowed, analysis) = policy.can_exec_shell_detailed(&effective_command);
@@ -1242,5 +1269,27 @@ impl NativeTool for SandboxExecTool {
         }
 
         serde_json::to_string(&body).map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod sandbox_digest_path_tests {
+    use super::sandbox_command_misuses_content_digest_as_path;
+
+    #[test]
+    fn detects_sha256_hex_as_path_misuse() {
+        assert!(sandbox_command_misuses_content_digest_as_path(
+            "cp sha256:30db6cfe48acf14817e914345f2a9657b510a8138a1442c3015103beef35279a x.py"
+        ));
+    }
+
+    #[test]
+    fn allows_normal_paths_and_short_sha256_prefix_only() {
+        assert!(!sandbox_command_misuses_content_digest_as_path(
+            "python3 /tmp/weather_agent.py Paris today"
+        ));
+        assert!(!sandbox_command_misuses_content_digest_as_path(
+            "echo sha256: not a digest"
+        ));
     }
 }
