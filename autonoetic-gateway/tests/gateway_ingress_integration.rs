@@ -5,7 +5,8 @@ mod support;
 
 use support::agents::install_outbound_reply_agent;
 use support::{
-    read_causal_entries, seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace,
+    read_causal_entries, seed_agent_revision, spawn_gateway_server_with_store, EnvGuard,
+    JsonRpcClient, OpenAiStub, TestWorkspace,
 };
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
@@ -97,9 +98,7 @@ async fn test_event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
         .join("agents")
         .join(target_agent_id)
         .join(&revision_id);
-    let agent_entries = read_causal_entries(
-        &rev_dir.join("history").join("causal_chain.jsonl"),
-    )?;
+    let agent_entries = read_causal_entries(&rev_dir.join("history").join("causal_chain.jsonl"))?;
 
     // Per-turn correlation: agent entries should match session AND turn
     let agent_session_entries: Vec<_> = agent_entries

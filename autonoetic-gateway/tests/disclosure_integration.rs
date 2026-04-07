@@ -3,7 +3,10 @@ use autonoetic_types::config::GatewayConfig;
 
 mod support;
 
-use support::{seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
+use support::{
+    seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub,
+    TestWorkspace,
+};
 
 #[tokio::test]
 async fn test_disclosure_policy_integration() {
@@ -162,7 +165,9 @@ disclosure:
         ..Default::default()
     };
 
-    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone()).await.unwrap();
+    let (listen_addr, store, server_task) = spawn_gateway_server_with_store(config.clone())
+        .await
+        .unwrap();
 
     // Seed the agent as a revision + alias
     seed_agent_revision(&store, &config, agent_id, &agent_dir).unwrap();

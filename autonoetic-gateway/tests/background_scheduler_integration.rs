@@ -152,8 +152,7 @@ async fn test_background_scheduler_idle_timer_through_public_api() -> anyhow::Re
         agent_id,
         "    timer: true\n    approval_resolved: false\n",
     )?;
-    let revision_id =
-        "rev_sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    let revision_id = "rev_sha256:1111111111111111111111111111111111111111111111111111111111111111";
     register_revision_mirror(&config, store.as_ref(), agent_id, &agent_dir, revision_id)?;
 
     let session_id = background_session(agent_id);
@@ -213,8 +212,7 @@ async fn test_background_scheduler_timer_action_is_recurring() -> anyhow::Result
             ..ReevaluationState::default()
         },
     )?;
-    let revision_id =
-        "rev_sha256:3333333333333333333333333333333333333333333333333333333333333333";
+    let revision_id = "rev_sha256:3333333333333333333333333333333333333333333333333333333333333333";
     register_revision_mirror(&config, store.as_ref(), agent_id, &agent_dir, revision_id)?;
     let rev_dir = gateway_dir
         .join("revisions")
@@ -297,8 +295,7 @@ async fn test_background_scheduler_evolution_flow_through_public_api() -> anyhow
             ..ReevaluationState::default()
         },
     )?;
-    let revision_id =
-        "rev_sha256:4444444444444444444444444444444444444444444444444444444444444444";
+    let revision_id = "rev_sha256:4444444444444444444444444444444444444444444444444444444444444444";
     register_revision_mirror(&config, store.as_ref(), agent_id, &agent_dir, revision_id)?;
     let rev_dir = gateway_dir
         .join("revisions")

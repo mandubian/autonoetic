@@ -38,7 +38,7 @@ fn evolution_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         response_contract: None,
-            allowed_tool_tiers: vec![],
+        allowed_tool_tiers: vec![],
         agentskills_import: None,
     }
 }
@@ -62,7 +62,9 @@ async fn test_agent_install_is_unavailable() {
     let artifact_store =
         autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
     let session_id = "test-session";
-    store.register_name(session_id, "main.py", &content_handle).unwrap();
+    store
+        .register_name(session_id, "main.py", &content_handle)
+        .unwrap();
     let bundle = artifact_store
         .build(&["main.py".to_string()], None, None, session_id)
         .unwrap();

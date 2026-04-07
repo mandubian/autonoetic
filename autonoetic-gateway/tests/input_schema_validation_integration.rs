@@ -1,7 +1,7 @@
 mod support;
 
-use autonoetic_gateway::GatewayExecutionService;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use autonoetic_gateway::GatewayExecutionService;
 use support::{seed_agent_revision, EnvGuard, OpenAiStub, TestWorkspace};
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
@@ -90,7 +90,12 @@ async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> any
     let gateway_dir = config.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
     let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
-    seed_agent_revision(&store, &config, target_agent_id, &agents_dir.join(target_agent_id))?;
+    seed_agent_revision(
+        &store,
+        &config,
+        target_agent_id,
+        &agents_dir.join(target_agent_id),
+    )?;
 
     let execution = GatewayExecutionService::new(config, Some(store));
     let mismatched_session_id = "session-schema-mismatch";

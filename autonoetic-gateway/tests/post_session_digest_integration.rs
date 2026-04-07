@@ -7,8 +7,8 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::post_session_digest::{
     run_post_session_digest_with_driver, POST_SESSION_NARRATIVE_CONTENT_NAME,
 };
-use autonoetic_gateway::runtime::tools::NativeTool;
 use autonoetic_gateway::runtime::tools::knowledge::DigestQueryTool;
+use autonoetic_gateway::runtime::tools::NativeTool;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::ExecutionTraceRecord;
@@ -56,7 +56,7 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
         gateway_token: None,
 
         response_contract: None,
-            allowed_tool_tiers: vec![],
+        allowed_tool_tiers: vec![],
         agentskills_import: None,
     }
 }
@@ -141,7 +141,7 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
         context_window_tokens: None,
         base_url: None,
         api_key_env: None,
-            routing_preset: None,
+        routing_preset: None,
     };
     let driver = FixedJsonDigestDriver;
     run_post_session_digest_with_driver(

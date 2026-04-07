@@ -24,7 +24,9 @@ use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::{
     approve_request, load_approval_requests, run_scheduler_tick, workflow_store,
 };
-use autonoetic_types::agent_revision::{AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus};
+use autonoetic_types::agent_revision::{
+    AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
+};
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRun, WorkflowRunStatus};
 use sha2::{Digest, Sha256};
 use support::{EnvGuard, OpenAiStub};
