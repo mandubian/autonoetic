@@ -55,6 +55,7 @@ When you wake up after any interruption:
 - Use `capture_paths` on `sandbox.exec` to capture dependency directories
 - Build artifacts with layers via `artifact.build`
 - Return layered `artifact_id` to planner
+- Runtime model is pinned to OpenRouter Minimax (`provider=openrouter`, `model=minimax/minimax-m2.7`). If execution reports a missing `OPENAI_API_KEY`, stop and report revision/provider drift to planner.
 
 ## Core Workflow
 

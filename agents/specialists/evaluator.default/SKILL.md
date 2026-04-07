@@ -161,6 +161,17 @@ Repair attempts are bounded by `validation_max_loops` and `validation_max_durati
 
 **Principle: Execute the artifact's code, don't write new code.**
 
+### Execution Attempt Budget (HARD LIMIT)
+
+To prevent loops, your evaluation run has a strict budget:
+
+1. `artifact.inspect(artifact_id)` once.
+2. `content.read(...)` as needed for understanding.
+3. One canonical `sandbox.exec` for happy-path behavior.
+4. Optional one negative-path `sandbox.exec` only if explicitly requested by planner.
+
+Do not run alternate command shapes (`cd ...`, `PYTHONPATH=...`, `python` vs `python3`, wrapper retries) after a failure. Report the first authoritative failure and stop.
+
 When using `sandbox.exec`:
 - Run the artifact's actual entrypoint: `sandbox.exec({"artifact_id": "art_xxx", "command": "python3 /tmp/weather_agent.py 'Paris'"})`
 - Use absolute paths: `python3 /tmp/weather_agent.py` NOT `cd /tmp && python weather_agent.py`
@@ -177,6 +188,16 @@ When you call `sandbox.exec` **with** `artifact_id`:
 - Write test scripts with `content.write` — just run the artifact
 - Include URL literals in your commands — they trigger approval loops
 - Try multiple commands to "make it work" — if it fails, report the failure
+
+### Artifact ID Validation (before any execution)
+
+If `artifact.inspect(artifact_id)` returns "not found":
+
+1. Do not execute any test command.
+2. Return `status: "clarification_needed"` with the missing artifact id in context.
+3. Ask planner to provide a valid artifact id or explicit resolved ref.
+
+Never guess or substitute artifact ids.
 
 ### Avoiding Approval Loops
 
@@ -196,6 +217,16 @@ When `sandbox.exec` returns an approval request (`approval_required: true`, or a
 4. **DO NOT** retry with `approval_ref` in the same turn — `approval_ref` is only valid after the operator approves and the session is resumed.
 5. **DO NOT** try alternate commands or loop.
 6. After the operator approves and the session resumes, you will receive an `approval_resolved` message. Then retry with the exact same command plus `approval_ref` set to that id, complete the evaluation, and only then record the final promotion outcome.
+
+### Policy-Denied Command Handling
+
+If `sandbox.exec` returns `error_type: permission` / `sandbox command denied by CodeExecution policy`:
+
+1. Record an error finding that the attempted command shape violates policy.
+2. Do not try alternate shell wrappers to bypass policy.
+3. Stop execution attempts and return fail/needs_rework to planner.
+
+This is a policy/configuration issue, not a runtime test failure to brute-force around.
 
 ## Artifact-First Review Protocol
 
@@ -263,6 +294,7 @@ When `sandbox.exec` fails (exit code != 0):
 2. **DO** check stderr for actual test errors (ignore `/etc/profile.d/` noise)
 3. **DO** report the failure in the evaluation report
 4. **DO NOT** silently pass when tests fail
+5. **DO NOT** issue additional fallback commands after the first authoritative failure
 
 ## Content System
 

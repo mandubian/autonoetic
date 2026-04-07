@@ -77,6 +77,17 @@ When a child task completed, read its `result_summary` from the `workflow.wait` 
 **Never restart from architect when a valid coder artifact already exists.**
 **Never re-interpret the original goal when the user says "continue" or "done".**
 
+## Artifact ID Discipline (CRITICAL)
+
+When routing artifacts between coder/builder/evaluator/specialized_builder:
+
+1. Never type artifact IDs manually from memory.
+2. Copy the artifact id exactly from structured tool results (`artifact.build`, `artifact.resolve_ref`, or child `result_summary`).
+3. Before spawning a child that depends on an artifact, call `artifact.inspect(artifact_id)` once as a preflight.
+4. If preflight says "artifact not found", do not spawn the child yet. Resolve ref explicitly or ask clarification.
+
+Wrong artifact IDs create avoidable retry loops and invalid evaluations.
+
 ---
 
 ## Behavior
@@ -359,6 +370,7 @@ When `workflow.wait` returns `any_failed: true`, inspect the `checkpoint_state.e
 - **Output schema validation error** (`"reply is not valid JSON"` or `"[output_schema]"`): The task likely completed its work but the LLM response format didn't match. Check if `promotion.record` was called — if yes, proceed to the next step (auditor or specialized_builder). Do NOT re-spawn the same task.
 - **Functional failure** (couldn't execute, no results, no promotion record): Iterate with coder to fix the underlying issue.
 - **Approval timeout**: Tell the user to approve, then call `workflow.wait` again.
+- **Loop guard / repeated permission denial** (`"LoopGuard tripped"` or repeated `CodeExecution policy` denial): Do NOT respawn evaluator immediately. Route to coder/debugger or fix policy/instructions first, then evaluate once.
 
 ### Handling Approval Timeouts
 
