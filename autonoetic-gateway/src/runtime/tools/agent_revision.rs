@@ -208,12 +208,14 @@ fn capability_from_shorthand(s: &str) -> anyhow::Result<Capability> {
         "WriteAccess" => Ok(Capability::WriteAccess {
             scopes: vec!["*".to_string()],
         }),
-        "NetworkAccess" => Ok(Capability::NetworkAccess {
-            hosts: vec!["*".to_string()],
-        }),
-        "CodeExecution" => Ok(Capability::CodeExecution {
-            patterns: vec!["*".to_string()],
-        }),
+        "NetworkAccess" => Err(anyhow::anyhow!(
+            "capability 'NetworkAccess' cannot be a bare string — explicit host scoping required. \
+             Use {{ \"type\": \"NetworkAccess\", \"hosts\": [\"api.example.com\"] }} instead."
+        )),
+        "CodeExecution" => Err(anyhow::anyhow!(
+            "capability 'CodeExecution' cannot be a bare string — explicit command patterns required. \
+             Use {{ \"type\": \"CodeExecution\", \"patterns\": [\"python*\"] }} instead."
+        )),
         "AgentMessage" => Ok(Capability::AgentMessage {
             patterns: vec!["*".to_string()],
         }),
@@ -229,9 +231,10 @@ fn capability_from_shorthand(s: &str) -> anyhow::Result<Capability> {
         "SchedulerSignal" => Ok(Capability::SchedulerSignal {
             patterns: vec!["*".to_string()],
         }),
-        "CredentialAccess" => Ok(Capability::CredentialAccess {
-            services: vec!["*".to_string()],
-        }),
+        "CredentialAccess" => Err(anyhow::anyhow!(
+            "capability 'CredentialAccess' cannot be a bare string — explicit service scoping required. \
+             Use {{ \"type\": \"CredentialAccess\", \"services\": [\"github\"] }} instead."
+        )),
         "EmergencyStop" => Ok(Capability::EmergencyStop),
         "AgentSpawn" | "BackgroundReevaluation" => Err(anyhow::anyhow!(
             "capability '{s}' cannot be a bare string; use a JSON object with required fields (see Capability schema)"
@@ -251,9 +254,8 @@ where
         .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            normalize_capability_from_llm(v).map_err(|e| {
-                serde::de::Error::custom(format!("capabilities[{i}]: {e}"))
-            })
+            normalize_capability_from_llm(v)
+                .map_err(|e| serde::de::Error::custom(format!("capabilities[{i}]: {e}")))
         })
         .collect()
 }
@@ -416,6 +418,7 @@ fn create_revision_from_files(
     lock_rel_path: &str,
     parsed_lock: RuntimeLock,
     skill_content: &[u8],
+    health_report: Option<&crate::runtime::install_contract::BundleHealthReport>,
 ) -> anyhow::Result<PersistedRevisionResult> {
     let expected_layers = expected_locked_layers(bundle);
     let normalized_lock = normalize_runtime_lock(parsed_lock);
@@ -484,6 +487,9 @@ fn create_revision_from_files(
         metadata_json: serde_json::json!({
             "summary": common.summary,
             "metadata": common.metadata,
+            "has_unresolved_dependencies": health_report.map(|h| h.has_unresolved_dependencies).unwrap_or(false),
+            "dependency_files": health_report.map(|h| h.dependency_files.clone()).unwrap_or_default(),
+            "detected_external_imports": health_report.map(|h| h.detected_external_imports.clone()).unwrap_or_default(),
         }),
         short_id: String::new(),
     };
@@ -491,17 +497,39 @@ fn create_revision_from_files(
     let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
     let short_ref = format!("{}@rev_{}", common.agent_id, short_id);
 
+    let mut response_obj = serde_json::json!({
+        "ok": true,
+        "status": "created",
+        "revision_id": revision_id,
+        "agent_ref": format!("{}@{}", common.agent_id, revision_id),
+        "short_ref": short_ref,
+        "agent_id": common.agent_id,
+        "artifact_id": common.artifact_id,
+        "next_step": "Use agent.revision.promote to activate this revision"
+    });
+
+    if let Some(hr) = health_report {
+        if let Some(obj) = response_obj.as_object_mut() {
+            if hr.has_unresolved_dependencies {
+                obj.insert(
+                    "has_unresolved_dependencies".to_string(),
+                    serde_json::json!(true),
+                );
+                obj.insert(
+                    "dependency_files".to_string(),
+                    serde_json::json!(hr.dependency_files),
+                );
+                obj.insert(
+                    "detected_external_imports".to_string(),
+                    serde_json::json!(hr.detected_external_imports),
+                );
+                obj.insert("warnings".to_string(), serde_json::json!(hr.warnings));
+            }
+        }
+    }
+
     Ok(PersistedRevisionResult {
-        response: serde_json::json!({
-            "ok": true,
-            "status": "created",
-            "revision_id": revision_id,
-            "agent_ref": format!("{}@{}", common.agent_id, revision_id),
-            "short_ref": short_ref,
-            "agent_id": common.agent_id,
-            "artifact_id": common.artifact_id,
-            "next_step": "Use agent.revision.promote to activate this revision"
-        }),
+        response: response_obj,
         normalized_lock,
     })
 }
@@ -707,6 +735,7 @@ impl NativeTool for AgentRevisionCreateTool {
             &lock_rel_path,
             parsed_lock,
             &skill_content,
+            None,
         )?;
         Ok(persisted.response.to_string())
     }
@@ -835,6 +864,14 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             );
         }
 
+        let has_layers = !bundle.layers.is_empty();
+        let health_report = crate::runtime::install_contract::analyze_bundle_health(
+            &file_map,
+            &args.capabilities,
+            has_layers,
+            args.script_entry.as_deref(),
+        );
+
         let target_manifest = AgentManifest {
             version: "1.0".to_string(),
             runtime: crate::runtime::install_contract::default_runtime_declaration(),
@@ -893,6 +930,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             &lock_rel_path,
             parsed_lock,
             &skill_content,
+            Some(&health_report),
         )?;
 
         let mut response = persisted.response;
@@ -1224,7 +1262,7 @@ impl NativeTool for AgentRevisionPromoteTool {
         manifest: &AgentManifest,
         policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -1245,6 +1283,7 @@ impl NativeTool for AgentRevisionPromoteTool {
         let Some(gateway_store) = gateway_store else {
             return Err(anyhow::anyhow!("GatewayStore is required"));
         };
+        let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
 
         let rev = gateway_store
             .get_agent_revision(&args.revision_id)?
@@ -1268,6 +1307,92 @@ impl NativeTool for AgentRevisionPromoteTool {
             args.revision_id,
             rev.status
         );
+
+        let revision_dir = gateway_dir
+            .join("revisions/agents")
+            .join(&args.agent_id)
+            .join(&args.revision_id);
+        let skill_path = revision_dir.join("SKILL.md");
+        let skill_bytes = std::fs::read(&skill_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot read SKILL.md for revision '{}': {}",
+                args.revision_id,
+                e
+            )
+        })?;
+        let skill_text = String::from_utf8_lossy(&skill_bytes);
+        let skill_frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(
+            &skill_text,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot parse SKILL.md frontmatter for revision '{}': {}",
+                args.revision_id,
+                e
+            )
+        })?;
+
+        // Deserialize capabilities from the frontmatter using the same lenient pipeline
+        // used by create_from_intent, so shorthand strings and field normalization are handled.
+        let has_high_risk = {
+            let frontmatter_json = serde_json::to_value(&skill_frontmatter)
+                .unwrap_or(serde_json::Value::Null);
+            let caps_json = frontmatter_json
+                .get("capabilities")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            caps_json.iter().any(|v| {
+                normalize_capability_from_llm(v.clone())
+                    .map(|cap| crate::runtime::install_contract::is_high_risk_capability(&cap))
+                    .unwrap_or(false)
+            })
+        };
+
+        if has_high_risk {
+            let artifact_id = rev.artifact_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Promotion gate: high-risk revision '{}' has no artifact_id — \
+                     cannot verify promotion records.",
+                    args.revision_id
+                )
+            })?;
+
+            let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+            let record = promo_store.get_promotion(artifact_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Promotion gate: no promotion.record found for artifact '{}'. \
+                     Agents with NetworkAccess/CodeExecution/AgentSpawn require both \
+                     evaluator and auditor pass records before promotion.",
+                    artifact_id
+                )
+            })?;
+
+            anyhow::ensure!(
+                record.evaluator_pass,
+                "Promotion gate: evaluator did not pass for artifact '{}'. \
+                 Fix the evaluation findings and re-run evaluator.default.",
+                artifact_id
+            );
+            anyhow::ensure!(
+                record.auditor_pass,
+                "Promotion gate: auditor did not pass for artifact '{}'. \
+                 Fix the audit findings and re-run auditor.default.",
+                artifact_id
+            );
+
+            let has_unresolved = rev
+                .metadata_json
+                .get("has_unresolved_dependencies")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            anyhow::ensure!(
+                !has_unresolved,
+                "Promotion gate: revision has unresolved dependencies. \
+                 Run builder.default to install dependencies as layers, \
+                 then re-submit the revision.",
+            );
+        }
 
         if let Some(eval_run_id) = &args.required_eval_run_id {
             let eval_run = gateway_store.get_eval_run(eval_run_id)?;
@@ -1656,8 +1781,77 @@ mod capability_lenient_deser_tests {
     }
 
     #[test]
-    fn string_shorthand_network_access() {
+    fn string_shorthand_network_access_refused() {
         let j = r#"{"capabilities":["NetworkAccess"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("capabilities[0]"),
+            "error should reference index, got: {msg}"
+        );
+        assert!(
+            msg.contains("NetworkAccess"),
+            "error should name capability, got: {msg}"
+        );
+        assert!(
+            msg.contains("hosts"),
+            "error should mention required field, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn string_shorthand_code_execution_refused() {
+        let j = r#"{"capabilities":["CodeExecution"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("CodeExecution"),
+            "error should name capability, got: {msg}"
+        );
+        assert!(
+            msg.contains("patterns"),
+            "error should mention required field, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn string_shorthand_credential_access_refused() {
+        let j = r#"{"capabilities":["CredentialAccess"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("CredentialAccess"),
+            "error should name capability, got: {msg}"
+        );
+        assert!(
+            msg.contains("services"),
+            "error should mention required field, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn string_shorthand_read_access_allowed() {
+        let j = r#"{"capabilities":["ReadAccess"]}"#;
+        let c: CapsOnly = serde_json::from_str(j).unwrap();
+        assert!(matches!(
+            c.capabilities.as_slice(),
+            [Capability::ReadAccess { scopes }] if scopes == &["*".to_string()]
+        ));
+    }
+
+    #[test]
+    fn scoped_network_access_object_accepted() {
+        let j = r#"{"capabilities":[{"type":"NetworkAccess","hosts":["api.weather.com"]}]}"#;
+        let c: CapsOnly = serde_json::from_str(j).unwrap();
+        assert!(matches!(
+            c.capabilities.as_slice(),
+            [Capability::NetworkAccess { hosts }] if hosts == &["api.weather.com".to_string()]
+        ));
+    }
+
+    #[test]
+    fn scoped_network_access_wildcard_accepted() {
+        let j = r#"{"capabilities":[{"type":"NetworkAccess","hosts":["*"]}]}"#;
         let c: CapsOnly = serde_json::from_str(j).unwrap();
         assert!(matches!(
             c.capabilities.as_slice(),

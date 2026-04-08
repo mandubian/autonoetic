@@ -10,11 +10,13 @@
 //! No inference from code meaning, no guessing agent intent.
 
 use autonoetic_types::agent::{AgentManifest, RuntimeDeclaration};
+use autonoetic_types::capability::Capability;
 use autonoetic_types::layer::ArtifactLayer;
 use autonoetic_types::runtime_lock::{
     LockedArtifact, LockedDependencySet, LockedGateway, LockedLayerMount, LockedSandbox, LockedSdk,
     RuntimeLock,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 // ─── Canonical defaults ────────────────────────────────────────
 
@@ -452,6 +454,185 @@ pub fn extract_frontmatter_raw(content: &str) -> anyhow::Result<serde_yaml::Valu
     Ok(value)
 }
 
+const DEPENDENCY_FILES: &[(&str, &str)] = &[
+    ("requirements.txt", "python/pip"),
+    ("pyproject.toml", "python"),
+    ("package.json", "node/npm"),
+    ("go.mod", "go"),
+    ("Cargo.toml", "rust/cargo"),
+    ("Gemfile", "ruby/bundler"),
+];
+
+/// Python 3.11 standard library top-level module names (deduplicated).
+/// Used by detect_external_python_imports to distinguish third-party from stdlib.
+const PYTHON_STDLIB: &[&str] = &[
+    // Core builtins & runtime
+    "_thread", "atexit", "builtins", "code", "codeop", "compileall", "copyreg",
+    "dis", "ensurepip", "errno", "faulthandler", "gc", "graphlib", "importlib",
+    "inspect", "modulefinder", "pkgutil", "platform", "py_compile", "pydoc",
+    "reprlib", "runpy", "site", "test", "venv", "warnings", "zipapp", "zipimport",
+    // Data structures & types
+    "array", "bisect", "calendar", "collections", "contextlib", "copy",
+    "dataclasses", "datetime", "decimal", "enum", "fractions", "functools",
+    "heapq", "io", "itertools", "math", "numbers", "operator", "pprint", "queue",
+    "random", "statistics", "string", "struct", "textwrap", "types", "typing",
+    "uuid", "weakref",
+    // Text, encoding & data formats
+    "base64", "binascii", "codecs", "csv", "difflib", "gettext", "hashlib",
+    "hmac", "json", "locale", "pickle", "re", "secrets", "shlex", "shelve",
+    "unicodedata",
+    // Files & OS
+    "configparser", "ctypes", "curses", "fcntl", "filecmp", "fileinput",
+    "genericpath", "glob", "grp", "mmap", "netrc", "nis", "os", "pathlib",
+    "pipes", "posix", "posixpath", "pty", "pwd", "readline", "resource",
+    "rlcompleter", "shutil", "signal", "stat", "sys", "syslog", "tarfile",
+    "tempfile", "termios", "tty", "zipfile",
+    // Concurrency
+    "asyncio", "concurrent", "multiprocessing", "select", "selectors",
+    "subprocess", "threading",
+    // Network & web
+    "cgi", "cgitb", "email", "ftplib", "html", "http", "imaplib", "ipaddress",
+    "nntplib", "poplib", "smtpd", "smtplib", "socket", "socketserver", "ssl",
+    "telnetlib", "urllib", "webbrowser", "wsgiref", "xml", "xmlrpc",
+    // Databases
+    "sqlite3",
+    // Dev, debug & testing
+    "abc", "argparse", "ast", "bdb", "cProfile", "doctest", "formatter",
+    "getopt", "logging", "optparse", "pdb", "profile", "pstats", "timeit",
+    "traceback", "unittest",
+    // Media & misc
+    "audioop", "cmath", "chunk", "colorsys", "imghdr", "sndhdr", "wave",
+    // Other common stdlib
+    "time", "copy",
+];
+
+
+#[derive(Debug, Default)]
+pub struct BundleHealthReport {
+    pub dependency_files: Vec<String>,
+    pub has_unresolved_dependencies: bool,
+    pub detected_external_imports: Vec<String>,
+    pub declares_network_access: bool,
+    pub declares_code_execution: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Run a full bundle health check for an agent being installed.
+///
+/// `script_entry`: when `Some(path)`, import scanning is limited to that file only,
+/// avoiding false positives from test helpers in the bundle. Pass `None` to scan all Python files.
+pub fn analyze_bundle_health(
+    file_map: &BTreeMap<String, Vec<u8>>,
+    capabilities: &[Capability],
+    has_layers: bool,
+    script_entry: Option<&str>,
+) -> BundleHealthReport {
+    let mut report = BundleHealthReport::default();
+
+    let found_dep_files: Vec<(&str, &str)> = DEPENDENCY_FILES
+        .iter()
+        .filter(|(f, _)| file_map.contains_key(*f))
+        .copied()
+        .collect();
+
+    report.dependency_files = found_dep_files.iter().map(|(f, _)| f.to_string()).collect();
+    report.has_unresolved_dependencies = !found_dep_files.is_empty() && !has_layers;
+
+    if report.has_unresolved_dependencies {
+        report.warnings.push(format!(
+            "Dependency files found ({}) but no layers in artifact. \
+             Run builder.default to install dependencies as layers before evaluation.",
+            found_dep_files
+                .iter()
+                .map(|(f, eco)| format!("{f} ({eco})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let external_imports = detect_external_python_imports(file_map, script_entry);
+    report.detected_external_imports = external_imports.clone();
+    if !external_imports.is_empty() && !has_layers {
+        report.warnings.push(format!(
+            "External Python imports detected: {}. \
+             These modules are not in the standard library and no dependency layers are present.",
+            external_imports.join(", ")
+        ));
+    }
+
+    for cap in capabilities {
+        match cap {
+            Capability::NetworkAccess { .. } => report.declares_network_access = true,
+            Capability::CodeExecution { .. } => report.declares_code_execution = true,
+            _ => {}
+        }
+    }
+
+    report
+}
+
+/// Scan Python files for external (non-stdlib, non-local) imports.
+///
+/// When `script_entry` is `Some(filename)`, only that file is scanned to avoid
+/// false positives from test files and dev tooling bundled alongside the agent.
+/// Pass `None` to scan all `.py` files.
+pub fn detect_external_python_imports(
+    file_map: &BTreeMap<String, Vec<u8>>,
+    script_entry: Option<&str>,
+) -> Vec<String> {
+    let mut external = BTreeSet::new();
+    for (path, content) in file_map {
+        if !path.ends_with(".py") {
+            continue;
+        }
+        // When script_entry is given, limit scanning to that file only
+        if let Some(entry) = script_entry {
+            if path != entry {
+                continue;
+            }
+        }
+        let text = String::from_utf8_lossy(content);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            let module = if trimmed.starts_with("import ") {
+                trimmed
+                    .strip_prefix("import ")
+                    .and_then(|s| s.split_whitespace().next())
+            } else if trimmed.starts_with("from ") {
+                trimmed
+                    .strip_prefix("from ")
+                    .and_then(|s| s.split_whitespace().next())
+            } else {
+                None
+            };
+            if let Some(module) = module {
+                let top_level = module.split('.').next().unwrap_or(module);
+                if top_level.is_empty() {
+                    continue;
+                }
+                if PYTHON_STDLIB.contains(&top_level) {
+                    continue;
+                }
+                let local_file = format!("{top_level}.py");
+                if file_map.contains_key(&local_file) {
+                    continue;
+                }
+                external.insert(top_level.to_string());
+            }
+        }
+    }
+    external.into_iter().collect()
+}
+
+pub fn is_high_risk_capability(cap: &Capability) -> bool {
+    matches!(
+        cap,
+        Capability::NetworkAccess { .. }
+            | Capability::CodeExecution { .. }
+            | Capability::AgentSpawn { .. }
+    )
+}
+
 pub fn format_install_validation_error(
     skill_missing: &[String],
     lock_missing: Option<&[String]>,
@@ -811,5 +992,103 @@ artifacts: "not_a_sequence"
         assert!(rendered.starts_with("---\n"));
         assert!(rendered.contains("agent:\n  id: roundtrip.agent"));
         assert!(rendered.contains("# Instructions"));
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_finds_requests() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "weather_agent.py".to_string(),
+            b"import requests\nimport json\ndef fetch(): pass\n".to_vec(),
+        );
+        let external = detect_external_python_imports(&file_map, None);
+        assert!(external.contains(&"requests".to_string()));
+        assert!(!external.contains(&"json".to_string()));
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_ignores_stdlib() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "agent.py".to_string(),
+            b"import os\nimport sys\nfrom pathlib import Path\n".to_vec(),
+        );
+        let external = detect_external_python_imports(&file_map, None);
+        assert!(external.is_empty());
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_ignores_local_modules() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import mymodule\nfrom utils import helper\n".to_vec(),
+        );
+        file_map.insert("mymodule.py".to_string(), b"# local module\n".to_vec());
+        file_map.insert("utils.py".to_string(), b"# local module\n".to_vec());
+        let external = detect_external_python_imports(&file_map, None);
+        assert!(external.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_warns_on_requirements_without_layers() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert("requirements.txt".to_string(), b"requests\n".to_vec());
+        let report = analyze_bundle_health(&file_map, &[], false, None);
+        assert!(report.has_unresolved_dependencies);
+        assert!(report
+            .dependency_files
+            .contains(&"requirements.txt".to_string()));
+        assert!(!report.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_no_warnings_when_layers_present() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert("requirements.txt".to_string(), b"requests\n".to_vec());
+        let _layers = vec![autonoetic_types::layer::ArtifactLayer {
+            layer_id: "layer1".to_string(),
+            name: "pip".to_string(),
+            mount_path: "/deps".to_string(),
+            digest: "sha256:abc".to_string(),
+        }];
+        let report = analyze_bundle_health(&file_map, &[], true, None);
+        assert!(!report.has_unresolved_dependencies);
+        assert!(report
+            .warnings
+            .iter()
+            .all(|w| !w.contains("Dependency files found")));
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_detects_high_risk_capabilities() {
+        let file_map = BTreeMap::new();
+        let caps = vec![
+            Capability::NetworkAccess {
+                hosts: vec!["api.example.com".to_string()],
+            },
+            Capability::CodeExecution {
+                patterns: vec!["python*".to_string()],
+            },
+        ];
+        let report = analyze_bundle_health(&file_map, &caps, false, None);
+        assert!(report.declares_network_access);
+        assert!(report.declares_code_execution);
+    }
+
+    #[test]
+    fn test_is_high_risk_capability() {
+        assert!(is_high_risk_capability(&Capability::NetworkAccess {
+            hosts: vec!["*".to_string()]
+        }));
+        assert!(is_high_risk_capability(&Capability::CodeExecution {
+            patterns: vec!["*".to_string()]
+        }));
+        assert!(is_high_risk_capability(&Capability::AgentSpawn {
+            max_children: 10
+        }));
+        assert!(!is_high_risk_capability(&Capability::ReadAccess {
+            scopes: vec!["*".to_string()]
+        }));
     }
 }

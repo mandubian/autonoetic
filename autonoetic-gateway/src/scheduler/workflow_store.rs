@@ -698,8 +698,11 @@ pub fn update_task_run_status(
 
 /// Creates an implicit artifact reference for a completed task.
 ///
-/// This stores a minimal JSON structure with task output information
-/// that can be retrieved via workflow.wait by the parent session.
+/// Per spec (spec-implicit-artifacts-agent-evolution.md §4.2), the implicit
+/// artifact carries a `content.named_outputs` array listing every file the
+/// child agent persisted via `content.write`. This lets the parent (planner)
+/// find child outputs via `content.read` with the name or `cnt_` ref —
+/// without needing to know the child's internal filenames in advance.
 fn create_implicit_artifact(
     config: &GatewayConfig,
     task: &TaskRun,
@@ -713,7 +716,25 @@ fn create_implicit_artifact(
     // Generate implicit artifact ID
     let artifact_id = format!("impl_{}", task.task_id);
 
-    // Build implicit artifact metadata
+    // Collect all named content written by the child agent during its session.
+    // Each entry gives the parent a `name` (e.g. "weather_api_research.md") and
+    // a `ref` (e.g. "cnt_a1b2c3d4") that can be passed directly to content.read.
+    let named_outputs: Vec<serde_json::Value> = content_store
+        .list_names_with_handles(&task.session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, handle)| {
+            let short_ref = format!("cnt_{}", ContentStore::get_short_alias(&handle));
+            serde_json::json!({
+                "name": name,
+                "ref": short_ref,
+            })
+        })
+        .collect();
+
+    let named_outputs_count = named_outputs.len();
+
+    // Build implicit artifact — spec §4.2 structure.
     let implicit_data = serde_json::json!({
         "artifact_id": artifact_id,
         "artifact_type": "implicit",
@@ -723,6 +744,10 @@ fn create_implicit_artifact(
         "parent_session": task.parent_session_id,
         "created_at": task.updated_at,
         "summary": result_summary.unwrap_or("Task completed"),
+        "content": {
+            // Named outputs from the child session — use name or ref with content.read
+            "named_outputs": named_outputs,
+        },
     });
 
     // Write as session-visible content in parent session
@@ -743,6 +768,7 @@ fn create_implicit_artifact(
         task_id = %task.task_id,
         artifact_id = %artifact_id,
         parent_session = %parent_session,
+        named_outputs = named_outputs_count,
         "Created implicit artifact for completed task"
     );
 

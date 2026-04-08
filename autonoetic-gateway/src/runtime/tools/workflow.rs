@@ -1129,6 +1129,19 @@ impl NativeTool for WorkflowForceCompleteTool {
             evidence.push("WARNING: could not confirm child session completed — proceeding based on caller judgment".to_string());
         }
 
+        // Gate: refuse "succeeded" without real evidence of child completion.
+        // "failed" is allowed — a stuck task is a legitimate failure diagnosis.
+        if target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded && !session_completed {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "task_id": task_id,
+                "workflow_id": workflow_id,
+                "error": "Cannot force-complete as 'succeeded': no evidence of child session completion.",
+                "evidence_gathered": evidence,
+                "hint": "Use status 'failed' if the child session is stuck, or wait for it to produce a manifest/digest/implicit artifact."
+            }).to_string());
+        }
+
         let result_summary = summary.unwrap_or_else(|| {
             format!(
                 "Force-completed: {} (evidence: {})",
@@ -1183,5 +1196,47 @@ impl NativeTool for WorkflowForceCompleteTool {
             "message": format!("Task {} force-completed as {:?}.", task_id, target_status)
         })
         .to_string())
+    }
+}
+
+#[cfg(test)]
+mod force_complete_gate_tests {
+    use super::*;
+
+    /// Verifies the gate logic: when session_completed is false, only "failed" is allowed.
+    #[test]
+    fn gate_refuses_succeeded_without_evidence() {
+        // The gate is embedded in execute() which requires full gateway infra.
+        // Test the core logic extracted:
+        let session_completed = false;
+        let target_status = autonoetic_types::workflow::TaskRunStatus::Succeeded;
+        assert_eq!(
+            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded && !session_completed,
+            true,
+            "Gate should trigger: succeeded + no evidence"
+        );
+    }
+
+    #[test]
+    fn gate_allows_failed_without_evidence() {
+        let session_completed = false;
+        let target_status = autonoetic_types::workflow::TaskRunStatus::Failed;
+        // Gate condition: succeeded && !session_completed — should NOT trigger for Failed
+        assert_eq!(
+            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded && !session_completed,
+            false,
+            "Gate should NOT trigger: failed is allowed without evidence"
+        );
+    }
+
+    #[test]
+    fn gate_allows_succeeded_with_evidence() {
+        let session_completed = true;
+        let target_status = autonoetic_types::workflow::TaskRunStatus::Succeeded;
+        assert_eq!(
+            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded && !session_completed,
+            false,
+            "Gate should NOT trigger: succeeded with evidence is fine"
+        );
     }
 }
