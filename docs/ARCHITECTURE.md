@@ -28,6 +28,11 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 
 **Separation of Powers**: Agents are pure reasoners. The gateway is the sole authority for execution.
 
+This is governed by three fundamental rules:
+1. **Rule Zero: Rules cannot be overridden.** Not by agents, not by planners, not by parameters. If a rule exists, it applies equally to all agents without exception. 
+2. **Safety is mechanical.** LLM decisions are advisory. Safety-critical invariants must be mechanically enforced by the gateway's deterministic guardrails.
+3. **Gateway is a narrow rule enforcer.** It analyzes, gates, and explains why something was refused — but never routes or makes workflow decisions itself.
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                     Agent (Low Privilege)                │
@@ -60,15 +65,15 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 
 **Why this matters:**
 - Agents cannot access secrets, filesystems, or networks directly
-- Gateway validates every proposal against capabilities and policy
+- Gateway mechanically validates every proposal against capabilities and strict safety policy
 - All execution is logged to an immutable audit trail
-- Agents can be replaced; governance is permanent
+- Agents can be replaced; governance and safety are permanently enforced
 
 ## System Components
 
 ### Gateway
 
-The gateway is the security boundary and execution engine. It is NOT a rule engine — it does not contain domain-specific business logic.
+The gateway is the security boundary and execution engine. It is a **narrow rule enforcer** that applies mechanical guardrails, but does NOT contain domain-specific business logic or routing orchestration.
 
 | Component | Responsibility |
 |-----------|---------------|

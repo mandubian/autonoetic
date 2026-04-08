@@ -12,6 +12,7 @@
 - [Agent, Revision, Eval, and Promotion Tools](#agent-tools)
 - [Agent Lifecycle](#agent-lifecycle)
 - [Script vs Reasoning Agents](#script-vs-reasoning-agents)
+- [Extended Thinking](#extended-thinking)
 - [Building New Agents](#building-new-agents)
 
 ---
@@ -121,6 +122,9 @@ metadata:
       provider: "openai"       # openai, anthropic, gemini, openrouter, etc.
       model: "gpt-4o"
       temperature: 0.1
+      thinking:                # Optional: enable extended thinking (see below)
+        effort: medium         # "low", "medium" (default), "high"
+        # budget_tokens: 4096  # Optional: override reasoning token budget (Anthropic only)
     capabilities:
       - type: "ToolInvoke"
         allowed: ["content.", "knowledge.", "agent."]
@@ -161,6 +165,7 @@ Markdown body with natural language instructions.
 | `description` | Yes | One-line description |
 | `metadata.autonoetic.agent.id` | Yes | Agent ID (must match directory name) |
 | `metadata.autonoetic.llm_config` | For reasoning | LLM provider/model |
+| `metadata.autonoetic.llm_config.thinking` | No | Extended thinking configuration (see below) |
 | `metadata.autonoetic.capabilities` | No | Permission declarations |
 | `metadata.autonoetic.execution_mode` | No | `"reasoning"` (default) or `"script"` |
 | `metadata.autonoetic.script_entry` | For script mode | Entry script path |
@@ -402,6 +407,78 @@ llm_config:
   provider: "openai"
   model: "gpt-4o"
   temperature: 0.1
+```
+
+---
+
+## Extended Thinking
+
+Extended thinking enables a model's native reasoning mode for deeper analysis on complex tasks. When configured, the gateway translates the setting into each provider's native format — no provider-specific knowledge needed in the agent manifest.
+
+### Configuration
+
+Add the `thinking` block to `llm_config` in SKILL.md:
+
+```yaml
+llm_config:
+  provider: "anthropic"
+  model: "claude-sonnet-4-20250514"
+  temperature: 0.1
+  thinking:
+    effort: high
+    # budget_tokens: 8192    # Optional: Anthropic reasoning budget override
+```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `thinking.effort` | string | `"medium"` | Reasoning effort: `"low"`, `"medium"`, or `"high"`. |
+| `thinking.budget_tokens` | integer | *(provider default)* | Max tokens for the reasoning trace. Only used by Anthropic. When unset, Anthropic defaults to half of `max_tokens` (or 2048). |
+
+### Provider Behavior
+
+The gateway translates `thinking` into the provider's native format:
+
+| Provider | Models | How It Works |
+|----------|--------|-------------|
+| **OpenAI** | `o1-*`, `o3-*`, `o4-*` | Sets `reasoning_effort` parameter (`low`/`medium`/`high`). Ignored for non-reasoning models (e.g., `gpt-4o`). `budget_tokens` is not used. |
+| **Anthropic** | All models | Enables `thinking: {type: "enabled", budget_tokens: N}`. Budget defaults to `max_tokens / 2` (or 2048) when `budget_tokens` is unset. `effort` is not sent directly — only `budget_tokens` controls Anthropic's reasoning depth. |
+| **Gemini / Gemma** | Models containing `gemma`, `gemini-1`, or `gemini-2` | Prepends the `<\|think\|>` token to the system instruction, activating the model's native thinking channel. `budget_tokens` is not used. |
+| **Other providers** | — | `thinking` is silently ignored. |
+
+### Routing
+
+`thinking` is preserved through all routing decisions — if the router switches between models (e.g., opus to haiku), the thinking configuration carries forward to whichever model handles the request.
+
+### Examples
+
+**OpenAI o3 with high reasoning:**
+```yaml
+llm_config:
+  provider: "openai"
+  model: "o3-mini"
+  thinking:
+    effort: high
+```
+
+**Anthropic with explicit budget:**
+```yaml
+llm_config:
+  provider: "anthropic"
+  model: "claude-sonnet-4-20250514"
+  thinking:
+    effort: high
+    budget_tokens: 16384
+```
+
+**Gemma with thinking enabled:**
+```yaml
+llm_config:
+  provider: "openrouter"
+  model: "google/gemma-4-26b-it"
+  thinking:
+    effort: medium
 ```
 
 ---
