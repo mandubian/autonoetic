@@ -1122,6 +1122,7 @@ impl AgentExecutor {
                 base_url: None,
                 api_key_env: None,
                 routing_preset: None,
+                thinking: None,
             };
             let mut routed_llm_cfg = self.manifest.llm_config.clone().unwrap_or(default_cfg);
 
@@ -1310,6 +1311,7 @@ impl AgentExecutor {
                 max_tokens: None,
                 temperature,
                 metadata: None,
+                thinking: routed_llm_cfg.thinking.clone(),
             };
 
             // --- Pre-process hook: transform input before LLM call ---
