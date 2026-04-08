@@ -102,8 +102,32 @@ impl GeminiDriver {
                 })).collect::<Vec<_>>()
             }]);
         }
+
+        if let Some(ref thinking) = req.thinking {
+            if model_is_gemma(&self.provider.model) && !matches!(thinking.effort, autonoetic_types::agent::ThinkingEffort::Low | autonoetic_types::agent::ThinkingEffort::Medium | autonoetic_types::agent::ThinkingEffort::High) {} else if model_is_gemma(&self.provider.model) {
+                if let Some(ref mut sys) = body.get_mut("systemInstruction") {
+                    if let Some(parts) = sys.get_mut("parts").and_then(|p| p.as_array_mut()) {
+                        if let Some(first) = parts.get_mut(0).and_then(|p| p.get_mut("text")) {
+                            if let Some(text) = first.as_str() {
+                                *first = json!({ "text": format!("<|think|>\n{}", text) });
+                            }
+                        }
+                    }
+                } else {
+                    body["systemInstruction"] = json!({
+                        "parts": [{ "text": "<|think|>" }]
+                    });
+                }
+            }
+        }
+
         body
     }
+}
+
+fn model_is_gemma(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains("gemma") || m.contains("gemini-2") || m.contains("gemini-1")
 }
 
 #[async_trait::async_trait]

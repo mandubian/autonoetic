@@ -92,6 +92,7 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         base_url: None,
         api_key_env: None,
         routing_preset: None,
+        thinking: None,
     })
 }
 
@@ -107,6 +108,7 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
         base_url: p.base_url.clone(),
         api_key_env: None,
         routing_preset: None,
+        thinking: p.thinking.clone(),
     }
 }
 

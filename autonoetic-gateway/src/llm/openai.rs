@@ -11,6 +11,11 @@ use crate::llm::provider::{AuthStrategy, ResolvedProvider};
 use reqwest::Client;
 use serde_json::json;
 
+pub struct OpenAiDriver {
+    client: Client,
+    provider: ResolvedProvider,
+}
+
 /// Whether a model uses `max_completion_tokens` instead of `max_tokens`.
 /// (GPT-5 and o-series reasoning models require this.)
 fn uses_completion_tokens(model: &str) -> bool {
@@ -22,17 +27,15 @@ fn uses_completion_tokens(model: &str) -> bool {
 /// Some multimodal or specialized models only support text completion.
 fn model_supports_tools(model: &str) -> bool {
     let m = model.to_lowercase();
-    // Known models that don't support tool calling
-    // Add more as discovered
     if m.contains("healer-alpha") || m.contains("healer_alpha") {
         return false;
     }
     true
 }
 
-pub struct OpenAiDriver {
-    client: Client,
-    provider: ResolvedProvider,
+fn model_is_reasoning_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.contains("-o1-") || m.contains("-o3-")
 }
 
 impl OpenAiDriver {
@@ -132,9 +135,19 @@ impl OpenAiDriver {
                     }
                 }))
                 .collect::<Vec<_>>());
-            // Only include tool_choice if provider supports it
             if self.provider.capabilities.supports_tool_choice {
                 body["tool_choice"] = json!("auto");
+            }
+        }
+
+        if let Some(ref thinking) = req.thinking {
+            if model_is_reasoning_model(&self.provider.model) {
+                let effort = match thinking.effort {
+                    autonoetic_types::agent::ThinkingEffort::Low => "low",
+                    autonoetic_types::agent::ThinkingEffort::Medium => "medium",
+                    autonoetic_types::agent::ThinkingEffort::High => "high",
+                };
+                body["reasoning_effort"] = json!(effort);
             }
         }
 

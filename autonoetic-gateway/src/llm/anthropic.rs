@@ -100,6 +100,16 @@ impl AnthropicDriver {
                 .collect::<Vec<_>>());
         }
 
+        if let Some(ref thinking) = req.thinking {
+            let budget = thinking.budget_tokens.unwrap_or(
+                req.max_tokens.map(|m| m / 2).unwrap_or(2048)
+            );
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget
+            });
+        }
+
         body
     }
 }

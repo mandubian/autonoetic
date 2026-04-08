@@ -4,6 +4,7 @@
 //! various remote model providers (OpenAI, Anthropic, Gemini, etc.).
 
 use autonoetic_types::agent::LlmConfig;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
@@ -158,6 +159,11 @@ pub struct CompletionRequest {
     pub temperature: Option<f32>,
     /// Optional metadata for pipeline hooks (e.g. skip_llm, assistant_reply).
     pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// Extended thinking configuration. When set, the driver translates this
+    /// to provider-native format (e.g., reasoning_effort for OpenAI o-series,
+    /// thinking budget for Anthropic, <|think|> token for Gemma).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<autonoetic_types::agent::ThinkingConfig>,
 }
 
 impl CompletionRequest {
@@ -169,6 +175,7 @@ impl CompletionRequest {
             max_tokens: None,
             temperature: None,
             metadata: None,
+            thinking: None,
         }
     }
 }
