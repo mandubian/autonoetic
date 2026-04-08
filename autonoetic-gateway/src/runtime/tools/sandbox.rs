@@ -30,10 +30,7 @@ fn sandbox_command_misuses_content_digest_as_path(command: &str) -> bool {
     while let Some(rel) = lower[search_from..].find("sha256:") {
         let after_prefix = search_from + rel + "sha256:".len();
         let rest = &lower[after_prefix..];
-        let hex_len = rest
-            .chars()
-            .take_while(|c| c.is_ascii_hexdigit())
-            .count();
+        let hex_len = rest.chars().take_while(|c| c.is_ascii_hexdigit()).count();
         if hex_len >= 8 {
             return true;
         }
@@ -201,7 +198,10 @@ fn apply_network_isolation_failure_to_result(
     );
     if let Some(obj) = body.as_object_mut() {
         obj.insert("ok".to_string(), serde_json::json!(false));
-        obj.insert("error_type".to_string(), serde_json::json!("network_isolated"));
+        obj.insert(
+            "error_type".to_string(),
+            serde_json::json!("network_isolated"),
+        );
         obj.insert("network_blocked".to_string(), serde_json::json!(true));
         obj.insert(
             "network_error_patterns".to_string(),
@@ -264,10 +264,11 @@ fn approved_request_targets(
         _ => return Vec::new(),
     };
     let code = extract_code_for_analysis(command, agent_dir, gateway_dir, Some(&req.session_id));
-    let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
-        &code,
-        dep_packages.as_deref(),
-    );
+    let analysis =
+        crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
+            &code,
+            dep_packages.as_deref(),
+        );
     let mut targets = normalize_targets(&analysis.detected_patterns);
     if targets.is_empty() {
         targets = extract_hosts_from_text(command);
@@ -813,6 +814,25 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 &code_to_analyze,
                 dep_packages.as_deref(),
             );
+
+        let agent_has_network_access = manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::NetworkAccess { .. }));
+
+        if agent_has_network_access
+            && remote_analysis.requires_approval
+            && !approval_validated_for_command
+        {
+            tracing::info!(
+                target: "sandbox.exec",
+                agent_id = %manifest.agent.id,
+                patterns = ?remote_analysis.detected_patterns,
+                "Agent has NetworkAccess capability — auto-approving remote access patterns"
+            );
+            approval_validated_for_command = true;
+        }
+
         tracing::info!(
             target: "sandbox.exec",
             agent_id = %manifest.agent.id,
@@ -1517,10 +1537,7 @@ mod network_error_detection_tests {
     fn detects_stdlib_url_errors() {
         let s = "Traceback...\nurllib.error.URLError: <urlopen error timed out>";
         let v = detect_network_errors_in_output(s);
-        assert!(
-            v.iter().any(|x| x.contains("urllib")),
-            "{v:?}"
-        );
+        assert!(v.iter().any(|x| x.contains("urllib")), "{v:?}");
     }
 
     #[test]
@@ -1549,7 +1566,10 @@ mod network_error_detection_tests {
             "",
             false,
         );
-        assert!(detected.is_some(), "expected network patterns to be detected");
+        assert!(
+            detected.is_some(),
+            "expected network patterns to be detected"
+        );
         assert_eq!(body["ok"], json!(false));
         assert_eq!(body["error_type"], json!("network_isolated"));
         assert_eq!(body["network_blocked"], json!(true));
@@ -1603,8 +1623,9 @@ mod approval_binding_tests {
             task_id: None,
             approval_level: ApprovalLevel::Operator,
         };
-        let err = validate_approval_ref_context(&decision, "evaluator.default", Some("root/eval-1"))
-            .expect_err("cross-agent approval_ref should be rejected");
+        let err =
+            validate_approval_ref_context(&decision, "evaluator.default", Some("root/eval-1"))
+                .expect_err("cross-agent approval_ref should be rejected");
         assert!(err.to_string().contains("belongs to agent"));
     }
 
@@ -1674,6 +1695,9 @@ mod approval_binding_tests {
     #[test]
     fn extracts_hosts_from_command_text_urls() {
         let hosts = extract_hosts_from_text("curl https://api.example.com/v1 && wget http://x.y/z");
-        assert_eq!(hosts, vec!["api.example.com".to_string(), "x.y".to_string()]);
+        assert_eq!(
+            hosts,
+            vec!["api.example.com".to_string(), "x.y".to_string()]
+        );
     }
 }
