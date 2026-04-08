@@ -36,6 +36,12 @@ pub struct LlmPreset {
     #[serde(default)]
     pub api_key_env: Option<String>,
 
+    /// Optional extended thinking configuration. When set on a preset, agents
+    /// using this preset will inherit the thinking config unless they override
+    /// it in their SKILL.md llm_config.
+    #[serde(default)]
+    pub thinking: Option<crate::agent::ThinkingConfig>,
+
     // ── Tier/cost (used by fixed presets when referenced by routing presets) ──
     #[serde(default)]
     pub tier: Option<CapabilityTier>,
@@ -1080,6 +1086,8 @@ mod tests {
                 chat_only: None,
                 context_window_tokens: None,
                 base_url: None,
+                api_key_env: None,
+                thinking: None,
                 tier: Some(CapabilityTier::Economy),
                 cost: None,
                 latency: None,
@@ -1097,6 +1105,8 @@ mod tests {
                 chat_only: None,
                 context_window_tokens: None,
                 base_url: None,
+                api_key_env: None,
+                thinking: None,
                 tier: None,
                 cost: None,
                 latency: None,
@@ -1132,6 +1142,8 @@ mod tests {
                 chat_only: None,
                 context_window_tokens: None,
                 base_url: None,
+                api_key_env: None,
+                thinking: None,
                 tier: None,
                 cost: None,
                 latency: None,
@@ -1164,6 +1176,8 @@ mod tests {
                 chat_only: None,
                 context_window_tokens: None,
                 base_url: None,
+                api_key_env: None,
+                thinking: None,
                 tier: None,
                 cost: None,
                 latency: None,
@@ -1191,6 +1205,8 @@ mod tests {
                 chat_only: None,
                 context_window_tokens: None,
                 base_url: None,
+                api_key_env: None,
+                thinking: None,
                 tier: None,
                 cost: None,
                 latency: None,
