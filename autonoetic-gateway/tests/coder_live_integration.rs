@@ -108,6 +108,7 @@ Always write working, syntactically correct Python code."#
         max_tokens: Some(2048),
         temperature: Some(0.3),
         metadata: None,
+                thinking: None,
     };
 
     let resp = driver.complete(&req).await?;
