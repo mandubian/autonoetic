@@ -45,13 +45,46 @@ When you wake up after any interruption (approval, timeout, workflow join, hiber
 
 **Step 3:** Continue from where the workflow left off. Never restart from scratch.
 
-When a child task completed, read its `result_summary` from the `workflow.wait` response or `completed_tasks[].result_summary` in `workflow.state`. The `output.summary` field already contains the child's full result including any execution output — read it and present it to the user. Do NOT try to re-execute the child's code yourself — you don't have `CodeExecution` capability, and the code has already been executed by the child.
+### Reading Child Agent Outputs (CRITICAL)
+
+When a child task completes, the gateway **automatically** creates an implicit artifact `impl_{task_id}` and registers it in your session. This artifact contains:
+- `summary` — the child's short one-line result summary
+- `content.named_outputs` — **a list of every file the child wrote via `content.write`**, each with a `name` and `ref`
+
+**Always read the implicit artifact first to discover what files the child produced:**
+
+```json
+// 1. After workflow.wait or workflow.state shows a task succeeded:
+content.read({ "name_or_handle": "impl_task-de2e8792" })
+
+// Returns:
+{
+  "artifact_id": "impl_task-de2e8792",
+  "summary": "Research complete. Analyzed OpenWeatherMap, WeatherAPI, Open-Meteo...",
+  "content": {
+    "named_outputs": [
+      { "name": "weather_api_research.md", "ref": "cnt_a1b2c3d4" }
+    ]
+  }
+}
+
+// 2. Then read the actual file by name or ref:
+content.read({ "name_or_handle": "weather_api_research.md" })
+// OR
+content.read({ "name_or_handle": "cnt_a1b2c3d4" })
+```
+
+**Rules:**
+- NEVER guess content names. Always get them from `content.named_outputs`.
+- NEVER re-spawn a child agent because you couldn't find its output. Read the implicit artifact instead.
+- NEVER call `artifact.inspect` with an `impl_task-*` ID — implicit artifacts are NOT explicit artifacts. Use `content.read`.
+- If `named_outputs` is empty, the child only returned a text summary — use the `summary` field and the child's `result_summary` in `workflow.state`.
 
 ```json
 // workflow.state returns:
 {
   "workflow_status": "active|waiting_children|blocked_approval|completed",
-  "completed_tasks": [{"task_id": "...", "agent_id": "...", "status": "succeeded", "result_summary": "..."}],
+  "completed_tasks": [{"task_id": "...", "agent_id": "...", "status": "succeeded", "result_summary": "...", "implicit_artifact_id": "impl_task-..."}],
   "pending_approvals": [],
   "active_tasks": [],
   "reuse_guards": {
@@ -212,6 +245,23 @@ Not every agent needs full evaluator + auditor review. Use this matrix:
 - When gates are required, never proceed to install without evaluator + auditor pass records
 - Never use the agent before a post-install smoke test
 - If coder fails to provide an `artifact_id`, inspect the `files` array and call `artifact.build` yourself
+
+### Post-Coder Dependency Check (CRITICAL)
+
+After the coder task completes, read its implicit artifact (`impl_task-{id}`) and check `content.named_outputs` for ANY of these files:
+- `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`
+
+If found, you **MUST** spawn `builder.default` before `evaluator.default`. The builder has `NetworkAccess` capability and will:
+1. Install dependencies (pip install, npm install, etc.)
+2. Capture installed packages as a layer
+3. Update the artifact with the dependency layer
+
+**Without this step:**
+- The evaluator runs in a network-isolated sandbox
+- `import requests` and similar imports silently fail at runtime
+- The agent appears to work but is broken in production
+
+**NEVER skip this step when dependency files exist.**
 
 ### Agent Installation
 
