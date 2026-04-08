@@ -333,16 +333,18 @@ The builder has `NetworkAccess` capability and will:
 
 ---
 
-### Tier 3 — Future Enhancements
+### Tier 3 — Enhancements (tracking)
 
-Lower priority, higher complexity. Documented here for tracking.
+Originally lower-priority follow-ups; **3.6–3.11 are implemented** (see Status column below).
 
-| ID | Enhancement | Description | Complexity |
-|----|-------------|-------------|------------|
-| 3.6 | `sandbox.exec` network policy | Detect outbound network in `sandbox.exec` commands for agents without `NetworkAccess`. Instead of letting Python catch the error and return `exit=0`, block at the sandbox level and surface an approval request or clear error. | High — needs sandbox/seccomp changes |
-| 3.7 | Gateway SHA computation | Replace `sha256: "replace-me"` placeholder in `runtime.lock` with actual gateway binary hash. Compute via `build.rs` and embed at compile time. | Medium — build system change |
-| 3.8 | Promotion record freshness | Reject `promote` if promotion records are older than the revision's `created_at` timestamp (stale evidence from a previous iteration). | Low |
-| 3.9 | `create_from_intent` null field cleanup | Omit null optional fields from serialized SKILL.md metadata instead of writing `llm_config: null`, `limits: null`, etc. Reduces noise. | Low |
+| ID | Enhancement | Description | Complexity | Status |
+|----|-------------|-------------|------------|--------|
+| 3.6 | `sandbox.exec` network policy | After execution in a network-isolated sandbox, scan stdout/stderr for typical network-failure fingerprints; if found, return `ok: false`, `error_type: network_isolated`, and structured `network_*` fields so a zero exit from swallowed exceptions cannot masquerade as success. Operator approval path unchanged for commands that statically require network. | High | ✅ Done |
+| 3.7 | Gateway SHA computation | Hybrid lock identity: keep compile-time source fingerprint (`build.rs` → `GATEWAY_BUILD_SHA256` + `GATEWAY_BUILD_TAG`) and add runtime-computed executable hash (`gateway.binary_sha256`) from the running gateway binary bytes. | Medium — build/runtime plumbing | ✅ Done |
+| 3.8 | Promotion record freshness | Reject `promote` if promotion records are older than the revision's `created_at` timestamp (stale evidence from a previous iteration). | Low | ✅ Done |
+| 3.9 | `create_from_intent` null field cleanup | Omit null optional fields from serialized SKILL.md metadata instead of writing `llm_config: null`, `limits: null`, etc. Reduces noise. | Low | ✅ Done |
+| 3.10 | JSON-RPC ingress authentication | Require auth token on local JSON-RPC ingress (`event.ingest`, `agent.spawn`, and all methods). Gateway now validates request token against `AUTONOETIC_SHARED_SECRET` and rejects unauthenticated requests. | Medium | ✅ Done |
+| 3.11 | Strict env-override gating | Fail-closed handling for security-sensitive env overrides: `AUTONOETIC_BWRAP_*` and global `AUTONOETIC_LLM_*` overrides are ignored unless explicit allow flags are set (`AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES`, `AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES`). | Medium | ✅ Done |
 
 > **Note:** Auto-dependency resolution (having the gateway automatically invoke builder logic) was considered and **rejected** — it violates the narrow rule enforcer principle. The gateway reports unresolved dependencies; the planner decides whether and how to resolve them.
 
@@ -385,48 +387,72 @@ For pure-transform agents (no I/O beyond `self.*`), the planner's existing matri
 | External import detection (3.3) | `install_contract.rs` | Scans entrypoint files (or all files) for external imports |
 | Bundle health diagnostic (3.4) | `install_contract.rs` | Structured `BundleHealthReport` for diagnostic feedback |
 | Planner SKILL.md dependency check (3.5) | `planner.default/SKILL.md` | Decision Flow rule to spawn `builder.default` when needed |
+| `sandbox.exec` network-isolation policy (3.6) | `runtime/tools/sandbox.rs` | `detect_network_errors_in_output` + failed tool result (`ok: false`, `error_type: network_isolated`) when isolated run output matches |
+| Gateway lock identity (3.7) | `build.rs`, `install_contract.rs`, `runtime_lock.rs` | Source fingerprint (`sha256`, `build_tag`) + runtime executable digest (`binary_sha256`) populated by gateway |
 | `force_complete` gate (A.1) | `workflow.rs` | Refuses `Succeeded` status without child session evidence |
 | `capability_from_shorthand` gate (A.2) | `install_contract.rs` | Refuses bare shorthand for high-risk caps (e.g. "NetworkAccess") |
+| Promotion record freshness (3.8) | `agent_revision.rs` | Rejects stale promotion records that predate the revision's `created_at` |
+| Null field cleanup (3.9) | `autonoetic-types/agent.rs` | `skip_serializing_if` on `Option` fields — SKILL.md no longer emits `llm_config: null` etc. |
+| JSON-RPC auth gate (3.10) | `server/jsonrpc.rs`, `server/mod.rs`, `router.rs`, CLI/test clients | JSON-RPC requests now include `auth_token`; gateway rejects missing/mismatched token with unauthorized JSON-RPC error |
+| Strict env override gates (3.11) | `sandbox.rs`, `llm/mod.rs`, docs | Security-sensitive env overrides are disabled by default and require explicit `AUTONOETIC_ALLOW_*_ENV_OVERRIDES=true` opt-in |
 
 ### 📋 To Implement
 
 | ID | Change | Priority | Estimated Effort |
 |----|--------|----------|-----------------|
-| - | All Tier 1 & Tier 2 complete | - | - |
+| - | No open items in this spec — Tier 1, 2, and listed Tier 3 tasks are implemented | - | - |
 
 ---
 
 ## 6. Verification Plan
 
-### Automated Tests
+### ✅ Automated Tests — All Implemented
 
 ```
-# Unit tests (agent_revision.rs)
-test_promote_rejects_high_risk_without_promotion_records
-test_promote_succeeds_with_both_evaluator_and_auditor_pass
-test_promote_rejects_when_evaluator_fails
-test_promote_rejects_when_auditor_missing
-test_promote_allows_low_risk_without_records
-test_promote_rejects_high_risk_with_unresolved_dependencies
-test_capability_shorthand_refuses_network_access_bare
-test_capability_shorthand_refuses_code_execution_bare
-test_capability_shorthand_allows_read_access_bare
-test_capability_scoped_object_accepted
+# Promotion gate integration tests (promotion_gate_hardening_integration.rs)
+test_promote_rejects_high_risk_without_promotion_records          ✅
+test_promote_succeeds_with_both_evaluator_and_auditor_pass        ✅
+test_promote_rejects_when_evaluator_fails                         ✅
+test_promote_rejects_when_auditor_missing                         ✅
+test_promote_allows_low_risk_without_records                      ✅
+test_promote_rejects_high_risk_with_unresolved_dependencies       ✅
+test_full_pipeline_with_builder_and_promotion_gates               ✅
+test_promote_rejects_stale_promotion_records                      ✅
 
-# Unit tests (install_contract.rs)
-test_detect_external_python_imports_finds_requests
-test_detect_external_python_imports_ignores_stdlib
-test_detect_external_python_imports_ignores_local_modules
-test_analyze_bundle_health_warns_on_requirements_without_layers
-test_analyze_bundle_health_no_warnings_when_layers_present
+# Capability shorthand tests (agent_revision.rs — capability_lenient_deser_tests)
+string_shorthand_network_access_refused                           ✅
+string_shorthand_code_execution_refused                           ✅
+string_shorthand_read_access_allowed                              ✅
+scoped_network_access_object_accepted                             ✅
 
-# Unit tests (workflow.rs)
-test_force_complete_refuses_succeeded_without_evidence
-test_force_complete_allows_failed_without_evidence
-test_force_complete_allows_succeeded_with_session_manifest
+# Import & bundle health tests (install_contract.rs)
+test_detect_external_python_imports_finds_requests                ✅
+test_detect_external_python_imports_ignores_stdlib                ✅
+test_detect_external_python_imports_ignores_local_modules         ✅
+test_analyze_bundle_health_warns_on_requirements_without_layers   ✅
+test_analyze_bundle_health_no_warnings_when_layers_present        ✅
 
-# Integration test
-test_full_pipeline_with_builder_and_promotion_gates
+# sandbox.exec network fingerprint unit tests (sandbox.rs — network_error_detection_tests)
+empty_output_matches_nothing                                      ✅
+detects_stdlib_url_errors                                         ✅
+detects_requests_traceback                                        ✅
+ignores_plain_connection_word                                     ✅
+marks_result_as_failed_when_network_failure_detected              ✅
+leaves_result_untouched_when_no_network_failure_detected          ✅
+
+# Gateway compile-time fingerprint (install_contract.rs)
+test_gateway_build_sha256_is_not_placeholder                       ✅
+
+# JSON-RPC auth gate tests (server/jsonrpc.rs)
+test_jsonrpc_tcp_rejects_missing_auth_token_when_required          ✅
+
+# Force-complete gate tests (workflow.rs — force_complete_gate_tests)
+gate_refuses_succeeded_without_evidence                           ✅
+gate_allows_failed_without_evidence                               ✅
+gate_allows_succeeded_with_evidence                               ✅
+
+# Null field cleanup test (install_contract.rs)
+test_render_skill_document_omits_null_optional_fields             ✅
 ```
 
 ### Manual Verification
@@ -437,6 +463,8 @@ test_full_pipeline_with_builder_and_promotion_gates
 4. Verify planner spawns `builder.default` before evaluator when `named_outputs` includes dependency files
 5. Verify `create_from_intent` refuses bare `"NetworkAccess"` and returns scoped capability error
 6. Verify `force_complete` refuses `succeeded` when child session has no completion evidence
+7. Verify JSON-RPC ingress rejects requests without `auth_token` when gateway is running with `AUTONOETIC_SHARED_SECRET`
+8. Verify `AUTONOETIC_BWRAP_*` and global `AUTONOETIC_LLM_*` env overrides are ignored unless matching `AUTONOETIC_ALLOW_*_ENV_OVERRIDES=true` is set
 
 ---
 

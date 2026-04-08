@@ -176,6 +176,7 @@ fn build_delivery_request(
                 "approval_status": approval_status,
             }
         }),
+        auth_token: std::env::var("AUTONOETIC_SHARED_SECRET").ok(),
     }
 }
 

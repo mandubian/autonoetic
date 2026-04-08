@@ -7,7 +7,7 @@
 
 ## Problem
 
-Sandbox network isolation (`--unshare-all`) is a **global** setting controlled by `GatewayConfig.sandbox.share_net` or `AUTONOETIC_BWRAP_SHARE_NET`. It cannot vary per agent or per execution. This causes:
+Sandbox network isolation (`--unshare-all`) is a **global** setting controlled by `GatewayConfig.sandbox.share_net` (or `AUTONOETIC_BWRAP_SHARE_NET` only when env overrides are explicitly enabled). It cannot vary per agent or per execution. This causes:
 
 1. **Evaluator cannot test network-dependent artifacts** — weather-fetcher smoke tests return `NETWORK_ERROR` because the evaluator's sandbox has no network, even though the artifact was approved with `NetworkAccess` capability.
 2. **Installed agents cannot use their approved capabilities** — `weather-fetcher` was approved with `NetworkAccess(hosts: [api.open-meteo.com])` but its runtime sandbox still runs `--unshare-all`.
@@ -51,7 +51,7 @@ This makes builder invocation deterministic rather than relying on the LLM notic
 ### 3. Cleanup
 
 - Remove dead `agents/specialists/builder.default/sandbox.conf` (not read by anything)
-- The global `share_net` config and env var remain as fallback/admin override
+- The global `share_net` config and gated env var remain as fallback/admin override
 
 ## What Changes
 
@@ -81,7 +81,7 @@ This makes builder invocation deterministic rather than relying on the LLM notic
 ## What Does NOT Change
 
 - Global `GatewayConfig.sandbox.share_net` still works as default
-- `AUTONOETIC_BWRAP_SHARE_NET` env var still overrides globally
+- `AUTONOETIC_BWRAP_SHARE_NET` can override globally only when `AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true`
 - `OnceLock<SandboxConfig>` remains for global defaults
 - Agents without `NetworkAccess` still get `--unshare-all` (no network)
 - All existing tests continue to pass (backward compatible)

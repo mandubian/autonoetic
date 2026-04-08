@@ -91,6 +91,23 @@ fn setup_store_and_repo() -> (TempDir, Arc<GatewayStore>, AgentRepository) {
     (tmp, store, repo)
 }
 
+/// Creates a minimal SKILL.md in the revision directory so that the
+/// promotion gate can read capabilities (needed since the hardening changes).
+fn materialize_revision_skill(gateway_dir: &Path, agent_id: &str, revision_id: &str) {
+    let revision_dir = gateway_dir
+        .join("revisions/agents")
+        .join(agent_id)
+        .join(revision_id);
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    std::fs::write(
+        revision_dir.join("SKILL.md"),
+        format!(
+            "---\nversion: \"1.0\"\nagent:\n  id: \"{agent_id}\"\n  name: \"{agent_id}\"\n  description: test\ncapabilities: []\n---\n# Test\n"
+        ),
+    )
+    .unwrap();
+}
+
 #[test]
 fn test_promote_changes_only_future_alias_resolution_and_running_session_stays_pinned() {
     let (_tmp, store, repo) = setup_store_and_repo();
@@ -235,6 +252,10 @@ fn test_rollback_restores_previous_alias_target() {
     store.insert_agent_revision(&rev2).unwrap();
     upsert_alias(store.as_ref(), agent_id, &rev1.revision_id, "initial");
 
+    // Materialize SKILL.md for both revisions so the promotion gate can read capabilities.
+    let gateway_dir = tmp.path().join(".gateway");
+    materialize_revision_skill(&gateway_dir, agent_id, &rev2.revision_id);
+
     let registry = default_registry();
     let manifest = revision_manifest();
     let policy = PolicyEngine::new(manifest.clone());
@@ -245,7 +266,7 @@ fn test_rollback_restores_previous_alias_target() {
             &manifest,
             &policy,
             tmp.path(),
-            Some(&tmp.path().join(".gateway")),
+            Some(&gateway_dir),
             &json!({
                 "agent_id": agent_id,
                 "revision_id": rev2.revision_id,

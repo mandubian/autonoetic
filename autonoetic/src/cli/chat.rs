@@ -1236,6 +1236,11 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
 
     // Map gateway request IDs to internal IDs
     let mut pending_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let jsonrpc_auth_token = std::env::var("AUTONOETIC_SHARED_SECRET").map_err(|_| {
+        anyhow::anyhow!(
+            "Missing required environment variable AUTONOETIC_SHARED_SECRET for chat JSON-RPC ingress authentication"
+        )
+    })?;
 
     // Signal check interval
     let mut signal_interval = tokio::time::interval(Duration::from_secs(1));
@@ -1312,6 +1317,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             &mut pending_map,
             &mut signal_interval,
             &shutdown,
+            &jsonrpc_auth_token,
         )
         .await?;
 
@@ -1359,6 +1365,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
     pending_map: &mut std::collections::HashMap<String, u64>,
     signal_interval: &mut tokio::time::Interval,
     shutdown: &std::sync::Arc<tokio::sync::Notify>,
+    jsonrpc_auth_token: &str,
 ) -> anyhow::Result<bool> {
     let mut needs_redraw = true;
     let mut last_spinner_tick = Instant::now();
@@ -1551,6 +1558,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         id: req_id,
                         method: "event.ingest".to_string(),
                         params,
+                        auth_token: Some(jsonrpc_auth_token.to_string()),
                     };
 
                     let encoded = serde_json::to_string(&request)?;
@@ -1572,6 +1580,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                 HandleKeyAction::ApproveInline(apr_id) => {
                                     // Handle inline approval
                                     if let Some(store) = gateway_store {
+                                        let approver_level =
+                                            autonoetic_types::background::ApprovalLevel::Operator;
                                         match autonoetic_gateway::scheduler::approve_request(
                                             config,
                                             Some(store),
@@ -1579,7 +1589,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             "chat-tui",
                                             None,
                                             None,
-                                            None,
+                                            Some(&approver_level),
                                         ) {
                                             Ok(_decision) => {
                                                 app.add_message(

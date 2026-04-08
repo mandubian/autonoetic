@@ -41,9 +41,9 @@ Options:
 ```
 
 **Environment variables:**
-- `AUTONOETIC_SHARED_SECRET` — Bearer token for HTTP API
-- `AUTONOETIC_LLM_BASE_URL` — Override LLM provider URL
-- `AUTONOETIC_LLM_API_KEY` — Override LLM API key
+- `AUTONOETIC_SHARED_SECRET` — Required auth token for HTTP API and local JSON-RPC ingress
+- `AUTONOETIC_LLM_BASE_URL` — Override LLM provider URL (ignored unless `AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES=true`)
+- `AUTONOETIC_LLM_API_KEY` — Override LLM API key (ignored unless `AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES=true`)
 
 ### `autonoetic gateway stop`
 
@@ -297,6 +297,8 @@ Options:
   --sender-id <ID>       Sender identifier (default: "terminal")
   --channel-id <ID>      Channel identifier (default: "terminal")
 ```
+
+Requires `AUTONOETIC_SHARED_SECRET` in the environment so chat requests can authenticate to gateway JSON-RPC ingress.
 
 **Explicit routing required:** `--agent` must specify a registered agent ID. The gateway requires an explicit `target_agent_id` and has no fallback lead.
 

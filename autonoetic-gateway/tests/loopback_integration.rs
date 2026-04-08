@@ -1,6 +1,4 @@
 //! Integration tests for loopback channels and memory execution loops.
-use autonoetic_types::config::GatewayConfig;
-
 mod support;
 
 use support::agents::install_content_agent;
@@ -225,6 +223,7 @@ async fn test_loopback_content_audit_and_negatives() {
                 "event_type": "chat",
                 "message": "delay message",
             }),
+            auth_token: std::env::var("AUTONOETIC_SHARED_SECRET").ok(),
         })
         .await
         .unwrap();

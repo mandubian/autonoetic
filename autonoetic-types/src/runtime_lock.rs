@@ -16,7 +16,14 @@ pub struct LockedArtifact {
 pub struct LockedGateway {
     pub artifact: String,
     pub version: String,
+    /// Source fingerprint (version + git state), set at compile time.
     pub sha256: String,
+    /// SHA-256 of the currently running gateway executable bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_sha256: Option<String>,
+    /// Human-readable source tag (e.g. "0.1.0+a1b2c3d4e5f6.dirty").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_tag: Option<String>,
     pub signature: Option<String>,
 }
 

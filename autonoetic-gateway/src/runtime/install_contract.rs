@@ -16,6 +16,7 @@ use autonoetic_types::runtime_lock::{
     LockedArtifact, LockedDependencySet, LockedGateway, LockedLayerMount, LockedSandbox, LockedSdk,
     RuntimeLock,
 };
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ─── Canonical defaults ────────────────────────────────────────
@@ -25,6 +26,13 @@ pub const DEFAULT_RUNTIME_TYPE: &str = "stateful";
 pub const DEFAULT_SANDBOX: &str = "bubblewrap";
 pub const DEFAULT_RUNTIME_LOCK_FILENAME: &str = "runtime.lock";
 pub const PLACEHOLDER_SHA: &str = "replace-me";
+
+/// SHA-256 source fingerprint of this gateway build, computed from version + git commit
+/// at compile time by build.rs.
+pub const GATEWAY_BUILD_SHA256: &str = env!("GATEWAY_BUILD_SHA256");
+
+/// Human-readable build tag (e.g. "0.1.0+a1b2c3d4e5f6").
+pub const GATEWAY_BUILD_TAG: &str = env!("GATEWAY_BUILD_TAG");
 
 pub fn gateway_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -36,6 +44,19 @@ pub fn sdk_version() -> String {
 
 pub fn default_gateway_artifact() -> String {
     "marketplace://gateway/autonoetic-gateway".to_string()
+}
+
+fn running_binary_sha256() -> anyhow::Result<String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to resolve current gateway executable path: {}", e))?;
+    let bytes = std::fs::read(&exe_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read current gateway executable '{}': {}",
+            exe_path.display(),
+            e
+        )
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 // ─── RuntimeDeclaration helpers ────────────────────────────────
@@ -57,12 +78,14 @@ pub fn scaffold_runtime_lock(
     agent_dependencies: Option<Vec<LockedDependencySet>>,
     agent_artifacts: Option<Vec<LockedArtifact>>,
     artifact_layers: &[ArtifactLayer],
-) -> RuntimeLock {
-    RuntimeLock {
+) -> anyhow::Result<RuntimeLock> {
+    Ok(RuntimeLock {
         gateway: LockedGateway {
             artifact: default_gateway_artifact(),
             version: gateway_version(),
-            sha256: PLACEHOLDER_SHA.to_string(),
+            sha256: GATEWAY_BUILD_SHA256.to_string(),
+            binary_sha256: Some(running_binary_sha256()?),
+            build_tag: Some(GATEWAY_BUILD_TAG.to_string()),
             signature: None,
         },
         sdk: LockedSdk {
@@ -81,10 +104,10 @@ pub fn scaffold_runtime_lock(
                 mount_path: l.mount_path.clone(),
             })
             .collect(),
-    }
+    })
 }
 
-pub fn default_runtime_lock(artifact_layers: &[ArtifactLayer]) -> RuntimeLock {
+pub fn default_runtime_lock(artifact_layers: &[ArtifactLayer]) -> anyhow::Result<RuntimeLock> {
     scaffold_runtime_lock(None, None, artifact_layers)
 }
 
@@ -120,19 +143,24 @@ execution_mode: "reasoning"
 }
 
 pub fn render_runtime_lock_example() -> String {
-    r#"gateway:
+    format!(
+        r#"gateway:
   artifact: "marketplace://gateway/autonoetic-gateway"
-  version: "0.1.0"
-  sha256: "replace-me"
+  version: "{version}"
+  sha256: "{sha}"
+  build_tag: "{build_tag}"
 sdk:
-  version: "0.1.0"
+  version: "{version}"
 sandbox:
   backend: "bubblewrap"
 dependencies: []
 artifacts: []
 layers: []
-"#
-    .to_string()
+"#,
+        version = gateway_version(),
+        sha = GATEWAY_BUILD_SHA256,
+        build_tag = GATEWAY_BUILD_TAG,
+    )
 }
 
 pub fn render_skill_document(
@@ -185,7 +213,7 @@ pub fn install_schema_description() -> String {
 - Final canonical runtime.lock serialization
 
 **Runtime lock — Gateway-owned (autofilled):**
-- gateway (artifact, version, sha256)
+- gateway (artifact, version, source sha256, binary_sha256, build_tag)
 - sdk (version)
 - sandbox (backend)
 - artifacts, layers (from artifact)
@@ -689,12 +717,25 @@ mod tests {
 
     #[test]
     fn test_scaffold_runtime_lock_no_layers() {
-        let lock = scaffold_runtime_lock(None, None, &[]);
+        let lock = scaffold_runtime_lock(None, None, &[]).expect("runtime lock scaffold");
         assert_eq!(
             lock.gateway.artifact,
             "marketplace://gateway/autonoetic-gateway"
         );
-        assert_eq!(lock.gateway.sha256, "replace-me");
+        assert_eq!(lock.gateway.sha256, GATEWAY_BUILD_SHA256);
+        assert!(
+            lock.gateway
+                .binary_sha256
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("sha256:"),
+            "binary_sha256 should be populated"
+        );
+        assert_eq!(
+            lock.gateway.build_tag.as_deref(),
+            Some(GATEWAY_BUILD_TAG),
+            "build_tag should be populated from build metadata"
+        );
         assert_eq!(lock.sandbox.backend, "bubblewrap");
         assert!(lock.dependencies.is_empty());
         assert!(lock.layers.is_empty());
@@ -708,7 +749,7 @@ mod tests {
             mount_path: "/deps".into(),
             digest: "sha256:xyz".into(),
         }];
-        let lock = scaffold_runtime_lock(None, None, &layers);
+        let lock = scaffold_runtime_lock(None, None, &layers).expect("runtime lock scaffold");
         assert_eq!(lock.layers.len(), 1);
         assert_eq!(lock.layers[0].layer_id, "layer_abc");
         assert_eq!(lock.layers[0].mount_path, "/deps");
@@ -1090,5 +1131,99 @@ artifacts: "not_a_sequence"
         assert!(!is_high_risk_capability(&Capability::ReadAccess {
             scopes: vec!["*".to_string()]
         }));
+    }
+
+    #[test]
+    fn test_gateway_build_sha256_is_not_placeholder() {
+        assert_ne!(
+            GATEWAY_BUILD_SHA256, PLACEHOLDER_SHA,
+            "GATEWAY_BUILD_SHA256 should not be the placeholder"
+        );
+        assert!(
+            GATEWAY_BUILD_SHA256.starts_with("sha256:"),
+            "GATEWAY_BUILD_SHA256 should start with 'sha256:', got: {GATEWAY_BUILD_SHA256}"
+        );
+        // The digest part should be 64 hex chars (SHA-256)
+        let digest = GATEWAY_BUILD_SHA256.strip_prefix("sha256:").unwrap();
+        assert_eq!(
+            digest.len(),
+            64,
+            "digest should be 64 hex chars, got {} chars: {digest}",
+            digest.len()
+        );
+    }
+
+    #[test]
+    fn test_scaffold_runtime_lock_uses_build_sha() {
+        let lock = scaffold_runtime_lock(None, None, &[]).expect("runtime lock scaffold");
+        assert_ne!(
+            lock.gateway.sha256, PLACEHOLDER_SHA,
+            "scaffolded lock should use build SHA, not placeholder"
+        );
+        assert!(
+            lock.gateway.sha256.starts_with("sha256:"),
+            "gateway.sha256 should start with 'sha256:'"
+        );
+        assert!(
+            lock.gateway
+                .binary_sha256
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("sha256:"),
+            "gateway.binary_sha256 should start with 'sha256:'"
+        );
+        assert_eq!(lock.gateway.build_tag.as_deref(), Some(GATEWAY_BUILD_TAG));
+    }
+
+    #[test]
+    fn test_render_skill_document_omits_null_optional_fields() {
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: default_runtime_declaration(),
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "null.field.test".to_string(),
+                name: "Null Field Test".to_string(),
+                description: "Tests null field omission".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            response_contract: None,
+            execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
+            script_entry: None,
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+        };
+        let rendered = render_skill_document(&manifest, "# Test").unwrap();
+        assert!(
+            !rendered.contains("llm_config: null"),
+            "rendered SKILL.md should not contain 'llm_config: null', got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("limits: null"),
+            "rendered SKILL.md should not contain 'limits: null', got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("background: null"),
+            "rendered SKILL.md should not contain 'background: null'"
+        );
+        assert!(
+            !rendered.contains("gateway_url: null"),
+            "rendered SKILL.md should not contain 'gateway_url: null'"
+        );
+        assert!(
+            !rendered.contains("script_entry: null"),
+            "rendered SKILL.md should not contain 'script_entry: null'"
+        );
+        assert!(
+            !rendered.contains("allowed_tool_tiers"),
+            "rendered SKILL.md should not contain empty 'allowed_tool_tiers'"
+        );
     }
 }

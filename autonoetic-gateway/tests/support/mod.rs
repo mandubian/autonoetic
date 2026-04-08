@@ -27,13 +27,29 @@ use tokio::net::{TcpListener, TcpStream};
 pub struct EnvGuard {
     key: &'static str,
     previous: Option<String>,
+    coupled_gate: Option<(&'static str, Option<String>)>,
 }
 
 impl EnvGuard {
     pub fn set(key: &'static str, value: impl Into<String>) -> Self {
+        const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
+        const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
+        const ALLOW_LLM_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES";
+
         let previous = std::env::var(key).ok();
         std::env::set_var(key, value.into());
-        Self { key, previous }
+        let coupled_gate = if matches!(key, LLM_BASE_URL_OVERRIDE_ENV | LLM_API_KEY_OVERRIDE_ENV) {
+            let gate_previous = std::env::var(ALLOW_LLM_ENV_OVERRIDES_ENV).ok();
+            std::env::set_var(ALLOW_LLM_ENV_OVERRIDES_ENV, "1");
+            Some((ALLOW_LLM_ENV_OVERRIDES_ENV, gate_previous))
+        } else {
+            None
+        };
+        Self {
+            key,
+            previous,
+            coupled_gate,
+        }
     }
 }
 
@@ -43,6 +59,13 @@ impl Drop for EnvGuard {
             std::env::set_var(self.key, previous);
         } else {
             std::env::remove_var(self.key);
+        }
+        if let Some((gate_key, gate_previous)) = self.coupled_gate.take() {
+            if let Some(value) = gate_previous {
+                std::env::set_var(gate_key, value);
+            } else {
+                std::env::remove_var(gate_key);
+            }
         }
     }
 }
@@ -221,7 +244,7 @@ pub async fn spawn_gateway_server(
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
 
     let router = JsonRpcRouter::new(config, Some(store));
-    let handle = tokio::spawn(async move { start_jsonrpc_server(addr, router).await });
+    let handle = tokio::spawn(async move { start_jsonrpc_server(addr, router, None).await });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     Ok((addr, handle))
 }
@@ -243,7 +266,7 @@ pub async fn spawn_gateway_server_with_store(
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
 
     let router = JsonRpcRouter::new(config, Some(store.clone()));
-    let handle = tokio::spawn(async move { start_jsonrpc_server(addr, router).await });
+    let handle = tokio::spawn(async move { start_jsonrpc_server(addr, router, None).await });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     Ok((addr, store, handle))
 }
@@ -380,6 +403,7 @@ impl JsonRpcClient {
             id: id.into(),
             method: "event.ingest".to_string(),
             params,
+            auth_token: std::env::var("AUTONOETIC_SHARED_SECRET").ok(),
         })
         .await?;
         self.recv().await
@@ -408,6 +432,7 @@ impl JsonRpcClient {
             id: id.into(),
             method: "agent.spawn".to_string(),
             params,
+            auth_token: std::env::var("AUTONOETIC_SHARED_SECRET").ok(),
         })
         .await?;
         self.recv().await

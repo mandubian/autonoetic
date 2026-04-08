@@ -24,6 +24,7 @@ const PYTHON_SDK_PATH_ENV: &str = "AUTONOETIC_PYTHON_SDK_PATH";
 const CCOS_SOCKET_ENV: &str = "CCOS_SOCKET_PATH";
 const BWRAP_SHARE_NET_ENV: &str = "AUTONOETIC_BWRAP_SHARE_NET";
 const BWRAP_DEV_MODE_ENV: &str = "AUTONOETIC_BWRAP_DEV_MODE";
+const ALLOW_SANDBOX_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES";
 
 static SANDBOX_CONFIG: OnceLock<SandboxConfig> = OnceLock::new();
 
@@ -47,7 +48,8 @@ impl BwrapIsolationOverrides {
 }
 
 /// Initialize sandbox config from gateway config. Call once at startup.
-/// Env vars always override config values.
+/// Config values are authoritative. Env overrides are ignored unless
+/// AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true.
 pub fn init_sandbox_config(config: &SandboxConfig) {
     SANDBOX_CONFIG.get_or_init(|| config.clone());
 }
@@ -783,26 +785,47 @@ pub fn append_bwrap_isolation_flags(
 }
 
 fn bwrap_share_net_enabled() -> bool {
-    // Env var overrides config
-    if let Some(val) = parse_env_bool(std::env::var(BWRAP_SHARE_NET_ENV).ok().as_deref()) {
-        return val;
+    // Env overrides are gated behind an explicit opt-in.
+    if sandbox_env_overrides_allowed() {
+        if let Some(val) = parse_env_bool(std::env::var(BWRAP_SHARE_NET_ENV).ok().as_deref()) {
+            return val;
+        }
+    } else if std::env::var(BWRAP_SHARE_NET_ENV).ok().is_some() {
+        tracing::warn!(
+            env = BWRAP_SHARE_NET_ENV,
+            gate = ALLOW_SANDBOX_ENV_OVERRIDES_ENV,
+            "Ignoring sandbox network env override in strict mode"
+        );
     }
     // Config value (if initialized)
     SANDBOX_CONFIG.get().map(|c| c.share_net).unwrap_or(false)
 }
 
 fn bwrap_dev_mode() -> BwrapDevMode {
-    // Env var overrides config
-    if let Some(val) = std::env::var(BWRAP_DEV_MODE_ENV).ok() {
-        if !val.trim().is_empty() {
-            return parse_bwrap_dev_mode(Some(&val));
+    // Env overrides are gated behind an explicit opt-in.
+    if sandbox_env_overrides_allowed() {
+        if let Some(val) = std::env::var(BWRAP_DEV_MODE_ENV).ok() {
+            if !val.trim().is_empty() {
+                return parse_bwrap_dev_mode(Some(&val));
+            }
         }
+    } else if std::env::var(BWRAP_DEV_MODE_ENV).ok().is_some() {
+        tracing::warn!(
+            env = BWRAP_DEV_MODE_ENV,
+            gate = ALLOW_SANDBOX_ENV_OVERRIDES_ENV,
+            "Ignoring sandbox dev-mode env override in strict mode"
+        );
     }
     // Config value (if initialized)
     if let Some(config) = SANDBOX_CONFIG.get() {
         return parse_bwrap_dev_mode(Some(&config.dev_mode));
     }
     BwrapDevMode::Legacy
+}
+
+fn sandbox_env_overrides_allowed() -> bool {
+    parse_env_bool(std::env::var(ALLOW_SANDBOX_ENV_OVERRIDES_ENV).ok().as_deref())
+        .unwrap_or(false)
 }
 
 fn parse_env_bool(value: Option<&str>) -> Option<bool> {

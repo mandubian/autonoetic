@@ -30,7 +30,7 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
 
-> **Note:** `AUTONOETIC_SHARED_SECRET` is intentionally not in config.yaml — it must be set as an environment variable to avoid accidental commits of secrets.
+> **Note:** `AUTONOETIC_SHARED_SECRET` is intentionally not in config.yaml — it must be set as an environment variable to avoid accidental commits of secrets. It authenticates both the HTTP API and local JSON-RPC ingress requests.
 
 ---
 
@@ -49,12 +49,14 @@ Controls the gateway-owned scheduler that periodically checks for due background
 
 ## Sandbox
 
-Bubblewrap isolation overrides. Environment variables always take precedence over config values.
+Bubblewrap isolation settings. `config.yaml` is authoritative by default.
 
 | Field | Type | Default | Env var override | Description |
 |-------|------|---------|------------------|-------------|
-| `sandbox.share_net` | bool | `false` | `AUTONOETIC_BWRAP_SHARE_NET` | Share host network namespace (`--share-net`). Use when the host/kernel blocks loopback setup in isolated namespaces. |
-| `sandbox.dev_mode` | string | `"legacy"` | `AUTONOETIC_BWRAP_DEV_MODE` | `/dev` mount strategy: `"legacy"` (no override), `"minimal"` (`--dev /dev`), `"host-bind"` (`--dev-bind /dev /dev`, least isolated). |
+| `sandbox.share_net` | bool | `false` | `AUTONOETIC_BWRAP_SHARE_NET` (gated) | Share host network namespace (`--share-net`). Use when the host/kernel blocks loopback setup in isolated namespaces. |
+| `sandbox.dev_mode` | string | `"legacy"` | `AUTONOETIC_BWRAP_DEV_MODE` (gated) | `/dev` mount strategy: `"legacy"` (no override), `"minimal"` (`--dev /dev`), `"host-bind"` (`--dev-bind /dev /dev`, least isolated). |
+
+> Env overrides above are ignored unless `AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true`.
 
 Example:
 

@@ -922,6 +922,16 @@ fn test_promote_rejects_required_eval_run_for_different_revision() {
     store.insert_agent_revision(&rev_target).unwrap();
     store.insert_agent_revision(&rev_other).unwrap();
 
+    // Materialize SKILL.md for the target revision so the promotion gate can read capabilities.
+    let rev_dir = gateway_dir
+        .join("revisions/agents/planner.default")
+        .join(&rev_target.revision_id);
+    std::fs::create_dir_all(&rev_dir).unwrap();
+    std::fs::write(
+        rev_dir.join("SKILL.md"),
+        "---\nversion: \"1.0\"\nagent:\n  id: planner.default\n  name: planner\n  description: test\ncapabilities: []\n---\n# Test\n",
+    ).unwrap();
+
     let eval_run = autonoetic_types::evaluation::EvalRunRecord {
         eval_run_id: "eval-mismatch".to_string(),
         suite_id: "suite-mismatch".to_string(),

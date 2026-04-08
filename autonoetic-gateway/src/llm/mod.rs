@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
+const ALLOW_LLM_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES";
 
 pub mod anthropic;
 pub mod gemini;
@@ -282,18 +283,44 @@ pub fn build_driver(
     config: LlmConfig,
     client: reqwest::Client,
 ) -> anyhow::Result<Arc<dyn LlmDriver>> {
-    let base_url_override = std::env::var(LLM_BASE_URL_OVERRIDE_ENV)
-        .ok()
-        .or(config.base_url.clone());
-    let api_key_override = std::env::var(LLM_API_KEY_OVERRIDE_ENV).ok().or_else(|| {
-        // If the preset specifies a custom env var name, read from that.
-        // This lets OpenAI-compatible providers (StreamLake, etc.) use their
-        // own key env var instead of the provider's default (e.g., OPENAI_API_KEY).
+    let allow_env_overrides = llm_env_overrides_allowed();
+    let base_url_override = if allow_env_overrides {
+        std::env::var(LLM_BASE_URL_OVERRIDE_ENV)
+            .ok()
+            .or(config.base_url.clone())
+    } else {
+        if std::env::var(LLM_BASE_URL_OVERRIDE_ENV).ok().is_some() {
+            tracing::warn!(
+                env = LLM_BASE_URL_OVERRIDE_ENV,
+                gate = ALLOW_LLM_ENV_OVERRIDES_ENV,
+                "Ignoring LLM base URL env override in strict mode"
+            );
+        }
+        config.base_url.clone()
+    };
+    let api_key_override = if allow_env_overrides {
+        std::env::var(LLM_API_KEY_OVERRIDE_ENV).ok().or_else(|| {
+            // If the preset specifies a custom env var name, read from that.
+            // This lets OpenAI-compatible providers (StreamLake, etc.) use their
+            // own key env var instead of the provider's default (e.g., OPENAI_API_KEY).
+            config
+                .api_key_env
+                .as_ref()
+                .and_then(|env_name| std::env::var(env_name).ok())
+        })
+    } else {
+        if std::env::var(LLM_API_KEY_OVERRIDE_ENV).ok().is_some() {
+            tracing::warn!(
+                env = LLM_API_KEY_OVERRIDE_ENV,
+                gate = ALLOW_LLM_ENV_OVERRIDES_ENV,
+                "Ignoring LLM API key env override in strict mode"
+            );
+        }
         config
             .api_key_env
             .as_ref()
             .and_then(|env_name| std::env::var(env_name).ok())
-    });
+    };
     let resolved = provider::resolve(
         &config.provider,
         &config.model,
@@ -316,4 +343,13 @@ pub fn build_driver(
         provider::DriverKind::OpenAi => Arc::new(openai::OpenAiDriver::new(client, resolved)),
     };
     Ok(driver)
+}
+
+fn llm_env_overrides_allowed() -> bool {
+    std::env::var(ALLOW_LLM_ENV_OVERRIDES_ENV)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
