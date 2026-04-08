@@ -32,6 +32,55 @@ pub struct ToolCallProcessor<'a> {
     run_context: Option<crate::runtime::active_execution_registry::NativeToolRunContext>,
 }
 
+fn strip_gemma_token_artifacts(s: &str) -> String {
+    let re = regex::Regex::new(r"<\|[^>]*\|>").unwrap();
+    re.replace_all(s, |caps: &regex::Captures| -> String {
+        let token = &caps[0];
+        match token {
+            "<|\"|>" => "\"".to_string(),
+            "<|'|>" => "'".to_string(),
+            "<|_|>" => "_".to_string(),
+            _ => token.to_string(),
+        }
+    })
+    .to_string()
+}
+
+fn fix_stringified_json_values(raw: &str) -> String {
+    let Ok(mut val) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+    fix_stringified_values_recursive(&mut val);
+    serde_json::to_string(&val).unwrap_or_else(|_| raw.to_string())
+}
+
+fn fix_stringified_values_recursive(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                if let serde_json::Value::String(s) = v {
+                    let trimmed = s.trim();
+                    if (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                        || (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                    {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            *v = parsed;
+                            continue;
+                        }
+                    }
+                }
+                fix_stringified_values_recursive(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                fix_stringified_values_recursive(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl<'a> ToolCallProcessor<'a> {
     fn canonical_tool_name(name: &str) -> &str {
         match name {
@@ -225,6 +274,10 @@ impl<'a> ToolCallProcessor<'a> {
     ) -> anyhow::Result<String> {
         let tool_name = Self::canonical_tool_name(&tc.name);
         let policy = crate::policy::PolicyEngine::new(self.manifest.clone());
+
+        let sanitized_args = strip_gemma_token_artifacts(&tc.arguments);
+        let sanitized_args = fix_stringified_json_values(&sanitized_args);
+
         let mut result = if self.mcp_runtime.has_tool(tool_name) {
             if !policy.can_invoke_tool(tool_name) {
                 return Err(anyhow::Error::from(
@@ -234,7 +287,7 @@ impl<'a> ToolCallProcessor<'a> {
                     )),
                 ));
             }
-            self.mcp_runtime.call_tool(tool_name, &tc.arguments).await?
+            self.mcp_runtime.call_tool(tool_name, &sanitized_args).await?
         } else if self.registry.has_tool(tool_name) {
             self.registry.execute(
                 tool_name,
@@ -242,7 +295,7 @@ impl<'a> ToolCallProcessor<'a> {
                 &policy,
                 agent_dir,
                 gateway_dir,
-                &tc.arguments,
+                &sanitized_args,
                 self.session_id.as_deref(),
                 self.turn_id.as_deref(),
                 self.config,

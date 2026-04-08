@@ -11,7 +11,7 @@ use autonoetic_types::config::{GatewayConfig, SchemaEnforcementConfig, SchemaEnf
 use autonoetic_types::schema_enforcement::{default_enforcer, EnforcementResult, SchemaEnforcer};
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowEventRecord};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -616,12 +616,35 @@ impl NativeTool for AgentExistsTool {
     }
 }
 
+fn deserialize_string_vec_lenient<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .map(|v| v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                de::Error::custom("array elements must be strings")
+            }))
+            .collect(),
+        serde_json::Value::String(s) => {
+            let sanitized = s.replace("<|\"|>", "\"");
+            serde_json::from_str::<Vec<String>>(&sanitized).map_err(de::Error::custom)
+        }
+        other => Err(de::Error::custom(format!(
+            "must be an array or a JSON string of an array, got {other}"
+        ))),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct AgentDiscoverArgs {
     intent: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_vec_lenient")]
     required_capabilities: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_vec_lenient")]
     exclude_ids: Vec<String>,
 }
 
