@@ -655,6 +655,27 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
+fn truncate_json_string_fields(v: &mut Value, max_len: usize) {
+    match v {
+        Value::String(s) => {
+            if s.len() > max_len {
+                *s = format!("{}…", &s[..max_len]);
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                truncate_json_string_fields(item, max_len);
+            }
+        }
+        Value::Object(map) => {
+            for val in map.values_mut() {
+                truncate_json_string_fields(val, max_len);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn as_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
 }
@@ -821,11 +842,13 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
                     cell(&truncate_chars(&redact_text_for_logs(msg), 280))
                 )
             } else {
-                let preview = serde_json::to_string(&v).unwrap_or_default();
+                let mut truncated = v.clone();
+                truncate_json_string_fields(&mut truncated, 500);
+                let preview = serde_json::to_string(&truncated).unwrap_or_default();
                 format!(
                     "`{}` — `{}`",
                     cell(tool_name),
-                    cell(&truncate_chars(&redact_text_for_logs(&preview), 320))
+                    cell(&truncate_chars(&redact_text_for_logs(&preview), 2000))
                 )
             }
         }
