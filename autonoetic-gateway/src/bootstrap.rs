@@ -2,12 +2,14 @@
 //!
 //! Scans `config.agents_dir` for agent bundles (directories with `SKILL.md`),
 //! creates revisions from their content, and auto-promotes them. Skips agents
-//! that already have revisions.
+//! that already have revisions. Merges preset-level `thinking` config into
+//! the agent's `SKILL.md` when the agent doesn't already specify one.
 
 use crate::scheduler::gateway_store::GatewayStore;
 use anyhow::Result;
+use autonoetic_types::agent::ThinkingConfig;
 use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus};
-use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::config::{GatewayConfig, LlmPreset};
 use autonoetic_types::id_format::mint_hashed_prefixed_id;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -65,6 +67,31 @@ pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<us
         let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         collect_files(&agent_dir, &agent_dir, &mut file_map)?;
         file_map.insert(lock_rel_path.clone(), lock_content.clone());
+
+        // Merge preset-level `thinking` into the agent's llm_config if the agent
+        // doesn't already specify thinking. This ensures bootstrapped revisions
+        // carry the preset's thinking config as part of their stored manifest.
+        let presets = &config.llm_presets;
+        let base_name = agent_id.rsplit_once('.').map(|(base, _)| base.to_string());
+        let preset_name = config
+            .llm_preset_mapping
+            .get(&agent_id)
+            .or_else(|| {
+                base_name
+                    .as_ref()
+                    .and_then(|b| config.llm_preset_mapping.get(b))
+            })
+            .or_else(|| config.llm_preset_mapping.get("default"));
+
+        if let Some(name) = preset_name {
+            if let Some(preset) = presets.get(name.as_str()) {
+                if let Some(modified) = merge_preset_into_skill(&skill_text, preset) {
+                    let modified_bytes = modified.into_bytes();
+                    file_map.insert("SKILL.md".to_string(), modified_bytes.clone());
+                    std::fs::write(&skill_path, &modified_bytes)?;
+                }
+            }
+        }
 
         let mut hasher = Sha256::new();
         for (path, bytes) in &file_map {
@@ -161,4 +188,70 @@ fn collect_files(base: &Path, current: &Path, out: &mut BTreeMap<String, Vec<u8>
         out.insert(rel, bytes);
     }
     Ok(())
+}
+
+/// Merges missing `llm_config` fields from a preset into the SKILL.md file,
+/// preserving the original YAML structure. Merges: `base_url`, `thinking`.
+/// Returns `None` if no modification was needed or if the frontmatter couldn't
+/// be parsed.
+fn merge_preset_into_skill(skill_text: &str, preset: &LlmPreset) -> Option<String> {
+    let (fm_start, fm_end) = {
+        let t = skill_text.trim_start();
+        if !t.starts_with("---") {
+            return None;
+        }
+        let rest = &t[3..];
+        let first_nl = rest.find(|c: char| c == '\n' || c == '\r')?;
+        let after_first = &rest[first_nl..];
+        let end = after_first.find("\n---")?;
+        (3 + first_nl, 3 + first_nl + end)
+    };
+
+    let frontmatter = &skill_text[fm_start..fm_end];
+
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+
+    let llm_config = {
+        if yaml.get("llm_config").is_some() {
+            yaml.get_mut("llm_config")
+        } else {
+            yaml.get_mut("metadata")
+                .and_then(|m| m.get_mut("autonoetic"))
+                .and_then(|a| a.get_mut("llm_config"))
+        }
+    };
+
+    let mut modified = false;
+
+    if let Some(cfg) = llm_config {
+        if let Some(map) = cfg.as_mapping_mut() {
+            let yaml_str = |s: &str| serde_yaml::Value::String(s.to_string());
+
+            let base_url_key = yaml_str("base_url");
+            let has_base_url = map.get(&base_url_key).map_or(false, |v| !v.is_null());
+            if !has_base_url {
+                if let Some(ref base_url) = preset.base_url {
+                    map.insert(base_url_key, serde_yaml::to_value(base_url).ok()?);
+                    modified = true;
+                }
+            }
+
+            let thinking_key = yaml_str("thinking");
+            let has_thinking = map.get(&thinking_key).map_or(false, |v| !v.is_null());
+            if !has_thinking {
+                if let Some(ref thinking) = preset.thinking {
+                    map.insert(thinking_key, serde_yaml::to_value(thinking).ok()?);
+                    modified = true;
+                }
+            }
+        }
+    }
+
+    if !modified {
+        return None;
+    }
+
+    let new_frontmatter = serde_yaml::to_string(&yaml).ok()?;
+    let body = &skill_text[fm_end + 4..];
+    Some(format!("---\n{}---{}\n", new_frontmatter, body))
 }
