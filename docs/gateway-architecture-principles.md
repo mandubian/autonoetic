@@ -1,48 +1,45 @@
 # Gateway Architecture Principles
 
-## Core Design Tenet: Neutral Executor, Not Rule Engine
+## Core Design Tenet: Dumb Gateway, Smart Agent
 
-The autonoetic gateway is designed as a **generic, neutral runtime executor**—not a business logic rule engine. This distinction is critical for maintaining agent autonomy and platform extensibility.
+The autonoetic gateway is designed as a **narrow rule enforcer** and **generic, neutral runtime executor**—not a business logic workflow engine. This distinction is critical for maintaining agent autonomy and platform safety.
 
 ### ✅ What the Gateway SHOULD Do
 
-**Generic robustness improvements** that benefit all agents:
-- **Tool-name canonicalization**: Map shorthand names (`spawn`, `install`, `message`) to canonical forms (`agent.spawn`, etc.) — fixes LLM model quirks, not agent-specific rules
-- **Unknown-tool error recovery**: Return structured errors instead of fatal aborts — allows sessions to continue and recover
-- **Success tracking for loop-guard**: Track whether tool calls actually succeeded — prevents infinite retry loops universally
-- **Error typing and resilience**: Distinguish between recoverable (resource, transient) and fatal (validation, auth) errors
+**Generic robustness improvements and mechanical safety guardrails**:
+- **Enforce Hard Invariants**: Mechanically refuse operations that violate safety rules (e.g., rejecting high-risk deployments missing promotion records, or blocking agent installation without dependency resolution).
+- **Rule Zero Enforcement**: Apply all rules equally. No agent, planner, or "trust me" flag can override a gateway safety invariant.
+- **Analyze and Explain**: Scan code for patterns (imports, capabilities) and surface findings as structured data (`warnings[]`, `BundleHealthReport`) so the calling agent can act on them.
+- **Tool-name canonicalization**: Map shorthand names to canonical forms.
+- **Error typing and resilience**: Distinguish between recoverable and fatal errors.
 
-These raise the floor of runtime robustness without prescribing what agents should do.
+These establish the safe floor of runtime robustness and capabilities without prescribing *how* agents navigate workflows to satisfy those boundaries.
 
 ### ❌ What the Gateway Should NOT Do
 
-**Domain-specific business logic gates** that restrict agent decision-making:
-- "Reject specialized_builder delegation without concrete endpoint + auth + sample retrieval"
-- "Prevent agent creation unless all preconditions are met"
-- "Block research→builder transitions unless research returned non-empty data"
+**Domain-specific business logic or workflow routing**:
+- "Auto-spawn a builder agent when dependencies are missing" (Routing)
+- "Decide if an agent's problem is worth fixing" (Workflow Decision)
+- "Prevent research→builder transitions unless research returned data" (Business Logic)
 
-These hardcode assumptions about agent workflows into the platform, breaking extensibility. Different agents (or future versions) may have entirely different delegation strategies.
+These routing and workflow decisions hardcode assumptions about agent deployment. The gateway tells the agent what is wrong (e.g., missing dependencies). The agent's planner decides what to do about it.
 
 ### Where Business Logic Belongs
 
 **In agent SKILL.md instructions** (not platform code):
 - Guardrails 8 & 9 in planner.default tell the agent: "If research has no actionable data, stop and return failure instead of delegating"
-- The agent *chooses* to follow these rules through LLM instruction-following
-- Different planner implementations can have different rules without changing the gateway
-
-Example: A speculative planning agent might intentionally delegate without waiting for research success—the gateway should not prevent this. The guardrails are agent-specific, not platform-wide.
+- The `specialized_builder` or `planner` handles the gateway's structured error refusing deployment, decides it needs to generate a `builder.default` dependency resolution task, and executes that task before retrying.
+- The agent *chooses* to follow these rules through LLM instruction-following, creating a **gate → explain → plan → execute → re-check** loop.
 
 ## Rationale
 
-1. **Agent autonomy**: Agents should make routing/delegation decisions, not the platform
-2. **Extensibility**: New agent types don't require platform code changes
-3. **Separation of concerns**: Gateway handles execution robustness; agents handle strategy
-4. **Framework-like design**: Similar to web frameworks that provide HTTP mechanics but don't enforce business logic constraints
+1. **Mechanical Safety against LLM Mistakes**: LLM decisions are advisory. Safety-critical invariants must be mechanically enforced by the gateway's deterministic guardrails.
+2. **Agent autonomy**: Agents should make routing/delegation/auto-fix decisions, not the platform.
+3. **Extensibility**: New agent types don't require platform code changes.
+4. **Separation of concerns**: The Gateway analyzes, gates, and explains. Agents plan and execute via generated workflows.
 
 ## Historical Context
 
-Session-6 failure flow was masked by downstream builder errors because the planner was allowed to continue delegating after empty research. The fix was **not** to add a platform gate in the gateway's lifecycle.rs, but to:
-1. Make the runtime more resilient (canonical tool names, error recovery)
-2. Add explicit behavioral guardrails in the planner's SKILL.md instructions
-
-This kept the gateway generic while fixing the agent's behavior.
+Session-1 failure showed that an agent could deploy a broken artifact (`import requests` with no `requirements.txt` installed) because the pipeline relied entirely on LLM judgement. The fix was **not** to have the gateway automatically invoke a builder logic (which violates the narrow rule enforcer principle), but to:
+1. Hard-gate the promotion mechanically so missing dependencies trigger a refusal.
+2. Send the structured explanation back and let the planner agent deploy the builder resolution step.

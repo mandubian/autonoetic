@@ -152,19 +152,23 @@ The gateway doesn't understand delegation, reevaluation, or evolution. It just v
 
 ## Design Principles
 
-1. **Gateway is a dumb secure pipe** — routes messages, enforces capability boundaries, logs everything. No domain logic.
+1. **Rule Zero: Rules cannot be overridden.** Not by agents, not by planners, not by parameters, not by "trust me" flags. If a rule exists, it applies equally to all agents without exception. Freedom for agents comes from well-defined capabilities within boundaries — not from the ability to move the boundaries.
 
-2. **Agents are pure reasoners** — they read, think, and propose. They never execute directly.
+2. **LLM decisions are advisory; Safety is mechanical.** Agents can make mistakes (forgetting steps, approving despite errors, guessing wrong). Safety-critical invariants must be mechanically enforced by the gateway, which has absolute authority to gate operations.
 
-3. **Autonomy through composition** — complex behaviors emerge from agents composing simple gateway primitives.
+3. **Gateway is a narrow rule enforcer.** It routes messages, enforces capability boundaries, analyzes, gates, and explains — but never makes workflow decisions itself. No domain logic. It tells the agent *what* rule was violated, but leaves it to the agent to figure out *how* to resolve it.
 
-4. **No hardcoded heuristics** — if the gateway has a concept like "lead agent" or "specialist" or "stale goal", it's coupling infrastructure to a specific orchestration pattern.
+4. **Agents are pure reasoners** — they read, think, plan, and propose. They never execute directly.
 
-5. **Spec-driven, not code-driven** — agent behavior is defined in SKILL.md (Markdown + YAML), not in gateway code.
+5. **Autonomy through composition** — complex behaviors emerge from agents composing simple gateway primitives.
 
-6. **Pluggable everything** — LLM providers, sandbox drivers, channels, capabilities. All swappable without touching core logic.
+6. **No hardcoded heuristics** — if the gateway has a concept like "lead agent" or "specialist" or "stale goal", it's coupling infrastructure to a specific orchestration pattern.
 
-7. **Immutable audit trail** — every action logged to causal chain with hash-chain linkage. Nothing happens invisibly.
+7. **Spec-driven, not code-driven** — agent behavior is defined in SKILL.md (Markdown + YAML), not in gateway code.
+
+8. **Pluggable everything** — LLM providers, sandbox drivers, channels, capabilities. All swappable without touching core logic.
+
+9. **Immutable audit trail** — every action logged to causal chain with hash-chain linkage. Nothing happens invisibly.
 
 ---
 
