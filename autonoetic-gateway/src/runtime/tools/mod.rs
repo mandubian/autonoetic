@@ -422,8 +422,96 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SandboxExecDependencies {
+    #[serde(default)]
     pub runtime: String,
+    #[serde(default)]
     pub packages: Vec<String>,
+}
+
+fn sanitize_llm_token_artifacts(s: &str) -> String {
+    let cleaned = s.replace("<|\"|>", "\"");
+    cleaned.replace("<|'|>", "'")
+}
+
+fn fixup_unquoted_json_keys(s: &str) -> String {
+    let re = regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*:").unwrap();
+    re.replace_all(s, "\"$1\":").to_string()
+}
+
+fn balance_braces(s: &str) -> String {
+    let mut open_curly = 0i64;
+    let mut open_bracket = 0i64;
+    for ch in s.chars() {
+        match ch {
+            '{' => open_curly += 1,
+            '}' => open_curly -= 1,
+            '[' => open_bracket += 1,
+            ']' => open_bracket -= 1,
+            _ => {}
+        }
+    }
+    let mut result = s.to_string();
+    for _ in 0..open_bracket {
+        result.push(']');
+    }
+    for _ in 0..open_curly {
+        result.push('}');
+    }
+    result
+}
+
+fn parse_lenient_json_object<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, serde_json::Error> {
+    let sanitized = sanitize_llm_token_artifacts(s);
+    match serde_json::from_str::<T>(&sanitized) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            let fixed = fixup_unquoted_json_keys(&sanitized);
+            match serde_json::from_str::<T>(&fixed) {
+                Ok(v) => Ok(v),
+                Err(_) => {
+                    let balanced = balance_braces(&fixed);
+                    serde_json::from_str::<T>(&balanced)
+                }
+            }
+        }
+    }
+}
+
+fn deserialize_deps_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<SandboxExecDependencies>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let value = serde_json::Value::deserialize(deserializer)?;
+
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    match serde_json::from_value::<SandboxExecDependencies>(value.clone()) {
+        Ok(deps) => Ok(Some(deps)),
+        Err(_) => {
+            if let Some(s) = value.as_str() {
+                parse_lenient_json_object::<SandboxExecDependencies>(s)
+                    .map(Some)
+                    .map_err(|e| {
+                        Error::custom(format!(
+                            "dependencies: expected object {{\"runtime\":\"...\", \"packages\":[...]}}, \
+                             got string that could not be parsed: {e}"
+                        ))
+                    })
+            } else {
+                Err(Error::custom(format!(
+                    "dependencies: expected object {{\"runtime\":\"...\", \"packages\":[...]}}, \
+                     got {}",
+                    value
+                )))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -435,7 +523,7 @@ pub(crate) struct CapturePath {
 #[derive(Debug, Deserialize)]
 pub(crate) struct SandboxExecArgs {
     pub command: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_deps_lenient")]
     pub dependencies: Option<SandboxExecDependencies>,
     #[serde(default)]
     pub approval_ref: Option<String>,
@@ -460,7 +548,12 @@ pub(crate) fn dependency_plan_from_args_or_lock(
     deps: Option<SandboxExecDependencies>,
 ) -> anyhow::Result<Option<DependencyPlan>> {
     if let Some(deps) = deps {
-        return parse_dependency_plan(deps.runtime.as_str(), deps.packages).map(Some);
+        let runtime = if deps.runtime.is_empty() {
+            "python"
+        } else {
+            deps.runtime.as_str()
+        };
+        return parse_dependency_plan(runtime, deps.packages).map(Some);
     }
 
     let lock_path = agent_dir.join(&manifest.runtime.runtime_lock);
@@ -647,5 +740,69 @@ mod tests {
                 def.name
             );
         }
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_dependencies_struct() {
+        let args: SandboxExecArgs = serde_json::from_str(
+            r#"{"command": "python3 /tmp/test.py", "dependencies": {"runtime": "python", "packages": ["requests", "pandas"]}}"#,
+        ).unwrap();
+        assert_eq!(args.command, "python3 /tmp/test.py");
+        let deps = args.dependencies.unwrap();
+        assert_eq!(deps.runtime, "python");
+        assert_eq!(deps.packages, vec!["requests", "pandas"]);
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_dependencies_none() {
+        let args: SandboxExecArgs =
+            serde_json::from_str(r#"{"command": "python3 /tmp/test.py"}"#).unwrap();
+        assert!(args.dependencies.is_none());
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_dependencies_stringified_json() {
+        let args: SandboxExecArgs = serde_json::from_str(
+            r#"{"command": "python3 /tmp/test.py", "dependencies": "{\"runtime\": \"python\", \"packages\": [\"requests\"]}"}"#,
+        ).unwrap();
+        let deps = args.dependencies.unwrap();
+        assert_eq!(deps.runtime, "python");
+        assert_eq!(deps.packages, vec!["requests"]);
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_dependencies_string_with_marker_tokens() {
+        let args: SandboxExecArgs = serde_json::from_str(
+            r#"{"command": "python3 /tmp/test.py", "dependencies": "{packages:[<|\"|>requests<|\"|>]"}"#,
+        ).unwrap();
+        let deps = args.dependencies.unwrap();
+        assert_eq!(deps.packages, vec!["requests"]);
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_dependencies_stringified_runtime_only_with_markers() {
+        let args: SandboxExecArgs = serde_json::from_str(
+            r#"{"command": "python3 /tmp/test.py", "dependencies": "{runtime:<|\"|>python<|\"|>}"}"#,
+        ).unwrap();
+        let deps = args.dependencies.unwrap();
+        assert_eq!(deps.runtime, "python");
+        assert!(deps.packages.is_empty());
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_dependencies_null() {
+        let args: SandboxExecArgs = serde_json::from_str(
+            r#"{"command": "python3 /tmp/test.py", "dependencies": null}"#,
+        )
+        .unwrap();
+        assert!(args.dependencies.is_none());
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_dependencies_garbage_string_fails() {
+        let result = serde_json::from_str::<SandboxExecArgs>(
+            r#"{"command": "python3 /tmp/test.py", "dependencies": "not json at all"}"#,
+        );
+        assert!(result.is_err());
     }
 }

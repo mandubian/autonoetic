@@ -3,6 +3,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::{AgentManifest, ToolTier};
+use serde::de::{self, DeserializeOwned};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use serde::Deserialize;
@@ -281,6 +282,28 @@ fn check_task_statuses(
     )
 }
 
+fn deserialize_task_ids_lenient<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .map(|v| v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                de::Error::custom("task_ids array elements must be strings")
+            }))
+            .collect(),
+        serde_json::Value::String(s) => {
+            let sanitized = s.replace("<|\"|>", "\"");
+            serde_json::from_str::<Vec<String>>(&sanitized).map_err(de::Error::custom)
+        }
+        other => Err(de::Error::custom(format!(
+            "task_ids must be an array or a JSON string of an array, got {other}"
+        ))),
+    }
+}
+
 impl NativeTool for WorkflowWaitTool {
     fn name(&self) -> &'static str {
         "workflow.wait"
@@ -343,6 +366,7 @@ impl NativeTool for WorkflowWaitTool {
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
+            #[serde(deserialize_with = "deserialize_task_ids_lenient")]
             task_ids: Vec<String>,
             #[serde(default)]
             workflow_id: Option<String>,
@@ -351,6 +375,7 @@ impl NativeTool for WorkflowWaitTool {
             #[serde(default)]
             poll_interval_secs: Option<u64>,
         }
+
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
@@ -1071,8 +1096,8 @@ impl NativeTool for WorkflowForceCompleteTool {
                                                 "session manifest shows completed status"
                                                     .to_string(),
                                             );
-                                        }
-                                    }
+    }
+}
                                 }
                             }
                         }
