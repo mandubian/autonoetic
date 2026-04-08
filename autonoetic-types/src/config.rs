@@ -521,7 +521,7 @@ pub struct GatewayConfig {
     pub response_validation: ResponseValidationConfig,
 
     /// Sandbox (bubblewrap) isolation overrides.
-    /// Overridable by AUTONOETIC_BWRAP_SHARE_NET and AUTONOETIC_BWRAP_DEV_MODE env vars.
+    /// Env overrides are ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true.
     #[serde(default)]
     pub sandbox: SandboxConfig,
 
@@ -644,12 +644,12 @@ impl Default for ResponseValidationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Share host network namespace (adds --share-net to bwrap).
-    /// Overridable by AUTONOETIC_BWRAP_SHARE_NET env var.
+    /// Env override is ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true.
     #[serde(default)]
     pub share_net: bool,
 
     /// /dev mount strategy: "legacy", "minimal", or "host-bind".
-    /// Overridable by AUTONOETIC_BWRAP_DEV_MODE env var.
+    /// Env override is ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true.
     #[serde(default = "default_sandbox_dev_mode")]
     pub dev_mode: String,
 }

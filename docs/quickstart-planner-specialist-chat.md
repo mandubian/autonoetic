@@ -52,7 +52,7 @@ Each LLM provider reads its key from a standard env var. Export the ones your `l
 | Qwen/DashScope | `DASHSCOPE_API_KEY` |
 | Ollama / vLLM / LM Studio | _(none — local providers)_ |
 
-A global override `AUTONOETIC_LLM_API_KEY` exists but is not recommended when using provider-specific keys. If both are set, the global override wins.
+A global override `AUTONOETIC_LLM_API_KEY` exists but is not recommended when using provider-specific keys. It is ignored unless `AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES=true`.
 
 ### Optional
 
@@ -60,8 +60,10 @@ A global override `AUTONOETIC_LLM_API_KEY` exists but is not recommended when us
 |---------|---------|---------|
 | `AUTONOETIC_NODE_ID` | config `node_id` or `"gateway"` | Node identity for OFP federation and causal chain authorship |
 | `AUTONOETIC_NODE_NAME` | config `node_name` or `"gateway"` | Human-readable node name |
-| `AUTONOETIC_BWRAP_SHARE_NET` | config `sandbox.share_net` or `false` | Share host network namespace |
-| `AUTONOETIC_BWRAP_DEV_MODE` | config `sandbox.dev_mode` or `"legacy"` | `/dev` mount strategy for bubblewrap |
+| `AUTONOETIC_BWRAP_SHARE_NET` | config `sandbox.share_net` or `false` | Share host network namespace (ignored unless `AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true`) |
+| `AUTONOETIC_BWRAP_DEV_MODE` | config `sandbox.dev_mode` or `"legacy"` | `/dev` mount strategy for bubblewrap (ignored unless `AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true`) |
+| `AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES` | `false` | Allow `AUTONOETIC_BWRAP_*` env overrides to bypass config |
+| `AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES` | `false` | Allow `AUTONOETIC_LLM_BASE_URL` / `AUTONOETIC_LLM_API_KEY` env overrides |
 | `AUTONOETIC_EVIDENCE_MODE` | config `evidence_mode` or `"full"` | How much tool/LLM data to save (`full`, `errors`, `off`) |
 | `AUTONOETIC_VAULT_PATH` | — | Vault file location (for credential management) |
 | `AUTONOETIC_VAULT_KEY` | — | Hex-encoded 32-byte AES-256-GCM master key for vault encryption |
@@ -75,7 +77,7 @@ A global override `AUTONOETIC_LLM_API_KEY` exists but is not recommended when us
 | `AUTONOETIC_OPENROUTER_CATALOG` | `1` | Set to `0` to disable OpenRouter model catalog |
 | `AUTONOETIC_LLM_OTHER_EMPTY_RETRIES` | `0` | Retry count when LLM returns empty response |
 
-Env vars always take precedence over config values.
+Node identity env vars can override config values. Security-sensitive sandbox and global LLM env overrides are blocked by default unless explicitly enabled via `AUTONOETIC_ALLOW_*_ENV_OVERRIDES=true`.
 
 ## 1) Create config (quick method)
 
@@ -393,10 +395,11 @@ unset AUTONOETIC_LLM_API_KEY AUTONOETIC_LLM_BASE_URL
 
 ### Sandbox compatibility
 
-The `sandbox` section in config.yaml handles environments where `bwrap --unshare-net` cannot configure loopback or where `/dev/null` writes fail. The quickstart config already sets `share_net: true` and `dev_mode: host-bind`. To override per-session via env vars:
+The `sandbox` section in config.yaml handles environments where `bwrap --unshare-net` cannot configure loopback or where `/dev/null` writes fail. The quickstart config already sets `share_net: true` and `dev_mode: host-bind`. If you still need env overrides for one-off debugging, explicitly opt in:
 
 ```bash
 AUTONOETIC_SHARED_SECRET=demo-secret \
+AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=1 \
 AUTONOETIC_BWRAP_SHARE_NET=1 \
 AUTONOETIC_BWRAP_DEV_MODE=host-bind \
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway start
@@ -407,6 +410,7 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway sta
 In a second terminal, from `autonoetic/`:
 
 ```bash
+AUTONOETIC_SHARED_SECRET=demo-secret \
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml chat --session-id demo-session
 ```
 

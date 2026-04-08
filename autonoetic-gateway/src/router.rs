@@ -35,6 +35,8 @@ pub struct JsonRpcRequest {
     pub id: String,
     pub method: String,
     pub params: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -823,6 +825,7 @@ mod tests {
             id: "1".to_string(),
             method: "ping".to_string(),
             params: serde_json::json!({}),
+            auth_token: None,
         };
         let resp = router.dispatch(req).await;
         assert_eq!(resp.result, Some(serde_json::json!("pong")));
@@ -840,6 +843,7 @@ mod tests {
                 "event_type": "webhook",
                 "target_agent_id": "agent_a"
             }),
+            auth_token: None,
         };
         let resp = router.dispatch(req).await;
         assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32602));
@@ -857,6 +861,7 @@ mod tests {
                 "message": "hello planner",
                 "session_id": "sess-default-route"
             }),
+            auth_token: None,
         };
         let resp = router.dispatch(req).await;
         let err = resp
@@ -897,6 +902,7 @@ mod tests {
                 "message": "hello",
                 "source_agent_id": "source"
             }),
+            auth_token: None,
         };
 
         let resp = router.dispatch(req).await;
@@ -924,6 +930,7 @@ mod tests {
                 "agent_id": "missing",
                 "message": "hello"
             }),
+            auth_token: None,
         };
         let resp = router.dispatch(req).await;
         assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32000));
@@ -951,6 +958,7 @@ mod tests {
                     "expected_outputs": ["summary.md", "sources.json"]
                 }
             }),
+            auth_token: None,
         };
         let resp = router.dispatch(req).await;
         assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32000));
@@ -995,6 +1003,7 @@ mod tests {
                 "session_id": "session-1",
                 "source_agent_id": "source"
             }),
+            auth_token: None,
         };
 
         // Should succeed since enforcement is disabled
@@ -1038,6 +1047,7 @@ mod tests {
                 "session_id": "session-2",
                 "source_agent_id": "source"
             }),
+            auth_token: None,
         };
 
         // Should succeed since enforcement is disabled
@@ -1062,6 +1072,7 @@ mod tests {
                 "message": "deploy",
                 "session_id": "session-inbox"
             }),
+            auth_token: None,
         };
 
         let resp = router.dispatch(req).await;
@@ -1093,6 +1104,7 @@ mod tests {
                     "message": "deploy",
                     "session_id": "session-inbox"
                 }),
+                auth_token: None,
             };
 
             let resp = router.dispatch(req).await;
@@ -1128,6 +1140,7 @@ mod tests {
                 "session_id": "session-task",
                 "source_agent_id": "source"
             }),
+            auth_token: None,
         };
 
         let resp = router.dispatch(req).await;

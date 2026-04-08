@@ -95,41 +95,43 @@ pub struct AgentManifest {
     pub agent: AgentIdentity,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_config: Option<LlmConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<ResourceLimits>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<BackgroundPolicy>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure: Option<DisclosurePolicy>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io: Option<AgentIO>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub middleware: Option<Middleware>,
     /// Response contract declared in the agent's own SKILL.md frontmatter.
     /// When present, the gateway uses this as the default contract for any
     /// spawn of this agent (unless the caller supplies an override in spawn metadata).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_contract: Option<serde_json::Value>,
     /// Execution mode: Script (fast path, no LLM) or Reasoning (default, LLM-driven).
     #[serde(default)]
     pub execution_mode: ExecutionMode,
     /// Entry script for Script mode. Relative path from agent directory.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_entry: Option<String>,
     /// Remote gateway URL for distributed agents. When set, SDK uses HTTP mode.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_url: Option<String>,
     /// Authentication token for remote gateway (Bearer token).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_token: Option<String>,
     /// Tool tiers this agent is allowed to use. Empty means all tiers.
     /// When set, tools outside these tiers are excluded from the agent's tool set.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tool_tiers: Vec<ToolTier>,
     /// Metadata from AgentSkills.io import. Set when the agent was imported
     /// from an external AgentSkills-compatible SKILL.md. Used for tool name
     /// bridging, resource mounting, and trust mode enforcement.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agentskills_import: Option<AgentSkillsImportMetadata>,
 }
 

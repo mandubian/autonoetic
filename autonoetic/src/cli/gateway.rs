@@ -226,7 +226,9 @@ pub async fn handle_gateway_approvals(
             request_id,
             reason,
             secrets,
+            approval_level,
         } => {
+            let approval_level = approval_level.to_runtime();
             let decision = autonoetic_gateway::scheduler::approve_request(
                 &config,
                 Some(&gateway_store),
@@ -238,7 +240,7 @@ pub async fn handle_gateway_approvals(
                 } else {
                     Some(secrets.clone())
                 },
-                None,
+                Some(&approval_level),
             )?;
             println!(
                 "Approved {} for agent {} ({})",
@@ -269,8 +271,8 @@ pub async fn handle_gateway_approvals(
                 decision.action.kind()
             );
         }
-        super::common::GatewayApprovalCommands::Interactive => {
-            run_interactive_approvals(&config, &gateway_store).await?;
+        super::common::GatewayApprovalCommands::Interactive { approval_level } => {
+            run_interactive_approvals(&config, &gateway_store, *approval_level).await?;
         }
     }
     Ok(())
@@ -279,6 +281,7 @@ pub async fn handle_gateway_approvals(
 async fn run_interactive_approvals(
     config: &autonoetic_types::config::GatewayConfig,
     gateway_store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    approval_level: super::common::CliApprovalLevel,
 ) -> anyhow::Result<()> {
     use autonoetic_types::background::ApprovalRequest;
     use crossterm::{
@@ -537,8 +540,8 @@ async fn run_interactive_approvals(
                                 {
                                     println!("\nCredential setup for '{}' requires secret input:", service);
                                     let mut collected = Vec::new();
+                                    let mut password_read_failed = false;
                                     for field in secret_fields {
-                                        let mask = if field.masked { "*" } else { "" };
                                         print!(
                                             "  {} ({}): ",
                                             field.label,
@@ -552,7 +555,7 @@ async fn run_interactive_approvals(
                                             match pass {
                                                 Ok(v) => input = v,
                                                 Err(_) => {
-                                                    status_msg = "Failed to read password".to_string();
+                                                    password_read_failed = true;
                                                     break;
                                                 }
                                             }
@@ -563,7 +566,11 @@ async fn run_interactive_approvals(
                                         collected.push((field.name.clone(), input));
                                     }
                                     if collected.len() != secret_fields.len() {
-                                        status_msg = "Secret input cancelled".to_string();
+                                        status_msg = if password_read_failed {
+                                            "Failed to read password".to_string()
+                                        } else {
+                                            "Secret input cancelled".to_string()
+                                        };
                                         continue;
                                     }
                                     Some(collected)
@@ -578,7 +585,7 @@ async fn run_interactive_approvals(
                                 "cli-interactive",
                                 None,
                                 secrets,
-                                None,
+                                Some(&approval_level.to_runtime()),
                             ) {
                                 Ok(decision) => {
                                     status_msg = format!(

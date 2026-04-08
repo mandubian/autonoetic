@@ -35,7 +35,8 @@ impl GatewayServer {
         std::env::set_var("AUTONOETIC_NODE_ID", &node_id);
         std::env::set_var("AUTONOETIC_NODE_NAME", &node_name);
 
-        // Initialize sandbox config (env vars override config values at point of use).
+        // Initialize sandbox config (config is authoritative by default; env overrides
+        // are ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true).
         crate::sandbox::init_sandbox_config(&self.config.sandbox);
 
         let shared_secret = std::env::var("AUTONOETIC_SHARED_SECRET").map_err(|_| {
@@ -87,11 +88,15 @@ impl GatewayServer {
                 ofp_addr,
                 node_id,
                 node_name,
-                shared_secret,
+                shared_secret.clone(),
                 self.registry.clone(),
                 jsonrpc_router.clone(),
             ),
-            jsonrpc::start_jsonrpc_server(jsonrpc_addr, (*jsonrpc_router).clone()),
+            jsonrpc::start_jsonrpc_server(
+                jsonrpc_addr,
+                (*jsonrpc_router).clone(),
+                Some(shared_secret),
+            ),
             background_scheduler,
             eval_runner,
         )?;

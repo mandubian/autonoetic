@@ -706,14 +706,14 @@ impl NativeTool for AgentRevisionCreateTool {
                 Some(agent_deps),
                 Some(agent_arts),
                 &artifact_layers_from_bundle(&bundle),
-            );
+            )?;
             scaffolded
         } else {
             crate::runtime::install_contract::scaffold_runtime_lock(
                 None,
                 None,
                 &artifact_layers_from_bundle(&bundle),
-            )
+            )?
         };
 
         let common = RevisionCreateCommonArgs {
@@ -909,7 +909,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             None,
             None,
             &artifact_layers_from_bundle(&bundle),
-        );
+        )?;
 
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
@@ -1342,11 +1342,26 @@ impl NativeTool for AgentRevisionPromoteTool {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            caps_json.iter().any(|v| {
-                normalize_capability_from_llm(v.clone())
-                    .map(|cap| crate::runtime::install_contract::is_high_risk_capability(&cap))
-                    .unwrap_or(false)
-            })
+            let mut high_risk = false;
+            let mut parse_errors: Vec<String> = Vec::new();
+            for v in caps_json {
+                match normalize_capability_from_llm(v.clone()) {
+                    Ok(cap) => {
+                        if crate::runtime::install_contract::is_high_risk_capability(&cap) {
+                            high_risk = true;
+                        }
+                    }
+                    Err(e) => parse_errors.push(e.to_string()),
+                }
+            }
+            if !parse_errors.is_empty() {
+                anyhow::bail!(
+                    "Promotion gate: cannot parse one or more capability entries in SKILL.md. \
+                     Refusing to infer risk level from malformed capabilities: {}",
+                    parse_errors.join("; ")
+                );
+            }
+            high_risk
         };
 
         if has_high_risk {
@@ -1380,6 +1395,33 @@ impl NativeTool for AgentRevisionPromoteTool {
                  Fix the audit findings and re-run auditor.default.",
                 artifact_id
             );
+
+            // Freshness check: promotion records must not predate the revision.
+            // Stale records from a previous iteration are not valid evidence.
+            if let Ok(rev_created) = chrono::DateTime::parse_from_rfc3339(&rev.created_at) {
+                if let Some(eval_ts) = &record.evaluator_timestamp {
+                    if let Ok(eval_time) = chrono::DateTime::parse_from_rfc3339(eval_ts) {
+                        anyhow::ensure!(
+                            eval_time >= rev_created,
+                            "Promotion gate: evaluator record for artifact '{}' is stale \
+                             (recorded {} but revision created {}). \
+                             Re-run evaluator.default against the current revision.",
+                            artifact_id, eval_ts, rev.created_at
+                        );
+                    }
+                }
+                if let Some(audit_ts) = &record.auditor_timestamp {
+                    if let Ok(audit_time) = chrono::DateTime::parse_from_rfc3339(audit_ts) {
+                        anyhow::ensure!(
+                            audit_time >= rev_created,
+                            "Promotion gate: auditor record for artifact '{}' is stale \
+                             (recorded {} but revision created {}). \
+                             Re-run auditor.default against the current revision.",
+                            artifact_id, audit_ts, rev.created_at
+                        );
+                    }
+                }
+            }
 
             let has_unresolved = rev
                 .metadata_json

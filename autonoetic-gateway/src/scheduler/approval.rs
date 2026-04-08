@@ -11,7 +11,7 @@ use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::background::{
     ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
 };
-use autonoetic_types::config::{ApprovalLevelConfig, GatewayConfig};
+use autonoetic_types::config::GatewayConfig;
 use std::sync::Arc;
 
 /// Determine the required approval level for a given action based on config.
@@ -27,6 +27,13 @@ pub fn resolve_approval_level(config: &GatewayConfig, action: &ScheduledAction) 
     // For SandboxExec, check host_overrides against the command
     if let ScheduledAction::SandboxExec { command, .. } = action {
         for (pattern, level_str) in &level_config.host_overrides {
+            if pattern.trim().is_empty() {
+                tracing::warn!(
+                    target: "approval",
+                    "Ignoring empty approval_levels.host_overrides pattern"
+                );
+                continue;
+            }
             if command.contains(pattern) {
                 return parse_approval_level(level_str);
             }
@@ -144,130 +151,121 @@ pub fn approve_request(
     secrets: Option<Vec<(String, String)>>,
     approver_level: Option<&ApprovalLevel>,
 ) -> anyhow::Result<ApprovalDecision> {
-    // If secrets are provided, store them in the vault before approving
-    // and create the CredentialRecord so the caller can resume.
-    if let Some(store) = gateway_store {
-        // Get the approval request to check if it's a CredentialPrompt
-        if let Some(req) = store.get_approval(request_id)? {
-            if let ScheduledAction::CredentialPrompt {
-                service,
-                credential_id,
-                secret_fields,
-                payload,
-                ..
-            } = &req.action
-            {
-                // For CredentialPrompt, secrets are always required
-                let secret_pairs = secrets.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "CredentialPrompt approval requires secrets. Provide them via --secret KEY=VALUE or interactively."
-                    )
-                })?;
-                if secret_pairs.is_empty() {
-                    anyhow::bail!(
-                        "CredentialPrompt approval requires at least one secret. None provided."
-                    );
-                }
+    let store = gateway_store.ok_or_else(|| {
+        anyhow::anyhow!("GatewayStore is required to approve requests")
+    })?;
+    let req = store
+        .get_approval(request_id)?
+        .ok_or_else(|| anyhow::anyhow!("Approval request not found in store: {}", request_id))?;
 
-                // Extract setup metadata from payload
-                let inject_as = payload.as_ref().and_then(|p| {
-                    p.get("inject_as")
-                        .and_then(|v| v.as_str().map(String::from))
-                });
-                let allowed_hosts: Vec<String> = payload
-                    .as_ref()
-                    .and_then(|p| {
-                        p.get("allowed_hosts")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    })
-                    .unwrap_or_default();
-                let expires_at = payload.as_ref().and_then(|p| {
-                    p.get("expires_at")
-                        .and_then(|v| v.as_str().map(String::from))
-                });
-
-                // Store secrets in vault — fail-closed, require VAULT_PATH
-                let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
-                    .ok()
-                    .map(std::path::PathBuf::from)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "AUTONOETIC_VAULT_PATH must be set for credential prompt approval"
-                        )
-                    })?;
-                let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
-                        vault_path.display(),
-                        e
-                    )
-                })?;
-
-                // Validate that all secret_fields have corresponding values
-                let missing: Vec<&str> = secret_fields
-                    .iter()
-                    .filter(|f| !secret_pairs.iter().any(|(name, _)| name == &f.name))
-                    .map(|f| f.name.as_str())
-                    .collect();
-                if !missing.is_empty() {
-                    anyhow::bail!(
-                        "Missing required secret fields for credential prompt: {}. Provided: {:?}.",
-                        missing.join(", "),
-                        secret_pairs
-                            .iter()
-                            .map(|(n, _)| n.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
-
-                for field in secret_fields {
-                    if let Some((_, value)) =
-                        secret_pairs.iter().find(|(name, _)| name == &field.name)
-                    {
-                        vault.set_secret(&field.name, value.clone());
-                    }
-                }
-                vault.persist_to_file(&vault_path)?;
-
-                // Create the CredentialRecord with full metadata
-                let cred = autonoetic_types::agent::CredentialRecord {
-                    credential_id: credential_id.clone(),
-                    service: service.clone(),
-                    secret_name: secret_fields
-                        .first()
-                        .map(|f| f.name.clone())
-                        .unwrap_or_default(),
-                    inject_as,
-                    created_by_agent: Some(req.agent_id.clone()),
-                    expires_at,
-                    shared_with: vec![],
-                    allowed_hosts,
-                };
-                store.upsert_credential(&cred)?;
-
-                tracing::info!(
-                    target: "approval",
-                    request_id = %request_id,
-                    credential_id = %credential_id,
-                    secrets_stored = secret_pairs.len(),
-                    "Stored secrets and created credential record for credential prompt"
-                );
-            }
-        }
+    // Level validation is always enforced. Missing level defaults to Operator.
+    let provided_level = approver_level.cloned().unwrap_or(ApprovalLevel::Operator);
+    if !level_satisfies(&provided_level, &req.approval_level) {
+        anyhow::bail!(
+            "Insufficient approval level: this request requires {:?} but you have {:?}",
+            req.approval_level,
+            provided_level
+        );
     }
 
-    // Level validation: check that the approver has sufficient privileges
-    if let (Some(store), Some(provided_level)) = (gateway_store, approver_level) {
-        if let Some(req) = store.get_approval(request_id)? {
-            if !level_satisfies(provided_level, &req.approval_level) {
-                anyhow::bail!(
-                    "Insufficient approval level: this request requires {:?} but you have {:?}",
-                    req.approval_level,
-                    provided_level
-                );
+    // If secrets are provided, store them in the vault before approving
+    // and create the CredentialRecord so the caller can resume.
+    if let ScheduledAction::CredentialPrompt {
+        service,
+        credential_id,
+        secret_fields,
+        payload,
+        ..
+    } = &req.action
+    {
+        // For CredentialPrompt, secrets are always required
+        let secret_pairs = secrets.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "CredentialPrompt approval requires secrets. Provide them via --secret KEY=VALUE or interactively."
+            )
+        })?;
+        if secret_pairs.is_empty() {
+            anyhow::bail!("CredentialPrompt approval requires at least one secret. None provided.");
+        }
+
+        // Extract setup metadata from payload
+        let inject_as = payload
+            .as_ref()
+            .and_then(|p| p.get("inject_as").and_then(|v| v.as_str().map(String::from)));
+        let allowed_hosts: Vec<String> = payload
+            .as_ref()
+            .and_then(|p| {
+                p.get("allowed_hosts")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+            })
+            .unwrap_or_default();
+        let expires_at = payload
+            .as_ref()
+            .and_then(|p| p.get("expires_at").and_then(|v| v.as_str().map(String::from)));
+
+        // Store secrets in vault — fail-closed, require VAULT_PATH
+        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!("AUTONOETIC_VAULT_PATH must be set for credential prompt approval")
+            })?;
+        let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
+                vault_path.display(),
+                e
+            )
+        })?;
+
+        // Validate that all secret_fields have corresponding values
+        let missing: Vec<&str> = secret_fields
+            .iter()
+            .filter(|f| !secret_pairs.iter().any(|(name, _)| name == &f.name))
+            .map(|f| f.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "Missing required secret fields for credential prompt: {}. Provided: {:?}.",
+                missing.join(", "),
+                secret_pairs
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        for field in secret_fields {
+            if let Some((_, value)) = secret_pairs.iter().find(|(name, _)| name == &field.name) {
+                vault.set_secret(&field.name, value.clone());
             }
         }
+        vault.persist_to_file(&vault_path)?;
+
+        // Create the CredentialRecord with full metadata
+        let cred = autonoetic_types::agent::CredentialRecord {
+            credential_id: credential_id.clone(),
+            service: service.clone(),
+            secret_name: secret_fields
+                .first()
+                .map(|f| f.name.clone())
+                .unwrap_or_default(),
+            inject_as,
+            created_by_agent: Some(req.agent_id.clone()),
+            expires_at,
+            shared_with: vec![],
+            allowed_hosts,
+        };
+        store.upsert_credential(&cred)?;
+
+        tracing::info!(
+            target: "approval",
+            request_id = %request_id,
+            credential_id = %credential_id,
+            secrets_stored = secret_pairs.len(),
+            "Stored secrets and created credential record for credential prompt"
+        );
     }
 
     let decision = decide_request(
@@ -832,7 +830,7 @@ fn decide_request(
     };
     // Persist decision in GatewayStore
     if let Some(store) = gateway_store {
-        if let Err(e) = store.record_decision(
+        store.record_decision(
             &decision.request_id,
             match decision.status {
                 ApprovalStatus::Approved => "approved",
@@ -841,14 +839,14 @@ fn decide_request(
             },
             &decision.decided_by,
             &decision.decided_at,
-        ) {
-            tracing::warn!(
-                target: "approval",
-                request_id = %decision.request_id,
-                error = %e,
-                "Failed to record decision in store"
-            );
-        }
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to record approval decision '{}' in store: {}",
+                decision.request_id,
+                e
+            )
+        })?;
     }
 
     let background_session_id = super::decision::background_session_id;
@@ -1342,6 +1340,86 @@ mod tests {
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(!pending.is_empty(), "should have created a notification");
+    }
+
+    #[test]
+    fn resolve_approval_level_ignores_empty_host_override_pattern() {
+        let mut cfg = GatewayConfig::default();
+        cfg.approval_levels
+            .host_overrides
+            .insert("".to_string(), "admin".to_string());
+        cfg.approval_levels.default = Some("operator".to_string());
+        let action = ScheduledAction::SandboxExec {
+            command: "python3 /tmp/run.py".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+        };
+        let level = super::resolve_approval_level(&cfg, &action);
+        assert_eq!(level, ApprovalLevel::Operator);
+    }
+
+    #[test]
+    fn approve_request_defaults_to_operator_and_enforces_required_level() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+        let request = ApprovalRequest {
+            request_id: "apr-admin-needed".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder-1".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "echo secure".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+            },
+            created_at: "2020-01-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            approval_level: ApprovalLevel::Admin,
+        };
+        store.create_approval(&request).unwrap();
+
+        // Missing approver_level defaults to Operator and should fail for admin requests.
+        let denied = super::approve_request(
+            &cfg,
+            Some(&store),
+            &request.request_id,
+            "cli",
+            None,
+            None,
+            None,
+        )
+        .expect_err("operator default should not satisfy admin-level request");
+        assert!(denied.to_string().contains("Insufficient approval level"));
+
+        // Explicit admin level should pass.
+        let admin = ApprovalLevel::Admin;
+        let decision = super::approve_request(
+            &cfg,
+            Some(&store),
+            &request.request_id,
+            "cli",
+            None,
+            None,
+            Some(&admin),
+        )
+        .expect("admin-level approval should succeed");
+        assert_eq!(decision.status, ApprovalStatus::Approved);
     }
 
     #[test]

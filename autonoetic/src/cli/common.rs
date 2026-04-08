@@ -26,6 +26,21 @@ pub enum ResponseValidationMode {
     Repair,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliApprovalLevel {
+    Operator,
+    Admin,
+}
+
+impl CliApprovalLevel {
+    pub fn to_runtime(self) -> autonoetic_types::background::ApprovalLevel {
+        match self {
+            Self::Operator => autonoetic_types::background::ApprovalLevel::Operator,
+            Self::Admin => autonoetic_types::background::ApprovalLevel::Admin,
+        }
+    }
+}
+
 pub fn apply_response_validation_override(
     config: &mut GatewayConfig,
     mode: Option<ResponseValidationMode>,
@@ -153,6 +168,9 @@ pub enum GatewayApprovalCommands {
         /// Secret values to provide for credential prompts (KEY=VALUE format).
         #[arg(long = "secret", value_parser = parse_key_value)]
         secrets: Vec<(String, String)>,
+        /// Approver level used to authorize this decision.
+        #[arg(long = "approval-level", value_enum, default_value_t = CliApprovalLevel::Operator)]
+        approval_level: CliApprovalLevel,
     },
     /// Reject one pending request.
     Reject {
@@ -163,7 +181,11 @@ pub enum GatewayApprovalCommands {
         reason: Option<String>,
     },
     /// Interactive TUI to review, approve, or reject pending requests.
-    Interactive,
+    Interactive {
+        /// Approver level used when approving from the TUI.
+        #[arg(long = "approval-level", value_enum, default_value_t = CliApprovalLevel::Operator)]
+        approval_level: CliApprovalLevel,
+    },
 }
 
 #[derive(Subcommand)]

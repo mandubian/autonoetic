@@ -10,9 +10,10 @@ use crate::runtime::tools::{
 };
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
 use autonoetic_types::agent::AgentManifest;
-use autonoetic_types::background::ScheduledAction;
+use autonoetic_types::background::{ApprovalDecision, ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::tagged;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
@@ -137,6 +138,179 @@ fn sandbox_exec_pid_guard(
     None
 }
 
+/// § 3.6 — Detects network error patterns in sandbox output.
+/// Returns the names of matched patterns (e.g., "ConnectionError", "URLError").
+/// Used when the sandbox ran without network access to surface blocked network calls
+/// that would otherwise be silently swallowed (exit=0).
+fn detect_network_errors_in_output(output: &str) -> Vec<String> {
+    // Substrings typical of real library tracebacks / errno text (not plain "connection" in prose).
+    const PATTERNS: &[(&str, &str)] = &[
+        ("ConnectionError:", "ConnectionError"),
+        ("ConnectionRefusedError:", "ConnectionRefusedError"),
+        ("URLError:", "URLError"),
+        ("urllib.error.URLError", "urllib URLError"),
+        ("socket.gaierror", "socket.gaierror"),
+        ("Name or service not known", "DNS resolution failed"),
+        ("Network is unreachable", "Network unreachable"),
+        ("Connection refused", "Connection refused"),
+        ("ConnectTimeoutError", "ConnectTimeoutError"),
+        ("NewConnectionError", "NewConnectionError"),
+        ("MaxRetryError", "MaxRetryError"),
+        ("OSError: [Errno 101]", "Network unreachable (errno 101)"),
+        ("OSError: [Errno 111]", "Connection refused (errno 111)"),
+        ("requests.exceptions.", "requests HTTP error"),
+        ("httpx.ConnectError", "httpx connection error"),
+        ("httpx.ConnectTimeout", "httpx timeout"),
+        ("aiohttp.ClientConnectorError", "aiohttp connector error"),
+        ("aiohttp.ClientError", "aiohttp client error"),
+        ("Could not resolve host", "DNS resolution failed (curl)"),
+    ];
+
+    let mut found = Vec::new();
+    for (pattern, label) in PATTERNS {
+        if output.contains(pattern) {
+            found.push(label.to_string());
+        }
+    }
+    found
+}
+
+fn apply_network_isolation_failure_to_result(
+    body: &mut serde_json::Value,
+    stdout: &str,
+    stderr: &str,
+    has_network_cap: bool,
+) -> Option<Vec<String>> {
+    let combined_output = format!("{stdout}\n{stderr}");
+    let network_errors = detect_network_errors_in_output(&combined_output);
+    if network_errors.is_empty() {
+        return None;
+    }
+
+    let summary = format!(
+        "Sandbox ran without outbound network and output indicates a network failure \
+         ({}). {}",
+        network_errors.join(", "),
+        if has_network_cap {
+            "This agent declares NetworkAccess but this run did not enable the network \
+             namespace (e.g. missing operator approval or misconfiguration)."
+        } else {
+            "This agent does not declare NetworkAccess: outbound calls are blocked. \
+             Add scoped NetworkAccess, or use builder.default layers so tests run offline."
+        }
+    );
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("ok".to_string(), serde_json::json!(false));
+        obj.insert("error_type".to_string(), serde_json::json!("network_isolated"));
+        obj.insert("network_blocked".to_string(), serde_json::json!(true));
+        obj.insert(
+            "network_error_patterns".to_string(),
+            serde_json::json!(&network_errors),
+        );
+        obj.insert("network_warning".to_string(), serde_json::json!(&summary));
+        obj.insert("message".to_string(), serde_json::json!(&summary));
+    }
+    Some(network_errors)
+}
+
+fn effective_root_session_id(session_id: &str, explicit_root: Option<&str>) -> String {
+    explicit_root
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| crate::runtime::content_store::root_session_id(session_id).to_string())
+}
+
+fn validate_approval_ref_context(
+    decision: &ApprovalDecision,
+    current_agent_id: &str,
+    current_session_id: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        decision.agent_id == current_agent_id,
+        "approval_ref belongs to agent '{}' but current agent is '{}'",
+        decision.agent_id,
+        current_agent_id
+    );
+    let sid = current_session_id.ok_or_else(|| {
+        anyhow::anyhow!("approval_ref requires a session context but no session_id was provided")
+    })?;
+    let current_root = crate::runtime::content_store::root_session_id(sid);
+    let approved_root =
+        effective_root_session_id(&decision.session_id, decision.root_session_id.as_deref());
+    anyhow::ensure!(
+        approved_root == current_root,
+        "approval_ref belongs to root session '{}' but current root session is '{}'",
+        approved_root,
+        current_root
+    );
+    Ok(())
+}
+
+fn approved_request_targets(
+    req: &ApprovalRequest,
+    agent_dir: &Path,
+    gateway_dir: Option<&Path>,
+) -> Vec<String> {
+    let (command, dep_packages) = match &req.action {
+        ScheduledAction::SandboxExec {
+            command,
+            dependencies,
+            ..
+        } => (
+            command.as_str(),
+            dependencies.as_ref().map(|d| d.packages.clone()),
+        ),
+        _ => return Vec::new(),
+    };
+    let code = extract_code_for_analysis(command, agent_dir, gateway_dir, Some(&req.session_id));
+    let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
+        &code,
+        dep_packages.as_deref(),
+    );
+    let mut targets = normalize_targets(&analysis.detected_patterns);
+    if targets.is_empty() {
+        targets = extract_hosts_from_text(command);
+    }
+    targets
+}
+
+fn extract_hosts_from_text(text: &str) -> Vec<String> {
+    let Ok(re) = regex::Regex::new(r#"(?i)https?://([^/\s:"'`]+)"#) else {
+        return Vec::new();
+    };
+    let mut hosts: Vec<String> = re
+        .captures_iter(text)
+        .filter_map(|cap| cap.get(1))
+        .map(|m| m.as_str().trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+fn approved_requests_cover_targets(
+    approved: &[ApprovalRequest],
+    required_targets: &[String],
+    agent_dir: &Path,
+    gateway_dir: Option<&Path>,
+) -> bool {
+    if required_targets.is_empty() {
+        return false;
+    }
+    let required: BTreeSet<String> = required_targets.iter().cloned().collect();
+    approved.iter().any(|req| {
+        if !matches!(req.action, ScheduledAction::SandboxExec { .. }) {
+            return false;
+        }
+        let granted: BTreeSet<String> = approved_request_targets(req, agent_dir, gateway_dir)
+            .into_iter()
+            .collect();
+        required.is_subset(&granted)
+    })
+}
+
 impl NativeTool for SandboxExecTool {
     fn name(&self) -> &'static str {
         "sandbox.exec"
@@ -230,6 +404,8 @@ impl NativeTool for SandboxExecTool {
                         .into());
                     }
                     let decision = req.into_decision()?;
+                    validate_approval_ref_context(&decision, &manifest.agent.id, session_id)
+                        .map_err(tagged::Tagged::validation)?;
                     match &decision.action {
                         ScheduledAction::SandboxExec { command, .. } => {
                             effective_command = command.clone();
@@ -419,18 +595,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                                 crate::runtime::remote_access::RemoteAccessAnalysis,
                             >(&content)
                             {
-                                analysis
-                                    .detected_patterns
-                                    .iter()
-                                    .filter(|p| p.category == "url_literal")
-                                    .filter_map(|p| {
-                                        let url = &p.pattern;
-                                        url.strip_prefix("https://")
-                                            .or_else(|| url.strip_prefix("http://"))
-                                            .and_then(|rest| rest.split('/').next())
-                                            .map(|d| d.to_string())
-                                    })
-                                    .collect()
+                                normalize_targets(&analysis.detected_patterns)
                             } else {
                                 vec![]
                             }
@@ -457,12 +622,12 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         let approved = gw_store
                             .get_approved_approvals_for_root(root_sid)
                             .unwrap_or_default();
-                        approved.iter().any(|r| {
-                            matches!(&r.action, ScheduledAction::SandboxExec { .. })
-                                && artifact_domains.iter().any(|d| {
-                                    r.reason.as_ref().map(|s| s.contains(d)).unwrap_or(false)
-                                })
-                        })
+                        approved_requests_cover_targets(
+                            &approved,
+                            &artifact_domains,
+                            agent_dir,
+                            gateway_dir,
+                        )
                     }
                 } else {
                     false
@@ -595,7 +760,18 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         },
                     };
                     if let Some(store) = &gateway_store {
-                        let _ = store.create_approval(&request);
+                        store.create_approval(&request).map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to persist sandbox approval request '{}': {}",
+                                request_id,
+                                e
+                            )
+                        })?;
+                    } else {
+                        anyhow::bail!(
+                            "GatewayStore missing; cannot persist sandbox approval request '{}'",
+                            request_id
+                        );
                     }
                     let approval = build_approval_details(
                         &request,
@@ -761,7 +937,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 // This catches cases where the operator approved but the cache hasn't been
                 // populated yet (e.g., first run after cache was cleared).
                 if !approval_validated_for_command {
-                    if let (Some(cfg), Some(gw_store), Some(sid)) =
+                    if let (Some(_cfg), Some(gw_store), Some(sid)) =
                         (config, &gateway_store, session_id)
                     {
                         let root_sid = crate::runtime::content_store::root_session_id(sid);
@@ -953,11 +1129,18 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         },
                     };
                     if let Some(store) = &gateway_store {
-                        if let Err(e) = store.create_approval(&request) {
-                            tracing::error!(target: "sandbox", error = %e, "Failed to create approval request in store");
-                        }
+                        store.create_approval(&request).map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to persist sandbox approval request '{}': {}",
+                                request_id,
+                                e
+                            )
+                        })?;
                     } else {
-                        tracing::error!(target: "sandbox", "GatewayStore missing; cannot create sandbox approval");
+                        anyhow::bail!(
+                            "GatewayStore missing; cannot persist sandbox approval request '{}'",
+                            request_id
+                        );
                     }
 
                     let approval = build_approval_details(
@@ -1151,6 +1334,32 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             "stderr": stderr
         });
 
+        // § 3.6 — Network error detection for agents running without network access.
+        // When the sandbox ran with network isolated (share_net=false) and the output
+        // contains network error patterns, surface a clear warning instead of letting
+        // the caller assume exit=0 means the code works.
+        if !overrides.share_net {
+            let has_network_cap = manifest
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, Capability::NetworkAccess { .. }));
+            if let Some(network_errors) = apply_network_isolation_failure_to_result(
+                &mut body,
+                &stdout,
+                &stderr,
+                has_network_cap,
+            ) {
+                tracing::warn!(
+                    target: "sandbox.exec",
+                    agent_id = %manifest.agent.id,
+                    has_network_cap = has_network_cap,
+                    patterns = ?network_errors,
+                    "Network errors detected in sandbox output but network was isolated. \
+                     Treating tool result as failure (ok=false)."
+                );
+            }
+        }
+
         if let Some(ref capture_paths) = args.capture_paths {
             if !capture_paths.is_empty() {
                 if let Some(gw_dir) = gateway_dir {
@@ -1291,5 +1500,180 @@ mod sandbox_digest_path_tests {
         assert!(!sandbox_command_misuses_content_digest_as_path(
             "echo sha256: not a digest"
         ));
+    }
+}
+
+#[cfg(test)]
+mod network_error_detection_tests {
+    use super::{apply_network_isolation_failure_to_result, detect_network_errors_in_output};
+    use serde_json::json;
+
+    #[test]
+    fn empty_output_matches_nothing() {
+        assert!(detect_network_errors_in_output("").is_empty());
+    }
+
+    #[test]
+    fn detects_stdlib_url_errors() {
+        let s = "Traceback...\nurllib.error.URLError: <urlopen error timed out>";
+        let v = detect_network_errors_in_output(s);
+        assert!(
+            v.iter().any(|x| x.contains("urllib")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn detects_requests_traceback() {
+        let s = "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='x')";
+        let v = detect_network_errors_in_output(s);
+        assert!(v.iter().any(|x| x.contains("requests")), "{v:?}");
+    }
+
+    #[test]
+    fn ignores_plain_connection_word() {
+        assert!(detect_network_errors_in_output("log: connection reset by policy").is_empty());
+    }
+
+    #[test]
+    fn marks_result_as_failed_when_network_failure_detected() {
+        let mut body = json!({
+            "ok": true,
+            "exit_code": 0,
+            "stdout": "done",
+            "stderr": ""
+        });
+        let detected = apply_network_isolation_failure_to_result(
+            &mut body,
+            "requests.exceptions.ConnectionError: boom",
+            "",
+            false,
+        );
+        assert!(detected.is_some(), "expected network patterns to be detected");
+        assert_eq!(body["ok"], json!(false));
+        assert_eq!(body["error_type"], json!("network_isolated"));
+        assert_eq!(body["network_blocked"], json!(true));
+    }
+
+    #[test]
+    fn leaves_result_untouched_when_no_network_failure_detected() {
+        let mut body = json!({
+            "ok": true,
+            "exit_code": 0,
+            "stdout": "all good",
+            "stderr": ""
+        });
+        let detected =
+            apply_network_isolation_failure_to_result(&mut body, "normal output", "", false);
+        assert!(detected.is_none(), "should not detect network patterns");
+        assert_eq!(body["ok"], json!(true));
+        assert!(body.get("error_type").is_none());
+        assert!(body.get("network_blocked").is_none());
+    }
+}
+
+#[cfg(test)]
+mod approval_binding_tests {
+    use super::{
+        approved_requests_cover_targets, extract_hosts_from_text, validate_approval_ref_context,
+    };
+    use autonoetic_types::background::{
+        ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn approval_ref_rejects_cross_agent_use() {
+        let decision = ApprovalDecision {
+            request_id: "apr-1".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder.default-1".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "echo ok".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+            },
+            status: ApprovalStatus::Approved,
+            decided_at: "2026-01-01T00:00:00Z".to_string(),
+            decided_by: "operator".to_string(),
+            reason: None,
+            root_session_id: Some("root".to_string()),
+            workflow_id: None,
+            task_id: None,
+            approval_level: ApprovalLevel::Operator,
+        };
+        let err = validate_approval_ref_context(&decision, "evaluator.default", Some("root/eval-1"))
+            .expect_err("cross-agent approval_ref should be rejected");
+        assert!(err.to_string().contains("belongs to agent"));
+    }
+
+    #[test]
+    fn approval_ref_rejects_cross_root_use() {
+        let decision = ApprovalDecision {
+            request_id: "apr-2".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root-a/coder.default-1".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "echo ok".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+            },
+            status: ApprovalStatus::Approved,
+            decided_at: "2026-01-01T00:00:00Z".to_string(),
+            decided_by: "operator".to_string(),
+            reason: None,
+            root_session_id: Some("root-a".to_string()),
+            workflow_id: None,
+            task_id: None,
+            approval_level: ApprovalLevel::Operator,
+        };
+        let err = validate_approval_ref_context(&decision, "coder.default", Some("root-b/coder-2"))
+            .expect_err("cross-root approval_ref should be rejected");
+        assert!(err.to_string().contains("root session"));
+    }
+
+    #[test]
+    fn approved_requests_cover_targets_requires_structured_host_match() {
+        let req = ApprovalRequest {
+            request_id: "apr-host".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder-1".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "curl https://api.example.com/v1".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+            },
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            root_session_id: Some("root".to_string()),
+            workflow_id: None,
+            task_id: None,
+            status: Some(ApprovalStatus::Approved),
+            decided_at: Some("2026-01-01T00:00:01Z".to_string()),
+            decided_by: Some("operator".to_string()),
+            approval_level: ApprovalLevel::Operator,
+        };
+        assert!(approved_requests_cover_targets(
+            &[req.clone()],
+            &["api.example.com".to_string()],
+            Path::new("."),
+            None
+        ));
+        assert!(!approved_requests_cover_targets(
+            &[req],
+            &["evil.com".to_string()],
+            Path::new("."),
+            None
+        ));
+    }
+
+    #[test]
+    fn extracts_hosts_from_command_text_urls() {
+        let hosts = extract_hosts_from_text("curl https://api.example.com/v1 && wget http://x.y/z");
+        assert_eq!(hosts, vec!["api.example.com".to_string(), "x.y".to_string()]);
     }
 }

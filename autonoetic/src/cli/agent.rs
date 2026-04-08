@@ -288,19 +288,29 @@ metadata:
     )
 }
 
-pub fn default_runtime_lock_contents() -> &'static str {
-    r#"gateway:
+pub fn default_runtime_lock_contents() -> String {
+    use autonoetic_gateway::runtime::install_contract::{
+        gateway_version, sdk_version, GATEWAY_BUILD_SHA256, GATEWAY_BUILD_TAG,
+    };
+    format!(
+        r#"gateway:
   artifact: "marketplace://gateway/autonoetic-gateway"
-  version: "0.1.0"
-  sha256: "replace-me"
+  version: "{gw_ver}"
+  sha256: "{sha}"
+  build_tag: "{build_tag}"
 sdk:
-  version: "0.1.0"
+  version: "{sdk_ver}"
 sandbox:
   backend: "bubblewrap"
 dependencies: []
 artifacts: []
 layers: []
-"#
+"#,
+        gw_ver = gateway_version(),
+        sha = GATEWAY_BUILD_SHA256,
+        build_tag = GATEWAY_BUILD_TAG,
+        sdk_ver = sdk_version(),
+    )
 }
 
 pub fn handle_agent_presets(config_path: &Path) -> anyhow::Result<()> {

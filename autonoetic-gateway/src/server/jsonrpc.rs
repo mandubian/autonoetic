@@ -9,29 +9,43 @@ use tokio::net::{TcpListener, TcpStream};
 pub async fn start_jsonrpc_server(
     listen_addr: SocketAddr,
     router: JsonRpcRouter,
+    required_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
-    serve_jsonrpc_listener(listener, router).await
+    serve_jsonrpc_listener(listener, router, required_auth_token).await
 }
 
 pub(crate) async fn serve_jsonrpc_listener(
     listener: TcpListener,
     router: JsonRpcRouter,
+    required_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
     tracing::info!("JSON-RPC server listening on {}", listener.local_addr()?);
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let router = router.clone();
+        let required_auth_token = required_auth_token.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, router).await {
+            if let Err(e) = handle_connection(stream, router, required_auth_token).await {
                 tracing::warn!(peer = %peer_addr, error = %e, "JSON-RPC client disconnected");
             }
         });
     }
 }
 
-async fn handle_connection(stream: TcpStream, router: JsonRpcRouter) -> anyhow::Result<()> {
+fn is_authorized_request(req: &JsonRpcRequest, required_auth_token: Option<&str>) -> bool {
+    match required_auth_token {
+        Some(expected) => req.auth_token.as_deref() == Some(expected),
+        None => true,
+    }
+}
+
+async fn handle_connection(
+    stream: TcpStream,
+    router: JsonRpcRouter,
+    required_auth_token: Option<String>,
+) -> anyhow::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
 
@@ -42,7 +56,13 @@ async fn handle_connection(stream: TcpStream, router: JsonRpcRouter) -> anyhow::
         }
 
         let response = match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(req) => router.dispatch(req).await,
+            Ok(req) => {
+                if !is_authorized_request(&req, required_auth_token.as_deref()) {
+                    JsonRpcResponse::error(req.id.clone(), -32001, "Unauthorized JSON-RPC request")
+                } else {
+                    router.dispatch(req).await
+                }
+            }
             Err(e) => {
                 JsonRpcResponse::error("null".to_string(), -32700, format!("Parse error: {}", e))
             }
@@ -86,7 +106,7 @@ mod tests {
             .local_addr()
             .expect("listener should expose local addr");
         let server = tokio::spawn(async move {
-            serve_jsonrpc_listener(listener, router)
+            serve_jsonrpc_listener(listener, router, None)
                 .await
                 .expect("server should run");
         });
@@ -132,7 +152,7 @@ mod tests {
             .local_addr()
             .expect("listener should expose local addr");
         let server = tokio::spawn(async move {
-            serve_jsonrpc_listener(listener, router)
+            serve_jsonrpc_listener(listener, router, None)
                 .await
                 .expect("server should run");
         });
@@ -171,6 +191,54 @@ mod tests {
             msg.contains("not found") || msg.contains("GatewayStore is required"),
             "unexpected error: {msg}"
         );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_jsonrpc_tcp_rejects_missing_auth_token_when_required() {
+        let (_temp, router) = test_router();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("listener should expose local addr");
+        let server = tokio::spawn(async move {
+            serve_jsonrpc_listener(listener, router, Some("test-secret".to_string()))
+                .await
+                .expect("server should run");
+        });
+
+        let stream = TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        let (read_half, mut write_half) = stream.into_split();
+        let mut lines = BufReader::new(read_half).lines();
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "3",
+            "method": "ping",
+            "params": {}
+        });
+
+        write_half
+            .write_all(format!("{}\n", request).as_bytes())
+            .await
+            .expect("request should write");
+
+        let line = lines
+            .next_line()
+            .await
+            .expect("response should read")
+            .expect("response line should exist");
+        let response: JsonRpcResponse =
+            serde_json::from_str(&line).expect("response should decode");
+
+        assert!(response.result.is_none());
+        let err = response.error.expect("error should exist");
+        assert_eq!(err.code, -32001);
+        assert!(err.message.contains("Unauthorized"));
 
         server.abort();
     }
