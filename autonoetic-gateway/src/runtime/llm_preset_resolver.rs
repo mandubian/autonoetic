@@ -23,6 +23,7 @@ pub fn resolve_fixed_preset(preset: &LlmPreset) -> Option<LlmConfig> {
         base_url: preset.base_url.clone(),
         api_key_env: preset.api_key_env.clone(),
         routing_preset: None,
+        thinking: preset.thinking.clone(),
     })
 }
 
@@ -97,6 +98,7 @@ mod tests {
             context_window_tokens: None,
             base_url: None,
             api_key_env: None,
+            thinking: None,
             tier: Some(tier),
             cost: None,
             latency: None,
@@ -115,6 +117,7 @@ mod tests {
             context_window_tokens: None,
             base_url: None,
             api_key_env: None,
+            thinking: None,
             tier: None,
             cost: None,
             latency: None,

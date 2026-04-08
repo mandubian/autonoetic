@@ -415,6 +415,7 @@ impl ModelRouter for LlmClassifierRouter {
             max_tokens: Some(20),
             temperature: Some(0.0),
             metadata: None,
+            thinking: None,
         };
 
         let result = tokio::time::timeout(
@@ -596,6 +597,7 @@ pub fn create_router_from_preset(
                 base_url: None,
                 api_key_env: None,
                 routing_preset: None,
+                thinking: None,
             });
             (
                 Box::new(LlmClassifierRouter::new(
@@ -618,6 +620,7 @@ pub fn create_router_from_preset(
                 base_url: None,
                 api_key_env: None,
                 routing_preset: None,
+                thinking: None,
             });
             (
                 Box::new(HybridRouter::new(
@@ -654,6 +657,7 @@ pub fn decision_to_llm_config(
             .or(base_config.base_url.clone()),
         api_key_env: base_config.api_key_env.clone(),
         routing_preset: base_config.routing_preset.clone(),
+        thinking: base_config.thinking.clone(),
     }
 }
 
@@ -680,6 +684,7 @@ mod tests {
                     base_url: None,
                     api_key_env: None,
                     routing_preset: None,
+                    thinking: None,
                 },
                 tier: CapabilityTier::Premium,
             },
@@ -696,6 +701,7 @@ mod tests {
                     base_url: None,
                     api_key_env: None,
                     routing_preset: None,
+                    thinking: None,
                 },
                 tier: CapabilityTier::Standard,
             },
@@ -712,6 +718,7 @@ mod tests {
                     base_url: None,
                     api_key_env: None,
                     routing_preset: None,
+                    thinking: None,
                 },
                 tier: CapabilityTier::Economy,
             },
@@ -730,6 +737,7 @@ mod tests {
             base_url: None,
             api_key_env: None,
             routing_preset: None,
+            thinking: None,
         }
     }
 
