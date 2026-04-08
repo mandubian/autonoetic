@@ -168,6 +168,9 @@ llm_presets:
     cost:
       input_per_million: 15.0
       output_per_million: 75.0
+    # thinking:
+    #   effort: high
+    #   budget_tokens: 8192
 
   # ── Routing presets: select from fixed presets at call time ─────────
   smart:
@@ -210,11 +213,6 @@ llm_presets:
     model: "minimax/minimax-m2.7"
     temperature: 0.3
 
-  qwen36:
-    provider: "openrouter"
-    model: "qwen/qwen3.6-plus:free"
-    temperature: 1.0
-
   fallback:
     provider: "openai"
     model: "gpt-4o"
@@ -224,14 +222,15 @@ llm_presets:
 # Used during 'agent bootstrap' and 'agent init --template <name>'.
 # Values can be fixed preset names or routing preset names.
 llm_preset_mapping:
-  planner: qwen36             # routed
-  coder: qwen36               # routed
-  researcher: qwen36         # fixed
-  debugger: qwen36            # fixed
-  evaluator: qwen36          # routed
-  architect: qwen36            # fixed
-  specialized_builder: qwen36
-  default: qwen36
+  planner: agentic             # routed
+  coder: coding               # routed
+  researcher: research         # fixed
+  debugger: coding            # fixed
+  evaluator: coding          # routed
+  architect: coding            # fixed
+  specialized_builder: agentic
+  builder: agentic
+  default: fallback
 
 
 # # ── Template → Preset Mapping ────────────────────────────────────────
