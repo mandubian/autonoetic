@@ -59,6 +59,35 @@ pub struct LlmConfig {
     /// at call time. provider/model are the fallback if routing is unavailable.
     #[serde(default)]
     pub routing_preset: Option<String>,
+    /// Extended thinking configuration. When set, enables the model's native
+    /// reasoning mode (e.g., o-series reasoning_effort, Anthropic thinking budget,
+    /// Gemma <|think|> token). The gateway translates this to provider-native format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+}
+
+/// Extended thinking / reasoning configuration for models that support it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ThinkingConfig {
+    /// Reasoning effort level: "low", "medium", or "high".
+    /// For OpenAI o-series: maps to reasoning_effort.
+    /// For Anthropic: controls budget_tokens allocation.
+    /// For Gemma: enables <|think|> token when truthy.
+    #[serde(default)]
+    pub effort: ThinkingEffort,
+    /// Override for Anthropic-style thinking budget (max tokens for reasoning).
+    /// If unset, defaults to 50% of max_tokens or a provider-specific default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingEffort {
+    Low,
+    #[default]
+    Medium,
+    High,
 }
 
 /// One provider round-trip: token counts and optional context window utilization.
