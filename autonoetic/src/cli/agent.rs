@@ -1560,6 +1560,7 @@ pub fn handle_agent_import_skill(
             base_url: None,
             api_key_env: None,
             routing_preset: None,
+            thinking: None,
         })
     } else {
         let resolved = resolve_llm_config(&config, None, None, provider, model);
@@ -1574,6 +1575,7 @@ pub fn handle_agent_import_skill(
             base_url: resolved.base_url,
             api_key_env: resolved.api_key_env,
             routing_preset: resolved.routing_preset,
+            thinking: None,
         })
     };
 
@@ -2096,6 +2098,7 @@ Use tools when needed.
                 cost: None,
                 latency: None,
                 api_key_env: None,
+                thinking: None,
                 routing: None,
             },
         );

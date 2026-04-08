@@ -44,6 +44,7 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
             base_url: None,
             api_key_env: None,
             routing_preset: None,
+            thinking: None,
         }),
         limits: None,
         background: None,
@@ -142,6 +143,7 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
         base_url: None,
         api_key_env: None,
         routing_preset: None,
+        thinking: None,
     };
     let driver = FixedJsonDigestDriver;
     run_post_session_digest_with_driver(

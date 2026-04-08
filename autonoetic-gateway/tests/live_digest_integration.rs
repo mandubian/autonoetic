@@ -69,6 +69,7 @@ fn test_manifest() -> AgentManifest {
             base_url: None,
             api_key_env: None,
             routing_preset: None,
+            thinking: None,
         }),
         limits: None,
         background: None,
