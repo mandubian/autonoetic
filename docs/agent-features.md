@@ -315,20 +315,21 @@ Autonoetic provides two memory tiers:
 
 ### Tier 2 (Durable Memory)
 
-- Gateway-managed SQLite storage
-- Cross-session and cross-agent recall
-- ACL-controlled sharing
+- Gateway-managed SQLite storage (`gateway.db` / `memories`)
+- Cross-session and cross-agent recall with **visibility** (`private`, `session`, `global`) — sharing is `knowledge.store` + `visibility`, not a separate tool
+- Optional **retention** TTL on stored rows
 - Full provenance tracking
 
-### Memory Tools
+### Memory tools (gateway LLM / JSON-RPC)
 
 | Tool | Description |
 |------|-------------|
-| `memory.remember(id, scope, content)` | Store a durable fact |
-| `memory.recall(id)` | Retrieve a durable fact |
-| `memory.search(query)` | Search memory |
-| `memory.working.save(key, content)` | Save to working memory |
-| `memory.working.load(key)` | Load from working memory |
+| `knowledge.store` | Store or upsert a durable fact (`visibility`, `retention`, tags, …) |
+| `knowledge.recall` | Retrieve by id if visible |
+| `knowledge.search` | Search by scope and text |
+| `knowledge.search_by_tags` | AND search on tags |
+
+Tier 1 working files still map to SDK helpers / `content.*` for session files under `state/`.
 
 ---
 

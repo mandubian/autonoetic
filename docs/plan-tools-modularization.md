@@ -21,7 +21,7 @@ autonoetic-gateway/src/runtime/
     content.rs             # content.write, content.read (~260 lines)
     artifact.rs            # artifact.build, artifact.inspect, artifact.resolve_ref (~450 lines)
     execution.rs           # execution.search (~147 lines)
-    knowledge.rs           # knowledge.store/.recall/.search/.search_by_tags/.share, digest.query (~680 lines)
+    knowledge.rs           # knowledge.store/.recall/.search/.search_by_tags, digest.query (~680 lines)
     session.rs             # session.escalate (~189 lines)
     agent.rs               # agent.spawn, agent.exists, agent.discover (~450 lines)
     agent_revision.rs      # agent.revision.{create,list,inspect,promote,rollback,diff} (~1,030 lines)

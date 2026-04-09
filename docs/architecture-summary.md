@@ -119,9 +119,9 @@ Strip the gateway down to its essential primitives:
 | `skill.execute(name, params)` | Run a skill in sandbox with injected secrets |
 | `skill.store.publish(bundle)` | Store a skill (pending approval) |
 | `skill.store.describe(name)` | Load skill description into context |
-| `memory.remember(data)` | Write to tier2 with provenance |
-| `memory.recall(query)` | Search tier2 with ACL filtering |
-| `memory.share(id, target, scope)` | Update ACLs for cross-agent access |
+| `knowledge.store(id, content, …)` | Write to tier2 with provenance, visibility (`session` / `private` / `global`), retention |
+| `knowledge.recall(id)` | Read one row if visible to this agent/session |
+| `knowledge.search(…)` | Search tier2 with visibility + expiry filters |
 | `scheduler.interval(id, period)` | Register periodic wake signal |
 | `scheduler.signal(id, name, payload)` | Fire event to agent |
 | `secrets.request(name, for_tool)` | Request secret injection authorization |
@@ -130,7 +130,7 @@ Strip the gateway down to its essential primitives:
 | `task.board` | Shared task queue (post, claim, complete) |
 | `causal.chain.log(event)` | Immutable audit entry |
 
-That's it. Sixteen primitives. No role registry. No wake predicates. No implicit routing. No disclosure classification. No evolution orchestration.
+That's it. Fourteen primitives. No role registry. No wake predicates. No implicit routing. No disclosure classification. No evolution orchestration.
 
 ---
 
@@ -144,7 +144,7 @@ The autonoetic properties — self-evolving, memory-bearing, multi-agent — eme
 
 **Evolution**: Coder agent calls `skill.store.publish`. Evaluator calls `approval.queue.decide`. Gateway enforces the gate.
 
-**Memory**: Agent calls `memory.share`. Gateway checks ACLs and updates visibility.
+**Memory**: Agent calls `knowledge.store` with a visibility horizon; gateway enforces reads (session match, private, global) and TTL.
 
 The gateway doesn't understand delegation, reevaluation, or evolution. It just validates proposals and executes them. A completely different agent architecture — swarms, consensus-based delegation, ML-driven scheduling — could use the same gateway without changing a line of code.
 

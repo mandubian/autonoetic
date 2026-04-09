@@ -200,7 +200,7 @@ Capabilities fall into three categories:
 |------------|--------|-------------|
 | `SandboxFunctions` | `allowed: [string]` | MCP tool access by prefix (e.g., `web.*`, `sandbox.*`) |
 | `ReadAccess` | `scopes: [string]` | Read access to content, memory, knowledge (includes search) |
-| `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge (includes share) |
+| `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge (includes `knowledge.store`) |
 | `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts |
 | `CodeExecution` | `patterns: [string]` | Execute scripts/commands in sandbox |
 | `AgentSpawn` | `max_children: number` | Create child agent sessions |
@@ -214,7 +214,7 @@ Capabilities fall into three categories:
 | Capability | Gates These Tools |
 |------------|------------------|
 | `ReadAccess` | `content.read`, `artifact.inspect`, `memory.read`, `knowledge.recall`, `knowledge.search` |
-| `WriteAccess` | `content.write`, `artifact.build`, `memory.write`, `knowledge.store`, `knowledge.share` |
+| `WriteAccess` | `content.write`, `artifact.build`, `memory.write`, `knowledge.store` |
 
 **Privilege capabilities gate boundary-crossing operations:**
 
@@ -278,14 +278,15 @@ For reviewable/installable file bundles:
 
 ### Knowledge Tools (Durable Memory)
 
-For facts with provenance across sessions:
+For facts with provenance across sessions. Reads respect **visibility** and **expiry**; the gateway attaches the active **session id** to tool calls so `session`-visible rows are readable by every agent participating in that workflow.
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `knowledge.store` | `(id: string, content: string, scope: string) → void` | Store fact |
-| `knowledge.recall` | `(id: string) → fact` | Retrieve fact |
-| `knowledge.search` | `(scope: string, query: string) → [facts]` | Search facts |
-| `knowledge.share` | `(id: string, agents: [string]) → void` | Share with agents |
+| `knowledge.store` | `(id, content, scope?, tags?, confidence?, retention?, visibility?) → record` | Upsert a fact. **`visibility`**: `session` (default), `private`, or `global`. **`retention`**: `stable` (default), `ephemeral`, `1d`, `30d`. Widen access by calling again with the same `id` and a broader `visibility`. |
+| `knowledge.recall` | `(id: string) → fact` | Retrieve fact if visible to this agent/session |
+| `knowledge.search` | `(scope: string, query: string) → [facts]` | Search facts by scope and content |
+| `knowledge.search_by_tags` | `(scope, tags, text?, limit?) → [facts]` | AND match on JSON tags |
+| `digest.query` | `(session_id?, narrative_handle?) → narrative` | Read post-session narrative / digest content |
 
 ### Agent Tools
 
@@ -321,7 +322,7 @@ For facts with provenance across sessions:
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `promotion.record` | `(artifact_id: string, ...) → record` | Record a successful tactic as a promotion candidate |
+| `promotion.record` | `(artifact_id: string, ...) → record` | Record evaluator/auditor evidence for promotion. Canonical `content_digest` binding is gateway-owned and attached during revision create/promote. |
 | `promotion.query` | `(scope: string, ...) → [records]` | Query promotion records |
 
 ---
@@ -605,6 +606,16 @@ Planner: "Create a weather agent"
   → specialized_builder calls agent.revision.promote
   → Agent is active and discoverable
 ```
+
+**Promotion evidence binding (high-risk capabilities):**
+
+- For revisions declaring `NetworkAccess`, `CodeExecution`, or `AgentSpawn`, promotion requires both evaluator and auditor pass records.
+- Evidence is validated against the revision's canonical `content_digest` (not by timestamp ordering against `created_at`).
+- Evaluator/auditor can run either:
+  - **before** `create_from_intent` (artifact-first flow), or
+  - **after** `create_from_intent` (revision-first flow).
+- If evidence was recorded before revision creation, the gateway binds it to the revision digest during revision creation.
+- If a later revision for the same artifact resolves to a different `content_digest`, existing promotion evidence is cleared and evaluator/auditor must re-run.
 
 **Rollback:**
 ```bash

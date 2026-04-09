@@ -53,10 +53,11 @@ This document describes the capability system used by Autonoetic agents. Capabil
 ### Knowledge Tools
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
-| `knowledge.recall` | `ReadAccess` | Recall stored knowledge |
-| `knowledge.store` | `WriteAccess` | Store new knowledge |
+| `knowledge.recall` | `ReadAccess` | Recall stored knowledge (visibility + session + expiry enforced) |
+| `knowledge.store` | `WriteAccess` | Store or update knowledge; `visibility` (`session` default) and `retention` |
 | `knowledge.search` | `ReadAccess` | Search knowledge base |
-| `knowledge.share` | `WriteAccess` | Share knowledge |
+| `knowledge.search_by_tags` | `ReadAccess` | Tag-AND search in a scope |
+| `digest.query` | `ReadAccess` | Post-session narrative / digest |
 
 ### Sandbox Tools
 | Tool | Requires Capability | Notes |

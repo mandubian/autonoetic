@@ -327,18 +327,21 @@ Content uses root-session visibility. Default is `session` (collaborative within
 
 Gateway-managed facts with provenance:
 
-**Tools:** `knowledge.store`, `knowledge.recall`, `knowledge.search`, `knowledge.share`
+**Tools:** `knowledge.store`, `knowledge.recall`, `knowledge.search`, `knowledge.search_by_tags`, `digest.query`
+
+Sharing is done by **storing (or re-storing) with the right visibility** — there is no separate share tool. To expose a fact to collaborators in the same root workflow, use `knowledge.store` with default `visibility: "session"` (or call `knowledge.store` again with the same `id` to widen visibility).
 
 | Field | Description |
 |-------|-------------|
 | `memory_id` | Unique identifier |
-| `scope` | Namespace for ACL enforcement |
+| `scope` | Namespace for organizing and policy scoping |
 | `owner_agent_id` | Agent that owns this fact |
 | `writer_agent_id` | Agent that wrote this fact |
 | `source_ref` | Session/turn reference for traceability |
 | `content` | The actual fact |
 | `content_hash` | SHA-256 for integrity |
-| `visibility` | private, shared, or global |
+| `visibility` | `private` (owner/writer only), `session` (same `session_id` as stored on the record), or `global` (any agent) |
+| `expires_at` | Optional TTL from `retention` on store (`stable`, `ephemeral`, `1d`, `30d`) |
 
 ---
 
