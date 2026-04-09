@@ -107,6 +107,7 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
     store.record_promotion(
         artifact_id.to_string(),
         None,
+        None,
         PromotionRole::Evaluator,
         agent_id,
         true,

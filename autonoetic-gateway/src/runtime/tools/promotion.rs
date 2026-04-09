@@ -104,6 +104,10 @@ impl NativeTool for PromotionRecordTool {
             args.artifact_id.starts_with("art_"),
             "artifact_id must start with 'art_'"
         );
+        anyhow::ensure!(
+            args.content_digest.is_none(),
+            "content_digest is gateway-owned and must not be provided to promotion.record"
+        );
 
         let Some(gw_dir) = gateway_dir else {
             anyhow::bail!("Promotion store requires gateway directory to be configured");
@@ -114,6 +118,7 @@ impl NativeTool for PromotionRecordTool {
         let record = store.record_promotion(
             args.artifact_id.clone(),
             args.artifact_digest.clone(),
+            None,
             args.role.clone(),
             &manifest.agent.id,
             args.pass,
@@ -217,6 +222,7 @@ impl NativeTool for PromotionQueryTool {
         let response = match store.get_promotion(&args.artifact_id) {
             Some(record) => PromotionQueryResponse {
                 artifact_id: record.artifact_id,
+                content_digest: record.content_digest,
                 evaluator_pass: Some(record.evaluator_pass),
                 auditor_pass: Some(record.auditor_pass),
                 evaluator_id: record.evaluator_id,

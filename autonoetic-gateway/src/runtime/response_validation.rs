@@ -921,6 +921,7 @@ mod tests {
             .record_promotion(
                 "art_good".to_string(),
                 None,
+                None,
                 PromotionRole::Evaluator,
                 "evaluator.default",
                 true,
@@ -941,6 +942,7 @@ mod tests {
         store
             .record_promotion(
                 "art_bad".to_string(),
+                None,
                 None,
                 PromotionRole::Evaluator,
                 "evaluator.default",
@@ -969,6 +971,7 @@ mod tests {
         store
             .record_promotion(
                 "art_audit".to_string(),
+                None,
                 None,
                 PromotionRole::Auditor,
                 "auditor.default",

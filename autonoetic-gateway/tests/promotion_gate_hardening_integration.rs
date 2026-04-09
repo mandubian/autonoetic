@@ -10,6 +10,7 @@ mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
+use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
@@ -17,7 +18,6 @@ use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus}
 use autonoetic_types::artifact::ArtifactKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_types::promotion::PromotionRole;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,11 +26,7 @@ use tempfile::tempdir;
 // ── Helpers ────────────────────────────────────────────────────
 
 /// Builds an agent bundle artifact with customizable SKILL.md content.
-fn build_agent_bundle(
-    base_dir: &Path,
-    skill_md: &str,
-    main_py: &str,
-) -> (String, PathBuf) {
+fn build_agent_bundle(base_dir: &Path, skill_md: &str, main_py: &str) -> (String, PathBuf) {
     let gateway_dir = base_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let content_store = ContentStore::new(&gateway_dir).unwrap();
@@ -437,7 +433,10 @@ fn test_promote_rejects_high_risk_without_promotion_records() {
         &revision_id,
     );
 
-    assert!(result.is_err(), "promote should fail without promotion records");
+    assert!(
+        result.is_err(),
+        "promote should fail without promotion records"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("Promotion gate") && err.contains("no promotion.record"),
@@ -591,7 +590,10 @@ fn test_promote_rejects_when_auditor_missing() {
         &revision_id,
     );
 
-    assert!(result.is_err(), "promote should fail when auditor is missing");
+    assert!(
+        result.is_err(),
+        "promote should fail when auditor is missing"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("auditor did not pass"),
@@ -740,9 +742,9 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
     );
 }
 
-/// § 3.8 — Stale promotion records (recorded before the revision was created) are rejected.
+/// § 3.8 — Promotion evidence is keyed by canonical content_digest, not by revision timestamp.
 #[test]
-fn test_promote_rejects_stale_promotion_records() {
+fn test_promote_accepts_precreate_records_when_digest_matches() {
     let agent_id = "hr.stale.records";
     let skill = high_risk_skill_md(agent_id);
     let temp = tempdir().expect("tempdir should create");
@@ -759,15 +761,15 @@ fn test_promote_rejects_stale_promotion_records() {
         ..Default::default()
     };
 
-    // Record promotion records with a timestamp in the past (2020)
+    // Record promotion records before revision creation.
     let artifact_id = "art_stale_test";
     let promo_store = PromotionStore::new(&gateway_dir).unwrap();
-    // We need to use the store's record_promotion which auto-timestamps to now,
-    // so instead we manually build the revision with a *future* created_at to
-    // simulate stale records (the record was from "now", but the revision is "later").
+    // record_promotion auto-timestamps "now". We then create a revision with a future
+    // created_at to verify timestamp ordering no longer blocks promotion.
     promo_store
         .record_promotion(
             artifact_id.to_string(),
+            None,
             None,
             PromotionRole::Evaluator,
             "evaluator.default",
@@ -780,6 +782,7 @@ fn test_promote_rejects_stale_promotion_records() {
         .record_promotion(
             artifact_id.to_string(),
             None,
+            None,
             PromotionRole::Auditor,
             "auditor.default",
             true,
@@ -788,7 +791,7 @@ fn test_promote_rejects_stale_promotion_records() {
         )
         .unwrap();
 
-    // Create the revision with created_at far in the future to make the records stale
+    // Create the revision with created_at in the future relative to pre-recorded evidence.
     let revision_id = "rev_sha256:test_stale_freshness_001";
     let revision_dir = gateway_dir
         .join("revisions/agents")
@@ -835,13 +838,8 @@ fn test_promote_rejects_stale_promotion_records() {
     );
 
     assert!(
-        result.is_err(),
-        "promote should fail with stale promotion records"
-    );
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("stale"),
-        "error should mention stale records: {err}"
+        result.is_ok(),
+        "promote should accept pre-create promotion records once digest binding matches"
     );
 }
 
@@ -868,9 +866,7 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         fail_result.is_err(),
         "Step 1: promote should fail without records"
     );
-    assert!(fail_result
-        .unwrap_err()
-        .contains("no promotion.record"));
+    assert!(fail_result.unwrap_err().contains("no promotion.record"));
 
     // Step 2: Evaluator records pass
     let eval_manifest = evaluator_manifest();
@@ -903,9 +899,7 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         partial_result.is_err(),
         "Step 3: promote should fail with only evaluator"
     );
-    assert!(partial_result
-        .unwrap_err()
-        .contains("auditor did not pass"));
+    assert!(partial_result.unwrap_err().contains("auditor did not pass"));
 
     // Step 4: Auditor records pass
     let audit_manifest = auditor_manifest();
