@@ -9,6 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use crossterm::{
+    cursor::Show,
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -35,6 +36,20 @@ use autonoetic_types::background::UserInteraction;
 // ============================================================================
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// If `handle_chat` enables raw mode / alternate screen then exits early (missing env, I/O error,
+/// `run_loop` failure), the tty stays raw with echo off unless we restore it—keyboard input looks
+/// "invisible" until `reset`.
+struct ChatTerminalRestore;
+
+impl Drop for ChatTerminalRestore {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut out = std::io::stdout();
+        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(out, Show);
+    }
+}
 
 // ============================================================================
 // App State
@@ -1193,13 +1208,20 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     let envelope = terminal_channel_envelope(&channel_id, &sender_id, &session_id);
     let config = Arc::new(config);
 
-    // Setup terminal
+    let jsonrpc_auth_token = std::env::var("AUTONOETIC_SHARED_SECRET").map_err(|_| {
+        anyhow::anyhow!(
+            "Missing required environment variable AUTONOETIC_SHARED_SECRET for chat JSON-RPC ingress authentication"
+        )
+    })?;
+
+    // Setup terminal (only after prerequisites—early `?` must not leave raw mode / alt screen on)
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
+    let _terminal_restore = ChatTerminalRestore;
 
     let mut app = App::new(session_id.clone(), target_hint.to_string());
     app.inline_approvals_enabled = config.chat.inline_approvals;
@@ -1236,11 +1258,6 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
 
     // Map gateway request IDs to internal IDs
     let mut pending_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    let jsonrpc_auth_token = std::env::var("AUTONOETIC_SHARED_SECRET").map_err(|_| {
-        anyhow::anyhow!(
-            "Missing required environment variable AUTONOETIC_SHARED_SECRET for chat JSON-RPC ingress authentication"
-        )
-    })?;
 
     // Signal check interval
     let mut signal_interval = tokio::time::interval(Duration::from_secs(1));
@@ -1338,15 +1355,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         }
     }
 
-    // Cleanup
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
+    // `_terminal_restore` Drop: raw mode off, leave alt screen, mouse capture off, show cursor
     Ok(())
 }
 
