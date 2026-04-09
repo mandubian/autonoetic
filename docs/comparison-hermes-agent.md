@@ -1166,7 +1166,7 @@ The 38 registered native tools include specialized tools (eval, revision, promot
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolTier {
-    /// Always sent: content.write, content.read, sandbox.exec, knowledge.store/recall/search
+    /// Always sent: content.write, content.read, sandbox.exec, knowledge.store/recall/search/search_by_tags
     Core,
     /// Sent when agent is in a workflow or delegates: agent.spawn, workflow.wait, workflow.state
     Workflow,

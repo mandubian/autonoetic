@@ -341,7 +341,7 @@ Originally lower-priority follow-ups; **3.6–3.11 are implemented** (see Status
 |----|-------------|-------------|------------|--------|
 | 3.6 | `sandbox.exec` network policy | After execution in a network-isolated sandbox, scan stdout/stderr for typical network-failure fingerprints; if found, return `ok: false`, `error_type: network_isolated`, and structured `network_*` fields so a zero exit from swallowed exceptions cannot masquerade as success. Operator approval path unchanged for commands that statically require network. | High | ✅ Done |
 | 3.7 | Gateway SHA computation | Hybrid lock identity: keep compile-time source fingerprint (`build.rs` → `GATEWAY_BUILD_SHA256` + `GATEWAY_BUILD_TAG`) and add runtime-computed executable hash (`gateway.binary_sha256`) from the running gateway binary bytes. | Medium — build/runtime plumbing | ✅ Done |
-| 3.8 | Promotion record freshness | Reject `promote` if promotion records are older than the revision's `created_at` timestamp (stale evidence from a previous iteration). | Low | ✅ Done |
+| 3.8 | Promotion record digest binding | Bind promotion evidence to canonical revision `content_digest`. Allow evidence recorded before revision creation, but reject/reconcile mismatched digests to prevent evidence replay across different revision contents. | Low | ✅ Done |
 | 3.9 | `create_from_intent` null field cleanup | Omit null optional fields from serialized SKILL.md metadata instead of writing `llm_config: null`, `limits: null`, etc. Reduces noise. | Low | ✅ Done |
 | 3.10 | JSON-RPC ingress authentication | Require auth token on local JSON-RPC ingress (`event.ingest`, `agent.spawn`, and all methods). Gateway now validates request token against `AUTONOETIC_SHARED_SECRET` and rejects unauthenticated requests. | Medium | ✅ Done |
 | 3.11 | Strict env-override gating | Fail-closed handling for security-sensitive env overrides: `AUTONOETIC_BWRAP_*` and global `AUTONOETIC_LLM_*` overrides are ignored unless explicit allow flags are set (`AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES`, `AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES`). | Medium | ✅ Done |
@@ -391,7 +391,7 @@ For pure-transform agents (no I/O beyond `self.*`), the planner's existing matri
 | Gateway lock identity (3.7) | `build.rs`, `install_contract.rs`, `runtime_lock.rs` | Source fingerprint (`sha256`, `build_tag`) + runtime executable digest (`binary_sha256`) populated by gateway |
 | `force_complete` gate (A.1) | `workflow.rs` | Refuses `Succeeded` status without child session evidence |
 | `capability_from_shorthand` gate (A.2) | `install_contract.rs` | Refuses bare shorthand for high-risk caps (e.g. "NetworkAccess") |
-| Promotion record freshness (3.8) | `agent_revision.rs` | Rejects stale promotion records that predate the revision's `created_at` |
+| Promotion record digest binding (3.8) | `agent_revision.rs`, `promotion_store.rs`, `promotion.rs`, `autonoetic-types/promotion.rs` | Binds/validates promotion evidence against canonical `content_digest`; reconciles or clears mismatched evidence |
 | Null field cleanup (3.9) | `autonoetic-types/agent.rs` | `skip_serializing_if` on `Option` fields — SKILL.md no longer emits `llm_config: null` etc. |
 | JSON-RPC auth gate (3.10) | `server/jsonrpc.rs`, `server/mod.rs`, `router.rs`, CLI/test clients | JSON-RPC requests now include `auth_token`; gateway rejects missing/mismatched token with unauthorized JSON-RPC error |
 | Strict env override gates (3.11) | `sandbox.rs`, `llm/mod.rs`, docs | Security-sensitive env overrides are disabled by default and require explicit `AUTONOETIC_ALLOW_*_ENV_OVERRIDES=true` opt-in |
@@ -417,7 +417,7 @@ test_promote_rejects_when_auditor_missing                         ✅
 test_promote_allows_low_risk_without_records                      ✅
 test_promote_rejects_high_risk_with_unresolved_dependencies       ✅
 test_full_pipeline_with_builder_and_promotion_gates               ✅
-test_promote_rejects_stale_promotion_records                      ✅
+test_promote_accepts_precreate_records_when_digest_matches        ✅
 
 # Capability shorthand tests (agent_revision.rs — capability_lenient_deser_tests)
 string_shorthand_network_access_refused                           ✅

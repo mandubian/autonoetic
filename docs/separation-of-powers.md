@@ -184,34 +184,46 @@ The agent receives only a boolean approval. When the gateway executes the sandbo
 
 ---
 
-## Memory Sharing
+## Knowledge visibility (Tier 2)
 
-**Agent proposes** what to share and with whom.
+**Agent proposes** durable facts via `knowledge.store` — including **who may read** them — using **`visibility`**, not a separate share API.
 
-**Gateway enforces** ACLs, scope policies, and provenance tracking.
+**Gateway enforces** visibility, session binding, scope policy, retention/expiry, and provenance.
+
+### Visibility modes
+
+| Value | Meaning |
+|-------|---------|
+| `private` | Only the owning/writing agent can read. |
+| `session` (default on store) | Any agent whose tool execution shares the same **session id** (same root workflow) can read. |
+| `global` | Any agent in any session can read. |
 
 ### Agent side
 
 ```
-Agent thinks: "I want to share my research findings with the coder agent"
-Agent proposes: gateway.memory.share(
-  memory_id="research_findings",
-  target="coder.default",
-  scope="project_X"
+Agent thinks: "The planner should see this finding"
+Agent proposes: knowledge.store(
+  id="research_findings",
+  content="…",
+  scope="project_X",
+  visibility="session"   // default; omitted is fine when a session is active
 )
 ```
+
+To widen access later (e.g. private → session → global), the agent calls **`knowledge.store` again** with the same `id` and updated `visibility`.
 
 ### Gateway side
 
 ```
 Gateway decides:
-  - Does this agent own memory_id "research_findings"?              ✓
-  - Is memory scope "project_X" sharable? (check ACLs)             ✓
-  - Is "coder.default" allowed to receive this scope?              ✓
-  → EXECUTES: updates ACL, returns handle to coder agent
+  - Is this agent allowed to write Tier 2 / this scope?              ✓
+  - For visibility "session": is there a non-empty session context?   ✓
+  - On read: does the reader's session match the row (or private/global rules)? ✓
+  - Has the row expired per retention?                                ✓
+  → EXECUTES: upsert memory row, audit/provenance as today
 ```
 
-The agent decides *what* to share and *with whom*. The gateway enforces *whether it's allowed* and records provenance for every access.
+The agent chooses visibility **horizons**; the gateway decides **policy** and **readability** on every recall/search.
 
 ---
 
@@ -223,7 +235,7 @@ The agent doesn't call functions — it proposes **intent verbs** that the gatew
 |---|---|---|
 | `execute` | "Run skill X with these params" | Validates capability, spawns sandbox, injects secrets, returns result |
 | `spawn` | "Create agent Y with these instructions" | Validates policy, allocates resources, starts agent |
-| `share` | "Share memory Z with agent W" | Checks ACLs, updates visibility |
+| `store` (knowledge) | "Persist fact Z with visibility V" | Validates policy, binds session/global/private, upserts row |
 | `schedule` | "Wake me every N minutes" | Registers with scheduler, deduplicates |
 | `recall` | "Get memory matching query Q" | Searches tier2, applies ACL filters, returns summaries |
 | `request` | "I need approval for capability C" | Enqueues approval, returns status |

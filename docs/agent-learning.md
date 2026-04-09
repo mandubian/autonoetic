@@ -17,6 +17,10 @@ This enables patterns like:
 - "What lessons did I learn about HTTP clients?"
 - "What approaches worked for similar tasks?"
 
+### Storing learnings (`knowledge.store`)
+
+Use **`knowledge.store`** to persist facts and lessons. **`visibility`** defaults to **`session`**: every agent participating in the **same workflow session** can read the row—no separate share tool. Use **`private`** for writer-only facts, **`global`** for cross-session reference material, and **`retention`** (`stable`, `ephemeral`, `1d`, `30d`) for TTL. To widen who can read an existing id, call **`knowledge.store` again** with the same **`id`** and updated **`visibility`** (upsert).
+
 ---
 
 ## execution.search
@@ -92,7 +96,7 @@ Search tagged memories for lessons, decisions, and facts.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `scope` | string | Memory scope (agent, session, global) |
+| `scope` | string | Knowledge namespace (e.g. `digest.lesson`, `general`), not the same as visibility |
 | `tags` | [string] | Required tags (AND logic) |
 | `text` | string | Optional text search in content |
 | `limit` | number | Max results (default: 10) |
