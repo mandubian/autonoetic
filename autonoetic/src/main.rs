@@ -19,12 +19,14 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| std::path::PathBuf::from(s))
         .unwrap_or_else(|| dirs_or_default().join("config.yaml"));
 
-    // For gateway start, set up rolling file logs in {agents_dir}/.gateway/logs/
-    // For all other commands, just log to stderr.
+    // `tracing_subscriber::fmt` defaults to stdout; the chat TUI also uses stdout (ratatui), so
+    // INFO lines (e.g. gateway `approval` events) corrupt the alternate screen. Chat therefore
+    // logs only to a rolling file under {agents_dir}/.gateway/logs/. Other commands log to stderr.
     let is_gateway_start = matches!(
         &cli.command,
         Commands::Gateway(args) if matches!(args.command, cli::common::GatewayCommands::Start { .. })
     );
+    let is_chat = matches!(&cli.command, Commands::Chat(_));
 
     if is_gateway_start {
         let config = autonoetic_gateway::config::load_config(&config_path)?;
@@ -41,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 
         tracing_subscriber::registry()
             .with(env_filter)
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_writer(non_blocking)
@@ -52,13 +54,36 @@ async fn main() -> anyhow::Result<()> {
         // Keep the guard alive for the process lifetime
         // (it gets dropped when main returns, which flushes remaining logs)
         std::mem::forget(_guard);
+    } else if is_chat {
+        let config = autonoetic_gateway::config::load_config(&config_path)?;
+        let log_dir = config.agents_dir.join(".gateway").join("logs");
+        std::fs::create_dir_all(&log_dir)?;
+        let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .max_log_files(5)
+            .filename_prefix("chat-cli")
+            .filename_suffix("log")
+            .build(&log_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to create log appender: {}", e))?;
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false),
+            )
+            .init();
+
+        std::mem::forget(_guard);
     } else {
         let base_dir = dirs_or_default();
         std::fs::create_dir_all(&base_dir)?;
 
         tracing_subscriber::registry()
             .with(env_filter)
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .init();
     }
 
