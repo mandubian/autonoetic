@@ -13,6 +13,9 @@ use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowEventRecord};
 use chrono::Utc;
 use serde::{de, Deserialize, Serialize};
 use std::path::Path;
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 struct SpawnAgentArgs {
@@ -30,6 +33,67 @@ struct SpawnAgentArgs {
     /// Join group name. Tasks in the same join group are awaited together by the planner.
     #[serde(default)]
     join_group: Option<String>,
+}
+
+/// Keeps a workflow task's `updated_at` fresh while synchronous `agent.spawn` blocks.
+///
+/// Without this, long post-processing tails can look like a stale Running task and trigger
+/// false stuck-task auto-resolution.
+struct SyncTaskHeartbeat {
+    stop_tx: Option<mpsc::Sender<()>>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl SyncTaskHeartbeat {
+    fn start(
+        config: GatewayConfig,
+        gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        workflow_id: String,
+        task_id: String,
+        heartbeat_secs: u64,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel::<()>();
+        let join = thread::spawn(move || {
+            let tick = Duration::from_secs(heartbeat_secs.max(1));
+            loop {
+                match rx.recv_timeout(tick) {
+                    Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Err(e) = crate::scheduler::workflow_store::refresh_task_run_heartbeat(
+                            &config,
+                            gateway_store.as_deref(),
+                            &workflow_id,
+                            &task_id,
+                        ) {
+                            tracing::debug!(
+                                target: "workflow",
+                                workflow_id = %workflow_id,
+                                task_id = %task_id,
+                                error = %e,
+                                "sync spawn heartbeat update failed"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            stop_tx: Some(tx),
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for SyncTaskHeartbeat {
+    fn drop(&mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 pub struct AgentSpawnTool;
@@ -358,10 +422,19 @@ impl NativeTool for AgentSpawnTool {
                 .await
         };
 
-        let spawn_result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tokio::task::block_in_place(|| handle.block_on(spawn_future))
-        } else {
-            tokio::runtime::Runtime::new()?.block_on(spawn_future)
+        let spawn_result = {
+            let _heartbeat = SyncTaskHeartbeat::start(
+                gw_config.clone(),
+                gateway_store.clone(),
+                workflow_id.clone(),
+                task_id.clone(),
+                crate::scheduler::workflow_task_heartbeat_interval_secs(gw_config),
+            );
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                tokio::task::block_in_place(|| handle.block_on(spawn_future))
+            } else {
+                tokio::runtime::Runtime::new()?.block_on(spawn_future)
+            }
         };
 
         match spawn_result {
@@ -625,9 +698,11 @@ where
         serde_json::Value::Null => Ok(Vec::new()),
         serde_json::Value::Array(arr) => arr
             .into_iter()
-            .map(|v| v.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                de::Error::custom("array elements must be strings")
-            }))
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| de::Error::custom("array elements must be strings"))
+            })
             .collect(),
         serde_json::Value::String(s) => {
             let sanitized = s.replace("<|\"|>", "\"");

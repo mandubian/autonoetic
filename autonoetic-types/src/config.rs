@@ -496,6 +496,14 @@ pub struct GatewayConfig {
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
 
+    /// Heartbeat interval (seconds) for workflow tasks in `Running` state.
+    ///
+    /// Used by both scheduler-driven async runs and synchronous `agent.spawn` waits to
+    /// refresh `TaskRun.updated_at` and avoid false stuck-task resolution during long
+    /// post-processing tails. If unset, derives from `background_tick_secs` (clamped 1..=5).
+    #[serde(default = "default_workflow_task_heartbeat_secs_val")]
+    pub workflow_task_heartbeat_secs: Option<u64>,
+
     /// Maximum seconds a workflow task may remain in `Running` state without progress
     /// before it is automatically force-completed as `Succeeded`. The sweeper checks
     /// whether the child session has actually completed (via session manifest, digest,
@@ -816,6 +824,10 @@ fn default_approval_timeout_secs() -> u64 {
     600
 }
 
+fn default_workflow_task_heartbeat_secs_val() -> Option<u64> {
+    None
+}
+
 fn default_stuck_task_timeout_secs_val() -> Option<u64> {
     Some(600)
 }
@@ -915,6 +927,7 @@ impl Default for GatewayConfig {
             code_analysis: CodeAnalysisConfig::default(),
             session_budget: SessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
+            workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
             evidence_mode: default_evidence_mode(),
             digest_agent: DigestAgentConfig::default(),
