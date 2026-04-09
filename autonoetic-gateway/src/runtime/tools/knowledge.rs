@@ -7,12 +7,56 @@ use autonoetic_types::capability::Capability;
 use serde::Deserialize;
 use std::path::Path;
 
+/// Maps tool-facing retention labels to optional `expires_at` (RFC 3339 UTC).
+fn knowledge_retention_expires_at(retention: &str) -> anyhow::Result<Option<String>> {
+    let r = retention.trim().to_ascii_lowercase();
+    let now = chrono::Utc::now();
+    match r.as_str() {
+        "stable" | "" => Ok(None),
+        // Short-lived facts (e.g. spot prices); avoids cluttering long-term knowledge.
+        "ephemeral" => Ok(Some((now + chrono::Duration::hours(1)).to_rfc3339())),
+        "1d" => Ok(Some((now + chrono::Duration::days(1)).to_rfc3339())),
+        "30d" => Ok(Some((now + chrono::Duration::days(30)).to_rfc3339())),
+        other => anyhow::bail!(
+            "retention must be one of: stable, ephemeral, 1d, 30d (got {:?})",
+            other
+        ),
+    }
+}
+
+fn parse_knowledge_store_visibility(
+    raw: &str,
+    tool_session_id: Option<&str>,
+) -> anyhow::Result<autonoetic_types::memory::MemoryVisibility> {
+    use autonoetic_types::memory::MemoryVisibility;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "private" => Ok(MemoryVisibility::Private),
+        "global" => Ok(MemoryVisibility::Global),
+        "session" => {
+            let sid = tool_session_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "knowledge.store visibility \"session\" requires a non-empty tool session_id"
+                    )
+                })?;
+            Ok(MemoryVisibility::Session {
+                session_id: sid.to_string(),
+            })
+        }
+        other => anyhow::bail!(
+            "visibility must be private, session, or global (got {:?})",
+            other
+        ),
+    }
+}
+
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(KnowledgeStoreTool));
     registry.register(Box::new(KnowledgeRecallTool));
     registry.register(Box::new(KnowledgeSearchTool));
     registry.register(Box::new(KnowledgeSearchByTagsTool));
-    registry.register(Box::new(KnowledgeShareTool));
     registry.register(Box::new(DigestQueryTool));
 }
 
@@ -33,7 +77,7 @@ impl NativeTool for KnowledgeStoreTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Store a durable fact in the knowledge base. Knowledge persists across sessions and can be shared with other agents. Each fact includes provenance tracking (who wrote it, when, from what source).".to_string(),
+            description: "Store a durable fact in the knowledge base with provenance. Default visibility is session: any agent in the same session can read it; use private to restrict to yourself, or global for all agents. Use retention for TTL: stable (default), ephemeral (~1 hour), 1d, or 30d. To widen visibility later, call knowledge.store again with the same id.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -41,7 +85,9 @@ impl NativeTool for KnowledgeStoreTool {
                     "content": { "type": "string", "description": "The fact or information to store" },
                     "scope": { "type": "string", "description": "Category/namespace for organizing knowledge (e.g., 'api-keys', 'user-preferences')", "default": "general" },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags for searchability" },
-                    "confidence": { "type": "number", "description": "Confidence level (0.0 to 1.0)", "default": 1.0 }
+                    "confidence": { "type": "number", "description": "Confidence level (0.0 to 1.0)", "default": 1.0 },
+                    "retention": { "type": "string", "description": "Lifetime: stable (no expiry), ephemeral (~1 hour), 1d, 30d", "default": "stable" },
+                    "visibility": { "type": "string", "description": "Who can read: session (default, same session), private (writer/owner only), global (all agents)", "default": "session" }
                 },
                 "required": ["id", "content"],
                 "additionalProperties": false
@@ -72,12 +118,22 @@ impl NativeTool for KnowledgeStoreTool {
             tags: Vec<String>,
             #[serde(default = "default_confidence")]
             confidence: f64,
+            #[serde(default = "default_retention")]
+            retention: String,
+            #[serde(default = "default_visibility")]
+            visibility: String,
         }
         fn default_scope() -> String {
             "general".to_string()
         }
         fn default_confidence() -> f64 {
             1.0
+        }
+        fn default_retention() -> String {
+            "stable".to_string()
+        }
+        fn default_visibility() -> String {
+            "session".to_string()
         }
 
         let args: Args = serde_json::from_str(arguments_json)
@@ -100,7 +156,15 @@ impl NativeTool for KnowledgeStoreTool {
             None => format!("session:{}", sid),
         };
 
-        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
+        let mem = tier2_memory_for_native_tool(
+            gw_dir,
+            gateway_store.as_ref(),
+            &manifest.agent.id,
+            session_id,
+        )?;
+
+        let expires_at = knowledge_retention_expires_at(&args.retention)?;
+        let visibility = parse_knowledge_store_visibility(&args.visibility, session_id)?;
 
         let mut memory = autonoetic_types::memory::MemoryObject::new(
             args.id.clone(),
@@ -112,6 +176,8 @@ impl NativeTool for KnowledgeStoreTool {
         );
         memory.confidence = Some(args.confidence);
         memory.tags = args.tags.clone();
+        memory.expires_at = expires_at.clone();
+        memory.visibility = visibility;
         let memory = mem.save_memory(&memory)?;
 
         serde_json::to_string(&serde_json::json!({
@@ -120,6 +186,9 @@ impl NativeTool for KnowledgeStoreTool {
             "scope": memory.scope,
             "content_hash": memory.content_hash,
             "created_at": memory.created_at,
+            "expires_at": memory.expires_at,
+            "retention": args.retention,
+            "visibility": memory.visibility,
         }))
         .map_err(Into::into)
     }
@@ -161,7 +230,7 @@ impl NativeTool for KnowledgeRecallTool {
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -180,7 +249,12 @@ impl NativeTool for KnowledgeRecallTool {
             anyhow::bail!("Knowledge requires gateway directory to be configured");
         };
 
-        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
+        let mem = tier2_memory_for_native_tool(
+            gw_dir,
+            gateway_store.as_ref(),
+            &manifest.agent.id,
+            session_id,
+        )?;
         let memory = mem.recall(&args.id)?;
 
         serde_json::to_string(&serde_json::json!({
@@ -191,6 +265,7 @@ impl NativeTool for KnowledgeRecallTool {
             "writer": memory.writer_agent_id,
             "created_at": memory.created_at,
             "confidence": memory.confidence,
+            "expires_at": memory.expires_at,
         }))
         .map_err(Into::into)
     }
@@ -233,7 +308,7 @@ impl NativeTool for KnowledgeSearchTool {
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -253,7 +328,12 @@ impl NativeTool for KnowledgeSearchTool {
             anyhow::bail!("Knowledge requires gateway directory to be configured");
         };
 
-        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
+        let mem = tier2_memory_for_native_tool(
+            gw_dir,
+            gateway_store.as_ref(),
+            &manifest.agent.id,
+            session_id,
+        )?;
         let results = mem.search(&args.scope, args.query.as_deref())?;
 
         let items: Vec<serde_json::Value> = results
@@ -265,6 +345,7 @@ impl NativeTool for KnowledgeSearchTool {
                     "writer": m.writer_agent_id,
                     "created_at": m.created_at,
                     "confidence": m.confidence,
+                    "expires_at": m.expires_at,
                 })
             })
             .collect();
@@ -318,7 +399,7 @@ impl NativeTool for KnowledgeSearchByTagsTool {
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -351,7 +432,12 @@ impl NativeTool for KnowledgeSearchByTagsTool {
             anyhow::bail!("Knowledge requires gateway directory to be configured");
         };
 
-        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
+        let mem = tier2_memory_for_native_tool(
+            gw_dir,
+            gateway_store.as_ref(),
+            &manifest.agent.id,
+            session_id,
+        )?;
         let results = mem.search_by_tags(&args.scope, &args.tags, args.text.as_deref(), limit)?;
 
         let items: Vec<serde_json::Value> = results
@@ -365,6 +451,7 @@ impl NativeTool for KnowledgeSearchByTagsTool {
                     "writer": m.writer_agent_id,
                     "created_at": m.created_at,
                     "confidence": m.confidence,
+                    "expires_at": m.expires_at,
                 })
             })
             .collect();
@@ -375,88 +462,6 @@ impl NativeTool for KnowledgeSearchByTagsTool {
             "tags": args.tags,
             "results": items,
             "count": items.len(),
-        }))
-        .map_err(Into::into)
-    }
-}
-
-pub struct KnowledgeShareTool;
-
-impl NativeTool for KnowledgeShareTool {
-    fn name(&self) -> &'static str {
-        "knowledge.share"
-    }
-
-    fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest
-            .capabilities
-            .iter()
-            .any(|cap| matches!(cap, Capability::WriteAccess { .. }))
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name().to_string(),
-            description: "Share knowledge with specific agents. Requires ownership or write access to the knowledge. Once shared, the target agents can recall and search for this knowledge.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "The knowledge ID to share" },
-                    "with_agents": { "type": "array", "items": { "type": "string" }, "description": "List of agent IDs to share with" }
-                },
-                "required": ["id", "with_agents"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    fn execute(
-        &self,
-        manifest: &AgentManifest,
-        policy: &PolicyEngine,
-        _agent_dir: &Path,
-        gateway_dir: Option<&Path>,
-        arguments_json: &str,
-        _session_id: Option<&str>,
-        _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
-        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
-    ) -> anyhow::Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            id: String,
-            with_agents: Vec<String>,
-        }
-        let args: Args = serde_json::from_str(arguments_json)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
-
-        anyhow::ensure!(!args.id.trim().is_empty(), "id must not be empty");
-        anyhow::ensure!(
-            !args.with_agents.is_empty(),
-            "with_agents must not be empty"
-        );
-
-        for target in &args.with_agents {
-            anyhow::ensure!(
-                policy.can_share_memory(target),
-                "Cannot share knowledge with agent '{}': not in allowed_targets",
-                target
-            );
-        }
-
-        let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Knowledge requires gateway directory to be configured");
-        };
-
-        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
-        let memory = mem.share_with(&args.id, args.with_agents.clone())?;
-
-        serde_json::to_string(&serde_json::json!({
-            "ok": true,
-            "id": memory.memory_id,
-            "visibility": "shared",
-            "allowed_agents": memory.allowed_agents,
         }))
         .map_err(Into::into)
     }
@@ -560,7 +565,13 @@ impl NativeTool for DigestQueryTool {
             anyhow::bail!("digest.query requires gateway directory");
         };
 
-        let mem = tier2_memory_for_native_tool(gw_dir, gateway_store.as_ref(), &manifest.agent.id)?;
+        let reader_sid = args.session_id.as_deref().or(session_id);
+        let mem = tier2_memory_for_native_tool(
+            gw_dir,
+            gateway_store.as_ref(),
+            &manifest.agent.id,
+            reader_sid,
+        )?;
         let results = mem.search_by_tags(
             &args.scope,
             &args.tags,
@@ -579,6 +590,7 @@ impl NativeTool for DigestQueryTool {
                     "writer": m.writer_agent_id,
                     "created_at": m.created_at,
                     "confidence": m.confidence,
+                    "expires_at": m.expires_at,
                 })
             })
             .collect();

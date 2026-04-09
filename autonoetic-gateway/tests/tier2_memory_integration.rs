@@ -1,7 +1,6 @@
-//! Integration tests for Tier 2 memory provenance and secure sharing.
+//! Integration tests for Tier 2 memory provenance and session/global visibility.
 
-use autonoetic_types::memory::MemoryVisibility;
-// use std::path::PathBuf;
+use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
 use tempfile::tempdir;
 
 /// Helper to create a test gateway directory with memory database
@@ -11,24 +10,26 @@ fn create_test_gateway() -> tempfile::TempDir {
     dir
 }
 
-/// Test that a writer agent can store a fact in Tier 2 memory and a reader agent
-/// can recall it under allowed scope after sharing.
+/// Session-visible facts are readable by any agent in the same session_id.
 #[test]
-fn test_tier2_memory_cross_agent_sharing() {
+fn test_tier2_memory_cross_agent_session_visibility() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
-    // Writer agent stores a fact
-    let mem_writer =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "writer-agent")
-            .unwrap();
+    let mem_writer = autonoetic_gateway::runtime::memory::Tier2Memory::open_for_agent(
+        &gateway_dir,
+        None,
+        "writer-agent",
+        Some("demo-session"),
+    )
+    .unwrap();
 
     let memory = mem_writer
         .remember(
             "fact_123",
             "general",
             "writer-agent",
-            "session:test:turn:1",
+            "session:demo-session:turn:1",
             "Paris is the capital of France",
         )
         .unwrap();
@@ -37,26 +38,31 @@ fn test_tier2_memory_cross_agent_sharing() {
     assert_eq!(memory.content, "Paris is the capital of France");
     assert_eq!(memory.visibility, MemoryVisibility::Private);
 
-    // Reader agent cannot access private memory
-    let mem_reader =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "reader-agent")
-            .unwrap();
+    let mem_reader = autonoetic_gateway::runtime::memory::Tier2Memory::open_for_agent(
+        &gateway_dir,
+        None,
+        "reader-agent",
+        Some("demo-session"),
+    )
+    .unwrap();
 
     let err = mem_reader.recall("fact_123").unwrap_err();
     assert!(err.to_string().contains("not accessible"));
 
-    // Writer shares with reader
-    let shared = mem_writer
-        .share_with("fact_123", vec!["reader-agent".to_string()])
-        .unwrap();
-    assert_eq!(shared.visibility, MemoryVisibility::Shared);
-    assert!(shared.allowed_agents.contains(&"reader-agent".to_string()));
+    // Widen to session (same pattern as knowledge.store upsert)
+    let mut m = mem_writer.recall("fact_123").unwrap();
+    m.visibility = MemoryVisibility::Session {
+        session_id: "demo-session".into(),
+    };
+    mem_writer.save_memory(&m).unwrap();
 
-    // Reader can now access the shared memory
     let recalled = mem_reader.recall("fact_123").unwrap();
     assert_eq!(recalled.content, "Paris is the capital of France");
     assert_eq!(recalled.owner_agent_id, "writer-agent");
-    assert_eq!(recalled.visibility, MemoryVisibility::Shared);
+    match &recalled.visibility {
+        MemoryVisibility::Session { session_id } => assert_eq!(session_id, "demo-session"),
+        _ => panic!("expected session visibility"),
+    }
 }
 
 /// Test that unauthorized agents cannot read private memories.
@@ -65,7 +71,6 @@ fn test_tier2_memory_unauthorized_access_denied() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
-    // Agent A writes a private memory
     let mem_a =
         autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "agent-a").unwrap();
 
@@ -79,11 +84,9 @@ fn test_tier2_memory_unauthorized_access_denied() {
         )
         .unwrap();
 
-    // Agent A can read its own memory
     let recalled = mem_a.recall("private_fact").unwrap();
     assert_eq!(recalled.content, "This is agent A's secret");
 
-    // Agent B cannot read agent A's private memory
     let mem_b =
         autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "agent-b").unwrap();
 
@@ -92,7 +95,6 @@ fn test_tier2_memory_unauthorized_access_denied() {
     assert!(err.to_string().contains("agent-b"));
 }
 
-/// Test that all shared memories include proper provenance tracking.
 #[test]
 fn test_tier2_memory_provenance_tracking() {
     let ws = create_test_gateway();
@@ -101,7 +103,6 @@ fn test_tier2_memory_provenance_tracking() {
     let mem =
         autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "test-agent").unwrap();
 
-    // Write a memory with specific source reference
     let memory = mem
         .remember(
             "provenance_test",
@@ -112,7 +113,6 @@ fn test_tier2_memory_provenance_tracking() {
         )
         .unwrap();
 
-    // Verify all provenance fields are set
     assert_eq!(memory.memory_id, "provenance_test");
     assert_eq!(memory.scope, "test");
     assert_eq!(memory.owner_agent_id, "test-agent");
@@ -122,23 +122,13 @@ fn test_tier2_memory_provenance_tracking() {
     assert!(!memory.updated_at.is_empty());
     assert!(!memory.content_hash.is_empty());
 
-    // Verify content hash is correct SHA-256
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update("Test content for provenance".as_bytes());
     let expected_hash = hex::encode(hasher.finalize());
     assert_eq!(memory.content_hash, expected_hash);
-
-    // Share with another agent and verify provenance is preserved
-    let shared = mem
-        .share_with("provenance_test", vec!["other-agent".to_string()])
-        .unwrap();
-    assert_eq!(shared.writer_agent_id, "test-agent"); // Original writer preserved
-    assert_eq!(shared.source_ref, "session:abc123:turn:5"); // Source ref preserved
-    assert_eq!(shared.content_hash, expected_hash); // Content hash unchanged
 }
 
-/// Test memory search functionality with visibility filtering.
 #[test]
 fn test_tier2_memory_search_with_visibility() {
     let ws = create_test_gateway();
@@ -147,7 +137,6 @@ fn test_tier2_memory_search_with_visibility() {
     let mem = autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "search-agent")
         .unwrap();
 
-    // Write multiple memories in the same scope
     mem.remember(
         "fact_1",
         "weather",
@@ -175,21 +164,17 @@ fn test_tier2_memory_search_with_visibility() {
     )
     .unwrap();
 
-    // Search by scope
     let results = mem.search("weather", None).unwrap();
     assert_eq!(results.len(), 2);
 
-    // Search by scope and query
     let results = mem.search("weather", Some("Paris")).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].memory_id, "fact_1");
 
-    // Search non-existent scope
     let results = mem.search("nonexistent", None).unwrap();
     assert_eq!(results.len(), 0);
 }
 
-/// Test global memory visibility.
 #[test]
 fn test_tier2_memory_global_visibility() {
     let ws = create_test_gateway();
@@ -206,7 +191,6 @@ fn test_tier2_memory_global_visibility() {
         autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "reader-agent-2")
             .unwrap();
 
-    // Owner writes a memory
     mem_owner
         .remember(
             "global_fact",
@@ -217,16 +201,12 @@ fn test_tier2_memory_global_visibility() {
         )
         .unwrap();
 
-    // Initially private - readers cannot access
     assert!(mem_reader1.recall("global_fact").is_err());
     assert!(mem_reader2.recall("global_fact").is_err());
 
-    // Make global
     let global = mem_owner.make_global("global_fact").unwrap();
     assert_eq!(global.visibility, MemoryVisibility::Global);
-    assert!(global.allowed_agents.is_empty());
 
-    // Now all readers can access
     let r1 = mem_reader1.recall("global_fact").unwrap();
     assert_eq!(r1.content, "This is public knowledge");
 
@@ -234,43 +214,48 @@ fn test_tier2_memory_global_visibility() {
     assert_eq!(r2.content, "This is public knowledge");
 }
 
-/// Test that only owners can make memories global.
 #[test]
 fn test_tier2_memory_only_owner_can_make_global() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
-    let mem_owner =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "owner-agent").unwrap();
+    let mem_owner = autonoetic_gateway::runtime::memory::Tier2Memory::open_for_agent(
+        &gateway_dir,
+        None,
+        "owner-agent",
+        Some("wf-1"),
+    )
+    .unwrap();
 
-    let mem_non_owner =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "non-owner-agent")
-            .unwrap();
+    let mem_non_owner = autonoetic_gateway::runtime::memory::Tier2Memory::open_for_agent(
+        &gateway_dir,
+        None,
+        "non-owner-agent",
+        Some("wf-1"),
+    )
+    .unwrap();
 
-    // Owner writes a memory
-    mem_owner
-        .remember(
-            "owned_fact",
-            "test",
-            "owner-agent",
-            "test:owned",
-            "Owned fact",
-        )
-        .unwrap();
+    let mut obj = MemoryObject::new(
+        "owned_fact".into(),
+        "test".into(),
+        "owner-agent".into(),
+        "owner-agent".into(),
+        "test:owned".into(),
+        "Owned fact".into(),
+    );
+    obj.visibility = MemoryVisibility::Session {
+        session_id: "wf-1".into(),
+    };
+    mem_owner.save_memory(&obj).unwrap();
 
-    // Share with non-owner so they can access it (but still can't make global)
-    mem_owner
-        .share_with("owned_fact", vec!["non-owner-agent".to_string()])
-        .unwrap();
+    assert!(mem_non_owner.recall("owned_fact").is_ok());
 
-    // Non-owner can read it but cannot make it global
     let err = mem_non_owner.make_global("owned_fact").unwrap_err();
     assert!(err
         .to_string()
         .contains("Only the owner can make a memory global"));
 }
 
-/// Test memory listing by scope.
 #[test]
 fn test_tier2_memory_list_scopes() {
     let ws = create_test_gateway();
@@ -279,11 +264,9 @@ fn test_tier2_memory_list_scopes() {
     let mem =
         autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "scope-agent").unwrap();
 
-    // Initially no scopes
     let scopes = mem.list_scopes().unwrap();
     assert!(scopes.is_empty());
 
-    // Write memories in different scopes
     mem.remember("f1", "scope_a", "scope-agent", "t:1", "content1")
         .unwrap();
     mem.remember("f2", "scope_b", "scope-agent", "t:2", "content2")
@@ -291,17 +274,14 @@ fn test_tier2_memory_list_scopes() {
     mem.remember("f3", "scope_a", "scope-agent", "t:3", "content3")
         .unwrap();
 
-    // List scopes
     let scopes = mem.list_scopes().unwrap();
     assert_eq!(scopes.len(), 2);
     assert!(scopes.contains(&"scope_a".to_string()));
     assert!(scopes.contains(&"scope_b".to_string()));
 }
 
-/// Tag search respects visibility: shared memory with tags is visible to readers.
 #[test]
-fn test_tier2_memory_search_by_tags_cross_agent_shared() {
-    use autonoetic_types::memory::MemoryObject;
+fn test_tier2_memory_search_by_tags_cross_agent_session() {
     use std::sync::Arc;
 
     let ws = create_test_gateway();
@@ -313,6 +293,7 @@ fn test_tier2_memory_search_by_tags_cross_agent_shared() {
     let writer = autonoetic_gateway::runtime::memory::Tier2Memory::with_store(
         Arc::clone(&store),
         "writer-agent",
+        None,
     );
 
     let mut memory = MemoryObject::new(
@@ -324,14 +305,16 @@ fn test_tier2_memory_search_by_tags_cross_agent_shared() {
         "Never block the runtime thread.".into(),
     );
     memory.tags = vec!["type:error_lesson".to_string(), "domain:async".to_string()];
+    memory.visibility = MemoryVisibility::Session {
+        session_id: "root-sess".into(),
+    };
     writer.save_memory(&memory).unwrap();
 
-    writer
-        .share_with("tagged_fact", vec!["reader-agent".to_string()])
-        .unwrap();
-
-    let reader =
-        autonoetic_gateway::runtime::memory::Tier2Memory::with_store(store, "reader-agent");
+    let reader = autonoetic_gateway::runtime::memory::Tier2Memory::with_store(
+        store,
+        "reader-agent",
+        Some("root-sess".into()),
+    );
     let found = reader
         .search_by_tags(
             "lessons",

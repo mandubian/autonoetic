@@ -46,20 +46,26 @@ pub struct Tier2Memory {
     store: Arc<GatewayStore>,
     /// The agent ID that is currently using this memory instance.
     current_agent_id: String,
+    /// Session id of the reading context (for [`autonoetic_types::memory::MemoryVisibility::Session`]).
+    reader_session_id: Option<String>,
 }
 
 impl Tier2Memory {
-    pub fn with_store(store: Arc<GatewayStore>, agent_id: impl Into<String>) -> Self {
+    pub fn with_store(
+        store: Arc<GatewayStore>,
+        agent_id: impl Into<String>,
+        reader_session_id: Option<String>,
+    ) -> Self {
         Self {
             store,
             current_agent_id: agent_id.into(),
+            reader_session_id,
         }
     }
 
     /// Opens the gateway store for `gateway_dir` and constructs Tier 2 memory for `agent_id`.
     pub fn new(gateway_dir: &Path, agent_id: &str) -> anyhow::Result<Self> {
-        let store = Arc::new(GatewayStore::open(gateway_dir)?);
-        Ok(Self::with_store(store, agent_id.to_string()))
+        Self::open_for_agent(gateway_dir, None, agent_id, None)
     }
 
     /// Uses an existing store when the runtime already holds `Arc<GatewayStore>`; otherwise opens `gateway_dir`.
@@ -67,10 +73,15 @@ impl Tier2Memory {
         gateway_dir: &Path,
         gateway_store: Option<Arc<GatewayStore>>,
         agent_id: &str,
+        reader_session_id: Option<&str>,
     ) -> anyhow::Result<Self> {
+        let rs = reader_session_id.map(|s| s.to_string());
         match gateway_store {
-            Some(gs) => Ok(Self::with_store(gs, agent_id.to_string())),
-            None => Self::new(gateway_dir, agent_id),
+            Some(gs) => Ok(Self::with_store(gs, agent_id.to_string(), rs)),
+            None => {
+                let store = Arc::new(GatewayStore::open(gateway_dir)?);
+                Ok(Self::with_store(store, agent_id.to_string(), rs))
+            }
         }
     }
 
@@ -116,8 +127,13 @@ impl Tier2Memory {
             anyhow::bail!("Memory '{}' not found", memory_id);
         };
 
+        let now = chrono::Utc::now().to_rfc3339();
+        if memory.is_expired_at(&now) {
+            anyhow::bail!("Memory '{}' has expired", memory_id);
+        }
+
         // Enforce visibility check
-        if !memory.is_readable_by(&self.current_agent_id) {
+        if !memory.is_readable_by(&self.current_agent_id, self.reader_session_id.as_deref()) {
             anyhow::bail!(
                 "Memory '{}' is not accessible to agent '{}'",
                 memory_id,
@@ -174,6 +190,7 @@ impl Tier2Memory {
         let ids = self.store.memory_list_ids_matching_tags(
             scope,
             &self.current_agent_id,
+            self.reader_session_id.as_deref(),
             tags,
             text,
             limit as i64,
@@ -192,29 +209,6 @@ impl Tier2Memory {
         }
 
         Ok(results)
-    }
-
-    /// Shares a memory with specific agents.
-    ///
-    /// Requires the current agent to be the owner or writer.
-    pub fn share_with(
-        &self,
-        memory_id: &str,
-        target_agents: Vec<String>,
-    ) -> anyhow::Result<MemoryObject> {
-        let memory = self.recall(memory_id)?;
-
-        // Only owner or writer can share
-        if memory.owner_agent_id != self.current_agent_id
-            && memory.writer_agent_id != self.current_agent_id
-        {
-            anyhow::bail!("Only the owner or writer can share a memory");
-        }
-
-        let updated = memory.share_with(target_agents);
-        self.save_memory(&updated)?;
-
-        Ok(updated)
     }
 
     /// Makes a memory globally visible.
@@ -236,7 +230,7 @@ impl Tier2Memory {
     /// Only returns scopes where the agent has at least one visible memory.
     pub fn list_scopes(&self) -> anyhow::Result<Vec<String>> {
         self.store
-            .memory_list_scopes_for_agent(&self.current_agent_id)
+            .memory_list_scopes_for_agent(&self.current_agent_id, self.reader_session_id.as_deref())
     }
 
     /// Lists all memories owned by the current agent.
@@ -342,29 +336,32 @@ mod tests {
     }
 
     #[test]
-    fn test_tier2_memory_sharing() {
+    fn test_tier2_memory_session_visibility_same_session() {
         let temp = tempfile::tempdir().unwrap();
-        let mem1 = Tier2Memory::new(temp.path(), "agent-1").unwrap();
-        let mem2 = Tier2Memory::new(temp.path(), "agent-2").unwrap();
+        let mem1 =
+            Tier2Memory::open_for_agent(temp.path(), None, "agent-1", Some("sess-a")).unwrap();
+        let mem2 =
+            Tier2Memory::open_for_agent(temp.path(), None, "agent-2", Some("sess-a")).unwrap();
 
-        mem1.remember(
-            "fact_1",
-            "general",
-            "agent-1",
-            "session:test:turn:1",
-            "Shared fact",
-        )
-        .unwrap();
+        let mut m = MemoryObject::new(
+            "fact_1".into(),
+            "general".into(),
+            "agent-1".into(),
+            "agent-1".into(),
+            "session:sess-a:turn:1".into(),
+            "Session-shared fact".into(),
+        );
+        m.visibility = MemoryVisibility::Session {
+            session_id: "sess-a".into(),
+        };
+        mem1.save_memory(&m).unwrap();
 
-        // Share with agent-2
-        mem1.share_with("fact_1", vec!["agent-2".to_string()])
-            .unwrap();
-
-        // Now agent-2 can read it
         let recalled = mem2.recall("fact_1").unwrap();
-        assert_eq!(recalled.content, "Shared fact");
-        assert_eq!(recalled.visibility, MemoryVisibility::Shared);
-        assert!(recalled.allowed_agents.contains(&"agent-2".to_string()));
+        assert_eq!(recalled.content, "Session-shared fact");
+        match &recalled.visibility {
+            MemoryVisibility::Session { session_id } => assert_eq!(session_id, "sess-a"),
+            _ => panic!("expected session visibility"),
+        }
     }
 
     #[test]
@@ -436,7 +433,7 @@ mod tests {
     fn test_tier2_memory_search_by_tags_requires_nonempty_tags() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-        let mem = Tier2Memory::with_store(store, "agent-1");
+        let mem = Tier2Memory::with_store(store, "agent-1", None);
         assert!(mem
             .search_by_tags("general", &[], None, 10)
             .unwrap_err()
@@ -448,7 +445,7 @@ mod tests {
     fn test_tier2_memory_search_by_tags_limit_bounds() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-        let mem = Tier2Memory::with_store(store, "agent-1");
+        let mem = Tier2Memory::with_store(store, "agent-1", None);
         let err0 = mem
             .search_by_tags("general", &["t".to_string()], None, 0)
             .unwrap_err()
@@ -473,7 +470,7 @@ mod tests {
     fn test_tier2_memory_search_by_tags_filters() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-        let mem = Tier2Memory::with_store(Arc::clone(&store), "agent-1");
+        let mem = Tier2Memory::with_store(Arc::clone(&store), "agent-1", None);
 
         let mut m1 = MemoryObject::new(
             "m1".into(),
@@ -528,10 +525,10 @@ mod tests {
     fn test_tier2_memory_search_by_tags_limit_applies_after_visibility() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-        let writer = Tier2Memory::with_store(Arc::clone(&store), "writer-agent");
-        let reader = Tier2Memory::with_store(store, "reader-agent");
+        let writer = Tier2Memory::with_store(Arc::clone(&store), "writer-agent", None);
+        let reader = Tier2Memory::with_store(store, "reader-agent", Some("root-s".into()));
 
-        // Write a shared match first (older row).
+        // Write a session-visible match first (older row).
         let mut shared = MemoryObject::new(
             "shared-hit".into(),
             "lessons".into(),
@@ -541,10 +538,10 @@ mod tests {
             "Readable memory".into(),
         );
         shared.tags = vec!["topic:rust".to_string()];
+        shared.visibility = MemoryVisibility::Session {
+            session_id: "root-s".into(),
+        };
         writer.save_memory(&shared).unwrap();
-        writer
-            .share_with("shared-hit", vec!["reader-agent".to_string()])
-            .unwrap();
 
         // Then write many newer private matches that reader cannot access.
         for i in 0..150 {
@@ -589,5 +586,34 @@ mod tests {
         assert!(!memory.created_at.is_empty());
         assert!(!memory.updated_at.is_empty());
         assert!(!memory.content_hash.is_empty());
+    }
+
+    #[test]
+    fn test_tier2_memory_expired_not_recallable_and_excluded_from_search() {
+        let temp = tempfile::tempdir().unwrap();
+        let mem = Tier2Memory::new(temp.path(), "agent-1").unwrap();
+
+        let mut m = MemoryObject::new(
+            "ephemeral_fact".into(),
+            "weather".into(),
+            "agent-1".into(),
+            "agent-1".into(),
+            "session:t:turn:1".into(),
+            "Old forecast".into(),
+        );
+        m.expires_at = Some("2000-01-01T00:00:00+00:00".to_string());
+        mem.save_memory(&m).unwrap();
+
+        let err = mem.recall("ephemeral_fact").unwrap_err();
+        assert!(
+            err.to_string().contains("has expired"),
+            "unexpected error: {err}"
+        );
+
+        let results = mem.search("weather", None).unwrap();
+        assert!(
+            results.iter().all(|r| r.memory_id != "ephemeral_fact"),
+            "expired memory must not appear in search"
+        );
     }
 }

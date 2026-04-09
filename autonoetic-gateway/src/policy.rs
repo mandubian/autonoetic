@@ -583,21 +583,6 @@ impl PolicyEngine {
         })
     }
 
-    /// Check if the agent is allowed to share memory with specific targets.
-    /// Sharing is included in WriteAccess capability.
-    pub fn can_share_memory(&self, _target_agent: &str) -> bool {
-        // Sharing requires WriteAccess capability - check write scopes
-        for cap in &self.manifest.capabilities {
-            if let Capability::WriteAccess { scopes } = cap {
-                // If has broad write access, can share
-                if scopes.iter().any(|s| s == "*") {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// Check if the agent is allowed to search memory.
     /// Searching is included in ReadAccess capability.
     pub fn can_search_memory(&self, scope: &str) -> bool {
