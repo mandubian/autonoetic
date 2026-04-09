@@ -161,49 +161,42 @@ pub fn collect_named_content(gateway_dir: &std::path::Path, session_id: &str) ->
         .collect()
 }
 
-/// Collects knowledge that was shared with a specific agent during execution.
-///
-/// Queries the Tier 2 memory for records that:
-/// 1. Have visibility "shared" or "global"
-/// 2. Include the target_agent_id in allowed_agents
-/// 3. Were created or updated recently (within this session)
+/// Collects knowledge the writer produced that the target agent may read (visibility + session + expiry).
 pub fn collect_shared_knowledge(
     gateway_dir: &std::path::Path,
     target_agent_id: &str,
     writer_agent_id: &str,
+    reader_session_id: Option<&str>,
 ) -> Vec<SharedKnowledge> {
-    let Ok(mem) = crate::runtime::memory::Tier2Memory::new(gateway_dir, writer_agent_id) else {
+    let Ok(store) = crate::scheduler::gateway_store::GatewayStore::open(gateway_dir) else {
         return Vec::new();
     };
-
-    // Get all memories owned by the writer agent
-    let Ok(all_memories) = mem.list_memories() else {
+    let Ok(ids) = store.memory_list_ids_owned_by(writer_agent_id) else {
         return Vec::new();
     };
+    let now = chrono::Utc::now().to_rfc3339();
 
-    // Filter to those shared with the target agent
-    all_memories
-        .into_iter()
-        .filter(|m| match &m.visibility {
-            autonoetic_types::memory::MemoryVisibility::Global => true,
-            autonoetic_types::memory::MemoryVisibility::Shared => {
-                m.allowed_agents.contains(&target_agent_id.to_string())
+    ids.into_iter()
+        .filter_map(|id| {
+            let m = store.memory_get_unrestricted(&id).ok()??;
+            if m.is_expired_at(&now) {
+                return None;
             }
-            autonoetic_types::memory::MemoryVisibility::Private => false,
-        })
-        .map(|m| {
+            if !m.is_readable_by(target_agent_id, reader_session_id) {
+                return None;
+            }
             let preview = if m.content.len() > 100 {
                 format!("{}...", &m.content[..100])
             } else {
                 m.content.clone()
             };
-            SharedKnowledge {
+            Some(SharedKnowledge {
                 id: m.memory_id,
                 scope: m.scope,
                 content_preview: preview,
                 writer_agent_id: m.writer_agent_id,
                 created_at: m.created_at,
-            }
+            })
         })
         .collect()
 }
@@ -820,6 +813,7 @@ impl GatewayExecutionService {
                     &self.config.agents_dir.join(".gateway"),
                     source_agent_id.unwrap_or(agent_id),
                     agent_id,
+                    Some(session_id),
                 );
 
                 return Ok(SpawnResult {
@@ -1452,6 +1446,7 @@ impl GatewayExecutionService {
                 &self.config.agents_dir.join(".gateway"),
                 source_agent_id.unwrap_or(agent_id),
                 agent_id,
+                Some(&resolved_session_id),
             );
 
             Ok(SpawnResult {
@@ -2142,6 +2137,7 @@ impl GatewayExecutionService {
             &self.config.agents_dir.join(".gateway"),
             source_agent_id.unwrap_or(agent_id),
             agent_id,
+            Some(&resolved_session_id),
         );
 
         // Delete consumed checkpoint only after successful resume execution.

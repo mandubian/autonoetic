@@ -124,7 +124,9 @@ impl ScheduledAction {
     pub fn is_executable_by_scheduler(&self) -> bool {
         !matches!(
             self,
-            Self::AgentInstall { .. } | Self::CredentialPrompt { .. } | Self::SessionContinue { .. }
+            Self::AgentInstall { .. }
+                | Self::CredentialPrompt { .. }
+                | Self::SessionContinue { .. }
         )
     }
 

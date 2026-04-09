@@ -2,6 +2,7 @@
 
 use autonoetic_gateway::execution::extract_artifacts_from_content_store;
 use autonoetic_gateway::runtime::content_store::ContentStore;
+use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
 use tempfile::tempdir;
 
 /// Helper to create a test gateway directory
@@ -249,35 +250,37 @@ fn test_knowledge_search_by_scope() {
 }
 
 #[test]
-fn test_knowledge_share_between_agents() {
+fn test_knowledge_session_visibility_between_agents() {
     let (_dir, gateway_dir) = create_test_gateway();
 
-    // Agent A stores a fact
-    let mem_a =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "agent-a").unwrap();
+    let mem_a = autonoetic_gateway::runtime::memory::Tier2Memory::open_for_agent(
+        &gateway_dir,
+        None,
+        "agent-a",
+        Some("team-sess"),
+    )
+    .unwrap();
 
-    mem_a
-        .remember(
-            "shared_fact",
-            "team",
-            "agent-a",
-            "s1",
-            "Project deadline is March 20",
-        )
-        .unwrap();
+    let mut m = MemoryObject::new(
+        "shared_fact".into(),
+        "team".into(),
+        "agent-a".into(),
+        "agent-a".into(),
+        "s1".into(),
+        "Project deadline is March 20".into(),
+    );
+    m.visibility = MemoryVisibility::Session {
+        session_id: "team-sess".into(),
+    };
+    mem_a.save_memory(&m).unwrap();
 
-    // Agent B cannot access it yet
-    let mem_b =
-        autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "agent-b").unwrap();
-    assert!(mem_b.recall("shared_fact").is_err());
-
-    // Agent A shares with Agent B
-    let shared = mem_a
-        .share_with("shared_fact", vec!["agent-b".to_string()])
-        .unwrap();
-    assert!(shared.allowed_agents.contains(&"agent-b".to_string()));
-
-    // Agent B can now access it
+    let mem_b = autonoetic_gateway::runtime::memory::Tier2Memory::open_for_agent(
+        &gateway_dir,
+        None,
+        "agent-b",
+        Some("team-sess"),
+    )
+    .unwrap();
     let recalled = mem_b.recall("shared_fact").unwrap();
     assert_eq!(recalled.content, "Project deadline is March 20");
 }
@@ -384,26 +387,24 @@ fn test_collect_shared_knowledge_finds_shared_records() {
         autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "writer-agent")
             .unwrap();
 
-    writer_mem
-        .remember(
-            "shared_fact",
-            "team-knowledge",
-            "writer-agent",
-            "session:test",
-            "Deployment requires approval",
-        )
-        .unwrap();
+    let mut mem = MemoryObject::new(
+        "shared_fact".into(),
+        "team-knowledge".into(),
+        "writer-agent".into(),
+        "writer-agent".into(),
+        "session:spawn-sess".into(),
+        "Deployment requires approval".into(),
+    );
+    mem.visibility = MemoryVisibility::Session {
+        session_id: "spawn-sess".into(),
+    };
+    writer_mem.save_memory(&mem).unwrap();
 
-    // Share with reader agent
-    writer_mem
-        .share_with("shared_fact", vec!["reader-agent".to_string()])
-        .unwrap();
-
-    // Collect shared knowledge for the reader
     let shared = autonoetic_gateway::execution::collect_shared_knowledge(
         &gateway_dir,
         "reader-agent",
         "writer-agent",
+        Some("spawn-sess"),
     );
 
     assert_eq!(shared.len(), 1);
@@ -436,6 +437,7 @@ fn test_collect_shared_knowledge_excludes_private() {
         &gateway_dir,
         "reader-agent",
         "writer-agent",
+        Some("spawn-sess"),
     );
 
     assert_eq!(shared.len(), 0);
@@ -468,6 +470,7 @@ fn test_collect_shared_knowledge_includes_global() {
         &gateway_dir,
         "any-reader-agent",
         "writer-agent",
+        None,
     );
 
     assert_eq!(shared.len(), 1);

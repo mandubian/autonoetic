@@ -1,15 +1,62 @@
 //! Tier 2 Memory Object — Gateway-substrate persistent memory with provenance tracking.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Visibility scope for a memory entry.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MemoryVisibility {
-    #[default]
+    /// Only the owning / writing agent can read.
     Private,
-    Shared,
+    /// Any agent participating in the same root `session_id` can read.
+    Session { session_id: String },
+    /// Any agent in any session can read.
     Global,
+}
+
+impl Default for MemoryVisibility {
+    fn default() -> Self {
+        MemoryVisibility::Private
+    }
+}
+
+impl<'de> Deserialize<'de> for MemoryVisibility {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = serde_json::Value::deserialize(deserializer)?;
+        decode_visibility_json(v).map_err(serde::de::Error::custom)
+    }
+}
+
+fn decode_visibility_json(v: serde_json::Value) -> Result<MemoryVisibility, String> {
+    match v {
+        serde_json::Value::String(s) => match s.as_str() {
+            "private" => Ok(MemoryVisibility::Private),
+            "global" => Ok(MemoryVisibility::Global),
+            // Legacy Tier-2 "shared" — treat as global (no allowed_agents list anymore).
+            "shared" => Ok(MemoryVisibility::Global),
+            // Unknown legacy values: safest default is private.
+            _ => Ok(MemoryVisibility::Private),
+        },
+        serde_json::Value::Object(_) => {
+            #[derive(Deserialize)]
+            #[serde(tag = "kind", rename_all = "snake_case")]
+            enum Tagged {
+                Private,
+                Session { session_id: String },
+                Global,
+            }
+            match serde_json::from_value::<Tagged>(v) {
+                Ok(Tagged::Private) => Ok(MemoryVisibility::Private),
+                Ok(Tagged::Session { session_id }) => Ok(MemoryVisibility::Session { session_id }),
+                Ok(Tagged::Global) => Ok(MemoryVisibility::Global),
+                Err(_) => Ok(MemoryVisibility::Private),
+            }
+        }
+        _ => Ok(MemoryVisibility::Private),
+    }
 }
 
 /// Source type for a memory record (tracks origin of the fact).
@@ -86,9 +133,9 @@ pub struct MemoryObject {
     #[serde(default)]
     pub visibility: MemoryVisibility,
 
-    /// Optional list of agent IDs explicitly granted access (when visibility=Shared).
-    #[serde(default)]
-    pub allowed_agents: Vec<String>,
+    /// When this memory stops being readable (`None` = never expires). RFC 3339 UTC from the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 impl MemoryObject {
@@ -123,8 +170,16 @@ impl MemoryObject {
             tags: Vec::new(),
             lineage: Vec::new(),
             visibility: MemoryVisibility::default(),
-            allowed_agents: Vec::new(),
+            expires_at: None,
         }
+    }
+
+    /// Whether this memory is past its expiry (compared to `now` as RFC 3339).
+    pub fn is_expired_at(&self, now_rfc3339: &str) -> bool {
+        let Some(exp) = self.expires_at.as_deref() else {
+            return false;
+        };
+        exp <= now_rfc3339
     }
 
     /// Updates the content and returns a new MemoryObject with updated timestamps and hash.
@@ -141,32 +196,29 @@ impl MemoryObject {
         self
     }
 
-    /// Shares this memory with specific agents.
-    pub fn share_with(mut self, agents: Vec<String>) -> Self {
-        self.visibility = MemoryVisibility::Shared;
-        self.allowed_agents = agents;
-        self.updated_at = chrono::Utc::now().to_rfc3339();
-        self
-    }
-
     /// Makes this memory globally visible.
     pub fn make_global(mut self) -> Self {
         self.visibility = MemoryVisibility::Global;
-        self.allowed_agents = Vec::new();
         self.updated_at = chrono::Utc::now().to_rfc3339();
+
         self
     }
 
     /// Checks if an agent is allowed to read this memory.
-    pub fn is_readable_by(&self, agent_id: &str) -> bool {
-        match self.visibility {
+    ///
+    /// For [`MemoryVisibility::Session`], `reader_session_id` must match the memory's
+    /// `session_id` unless the agent is the reader or writer.
+    pub fn is_readable_by(&self, agent_id: &str, reader_session_id: Option<&str>) -> bool {
+        match &self.visibility {
             MemoryVisibility::Private => {
                 self.owner_agent_id == agent_id || self.writer_agent_id == agent_id
             }
-            MemoryVisibility::Shared => {
+            MemoryVisibility::Session { session_id } => {
                 self.owner_agent_id == agent_id
                     || self.writer_agent_id == agent_id
-                    || self.allowed_agents.contains(&agent_id.to_string())
+                    || reader_session_id
+                        .map(|s| s == session_id.as_str())
+                        .unwrap_or(false)
             }
             MemoryVisibility::Global => true,
         }

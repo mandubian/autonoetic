@@ -384,11 +384,13 @@ pub(crate) fn tier2_memory_for_native_tool(
     gateway_dir: &Path,
     gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     agent_id: &str,
+    reader_session_id: Option<&str>,
 ) -> anyhow::Result<crate::runtime::memory::Tier2Memory> {
     crate::runtime::memory::Tier2Memory::open_for_agent(
         gateway_dir,
         gateway_store.cloned(),
         agent_id,
+        reader_session_id,
     )
 }
 
@@ -460,7 +462,9 @@ fn balance_braces(s: &str) -> String {
     result
 }
 
-fn parse_lenient_json_object<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, serde_json::Error> {
+fn parse_lenient_json_object<T: serde::de::DeserializeOwned>(
+    s: &str,
+) -> Result<T, serde_json::Error> {
     let sanitized = sanitize_llm_token_artifacts(s);
     match serde_json::from_str::<T>(&sanitized) {
         Ok(v) => Ok(v),
@@ -791,10 +795,9 @@ mod tests {
 
     #[test]
     fn test_sandbox_exec_args_dependencies_null() {
-        let args: SandboxExecArgs = serde_json::from_str(
-            r#"{"command": "python3 /tmp/test.py", "dependencies": null}"#,
-        )
-        .unwrap();
+        let args: SandboxExecArgs =
+            serde_json::from_str(r#"{"command": "python3 /tmp/test.py", "dependencies": null}"#)
+                .unwrap();
         assert!(args.dependencies.is_none());
     }
 

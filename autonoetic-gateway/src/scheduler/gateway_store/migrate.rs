@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 1;
+const SCHEMA_VERSION_LATEST: i64 = 3;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -32,12 +32,9 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
-    if current_version >= SCHEMA_VERSION_LATEST {
-        return Ok(());
-    }
-
-    let tx = conn.transaction()?;
-    tx.execute_batch(
+    if current_version < 1 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS approvals (
             request_id TEXT PRIMARY KEY,
             agent_id TEXT NOT NULL,
@@ -272,7 +269,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
             tags TEXT,
             lineage TEXT,
             visibility TEXT NOT NULL DEFAULT 'private',
-            allowed_agents TEXT
+            expires_at TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
@@ -411,7 +408,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
         ",
     )?;
 
-    tx.execute_batch(
+        tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS short_id_index (
             short_id TEXT PRIMARY KEY,
             revision_id TEXT NOT NULL,
@@ -475,16 +472,72 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
         ",
     )?;
 
-    tx.execute(
+        tx.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+            params![1_i64, "initial_schema", chrono::Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+    }
+
+    apply_memories_expires_at_v2(conn)?;
+    apply_memories_drop_allowed_agents_v3(conn)?;
+
+    Ok(())
+}
+
+fn apply_memories_expires_at_v2(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 2 {
+        return Ok(());
+    }
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'expires_at'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute("ALTER TABLE memories ADD COLUMN expires_at TEXT", [])?;
+    }
+    conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![
-            SCHEMA_VERSION_LATEST,
-            "initial_schema",
+            2_i64,
+            "memories_expires_at",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;
-    tx.commit()?;
+    Ok(())
+}
 
+fn apply_memories_drop_allowed_agents_v3(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 3 {
+        return Ok(());
+    }
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'allowed_agents'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count > 0 {
+        conn.execute("ALTER TABLE memories DROP COLUMN allowed_agents", [])?;
+    }
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            3_i64,
+            "memories_drop_allowed_agents",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 

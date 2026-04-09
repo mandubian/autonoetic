@@ -287,7 +287,9 @@ impl<'a> ToolCallProcessor<'a> {
                     )),
                 ));
             }
-            self.mcp_runtime.call_tool(tool_name, &sanitized_args).await?
+            self.mcp_runtime
+                .call_tool(tool_name, &sanitized_args)
+                .await?
         } else if self.registry.has_tool(tool_name) {
             self.registry.execute(
                 tool_name,
@@ -355,7 +357,6 @@ impl<'a> ToolCallProcessor<'a> {
             "memory.remember" => "remember",
             "memory.recall" => "recall",
             "memory.search" => "search",
-            "memory.share" => "share",
             _ => return,
         };
 
@@ -970,6 +971,10 @@ mod tests {
             None,
             None,
             None,
+        )
+        .with_session_context(
+            Some("repair-loop-session".to_string()),
+            Some("turn-000001".to_string()),
         );
 
         // First turn: malformed tool call - empty id triggers validation error
