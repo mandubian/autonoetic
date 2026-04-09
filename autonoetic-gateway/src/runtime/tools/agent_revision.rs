@@ -446,6 +446,7 @@ fn create_revision_from_files(
                 "ok": true,
                 "status": "already_exists",
                 "revision_id": revision_id,
+                "content_digest": existing_rev.content_digest,
                 "agent_id": common.agent_id,
                 "artifact_id": common.artifact_id,
                 "agent_ref": format!("{}@{}", common.agent_id, revision_id),
@@ -495,12 +496,20 @@ fn create_revision_from_files(
     };
 
     let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
+
+    // If promotion evidence was recorded before revision creation, bind or rotate that evidence
+    // to this canonical revision digest now.
+    let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+    let _ = promo_store
+        .reconcile_content_digest_for_revision(&common.artifact_id, &rev.content_digest)?;
+
     let short_ref = format!("{}@rev_{}", common.agent_id, short_id);
 
     let mut response_obj = serde_json::json!({
         "ok": true,
         "status": "created",
         "revision_id": revision_id,
+        "content_digest": rev.content_digest,
         "agent_ref": format!("{}@{}", common.agent_id, revision_id),
         "short_ref": short_ref,
         "agent_id": common.agent_id,
@@ -1335,8 +1344,8 @@ impl NativeTool for AgentRevisionPromoteTool {
         // Deserialize capabilities from the frontmatter using the same lenient pipeline
         // used by create_from_intent, so shorthand strings and field normalization are handled.
         let has_high_risk = {
-            let frontmatter_json = serde_json::to_value(&skill_frontmatter)
-                .unwrap_or(serde_json::Value::Null);
+            let frontmatter_json =
+                serde_json::to_value(&skill_frontmatter).unwrap_or(serde_json::Value::Null);
             let caps_json = frontmatter_json
                 .get("capabilities")
                 .and_then(|v| v.as_array())
@@ -1374,6 +1383,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             })?;
 
             let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+            let _ = promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
             let record = promo_store.get_promotion(artifact_id).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Promotion gate: no promotion.record found for artifact '{}'. \
@@ -1382,6 +1392,16 @@ impl NativeTool for AgentRevisionPromoteTool {
                     artifact_id
                 )
             })?;
+
+            let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
+            anyhow::ensure!(
+                record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
+                "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
+                 but revision requires '{}'. Re-run evaluator.default and auditor.default for this revision content.",
+                artifact_id,
+                record_content_digest,
+                rev.content_digest
+            );
 
             anyhow::ensure!(
                 record.evaluator_pass,
@@ -1395,33 +1415,6 @@ impl NativeTool for AgentRevisionPromoteTool {
                  Fix the audit findings and re-run auditor.default.",
                 artifact_id
             );
-
-            // Freshness check: promotion records must not predate the revision.
-            // Stale records from a previous iteration are not valid evidence.
-            if let Ok(rev_created) = chrono::DateTime::parse_from_rfc3339(&rev.created_at) {
-                if let Some(eval_ts) = &record.evaluator_timestamp {
-                    if let Ok(eval_time) = chrono::DateTime::parse_from_rfc3339(eval_ts) {
-                        anyhow::ensure!(
-                            eval_time >= rev_created,
-                            "Promotion gate: evaluator record for artifact '{}' is stale \
-                             (recorded {} but revision created {}). \
-                             Re-run evaluator.default against the current revision.",
-                            artifact_id, eval_ts, rev.created_at
-                        );
-                    }
-                }
-                if let Some(audit_ts) = &record.auditor_timestamp {
-                    if let Ok(audit_time) = chrono::DateTime::parse_from_rfc3339(audit_ts) {
-                        anyhow::ensure!(
-                            audit_time >= rev_created,
-                            "Promotion gate: auditor record for artifact '{}' is stale \
-                             (recorded {} but revision created {}). \
-                             Re-run auditor.default against the current revision.",
-                            artifact_id, audit_ts, rev.created_at
-                        );
-                    }
-                }
-            }
 
             let has_unresolved = rev
                 .metadata_json

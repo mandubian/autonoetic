@@ -38,6 +38,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
     let _ = promotion_store.record_promotion(
         bundle.artifact_id.clone(),
         Some(bundle.digest.clone()),
+        None,
         PromotionRole::Evaluator,
         "evaluator.default",
         true,
@@ -47,6 +48,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
     let _ = promotion_store.record_promotion(
         bundle.artifact_id.clone(),
         Some(bundle.digest.clone()),
+        None,
         PromotionRole::Auditor,
         "auditor.default",
         true,
@@ -432,4 +434,53 @@ async fn test_promotion_auditor_fail_rejected() {
 
     let agent_dir = agents_dir.join("exfil.agent");
     assert!(!agent_dir.exists(), "exfil agent should NOT be installed");
+}
+
+#[test]
+fn test_promotion_record_rejects_agent_supplied_content_digest() {
+    let temp = tempdir().expect("tempdir should create");
+    let agents_dir = temp.path().join("agents");
+    let builder_dir = agents_dir.join("specialized_builder.default");
+    std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+
+    let config = GatewayConfig {
+        agents_dir,
+        ..Default::default()
+    };
+
+    let eval_manifest = evaluator_manifest();
+    let eval_policy = PolicyEngine::new(eval_manifest.clone());
+    let registry = default_registry();
+    let args = serde_json::json!({
+        "artifact_id": "art_digest_owner_test",
+        "content_digest": "sha256:fake-from-agent",
+        "role": "evaluator",
+        "pass": true,
+        "findings": [],
+        "summary": "should be rejected"
+    });
+
+    let err = registry
+        .execute(
+            "promotion.record",
+            &eval_manifest,
+            &eval_policy,
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).expect("serialize args"),
+            Some("session-content-digest-owner"),
+            None,
+            Some(&config),
+            None,
+            None,
+        )
+        .expect_err("agent-supplied content_digest must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("content_digest is gateway-owned and must not be provided"),
+        "unexpected error: {err}"
+    );
 }

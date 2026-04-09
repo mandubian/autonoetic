@@ -16,6 +16,17 @@ pub struct PromotionStore {
 }
 
 impl PromotionStore {
+    fn clear_role_evidence(record: &mut PromotionRecord) {
+        record.evaluator_id = None;
+        record.evaluator_pass = false;
+        record.evaluator_findings.clear();
+        record.evaluator_timestamp = None;
+        record.auditor_id = None;
+        record.auditor_pass = false;
+        record.auditor_findings.clear();
+        record.auditor_timestamp = None;
+    }
+
     /// Creates a new PromotionStore, loading existing records from disk.
     pub fn new(gateway_dir: &Path) -> anyhow::Result<Self> {
         let store_path = gateway_dir.join("promotion_registry.json");
@@ -46,6 +57,7 @@ impl PromotionStore {
         &self,
         artifact_id: String,
         artifact_digest: Option<String>,
+        content_digest: Option<String>,
         role: PromotionRole,
         agent_id: &str,
         pass: bool,
@@ -61,6 +73,7 @@ impl PromotionStore {
             .or_insert_with(|| PromotionRecord {
                 artifact_id: artifact_id.clone(),
                 artifact_digest: artifact_digest.clone(),
+                content_digest: content_digest.clone(),
                 evaluator_id: None,
                 evaluator_pass: false,
                 evaluator_findings: vec![],
@@ -71,6 +84,22 @@ impl PromotionStore {
                 auditor_timestamp: None,
                 promotion_gate_version: "2.0".to_string(),
             });
+
+        if let Some(artifact_digest) = artifact_digest {
+            record.artifact_digest = Some(artifact_digest);
+        }
+
+        if let Some(content_digest) = content_digest {
+            let current = record.content_digest.as_deref();
+            if current != Some(content_digest.as_str()) {
+                // New digest means new review subject; drop previous role evidence to avoid
+                // mixing evaluator/auditor outcomes across different revision contents.
+                if current.is_some() {
+                    Self::clear_role_evidence(record);
+                }
+                record.content_digest = Some(content_digest);
+            }
+        }
 
         match role {
             PromotionRole::Evaluator => {
@@ -118,6 +147,53 @@ impl PromotionStore {
         self.save()?;
 
         Ok(record)
+    }
+
+    /// If a promotion record exists but has no bound content digest yet, attach one.
+    pub fn bind_content_digest_if_unset(
+        &self,
+        artifact_id: &str,
+        content_digest: &str,
+    ) -> anyhow::Result<bool> {
+        let mut records = self.records.lock().unwrap();
+        let Some(record) = records.get_mut(artifact_id) else {
+            return Ok(false);
+        };
+        if record.content_digest.is_none() {
+            record.content_digest = Some(content_digest.to_string());
+            drop(records);
+            self.save()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Reconciles an existing promotion record with a canonical revision content digest.
+    ///
+    /// When the digest changes for the same artifact ID, prior evaluator/auditor evidence is
+    /// cleared to prevent accidental evidence replay across revision variants.
+    pub fn reconcile_content_digest_for_revision(
+        &self,
+        artifact_id: &str,
+        content_digest: &str,
+    ) -> anyhow::Result<bool> {
+        let mut records = self.records.lock().unwrap();
+        let Some(record) = records.get_mut(artifact_id) else {
+            return Ok(false);
+        };
+
+        let current = record.content_digest.as_deref();
+        if current == Some(content_digest) {
+            return Ok(false);
+        }
+
+        if current.is_some() {
+            Self::clear_role_evidence(record);
+        }
+        record.content_digest = Some(content_digest.to_string());
+        drop(records);
+        self.save()?;
+        Ok(true)
     }
 
     /// Gets a promotion record by artifact ID.
@@ -192,6 +268,7 @@ mod tests {
             .record_promotion(
                 artifact_id.clone(),
                 Some("sha256:abc123".to_string()),
+                Some("sha256:content-abc123".to_string()),
                 PromotionRole::Evaluator,
                 "evaluator.default",
                 true,
@@ -201,6 +278,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(record.artifact_id, artifact_id);
+        assert_eq!(
+            record.content_digest.as_deref(),
+            Some("sha256:content-abc123")
+        );
         assert_eq!(record.evaluator_id, Some("evaluator.default".to_string()));
         assert!(record.evaluator_pass);
         assert_eq!(record.evaluator_findings.len(), 1);
@@ -221,6 +302,7 @@ mod tests {
             .record_promotion(
                 artifact_id.clone(),
                 None,
+                None,
                 PromotionRole::Evaluator,
                 "evaluator.default",
                 true,
@@ -232,6 +314,7 @@ mod tests {
         store
             .record_promotion(
                 artifact_id.clone(),
+                None,
                 None,
                 PromotionRole::Auditor,
                 "auditor.default",
@@ -256,6 +339,7 @@ mod tests {
         store
             .record_promotion(
                 artifact_id.clone(),
+                None,
                 None,
                 PromotionRole::Evaluator,
                 "evaluator.default",
@@ -284,6 +368,7 @@ mod tests {
             .record_promotion(
                 artifact_id.clone(),
                 None,
+                None,
                 PromotionRole::Evaluator,
                 "evaluator.default",
                 false,
@@ -295,6 +380,7 @@ mod tests {
         store
             .record_promotion(
                 artifact_id.clone(),
+                None,
                 None,
                 PromotionRole::Evaluator,
                 "evaluator.default",
@@ -321,6 +407,7 @@ mod tests {
                 .record_promotion(
                     artifact_id.clone(),
                     None,
+                    None,
                     PromotionRole::Evaluator,
                     "evaluator.default",
                     true,
@@ -346,5 +433,93 @@ mod tests {
         assert!(store.get_promotion("art_nonexistent").is_none());
         assert!(!store.has_passed("art_nonexistent", &PromotionRole::Evaluator));
         assert!(!store.is_fully_promoted("art_nonexistent"));
+    }
+
+    #[test]
+    fn test_bind_content_digest_if_unset_preserves_evidence() {
+        let temp = tempdir().unwrap();
+        let store = PromotionStore::new(temp.path()).unwrap();
+        let artifact_id = "art_bind".to_string();
+
+        store
+            .record_promotion(
+                artifact_id.clone(),
+                None,
+                None,
+                PromotionRole::Evaluator,
+                "evaluator.default",
+                true,
+                vec![],
+                None,
+            )
+            .unwrap();
+        store
+            .record_promotion(
+                artifact_id.clone(),
+                None,
+                None,
+                PromotionRole::Auditor,
+                "auditor.default",
+                true,
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        let changed = store
+            .bind_content_digest_if_unset(&artifact_id, "sha256:bind")
+            .unwrap();
+        assert!(changed);
+
+        let record = store.get_promotion(&artifact_id).unwrap();
+        assert_eq!(record.content_digest.as_deref(), Some("sha256:bind"));
+        assert!(record.evaluator_pass);
+        assert!(record.auditor_pass);
+    }
+
+    #[test]
+    fn test_reconcile_content_digest_resets_mismatched_evidence() {
+        let temp = tempdir().unwrap();
+        let store = PromotionStore::new(temp.path()).unwrap();
+        let artifact_id = "art_reconcile".to_string();
+
+        store
+            .record_promotion(
+                artifact_id.clone(),
+                None,
+                Some("sha256:old".to_string()),
+                PromotionRole::Evaluator,
+                "evaluator.default",
+                true,
+                vec![],
+                None,
+            )
+            .unwrap();
+        store
+            .record_promotion(
+                artifact_id.clone(),
+                None,
+                Some("sha256:old".to_string()),
+                PromotionRole::Auditor,
+                "auditor.default",
+                true,
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        let changed = store
+            .reconcile_content_digest_for_revision(&artifact_id, "sha256:new")
+            .unwrap();
+        assert!(changed);
+
+        let record = store.get_promotion(&artifact_id).unwrap();
+        assert_eq!(record.content_digest.as_deref(), Some("sha256:new"));
+        assert!(!record.evaluator_pass);
+        assert!(!record.auditor_pass);
+        assert!(record.evaluator_id.is_none());
+        assert!(record.auditor_id.is_none());
+        assert!(record.evaluator_findings.is_empty());
+        assert!(record.auditor_findings.is_empty());
     }
 }

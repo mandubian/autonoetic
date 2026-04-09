@@ -47,6 +47,9 @@ pub struct PromotionRecord {
     /// SHA256 digest of the artifact at review time (for integrity verification).
     #[serde(default)]
     pub artifact_digest: Option<String>,
+    /// Canonical revision content digest this promotion evidence is bound to.
+    #[serde(default)]
+    pub content_digest: Option<String>,
     /// Agent who validated (evaluator.default).
     #[serde(default)]
     pub evaluator_id: Option<String>,
@@ -83,6 +86,10 @@ pub struct PromotionRecordArgs {
     /// SHA256 digest of the artifact (optional, for integrity verification).
     #[serde(default)]
     pub artifact_digest: Option<String>,
+    /// Reserved gateway-owned binding for canonical revision content.
+    /// External callers must omit this field; `promotion.record` rejects it.
+    #[serde(default)]
+    pub content_digest: Option<String>,
     /// Role recording this promotion (evaluator or auditor).
     pub role: PromotionRole,
     /// Whether this role's validation passed.
@@ -113,6 +120,8 @@ pub struct PromotionQueryArgs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionQueryResponse {
     pub artifact_id: String,
+    #[serde(default)]
+    pub content_digest: Option<String>,
     pub evaluator_pass: Option<bool>,
     pub auditor_pass: Option<bool>,
     pub evaluator_id: Option<String>,
