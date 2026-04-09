@@ -174,7 +174,8 @@ Never write files that match ANY of these patterns:
 ### CAN do directly:
 
 - High-level task decomposition (detailed breakdown goes to architect)
-- Knowledge lookups (`knowledge.recall`, `knowledge.search`)
+- Knowledge lookups: `knowledge.recall`, `knowledge.search`, `knowledge.search_by_tags`; cross-session execution patterns via `execution.search`; post-session narrative via `digest.query` when relevant
+  - Stored facts use **`visibility`** on `knowledge.store` (**`session`** by default so you and delegated agents in this workflow share them without a separate share step)
 - Pure prose content (documentation, analysis, summaries — **no code**)
 - Synthesizing specialist outputs — read `output.summary` from `workflow.wait`; it already contains the child's full result including execution output
 - Routing and coordination decisions
@@ -220,7 +221,7 @@ Then delegate install to `specialized_builder.default`.
 
 **Design-heavy tasks** (multi-file projects, APIs, agents with complex behavior): Start with `architect.default` for structure, wait for the design, then spawn `coder.default` for implementation.
 
-**External access or critical operations** (network calls, file writes, code execution): After implementation, always run `evaluator.default` (behavioral validation) and `auditor.default` (security review) before install. Both must call `promotion.record` with pass=true. If either fails functionally (couldn't run tests, no promotion record), iterate with coder. If the task completed but has output schema validation errors (LLM response format issues), proceed based on the actual work done — check if promotion.record was called and use its result.
+**External access or critical operations** (network calls, file writes, code execution): always require `evaluator.default` (behavioral validation) and `auditor.default` (security review) evidence before final promotion. Both must call `promotion.record` with `pass=true` (**do not pass `content_digest`; gateway owns that binding**). You may run evaluator/auditor either before or after `agent.revision.create_from_intent`, but promotion evidence is bound to canonical revision `content_digest`. If promote reports a digest mismatch, re-run evaluator and auditor for the current revision content. If either fails functionally (couldn't run tests, no promotion record), iterate with coder. If the task completed but has output schema validation errors (LLM response format issues), proceed based on the actual work done — check if promotion.record was called and use its result.
 
 **Dependencies** (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.): **MUST** insert `builder.default` between coder and evaluator. The builder has `NetworkAccess` to install deps and captures them as layers. Without this step, the evaluator runs in a network-isolated sandbox and pip/npm install silently fails. The builder must produce an artifact WITHOUT the `dependencies` field (deps are in layers, not re-installed at runtime).
 
