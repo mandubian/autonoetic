@@ -616,7 +616,8 @@ impl AgentExecutor {
         let Some(store) = self.gateway_store.as_ref() else {
             anyhow::bail!("GatewayStore is required for max-session-turn approval gating");
         };
-        let root_session_id = crate::runtime::content_store::root_session_id(session_id).to_string();
+        let root_session_id =
+            crate::runtime::content_store::root_session_id(session_id).to_string();
         let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let action = ScheduledAction::SessionContinue {
             session_id: session_id.to_string(),
@@ -635,14 +636,9 @@ impl AgentExecutor {
         });
         let task_id = self.task_id.clone().or_else(|| {
             workflow_id.as_ref().and_then(|wf_id| {
-                crate::scheduler::resolve_task_id_for_session(
-                    cfg,
-                    None,
-                    wf_id,
-                    session_id,
-                )
-                .ok()
-                .flatten()
+                crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, session_id)
+                    .ok()
+                    .flatten()
             })
         });
         let request = ApprovalRequest {
@@ -840,7 +836,8 @@ impl AgentExecutor {
         if let Some(cfg) = &self.config {
             if cfg.max_session_turns > 0 {
                 let approved_windows = self.approved_session_continue_count(&session_id)?;
-                let allowed_turns = (cfg.max_session_turns as u64).saturating_mul(1 + approved_windows);
+                let allowed_turns =
+                    (cfg.max_session_turns as u64).saturating_mul(1 + approved_windows);
                 // turn_counter already includes the in-flight turn (next_turn_id incremented above),
                 // so we trip only when attempting turn N+1 for an allowance of N.
                 if self.turn_counter > allowed_turns {
@@ -3232,13 +3229,13 @@ mod tests {
             .expect("approval should exist");
         assert!(matches!(
             approval.action,
-            ScheduledAction::SessionContinue {
-                max_turns: 1,
-                ..
-            }
+            ScheduledAction::SessionContinue { max_turns: 1, .. }
         ));
         assert!(
-            approval.reason.unwrap_or_default().contains("max_session_turns=1"),
+            approval
+                .reason
+                .unwrap_or_default()
+                .contains("max_session_turns=1"),
             "reason should mention configured max_session_turns"
         );
     }

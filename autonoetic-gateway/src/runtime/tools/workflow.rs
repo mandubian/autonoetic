@@ -3,9 +3,9 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::{AgentManifest, ToolTier};
-use serde::de::{self, DeserializeOwned};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use serde::de::{self, DeserializeOwned};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -290,9 +290,11 @@ where
     match value {
         serde_json::Value::Array(arr) => arr
             .into_iter()
-            .map(|v| v.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                de::Error::custom("task_ids array elements must be strings")
-            }))
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| de::Error::custom("task_ids array elements must be strings"))
+            })
             .collect(),
         serde_json::Value::String(s) => {
             let sanitized = s.replace("<|\"|>", "\"");
@@ -1096,8 +1098,8 @@ impl NativeTool for WorkflowForceCompleteTool {
                                                 "session manifest shows completed status"
                                                     .to_string(),
                                             );
-    }
-}
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1156,7 +1158,9 @@ impl NativeTool for WorkflowForceCompleteTool {
 
         // Gate: refuse "succeeded" without real evidence of child completion.
         // "failed" is allowed — a stuck task is a legitimate failure diagnosis.
-        if target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded && !session_completed {
+        if target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded
+            && !session_completed
+        {
             return Ok(serde_json::json!({
                 "ok": false,
                 "task_id": task_id,
@@ -1236,7 +1240,8 @@ mod force_complete_gate_tests {
         let session_completed = false;
         let target_status = autonoetic_types::workflow::TaskRunStatus::Succeeded;
         assert_eq!(
-            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded && !session_completed,
+            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded
+                && !session_completed,
             true,
             "Gate should trigger: succeeded + no evidence"
         );
@@ -1248,7 +1253,8 @@ mod force_complete_gate_tests {
         let target_status = autonoetic_types::workflow::TaskRunStatus::Failed;
         // Gate condition: succeeded && !session_completed — should NOT trigger for Failed
         assert_eq!(
-            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded && !session_completed,
+            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded
+                && !session_completed,
             false,
             "Gate should NOT trigger: failed is allowed without evidence"
         );
@@ -1259,7 +1265,8 @@ mod force_complete_gate_tests {
         let session_completed = true;
         let target_status = autonoetic_types::workflow::TaskRunStatus::Succeeded;
         assert_eq!(
-            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded && !session_completed,
+            target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded
+                && !session_completed,
             false,
             "Gate should NOT trigger: succeeded with evidence is fine"
         );

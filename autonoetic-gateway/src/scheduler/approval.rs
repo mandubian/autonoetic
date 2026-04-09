@@ -151,9 +151,8 @@ pub fn approve_request(
     secrets: Option<Vec<(String, String)>>,
     approver_level: Option<&ApprovalLevel>,
 ) -> anyhow::Result<ApprovalDecision> {
-    let store = gateway_store.ok_or_else(|| {
-        anyhow::anyhow!("GatewayStore is required to approve requests")
-    })?;
+    let store = gateway_store
+        .ok_or_else(|| anyhow::anyhow!("GatewayStore is required to approve requests"))?;
     let req = store
         .get_approval(request_id)?
         .ok_or_else(|| anyhow::anyhow!("Approval request not found in store: {}", request_id))?;
@@ -189,9 +188,10 @@ pub fn approve_request(
         }
 
         // Extract setup metadata from payload
-        let inject_as = payload
-            .as_ref()
-            .and_then(|p| p.get("inject_as").and_then(|v| v.as_str().map(String::from)));
+        let inject_as = payload.as_ref().and_then(|p| {
+            p.get("inject_as")
+                .and_then(|v| v.as_str().map(String::from))
+        });
         let allowed_hosts: Vec<String> = payload
             .as_ref()
             .and_then(|p| {
@@ -199,9 +199,10 @@ pub fn approve_request(
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
             })
             .unwrap_or_default();
-        let expires_at = payload
-            .as_ref()
-            .and_then(|p| p.get("expires_at").and_then(|v| v.as_str().map(String::from)));
+        let expires_at = payload.as_ref().and_then(|p| {
+            p.get("expires_at")
+                .and_then(|v| v.as_str().map(String::from))
+        });
 
         // Store secrets in vault — fail-closed, require VAULT_PATH
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
@@ -830,23 +831,24 @@ fn decide_request(
     };
     // Persist decision in GatewayStore
     if let Some(store) = gateway_store {
-        store.record_decision(
-            &decision.request_id,
-            match decision.status {
-                ApprovalStatus::Approved => "approved",
-                ApprovalStatus::Rejected => "rejected",
-                ApprovalStatus::Cancelled => "cancelled",
-            },
-            &decision.decided_by,
-            &decision.decided_at,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to record approval decision '{}' in store: {}",
-                decision.request_id,
-                e
+        store
+            .record_decision(
+                &decision.request_id,
+                match decision.status {
+                    ApprovalStatus::Approved => "approved",
+                    ApprovalStatus::Rejected => "rejected",
+                    ApprovalStatus::Cancelled => "cancelled",
+                },
+                &decision.decided_by,
+                &decision.decided_at,
             )
-        })?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to record approval decision '{}' in store: {}",
+                    decision.request_id,
+                    e
+                )
+            })?;
     }
 
     let background_session_id = super::decision::background_session_id;

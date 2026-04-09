@@ -104,7 +104,15 @@ impl GeminiDriver {
         }
 
         if let Some(ref thinking) = req.thinking {
-            if model_is_gemma(&self.provider.model) && !matches!(thinking.effort, autonoetic_types::agent::ThinkingEffort::Low | autonoetic_types::agent::ThinkingEffort::Medium | autonoetic_types::agent::ThinkingEffort::High) {} else if model_is_gemma(&self.provider.model) {
+            if model_is_gemma(&self.provider.model)
+                && !matches!(
+                    thinking.effort,
+                    autonoetic_types::agent::ThinkingEffort::Low
+                        | autonoetic_types::agent::ThinkingEffort::Medium
+                        | autonoetic_types::agent::ThinkingEffort::High
+                )
+            {
+            } else if model_is_gemma(&self.provider.model) {
                 if let Some(ref mut sys) = body.get_mut("systemInstruction") {
                     if let Some(parts) = sys.get_mut("parts").and_then(|p| p.as_array_mut()) {
                         if let Some(first) = parts.get_mut(0).and_then(|p| p.get_mut("text")) {

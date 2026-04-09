@@ -103,7 +103,7 @@ async fn test_openrouter_tool_call() -> anyhow::Result<()> {
         max_tokens: Some(512),
         temperature: Some(0.0),
         metadata: None,
-                thinking: None,
+        thinking: None,
     };
 
     let resp = driver.complete(&req).await?;
@@ -176,7 +176,7 @@ async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
         max_tokens: Some(512),
         temperature: Some(0.0),
         metadata: None,
-                thinking: None,
+        thinking: None,
     };
 
     let resp_turn0 = driver.complete(&req_turn0).await?;
@@ -215,7 +215,7 @@ async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
         max_tokens: Some(512),
         temperature: Some(0.0),
         metadata: None,
-                thinking: None,
+        thinking: None,
     };
 
     let resp_turn1 = driver.complete(&req_turn1).await?;

@@ -167,6 +167,7 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
     let ids = store.memory_list_ids_matching_tags(
         "digest.lesson",
         "digest.agent",
+        None,
         &["type:lesson".to_string()],
         None,
         10,
