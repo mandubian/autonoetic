@@ -824,8 +824,12 @@ fn bwrap_dev_mode() -> BwrapDevMode {
 }
 
 fn sandbox_env_overrides_allowed() -> bool {
-    parse_env_bool(std::env::var(ALLOW_SANDBOX_ENV_OVERRIDES_ENV).ok().as_deref())
-        .unwrap_or(false)
+    parse_env_bool(
+        std::env::var(ALLOW_SANDBOX_ENV_OVERRIDES_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or(false)
 }
 
 fn parse_env_bool(value: Option<&str>) -> Option<bool> {

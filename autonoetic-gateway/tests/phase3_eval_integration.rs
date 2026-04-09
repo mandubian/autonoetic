@@ -1140,13 +1140,18 @@ fn test_revision_create_from_intent_materializes_canonical_skill_and_lock() {
     assert!(revision_dir.join("runtime.lock").exists());
 
     let skill_text = std::fs::read_to_string(revision_dir.join("SKILL.md")).unwrap();
-    let (parsed_manifest, body) = autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_text).unwrap();
+    let (parsed_manifest, body) =
+        autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_text).unwrap();
     assert_eq!(parsed_manifest.agent.id, "intent.agent");
     assert!(body.contains("Use deterministic install intent."));
 
     let lock_text = std::fs::read_to_string(revision_dir.join("runtime.lock")).unwrap();
-    let lock: autonoetic_types::runtime_lock::RuntimeLock = serde_yaml::from_str(&lock_text).unwrap();
-    assert_eq!(lock.gateway.artifact, "marketplace://gateway/autonoetic-gateway");
+    let lock: autonoetic_types::runtime_lock::RuntimeLock =
+        serde_yaml::from_str(&lock_text).unwrap();
+    assert_eq!(
+        lock.gateway.artifact,
+        "marketplace://gateway/autonoetic-gateway"
+    );
     assert_eq!(lock.dependencies.len(), 0);
 }
 
@@ -1214,7 +1219,9 @@ layers: []
         ("main.py", b"print('compat workflow')".as_ref()),
     ] {
         let handle = content_store.write(bytes).unwrap();
-        content_store.register_name(session_id, name, &handle).unwrap();
+        content_store
+            .register_name(session_id, name, &handle)
+            .unwrap();
     }
 
     let bundle = artifact_store
@@ -1289,8 +1296,8 @@ layers: []
 }
 
 #[tokio::test]
-async fn test_revision_create_from_intent_live_openrouter_smoke_if_key_available()
--> anyhow::Result<()> {
+async fn test_revision_create_from_intent_live_openrouter_smoke_if_key_available(
+) -> anyhow::Result<()> {
     if std::env::var("OPENROUTER_API_KEY").is_err() {
         eprintln!("Skipping live smoke test: OPENROUTER_API_KEY not set");
         return Ok(());

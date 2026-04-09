@@ -35,7 +35,11 @@ fn model_supports_tools(model: &str) -> bool {
 
 fn model_is_reasoning_model(model: &str) -> bool {
     let m = model.to_lowercase();
-    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.contains("-o1-") || m.contains("-o3-")
+    m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.contains("-o1-")
+        || m.contains("-o3-")
 }
 
 impl OpenAiDriver {
