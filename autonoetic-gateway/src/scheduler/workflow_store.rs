@@ -860,6 +860,27 @@ pub fn refresh_task_claim_heartbeat(
     write_json_file(&task_claim_path(config, workflow_id, task_id), &claim)
 }
 
+/// Refresh a running task's `updated_at` without changing status or emitting workflow events.
+///
+/// This is used as a low-noise heartbeat while a long-running execution is still active
+/// (e.g. synchronous `agent.spawn` blocked on post-processing). It prevents false
+/// stuck-task detection based purely on stale `updated_at`.
+pub fn refresh_task_run_heartbeat(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    task_id: &str,
+) -> anyhow::Result<()> {
+    let Some(mut task) = load_task_run(config, store, workflow_id, task_id)? else {
+        return Ok(());
+    };
+    if task.status != TaskRunStatus::Running {
+        return Ok(());
+    }
+    task.updated_at = now_rfc3339();
+    save_task_run(config, store, &task)
+}
+
 pub fn release_task_claim(
     config: &GatewayConfig,
     _store: Option<&GatewayStore>,

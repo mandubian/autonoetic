@@ -39,6 +39,10 @@ response_validation:
 # ── Approval Timeout ──────────────────────────────────────────────────
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
 approval_timeout_secs: 600
+# Optional: heartbeat interval for Running workflow tasks (seconds).
+# Keeps task updated_at fresh during long-running child execution/finalization.
+# If omitted, derives from background_tick_secs (clamped 1..=5). Valid range: 1..=30.
+# workflow_task_heartbeat_secs: 2
 
 # ── Chat TUI ──────────────────────────────────────────────────────────
 # Inline approval from the chat interface (Ctrl+A).

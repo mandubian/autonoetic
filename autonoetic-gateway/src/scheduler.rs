@@ -479,8 +479,17 @@ async fn check_stuck_running_tasks(
     Ok(())
 }
 
+pub fn workflow_task_heartbeat_interval_secs(
+    config: &autonoetic_types::config::GatewayConfig,
+) -> u64 {
+    config
+        .workflow_task_heartbeat_secs
+        .unwrap_or_else(|| config.background_tick_secs.clamp(1, 5))
+        .clamp(1, 30)
+}
+
 fn task_claim_heartbeat_interval_secs(config: &autonoetic_types::config::GatewayConfig) -> u64 {
-    config.background_tick_secs.clamp(1, 5)
+    workflow_task_heartbeat_interval_secs(config)
 }
 
 fn task_claim_stale_after_secs(config: &autonoetic_types::config::GatewayConfig) -> u64 {
@@ -839,6 +848,12 @@ async fn spawn_task_execution(
         loop {
             interval.tick().await;
             let _ = workflow_store::refresh_task_claim_heartbeat(
+                &heartbeat_cfg,
+                None,
+                &heartbeat_wf_id,
+                &heartbeat_task_id,
+            );
+            let _ = workflow_store::refresh_task_run_heartbeat(
                 &heartbeat_cfg,
                 None,
                 &heartbeat_wf_id,
