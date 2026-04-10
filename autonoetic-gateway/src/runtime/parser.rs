@@ -1,8 +1,8 @@
 //! SKILL.md Parser.
 
 use autonoetic_types::agent::{
-    AgentIO, AgentIdentity, AgentManifest, AgentSkillsImportMetadata, ExecutionMode, LlmConfig,
-    Middleware, ResourceLimits, RuntimeDeclaration,
+    AgentIO, AgentIdentity, AgentManifest, AgentSkillsImportMetadata, CompressionConfig,
+    ExecutionMode, LlmConfig, Middleware, ResourceLimits, RuntimeDeclaration,
 };
 use autonoetic_types::background::BackgroundPolicy;
 use autonoetic_types::capability::Capability;
@@ -57,6 +57,8 @@ struct AutonoeticMetadata {
     response_contract: Option<serde_json::Value>,
     #[serde(default)]
     allowed_tool_tiers: Option<Vec<autonoetic_types::agent::ToolTier>>,
+    #[serde(default)]
+    compression: Option<CompressionConfig>,
 }
 
 /// Parser for `SKILL.md` files.
@@ -154,6 +156,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         response_contract: meta.response_contract,
         allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
         agentskills_import,
+        compression: meta.compression,
     }
 }
 

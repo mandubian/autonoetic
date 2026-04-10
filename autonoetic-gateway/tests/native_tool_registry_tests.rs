@@ -45,6 +45,7 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
         response_contract: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
+        compression: None,
     }
 }
 

@@ -57,6 +57,7 @@ fn test_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         agentskills_import: None,
+        compression: None,
     }
 }
 

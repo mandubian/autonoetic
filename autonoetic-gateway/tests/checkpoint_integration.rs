@@ -56,6 +56,7 @@ fn make_checkpoint(
         tool_invocations_consumed: 0,
         tokens_consumed: 100,
         estimated_cost_usd: 0.001,
+        compression_metadata: None,
     }
 }
 

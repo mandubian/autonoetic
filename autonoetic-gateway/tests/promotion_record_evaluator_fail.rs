@@ -89,6 +89,7 @@ fn evolution_manifest() -> AgentManifest {
         response_contract: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
+        compression: None,
     }
 }
 
@@ -125,6 +126,7 @@ fn evaluator_manifest() -> AgentManifest {
         response_contract: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
+        compression: None,
     }
 }
 
@@ -341,6 +343,7 @@ async fn test_promotion_auditor_fail_rejected() {
         response_contract: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
+        compression: None,
     };
 
     let audit_args = serde_json::json!({

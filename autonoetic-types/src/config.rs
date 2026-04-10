@@ -554,6 +554,13 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub llm_routing: Option<LlmRoutingConfig>,
 
+    /// Context compression configuration.
+    /// When enabled, the gateway summarizes conversation history when it
+    /// exceeds a configurable threshold, replacing old turns with a compact
+    /// summary to stay within context limits.
+    #[serde(default)]
+    pub context_compression: ContextCompressionConfig,
+
     /// Chat TUI settings.
     #[serde(default)]
     pub chat: ChatConfig,
@@ -906,6 +913,78 @@ impl Default for PromptBudgetConfig {
     }
 }
 
+/// Configuration for context compression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextCompressionConfig {
+    /// Enable context compression. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// LLM preset name to use for compression (should be a cheap/fast model).
+    /// The preset must resolve to a fixed provider/model (not a routing preset).
+    #[serde(default)]
+    pub llm_preset: Option<String>,
+
+    /// Inline provider (e.g. "anthropic") if not using a preset.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Inline model (e.g. "claude-3-haiku-20240307") if not using a preset.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Compress when conversation tokens exceed this percentage of the context window.
+    /// Default: 60.0
+    #[serde(default = "default_compression_threshold_pct")]
+    pub threshold_pct: f64,
+
+    /// Number of recent turns to always keep in full (not summarized).
+    /// Default: 3
+    #[serde(default = "default_compression_recent_turns")]
+    pub recent_turns_to_keep: usize,
+
+    /// Maximum size of the compressed summary in tokens.
+    /// Default: 500
+    #[serde(default = "default_compression_max_summary_tokens")]
+    pub max_summary_tokens: usize,
+
+    /// Minimum number of turns between compression operations.
+    /// Prevents compression thrashing when token count oscillates around
+    /// the threshold. Default: 3
+    #[serde(default = "default_min_turns_between_compression")]
+    pub min_turns_between_compression: u64,
+}
+
+fn default_compression_threshold_pct() -> f64 {
+    60.0
+}
+
+fn default_compression_recent_turns() -> usize {
+    3
+}
+
+fn default_compression_max_summary_tokens() -> usize {
+    500
+}
+
+fn default_min_turns_between_compression() -> u64 {
+    3
+}
+
+impl Default for ContextCompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            llm_preset: None,
+            provider: None,
+            model: None,
+            threshold_pct: default_compression_threshold_pct(),
+            recent_turns_to_keep: default_compression_recent_turns(),
+            max_summary_tokens: default_compression_max_summary_tokens(),
+            min_turns_between_compression: default_min_turns_between_compression(),
+        }
+    }
+}
+
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
@@ -939,6 +1018,7 @@ impl Default for GatewayConfig {
             llm_routing: None,
             chat: ChatConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),
+            context_compression: ContextCompressionConfig::default(),
         }
     }
 }

@@ -9,6 +9,8 @@ pub mod approved_exec_cache;
 pub mod artifact;
 pub mod capability_inference;
 pub mod checkpoint;
+pub mod compression;
+pub mod compression_quality;
 pub mod content_store;
 pub mod continuation;
 pub mod crypto;

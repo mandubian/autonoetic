@@ -544,6 +544,7 @@ impl GatewayExecutionService {
                 tool_invocations_consumed: 0,
                 tokens_consumed: 0,
                 estimated_cost_usd: 0.0,
+                compression_metadata: None,
             }
         };
         cp.yield_reason = YieldReason::EmergencyStop {
@@ -866,7 +867,8 @@ impl GatewayExecutionService {
                 workflow_id.map(String::from),
                 task_id.map(String::from),
             )
-            .with_active_executions(Some(self.active_executions.clone()));
+            .with_active_executions(Some(self.active_executions.clone()))
+            .with_http_client(self.http_client.clone());
 
             use crate::runtime::lifecycle::TurnOutcome;
 
@@ -1159,6 +1161,9 @@ impl GatewayExecutionService {
                             runtime.session_started = true;
                             runtime.turn_counter = checkpoint.turn_counter;
                             runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+                            if let Some(ref cm) = checkpoint.compression_metadata {
+                                runtime.compression_metadata = cm.clone();
+                            }
 
                             let mut history = checkpoint.history.clone();
                             history.push(Message::user(message.to_string()));
@@ -1330,6 +1335,9 @@ impl GatewayExecutionService {
                         runtime.session_started = true;
                         runtime.turn_counter = checkpoint.turn_counter;
                         runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+                        if let Some(ref cm) = checkpoint.compression_metadata {
+                            runtime.compression_metadata = cm.clone();
+                        }
 
                         let mut history = checkpoint.history.clone();
                         history.push(Message::user(message.to_string()));
@@ -2063,7 +2071,8 @@ impl GatewayExecutionService {
         .with_middleware(middleware)
         .with_session_id(session_id.to_string())
         .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from))
-        .with_active_executions(Some(self.active_executions.clone()));
+        .with_active_executions(Some(self.active_executions.clone()))
+        .with_http_client(self.http_client.clone());
 
         // Restore executor state from checkpoint
         runtime.guard =
@@ -2071,6 +2080,9 @@ impl GatewayExecutionService {
         runtime.session_started = true;
         runtime.turn_counter = checkpoint.turn_counter;
         runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+        if let Some(ref cm) = checkpoint.compression_metadata {
+            runtime.compression_metadata = cm.clone();
+        }
 
         // Build history from checkpoint, optionally appending an additional message
         let mut history = checkpoint.history.clone();
@@ -2846,6 +2858,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
+        compression: None,
         };
 
         let history = build_initial_history(
@@ -3123,6 +3136,7 @@ fn resolve_pending_prefers_checkpoint_pending_tool_state() {
         tool_invocations_consumed: 0,
         tokens_consumed: 0,
         estimated_cost_usd: 0.0,
+        compression_metadata: None,
     };
     let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
     assert_eq!(id, "tid-99");

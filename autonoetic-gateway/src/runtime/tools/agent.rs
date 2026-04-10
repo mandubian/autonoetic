@@ -23,6 +23,12 @@ struct SpawnAgentArgs {
     message: String,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    /// Optional bounded context summary from the parent. When provided,
+    /// injected as a system message before the user message. The parent
+    /// should summarize only what the child needs; the gateway does not
+    /// automatically share the parent's full conversation history.
+    #[serde(default)]
+    context: Option<String>,
     #[serde(default)]
     session_id: Option<String>,
     /// When true, enqueue the task for async execution and return immediately with task_id.
@@ -118,7 +124,8 @@ impl NativeTool for AgentSpawnTool {
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string" },
-                    "message": { "type": "string" },
+                    "message": { "type": "string", "description": "The task to delegate. Should be self-contained; avoid dumping full conversation history." },
+                    "context": { "type": "string", "description": "Optional bounded context summary. Include only what the child needs (goals, decisions, key facts, open items). The parent's full conversation history is NOT automatically shared." },
                     "metadata": { "type": "object" },
                     "session_id": { "type": "string" },
                     "async": { "type": "boolean", "description": "If true, enqueue for background execution and return immediately with task_id. Default: false (synchronous)." },
@@ -171,6 +178,7 @@ impl NativeTool for AgentSpawnTool {
                                     let enforcer = default_enforcer();
                                     let payload = serde_json::json!({
                                         "message": args.message,
+                                        "context": args.context,
                                         "metadata": args.metadata,
                                         "session_id": args.session_id,
                                     });
@@ -274,9 +282,20 @@ impl NativeTool for AgentSpawnTool {
             crate::execution::GatewayExecutionService::new(execution_config, gateway_store.clone());
 
         let target_agent_id = args.agent_id.clone();
-        let kickoff_message = match &args.metadata {
-            Some(value) => format!("{}\n\nDelegation metadata: {}", args.message, value),
-            None => args.message.clone(),
+        let kickoff_message = match (&args.context, &args.metadata) {
+            (Some(ctx), Some(meta)) => {
+                format!(
+                    "[Context]\n{}\n\n[Task]\n{}\n\n[Metadata]\n{}",
+                    ctx, args.message, meta
+                )
+            }
+            (Some(ctx), None) => {
+                format!("[Context]\n{}\n\n[Task]\n{}", ctx, args.message)
+            }
+            (None, Some(meta)) => {
+                format!("{}\n\nDelegation metadata: {}", args.message, meta)
+            }
+            (None, None) => args.message.clone(),
         };
 
         // Set up hierarchical content namespace for the child agent

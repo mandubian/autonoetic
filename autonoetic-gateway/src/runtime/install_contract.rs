@@ -1167,6 +1167,7 @@ artifacts: "not_a_sequence"
             gateway_token: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
+            compression: None,
         };
         let rendered = render_skill_document(&manifest, "# Instructions").unwrap();
         assert!(rendered.starts_with("---\n"));
@@ -1338,6 +1339,7 @@ artifacts: "not_a_sequence"
             gateway_token: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
+            compression: None,
         };
         let rendered = render_skill_document(&manifest, "# Test").unwrap();
         assert!(
