@@ -524,8 +524,7 @@ impl GatewayExecutionService {
                 loop_guard_state: LoopGuardState {
                     max_loops_without_progress: 32,
                     current_loops: 0,
-                    last_failure_hash: None,
-                    consecutive_failures: 0,
+                    tool_failure_counts: std::collections::HashMap::new(),
                 },
                 agent_id: lead.to_string(),
                 session_id: root_session_id.to_string(),
@@ -3104,8 +3103,7 @@ fn resolve_pending_prefers_checkpoint_pending_tool_state() {
         loop_guard_state: LoopGuardState {
             max_loops_without_progress: 1,
             current_loops: 0,
-            last_failure_hash: None,
-            consecutive_failures: 0,
+            tool_failure_counts: std::collections::HashMap::new(),
         },
         agent_id: "a".into(),
         session_id: "s".into(),
