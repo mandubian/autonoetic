@@ -175,6 +175,7 @@ pub async fn handle_due_wake(
                     status: None,
                     decided_at: None,
                     decided_by: None,
+                    decision_reason: None,
                 };
                 if let Some(store) = execution.gateway_store() {
                     store.create_approval(&request)?;

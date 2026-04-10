@@ -428,6 +428,19 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
     let updated = updated.unwrap();
     assert!(updated.status.is_some(), "approval status should be set after decision");
 
+    // Verify decision_reason is persisted (the operator's guidance note)
+    assert_eq!(
+        updated.decision_reason.as_deref(),
+        Some("Try using a debugger to step through the code"),
+        "decision_reason should carry operator guidance, not the agent's original reason"
+    );
+
+    // The original `reason` field should still be the agent's escalation justification
+    assert!(
+        updated.reason.is_some(),
+        "reason should remain the agent's original escalation reason"
+    );
+
     // Second spawn — should resume from escalation checkpoint with guidance injected
     let second_result = execution
         .spawn_agent_once(

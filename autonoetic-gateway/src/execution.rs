@@ -473,6 +473,7 @@ impl GatewayExecutionService {
                 "cancelled",
                 &format!("emergency_stop:{stop_id}"),
                 &chrono::Utc::now().to_rfc3339(),
+                None,
             )?;
         }
 
@@ -1199,7 +1200,7 @@ impl GatewayExecutionService {
                                     runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
                                     let mut history = checkpoint.history.clone();
                                     let operator = req.decided_by.as_deref().unwrap_or("operator");
-                                    let guidance_note = req.reason.as_deref().unwrap_or("");
+                                    let guidance_note = req.decision_reason.as_deref().unwrap_or("");
                                     let escalation_msg = if guidance_note.is_empty() {
                                         format!(
                                             "Operator '{}' approved your escalation. You may now continue.",
@@ -1447,7 +1448,7 @@ impl GatewayExecutionService {
                                 runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
                                 let mut history = checkpoint.history.clone();
                                 let operator = req.decided_by.as_deref().unwrap_or("operator");
-                                let guidance_note = req.reason.as_deref().unwrap_or("");
+                                let guidance_note = req.decision_reason.as_deref().unwrap_or("");
                                 let escalation_msg = if guidance_note.is_empty() {
                                     format!(
                                         "Operator '{}' approved your escalation. You may now continue.",
