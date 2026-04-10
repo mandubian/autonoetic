@@ -143,6 +143,70 @@ Before the approval check (line 862): if `is_safe_inspection_command()` returns 
 - `docs/ARCHITECTURE.md` — Update agent role table (builder → packager)
 - `docs/AGENTS.md` — Update role table and delegation ladder
 
+## Pluggability and Evolution
+
+### The plan is already runtime-agnostic
+
+The redirect logic (Phase 1) does NOT hardcode `pip install`. It operates on the existing `network_command` detection category in `remote_access.rs:252-354`, which already covers all runtimes:
+
+| Runtime | Commands detected |
+|---------|------------------|
+| Python | `pip install`, `pip3 install` |
+| Node | `npm install`, `yarn install`, `yarn add`, `pnpm install`, `bun install` |
+| Go | `go get`, `go mod download` |
+| Rust | `cargo install` |
+| Ruby | `gem install` |
+| PHP | `composer install`, `composer require` |
+| System | `apt-get install`, `apk add`, `yum install`, `dnf install`, `pacman -S` |
+| VCS | `git clone`, `git fetch`, `git pull`, `git push` |
+| Download | `curl`, `wget` |
+
+Adding a new runtime means adding one line to the `command_patterns` table in `remote_access.rs`. The redirect, approval bypass, and safe-inspection logic all work automatically because they're category-based, not command-specific.
+
+### Capability-based, not agent-name-based
+
+The redirect checks for the `NetworkAccess` capability, not `agent_id == "packager.default"`. Any agent with `NetworkAccess` in its manifest auto-approves dependency installs. Any agent without it gets the redirect. This means:
+- Adding a new packager agent (e.g., `packager.rust`) with `NetworkAccess` works without gateway changes
+- Removing `NetworkAccess` from an agent automatically gates it
+
+### Safe inspection is data-driven
+
+Phase 3's allowlist should be implemented as a static table, not inline conditionals:
+
+```rust
+const SAFE_INSPECTION_COMMANDS: &[&str] = &[
+    "pip list", "pip show ", "pip --version",
+    "npm list", "npm version",
+    // Future: "cargo --version", "go version", etc.
+];
+```
+
+Adding new safe commands is a one-line table entry.
+
+### Future evolution paths the plan opens
+
+1. **`DependencyInstall` approval action type.** If we later want to tighten packager's blanket `NetworkAccess`, we add a `ScheduledAction::DependencyInstall` variant. The redirect logic becomes: "if agent has `DependencyResolution` capability AND approval exists for this (runtime, package_set_digest), auto-approve." The current Phase 1 redirect is the foundation — it already identifies the category, just needs a second grant-check path.
+
+2. **Approval provider interface.** The approval system currently resolves approvals via SQLite + operator CLI. The `ScheduledAction` enum + `ApprovalRequest` struct form a natural provider boundary. A future `ApprovalProvider` trait could swap in:
+   - Policy-as-code (auto-approve based on org rules)
+   - External approval services (e.g., Slack-based approval)
+   - Signed approval bundles (offline/pre-approved scopes)
+
+   The gateway's approval logic is already centralized in `scheduler/approval.rs` and `scheduler/decision.rs` — it's one indirection away from being provider-based.
+
+3. **Artifact-level dependency declarations.** `dependency_plan_from_args_or_lock` (tools/mod.rs:573) already normalizes dependency intent from either explicit args or `runtime.lock`. A future step could allow artifacts to declare their dependency requirements in their manifest, enabling the gateway to automatically route artifacts through packager without planner guidance.
+
+4. **Layer composition.** `artifact.build` already accepts `layers: Vec<ArtifactLayer>`. Multiple packager runs (Python deps + Node deps) could produce separate layers composed into one artifact. No gateway changes needed — the layer infrastructure already supports this.
+
+### What keeps the gateway dumb
+
+Each evolution path extends the gateway by adding **new data tables** (commands, capabilities, action types) or **new provider boundaries** (approval provider), not by adding judgment logic. The gateway's role remains:
+- Match patterns against static tables (deterministic)
+- Check capabilities against manifests (mechanical)
+- Enforce policy: approve, redirect, or deny (rule-based)
+
+The intelligence lives in the planner's routing decisions and the agents' behavior — the gateway just enforces the rules they operate under.
+
 ## What We're NOT Building
 
 | Rejected approach | Why |
