@@ -1,10 +1,82 @@
 //! Agent Memory Tier 1 and Tier 2 with provenance tracking.
+//!
+//! The memory system is split into two tiers:
+//! - **Tier 1**: Working state directory (`state/`) — flat files for immediate use
+//! - **Tier 2**: Gateway-managed long-term storage with provenance, backed by a
+//!   pluggable [`MemoryStore`] trait
 
+mod sqlite_store;
+
+use async_trait::async_trait;
 use autonoetic_types::memory::MemoryObject;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::scheduler::gateway_store::GatewayStore;
+
+pub use sqlite_store::SqliteMemoryStore;
+
+// ---------------------------------------------------------------------------
+// MemoryStore trait
+// ---------------------------------------------------------------------------
+
+/// Pluggable backend for Tier 2 memory persistence.
+///
+/// Implementations store and retrieve [`MemoryObject`] records. The default
+/// backend is [`SqliteMemoryStore`] which wraps the existing `GatewayStore`
+/// SQLite methods.
+///
+/// # Adding a new backend
+///
+/// 1. Implement this trait (e.g. `HonchoMemoryStore`)
+/// 2. Add a feature-gated branch in `build_memory_store()` in `server/mod.rs`
+/// 3. Set `memory_backend.backend_type` in gateway config YAML
+#[async_trait]
+pub trait MemoryStore: Send + Sync {
+    /// Insert or replace a memory record.
+    async fn upsert(&self, memory: &MemoryObject) -> anyhow::Result<()>;
+
+    /// Retrieve a memory by ID, without visibility checks.
+    /// Returns `None` if not found.
+    async fn get(&self, memory_id: &str) -> anyhow::Result<Option<MemoryObject>>;
+
+    /// List memory IDs for a given scope, optionally filtered by content substring.
+    /// Results ordered by `updated_at` descending.
+    async fn list_ids_for_scope(
+        &self,
+        scope: &str,
+        content_substr: Option<&str>,
+    ) -> anyhow::Result<Vec<String>>;
+
+    /// List memory IDs matching ALL given tags within a scope, filtered by
+    /// visibility for `agent_id`. Optional content substring filter.
+    /// Results ordered by `updated_at` descending, capped by `limit`.
+    async fn list_ids_matching_tags(
+        &self,
+        scope: &str,
+        agent_id: &str,
+        reader_session_id: Option<&str>,
+        tags: &[String],
+        content_substr: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<String>>;
+
+    /// List memory IDs owned by a specific agent.
+    /// Results ordered by `created_at` descending.
+    async fn list_ids_owned_by(&self, owner_agent_id: &str) -> anyhow::Result<Vec<String>>;
+
+    /// List distinct scopes visible to an agent (based on visibility rules).
+    /// Results ordered alphabetically.
+    async fn list_scopes_for_agent(
+        &self,
+        agent_id: &str,
+        reader_session_id: Option<&str>,
+    ) -> anyhow::Result<Vec<String>>;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 1 Memory
+// ---------------------------------------------------------------------------
 
 /// Tier 1 Memory: Working state directory (`state/`).
 /// Flat files for the agent's immediate situational awareness.
@@ -37,13 +109,19 @@ impl Tier1Memory {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tier 2 Memory
+// ---------------------------------------------------------------------------
+
 /// Tier 2 Memory: Gateway-managed long-term storage with provenance tracking.
 ///
 /// This is the gateway-owned source of truth for durable facts and cross-agent recall.
 /// All memory records include full provenance (writer, source, timestamps, content hash).
-/// Rows live in `gateway.db` (`memories` table).
+///
+/// Storage is delegated to a [`MemoryStore`] backend (default: SQLite via
+/// [`SqliteMemoryStore`]).
 pub struct Tier2Memory {
-    store: Arc<GatewayStore>,
+    store: Arc<dyn MemoryStore>,
     /// The agent ID that is currently using this memory instance.
     current_agent_id: String,
     /// Session id of the reading context (for [`autonoetic_types::memory::MemoryVisibility::Session`]).
@@ -52,7 +130,7 @@ pub struct Tier2Memory {
 
 impl Tier2Memory {
     pub fn with_store(
-        store: Arc<GatewayStore>,
+        store: Arc<dyn MemoryStore>,
         agent_id: impl Into<String>,
         reader_session_id: Option<String>,
     ) -> Self {
@@ -68,18 +146,24 @@ impl Tier2Memory {
         Self::open_for_agent(gateway_dir, None, agent_id, None)
     }
 
-    /// Uses an existing store when the runtime already holds `Arc<GatewayStore>`; otherwise opens `gateway_dir`.
+    /// Convenience helper for call sites that do not need a session-aware reader context.
+    pub fn open_sqlite(gateway_dir: &Path, agent_id: &str) -> anyhow::Result<Self> {
+        Self::open_for_agent(gateway_dir, None, agent_id, None)
+    }
+
+    /// Uses an existing memory store when provided; otherwise opens SQLite at `gateway_dir`.
     pub fn open_for_agent(
         gateway_dir: &Path,
-        gateway_store: Option<Arc<GatewayStore>>,
+        memory_store: Option<Arc<dyn MemoryStore>>,
         agent_id: &str,
         reader_session_id: Option<&str>,
     ) -> anyhow::Result<Self> {
         let rs = reader_session_id.map(|s| s.to_string());
-        match gateway_store {
-            Some(gs) => Ok(Self::with_store(gs, agent_id.to_string(), rs)),
+        match memory_store {
+            Some(store) => Ok(Self::with_store(store, agent_id.to_string(), rs)),
             None => {
-                let store = Arc::new(GatewayStore::open(gateway_dir)?);
+                let gw = Arc::new(GatewayStore::open(gateway_dir)?);
+                let store: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(gw));
                 Ok(Self::with_store(store, agent_id.to_string(), rs))
             }
         }
@@ -93,7 +177,7 @@ impl Tier2Memory {
     /// * `owner_agent_id` - Agent that owns this memory
     /// * `source_ref` - Reference to causal chain entry or session
     /// * `content` - The content to store
-    pub fn remember(
+    pub async fn remember(
         &self,
         memory_id: &str,
         scope: &str,
@@ -110,20 +194,20 @@ impl Tier2Memory {
             content.to_string(),
         );
 
-        self.save_memory(&memory)
+        self.save_memory(&memory).await
     }
 
     /// Saves a MemoryObject to the database.
-    pub fn save_memory(&self, memory: &MemoryObject) -> anyhow::Result<MemoryObject> {
-        self.store.memory_upsert(memory)?;
+    pub async fn save_memory(&self, memory: &MemoryObject) -> anyhow::Result<MemoryObject> {
+        self.store.upsert(memory).await?;
         Ok(memory.clone())
     }
 
     /// Recalls a memory by its ID.
     ///
     /// Enforces visibility/ACL checks based on the current agent.
-    pub fn recall(&self, memory_id: &str) -> anyhow::Result<MemoryObject> {
-        let Some(memory) = self.store.memory_get_unrestricted(memory_id)? else {
+    pub async fn recall(&self, memory_id: &str) -> anyhow::Result<MemoryObject> {
+        let Some(memory) = self.store.get(memory_id).await? else {
             anyhow::bail!("Memory '{}' not found", memory_id);
         };
 
@@ -147,14 +231,18 @@ impl Tier2Memory {
     /// Searches memories by scope and optional query terms.
     ///
     /// Returns memories that match the scope and are visible to the current agent.
-    pub fn search(&self, scope: &str, query: Option<&str>) -> anyhow::Result<Vec<MemoryObject>> {
-        let ids = self.store.memory_list_ids_for_scope(scope, query)?;
+    pub async fn search(
+        &self,
+        scope: &str,
+        query: Option<&str>,
+    ) -> anyhow::Result<Vec<MemoryObject>> {
+        let ids = self.store.list_ids_for_scope(scope, query).await?;
 
         let mut results = Vec::new();
         for memory_id in ids {
             // Only include memories visible to current agent
             // Propagate errors for debugging DB/serde issues
-            match self.recall(&memory_id) {
+            match self.recall(&memory_id).await {
                 Ok(memory) => results.push(memory),
                 Err(e) => {
                     // Log the error for debugging but don't fail the entire search
@@ -174,7 +262,7 @@ impl Tier2Memory {
     /// optionally filtered by substring match on `text`, visible to the current agent.
     ///
     /// `tags` must be non-empty.
-    pub fn search_by_tags(
+    pub async fn search_by_tags(
         &self,
         scope: &str,
         tags: &[String],
@@ -187,21 +275,21 @@ impl Tier2Memory {
             "limit must be between 1 and 100 inclusive"
         );
 
-        let ids = self.store.memory_list_ids_matching_tags(
+        let ids = self.store.list_ids_matching_tags(
             scope,
             &self.current_agent_id,
             self.reader_session_id.as_deref(),
             tags,
             text,
             limit as i64,
-        )?;
+        ).await?;
 
         let mut results = Vec::new();
         for memory_id in ids {
             if results.len() >= limit {
                 break;
             }
-            let memory = match self.recall(&memory_id) {
+            let memory = match self.recall(&memory_id).await {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -212,8 +300,8 @@ impl Tier2Memory {
     }
 
     /// Makes a memory globally visible.
-    pub fn make_global(&self, memory_id: &str) -> anyhow::Result<MemoryObject> {
-        let memory = self.recall(memory_id)?;
+    pub async fn make_global(&self, memory_id: &str) -> anyhow::Result<MemoryObject> {
+        let memory = self.recall(memory_id).await?;
 
         // Only owner can make global
         if memory.owner_agent_id != self.current_agent_id {
@@ -221,27 +309,29 @@ impl Tier2Memory {
         }
 
         let updated = memory.make_global();
-        self.save_memory(&updated)?;
+        self.save_memory(&updated).await?;
 
         Ok(updated)
     }
 
     /// Lists all scopes available to the current agent.
     /// Only returns scopes where the agent has at least one visible memory.
-    pub fn list_scopes(&self) -> anyhow::Result<Vec<String>> {
+    pub async fn list_scopes(&self) -> anyhow::Result<Vec<String>> {
         self.store
-            .memory_list_scopes_for_agent(&self.current_agent_id, self.reader_session_id.as_deref())
+            .list_scopes_for_agent(&self.current_agent_id, self.reader_session_id.as_deref())
+            .await
     }
 
     /// Lists all memories owned by the current agent.
-    pub fn list_memories(&self) -> anyhow::Result<Vec<MemoryObject>> {
+    pub async fn list_memories(&self) -> anyhow::Result<Vec<MemoryObject>> {
         let ids = self
             .store
-            .memory_list_ids_owned_by(&self.current_agent_id)?;
+            .list_ids_owned_by(&self.current_agent_id)
+            .await?;
 
         let mut memories = Vec::new();
         for memory_id in ids {
-            match self.recall(&memory_id) {
+            match self.recall(&memory_id).await {
                 Ok(memory) => memories.push(memory),
                 Err(e) => {
                     tracing::warn!("Failed to recall memory '{}' during list: {}", memory_id, e);
@@ -268,10 +358,10 @@ mod tests {
         assert!(mem.write_file("../out.txt", "hacker").is_err());
     }
 
-    #[test]
-    fn test_tier2_memory_basic() {
+    #[tokio::test]
+    async fn test_tier2_memory_basic() {
         let temp = tempfile::tempdir().unwrap();
-        let mem = Tier2Memory::new(temp.path(), "agent-1").unwrap();
+        let mem = Tier2Memory::open_sqlite(temp.path(), "agent-1").unwrap();
 
         let memory = mem
             .remember(
@@ -281,6 +371,7 @@ mod tests {
                 "session:test:turn:1",
                 "The sky is blue",
             )
+            .await
             .unwrap();
 
         assert_eq!(memory.memory_id, "fact_1");
@@ -292,10 +383,10 @@ mod tests {
         assert!(!memory.content_hash.is_empty());
     }
 
-    #[test]
-    fn test_tier2_memory_recall() {
+    #[tokio::test]
+    async fn test_tier2_memory_recall() {
         let temp = tempfile::tempdir().unwrap();
-        let mem = Tier2Memory::new(temp.path(), "agent-1").unwrap();
+        let mem = Tier2Memory::open_sqlite(temp.path(), "agent-1").unwrap();
 
         mem.remember(
             "fact_1",
@@ -304,39 +395,42 @@ mod tests {
             "session:test:turn:1",
             "The sky is blue",
         )
+        .await
         .unwrap();
 
-        let recalled = mem.recall("fact_1").unwrap();
+        let recalled = mem.recall("fact_1").await.unwrap();
         assert_eq!(recalled.content, "The sky is blue");
 
         // Non-existent memory should fail
-        assert!(mem.recall("fact_2").is_err());
+        assert!(mem.recall("fact_2").await.is_err());
     }
 
-    #[test]
-    fn test_tier2_memory_visibility_private() {
+    #[tokio::test]
+    async fn test_tier2_memory_visibility_private() {
         let temp = tempfile::tempdir().unwrap();
-        let mem1 = Tier2Memory::new(temp.path(), "agent-1").unwrap();
-        let mem2 = Tier2Memory::new(temp.path(), "agent-2").unwrap();
+        let mem1 = Tier2Memory::open_sqlite(temp.path(), "agent-1").unwrap();
+        let mem2 = Tier2Memory::open_sqlite(temp.path(), "agent-2").unwrap();
 
-        mem1.remember(
-            "fact_1",
-            "general",
-            "agent-1",
-            "session:test:turn:1",
-            "Private fact",
-        )
-        .unwrap();
+        mem1
+            .remember(
+                "fact_1",
+                "general",
+                "agent-1",
+                "session:test:turn:1",
+                "Private fact",
+            )
+            .await
+            .unwrap();
 
         // agent-1 can read its own memory
-        assert!(mem1.recall("fact_1").is_ok());
+        assert!(mem1.recall("fact_1").await.is_ok());
 
         // agent-2 cannot read agent-1's private memory
-        assert!(mem2.recall("fact_1").is_err());
+        assert!(mem2.recall("fact_1").await.is_err());
     }
 
-    #[test]
-    fn test_tier2_memory_session_visibility_same_session() {
+    #[tokio::test]
+    async fn test_tier2_memory_session_visibility_same_session() {
         let temp = tempfile::tempdir().unwrap();
         let mem1 =
             Tier2Memory::open_for_agent(temp.path(), None, "agent-1", Some("sess-a")).unwrap();
@@ -354,9 +448,9 @@ mod tests {
         m.visibility = MemoryVisibility::Session {
             session_id: "sess-a".into(),
         };
-        mem1.save_memory(&m).unwrap();
+        mem1.save_memory(&m).await.unwrap();
 
-        let recalled = mem2.recall("fact_1").unwrap();
+        let recalled = mem2.recall("fact_1").await.unwrap();
         assert_eq!(recalled.content, "Session-shared fact");
         match &recalled.visibility {
             MemoryVisibility::Session { session_id } => assert_eq!(session_id, "sess-a"),
@@ -364,33 +458,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_tier2_memory_global() {
+    #[tokio::test]
+    async fn test_tier2_memory_global() {
         let temp = tempfile::tempdir().unwrap();
-        let mem1 = Tier2Memory::new(temp.path(), "agent-1").unwrap();
-        let mem2 = Tier2Memory::new(temp.path(), "agent-2").unwrap();
+        let mem1 = Tier2Memory::open_sqlite(temp.path(), "agent-1").unwrap();
+        let mem2 = Tier2Memory::open_sqlite(temp.path(), "agent-2").unwrap();
 
-        mem1.remember(
-            "fact_1",
-            "general",
-            "agent-1",
-            "session:test:turn:1",
-            "Global fact",
-        )
-        .unwrap();
+        mem1
+            .remember(
+                "fact_1",
+                "general",
+                "agent-1",
+                "session:test:turn:1",
+                "Global fact",
+            )
+            .await
+            .unwrap();
 
         // Make global
-        mem1.make_global("fact_1").unwrap();
+        mem1.make_global("fact_1").await.unwrap();
 
         // All agents can read it
-        assert!(mem1.recall("fact_1").is_ok());
-        assert!(mem2.recall("fact_1").is_ok());
+        assert!(mem1.recall("fact_1").await.is_ok());
+        assert!(mem2.recall("fact_1").await.is_ok());
     }
 
-    #[test]
-    fn test_tier2_memory_search() {
+    #[tokio::test]
+    async fn test_tier2_memory_search() {
         let temp = tempfile::tempdir().unwrap();
-        let mem = Tier2Memory::new(temp.path(), "agent-1").unwrap();
+        let mem = Tier2Memory::open_sqlite(temp.path(), "agent-1").unwrap();
 
         mem.remember(
             "fact_1",
@@ -399,6 +495,7 @@ mod tests {
             "session:test:turn:1",
             "Paris is sunny",
         )
+        .await
         .unwrap();
 
         mem.remember(
@@ -408,6 +505,7 @@ mod tests {
             "session:test:turn:2",
             "London is rainy",
         )
+        .await
         .unwrap();
 
         mem.remember(
@@ -417,37 +515,42 @@ mod tests {
             "session:test:turn:3",
             "Paris is in France",
         )
+        .await
         .unwrap();
 
         // Search by scope
-        let results = mem.search("weather", None).unwrap();
+        let results = mem.search("weather", None).await.unwrap();
         assert_eq!(results.len(), 2);
 
         // Search by scope and query
-        let results = mem.search("weather", Some("Paris")).unwrap();
+        let results = mem.search("weather", Some("Paris")).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].memory_id, "fact_1");
     }
 
-    #[test]
-    fn test_tier2_memory_search_by_tags_requires_nonempty_tags() {
+    #[tokio::test]
+    async fn test_tier2_memory_search_by_tags_requires_nonempty_tags() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-        let mem = Tier2Memory::with_store(store, "agent-1", None);
+        let mem_store: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(store));
+        let mem = Tier2Memory::with_store(mem_store, "agent-1", None);
         assert!(mem
             .search_by_tags("general", &[], None, 10)
+            .await
             .unwrap_err()
             .to_string()
             .contains("tags must not be empty"));
     }
 
-    #[test]
-    fn test_tier2_memory_search_by_tags_limit_bounds() {
+    #[tokio::test]
+    async fn test_tier2_memory_search_by_tags_limit_bounds() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-        let mem = Tier2Memory::with_store(store, "agent-1", None);
+        let mem_store: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(store));
+        let mem = Tier2Memory::with_store(mem_store, "agent-1", None);
         let err0 = mem
             .search_by_tags("general", &["t".to_string()], None, 0)
+            .await
             .unwrap_err()
             .to_string();
         assert!(
@@ -457,6 +560,7 @@ mod tests {
         );
         let err101 = mem
             .search_by_tags("general", &["t".to_string()], None, 101)
+            .await
             .unwrap_err()
             .to_string();
         assert!(
@@ -466,11 +570,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_tier2_memory_search_by_tags_filters() {
+    #[tokio::test]
+    async fn test_tier2_memory_search_by_tags_filters() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-        let mem = Tier2Memory::with_store(Arc::clone(&store), "agent-1", None);
+        let mem_store: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(Arc::clone(&store)));
+        let mem = Tier2Memory::with_store(mem_store, "agent-1", None);
 
         let mut m1 = MemoryObject::new(
             "m1".into(),
@@ -481,7 +586,7 @@ mod tests {
             "async needs Send".into(),
         );
         m1.tags = vec!["type:error_lesson".to_string(), "domain:http".to_string()];
-        mem.save_memory(&m1).unwrap();
+        mem.save_memory(&m1).await.unwrap();
 
         let mut m2 = MemoryObject::new(
             "m2".into(),
@@ -492,10 +597,11 @@ mod tests {
             "other".into(),
         );
         m2.tags = vec!["type:fact".to_string()];
-        mem.save_memory(&m2).unwrap();
+        mem.save_memory(&m2).await.unwrap();
 
         let found = mem
             .search_by_tags("lessons", &["type:error_lesson".to_string()], None, 10)
+            .await
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].memory_id, "m1");
@@ -507,6 +613,7 @@ mod tests {
                 None,
                 10,
             )
+            .await
             .unwrap();
         assert_eq!(found2.len(), 1);
 
@@ -517,16 +624,18 @@ mod tests {
                 Some("Send"),
                 10,
             )
+            .await
             .unwrap();
         assert_eq!(found_text.len(), 1);
     }
 
-    #[test]
-    fn test_tier2_memory_search_by_tags_limit_applies_after_visibility() {
+    #[tokio::test]
+    async fn test_tier2_memory_search_by_tags_limit_applies_after_visibility() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
-        let writer = Tier2Memory::with_store(Arc::clone(&store), "writer-agent", None);
-        let reader = Tier2Memory::with_store(store, "reader-agent", Some("root-s".into()));
+        let mem_store: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(Arc::clone(&store)));
+        let writer = Tier2Memory::with_store(Arc::clone(&mem_store), "writer-agent", None);
+        let reader = Tier2Memory::with_store(mem_store, "reader-agent", Some("root-s".into()));
 
         // Write a session-visible match first (older row).
         let mut shared = MemoryObject::new(
@@ -541,7 +650,7 @@ mod tests {
         shared.visibility = MemoryVisibility::Session {
             session_id: "root-s".into(),
         };
-        writer.save_memory(&shared).unwrap();
+        writer.save_memory(&shared).await.unwrap();
 
         // Then write many newer private matches that reader cannot access.
         for i in 0..150 {
@@ -554,20 +663,21 @@ mod tests {
                 format!("Private {}", i),
             );
             private.tags = vec!["topic:rust".to_string()];
-            writer.save_memory(&private).unwrap();
+            writer.save_memory(&private).await.unwrap();
         }
 
         let found = reader
             .search_by_tags("lessons", &["topic:rust".to_string()], None, 1)
+            .await
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].memory_id, "shared-hit");
     }
 
-    #[test]
-    fn test_tier2_memory_provenance() {
+    #[tokio::test]
+    async fn test_tier2_memory_provenance() {
         let temp = tempfile::tempdir().unwrap();
-        let mem = Tier2Memory::new(temp.path(), "agent-1").unwrap();
+        let mem = Tier2Memory::open_sqlite(temp.path(), "agent-1").unwrap();
 
         let memory = mem
             .remember(
@@ -577,6 +687,7 @@ mod tests {
                 "session:abc123:turn:5",
                 "Important fact",
             )
+            .await
             .unwrap();
 
         // Verify provenance fields
@@ -588,8 +699,8 @@ mod tests {
         assert!(!memory.content_hash.is_empty());
     }
 
-    #[test]
-    fn test_tier2_memory_expired_not_recallable_and_excluded_from_search() {
+    #[tokio::test]
+    async fn test_tier2_memory_expired_not_recallable_and_excluded_from_search() {
         let temp = tempfile::tempdir().unwrap();
         let mem = Tier2Memory::new(temp.path(), "agent-1").unwrap();
 
@@ -602,15 +713,15 @@ mod tests {
             "Old forecast".into(),
         );
         m.expires_at = Some("2000-01-01T00:00:00+00:00".to_string());
-        mem.save_memory(&m).unwrap();
+        mem.save_memory(&m).await.unwrap();
 
-        let err = mem.recall("ephemeral_fact").unwrap_err();
+        let err = mem.recall("ephemeral_fact").await.unwrap_err();
         assert!(
             err.to_string().contains("has expired"),
             "unexpected error: {err}"
         );
 
-        let results = mem.search("weather", None).unwrap();
+        let results = mem.search("weather", None).await.unwrap();
         assert!(
             results.iter().all(|r| r.memory_id != "ephemeral_fact"),
             "expired memory must not appear in search"
