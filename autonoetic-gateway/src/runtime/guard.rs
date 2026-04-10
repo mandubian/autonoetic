@@ -3,6 +3,56 @@
 //! Prevents agents from getting stuck in infinite reasoning loops
 //! without making progress.
 
+fn extract_failure_key(tool_name: &str, arguments: &str) -> String {
+    if let Some(host) = extract_url_host_from_json(arguments) {
+        return format!("{}:{}", tool_name, host);
+    }
+    if let Some(path) = extract_path_from_json(arguments) {
+        return format!("{}:{}", tool_name, path);
+    }
+    if let Some(query) = extract_query_from_json(arguments) {
+        return format!("{}:{}", tool_name, query);
+    }
+    format!("{}:{}", tool_name, arguments)
+}
+
+fn extract_url_host_from_json(arguments: &str) -> Option<String> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return None;
+    };
+    let url = val.get("url").and_then(|v| v.as_str())?;
+    extract_host_from_url(url)
+}
+
+fn extract_path_from_json(arguments: &str) -> Option<String> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return None;
+    };
+    val.get("path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn extract_query_from_json(arguments: &str) -> Option<String> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return None;
+    };
+    val.get("query")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn extract_host_from_url(url: &str) -> Option<String> {
+    let re = regex::Regex::new(r"(?i)^[a-z]+://([^/:]+)").ok()?;
+    let captures = re.captures(url)?;
+    let host = captures.get(1)?.as_str();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.trim_end_matches('.').to_ascii_lowercase())
+    }
+}
+
 pub struct LoopGuard {
     max_loops_without_progress: u32,
     current_loops: u32,
@@ -44,9 +94,9 @@ impl LoopGuard {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
+        let failure_key = extract_failure_key(tool_name, arguments);
         let mut hasher = DefaultHasher::new();
-        tool_name.hash(&mut hasher);
-        arguments.hash(&mut hasher);
+        failure_key.hash(&mut hasher);
         let current_hash = hasher.finish();
 
         if let Some(last_hash) = self.last_failure_hash {
@@ -65,8 +115,6 @@ impl LoopGuard {
     /// Call this when the agent takes a meaningful external action (e.g., writes a file, calls a tool successfully).
     pub fn register_progress(&mut self) {
         self.current_loops = 0;
-        self.last_failure_hash = None;
-        self.consecutive_failures = 0;
     }
 
     /// Capture the current guard state for serialization (e.g. turn continuation checkpoint).
@@ -129,15 +177,49 @@ mod tests {
     }
 
     #[test]
-    fn test_loop_guard_failure_reset() {
+    fn test_loop_guard_failure_persists_across_progress() {
         let mut guard = LoopGuard::new(10);
 
         guard.register_failure("test_tool", "{\"a\": 1}");
         guard.register_failure("test_tool", "{\"a\": 1}");
-        guard.register_progress(); // Success resets failures
+        guard.register_progress();
 
         guard.register_failure("test_tool", "{\"a\": 1}");
-        guard.register_failure("test_tool", "{\"a\": 1}");
-        assert!(guard.check_loop().is_ok()); // Should be OK (only 2 consecutive)
+        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_loop_guard_progress_resets_loops_not_failures() {
+        let mut guard = LoopGuard::new(3);
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+        assert!(guard.check_loop().is_ok());
+    }
+
+    #[test]
+    fn test_loop_guard_different_hosts_different_keys() {
+        let mut guard = LoopGuard::new(3);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com/a"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+
+        guard.register_failure("web.fetch", r#"{"url":"https://other.com/b"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com/b"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com/c"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com/d"}"#);
+        assert!(guard.check_loop().is_err());
     }
 }
