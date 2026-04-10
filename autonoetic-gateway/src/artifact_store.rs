@@ -238,28 +238,12 @@ impl ArtifactStore {
 
         // Phase 1: Resolve all inputs to file handles
         for input_name in inputs {
-            // Resolve content: try as name first, then as handle (with visibility check)
-            let (handle, content) = if input_name.starts_with("sha256:") {
-                // Handle inputs must also be visible — handles are not bearer tokens
-                if !self
-                    .content_store
-                    .is_handle_visible(builder_session_id, input_name)?
-                {
-                    anyhow::bail!(
-                        "Content handle '{}' is not visible in session '{}' or its root session",
-                        input_name,
-                        builder_session_id
-                    );
-                }
-                let content = self.content_store.read(&input_name.to_string())?;
-                (input_name.clone(), content)
-            } else {
-                let handle = self
-                    .content_store
-                    .resolve_name_with_root(builder_session_id, input_name)?;
-                let content = self.content_store.read(&handle)?;
-                (handle, content)
-            };
+            // Same resolution as `content.read` (`cnt_*`, bare alias, `sha256:`, logical names).
+            let handle = self.content_store.resolve_name_or_handle_to_handle(
+                builder_session_id,
+                input_name,
+            )?;
+            let content = self.content_store.read(&handle)?;
 
             let alias = ContentStore::get_short_alias(&handle);
 

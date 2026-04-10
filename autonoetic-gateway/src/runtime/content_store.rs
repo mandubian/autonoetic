@@ -499,22 +499,56 @@ impl ContentStore {
         Ok(false)
     }
 
-    /// Resolves a handle with visibility check — reads only if handle is visible
-    /// in the current or root session.
-    fn resolve_handle_with_visibility(
+    /// Resolves a content name, `cnt_*` ref, bare alias, or `sha256:` handle the same way as
+    /// [`read_by_name_or_handle`], returning the canonical store handle (no blob read).
+    ///
+    /// Use this anywhere session-visible content must be located consistently (e.g. `artifact.build`
+    /// inputs must match `content.read`).
+    pub fn resolve_name_or_handle_to_handle(
         &self,
         session_id: &str,
-        handle: &str,
-    ) -> anyhow::Result<Vec<u8>> {
-        if self.is_handle_visible(session_id, handle)? {
-            self.read(&handle.to_string())
-        } else {
-            Err(anyhow::anyhow!(
-                "Content handle '{}' is not visible in session '{}' or its root session",
-                handle,
-                session_id
-            ))
+        name_or_handle: &str,
+    ) -> anyhow::Result<ContentHandle> {
+        let name_or_handle = name_or_handle.trim();
+
+        // Agent-facing short ref from content.write / SpawnResult (`cnt_<8 hex>`)
+        if let Some(rest) = name_or_handle.strip_prefix("cnt_") {
+            if rest.len() == SHORT_ALIAS_LEN && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                return self.resolve_alias_with_root(session_id, rest);
+            }
         }
+        if let Some(rest) = name_or_handle.strip_prefix("cnt:") {
+            if rest.len() == SHORT_ALIAS_LEN && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                return self.resolve_alias_with_root(session_id, rest);
+            }
+        }
+
+        // "sha256:SHORT_ALIAS" — LLMs sometimes pass alias after sha256: prefix
+        if name_or_handle.starts_with("sha256:") {
+            let after_prefix = &name_or_handle["sha256:".len()..];
+            if after_prefix.len() == SHORT_ALIAS_LEN
+                && after_prefix.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                return self.resolve_alias_with_root(session_id, after_prefix);
+            }
+            if !self.is_handle_visible(session_id, name_or_handle)? {
+                anyhow::bail!(
+                    "Content handle '{}' is not visible in session '{}' or its root session",
+                    name_or_handle,
+                    session_id
+                );
+            }
+            return Ok(name_or_handle.to_string());
+        }
+
+        // Bare 8-char hex alias
+        if name_or_handle.len() == SHORT_ALIAS_LEN
+            && name_or_handle.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return self.resolve_alias_with_root(session_id, name_or_handle);
+        }
+
+        self.resolve_name_with_root(session_id, name_or_handle)
     }
 
     /// Reads content by name, handle, or short alias with root-based lookup.
@@ -530,52 +564,8 @@ impl ContentStore {
         session_id: &str,
         name_or_handle: &str,
     ) -> anyhow::Result<Vec<u8>> {
-        let name_or_handle = name_or_handle.trim();
-
-        // Agent-facing short ref from content.write / SpawnResult (`cnt_<8 hex>`)
-        if let Some(rest) = name_or_handle.strip_prefix("cnt_") {
-            if rest.len() == SHORT_ALIAS_LEN && rest.chars().all(|c| c.is_ascii_hexdigit()) {
-                return self
-                    .resolve_alias_with_root(session_id, rest)
-                    .and_then(|handle| self.read(&handle));
-            }
-        }
-        if let Some(rest) = name_or_handle.strip_prefix("cnt:") {
-            if rest.len() == SHORT_ALIAS_LEN && rest.chars().all(|c| c.is_ascii_hexdigit()) {
-                return self
-                    .resolve_alias_with_root(session_id, rest)
-                    .and_then(|handle| self.read(&handle));
-            }
-        }
-
-        // Check for "sha256:SHORT_ALIAS" pattern (e.g., "sha256:8b40c8e1")
-        // This happens when LLMs mistakenly use the alias value as a full handle
-        if name_or_handle.starts_with("sha256:") {
-            let after_prefix = &name_or_handle["sha256:".len()..];
-            // If exactly SHORT_ALIAS_LEN hex chars, treat as alias lookup
-            if after_prefix.len() == SHORT_ALIAS_LEN
-                && after_prefix.chars().all(|c| c.is_ascii_hexdigit())
-            {
-                return self
-                    .resolve_alias_with_root(session_id, after_prefix)
-                    .and_then(|handle| self.read(&handle));
-            }
-            // Otherwise, treat as full handle
-            return self.resolve_handle_with_visibility(session_id, name_or_handle);
-        }
-
-        // Bare 8-char hex alias
-        if name_or_handle.len() == SHORT_ALIAS_LEN
-            && name_or_handle.chars().all(|c| c.is_ascii_hexdigit())
-        {
-            return self
-                .resolve_alias_with_root(session_id, name_or_handle)
-                .and_then(|handle| self.read(&handle));
-        }
-
-        // Name lookup
-        self.resolve_name_with_root(session_id, name_or_handle)
-            .and_then(|handle| self.read(&handle))
+        let handle = self.resolve_name_or_handle_to_handle(session_id, name_or_handle)?;
+        self.read(&handle)
     }
 
     /// Lists all content names in a session.
@@ -775,6 +765,31 @@ mod tests {
             .read_by_name_or_handle("session-1", &format!("cnt_{}", alias))
             .unwrap();
         assert_eq!(by_cnt, content);
+    }
+
+    #[test]
+    fn test_resolve_name_or_handle_to_handle_matches_read() {
+        let temp = tempdir().unwrap();
+        let store = ContentStore::new(temp.path()).unwrap();
+
+        let content = b"resolve probe";
+        let handle = store.write(content).unwrap();
+        store
+            .register_name("session-1", "f.py", &handle)
+            .unwrap();
+        let short = ContentStore::get_short_alias(&handle);
+        let cnt_ref = format!("cnt_{}", short);
+
+        for probe in ["f.py", handle.as_str(), cnt_ref.as_str(), short.as_str()] {
+            let h = store
+                .resolve_name_or_handle_to_handle("session-1", probe)
+                .unwrap();
+            assert_eq!(store.read(&h).unwrap(), content);
+            assert_eq!(
+                store.read_by_name_or_handle("session-1", probe).unwrap(),
+                content
+            );
+        }
     }
 
     #[test]
