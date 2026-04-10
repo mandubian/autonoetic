@@ -195,6 +195,7 @@ You bridge this gap by installing deps **during build** and packaging them as la
 ## Content System
 
 Use `content.write` and `content.read`:
+- Every `content.write` must include **`name`** and **`content`** (path-like `name`, e.g. `requirements.txt`)
 - Write dependency files with `content.write`
 - They will be mounted at `/tmp/{name}` in sandbox
 - Use `visibility: "session"` for collaborative work
