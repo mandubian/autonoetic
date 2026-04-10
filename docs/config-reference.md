@@ -179,6 +179,33 @@ See `docs/session-budget.md` and `docs/budget-management.md` for details.
 
 ---
 
+## Loop Guard
+
+Controls the per-session runaway loop detection. Independent of `max_session_turns` (which is a hard circuit breaker at the gateway level).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `loop_guard.max_loops_without_progress` | u32 | `5` | Maximum turns without meaningful progress before suspension. Reset by any tool call returning `ok: true` with a new (tool, arguments) fingerprint. |
+| `loop_guard.max_tool_failures` | u32 | `5` | Maximum total failures per tool name before suspension. NOT reset by `register_progress()`. Catches alternating-failure patterns where the same tool keeps failing regardless of arguments. |
+| `loop_guard.max_consecutive_same_progress` | u32 | `1` | Number of consecutive identical (tool, arguments) calls allowed before repeats stop counting as progress. Default `1` means the first call counts as progress, but the second identical call does not. |
+
+Example:
+
+```yaml
+loop_guard:
+  max_loops_without_progress: 5
+  max_tool_failures: 5
+  max_consecutive_same_progress: 1
+```
+
+The loop guard trips when EITHER condition is met:
+1. `current_loops >= max_loops_without_progress` (no meaningful progress)
+2. Any single tool's failure count reaches `max_tool_failures`
+
+"Meaningful progress" requires a tool call with a fingerprint different from the previous `max_consecutive_same_progress` calls. This prevents agents from spinning on the same successful-but-useless tool call indefinitely.
+
+---
+
 ## Max Session Turns
 
 Circuit breaker for runaway agent sessions.

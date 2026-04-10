@@ -20,6 +20,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Live Digest](#live-digest)
 - [Unified Gateway Database](#unified-gateway-database)
 - [Emergency Stop](#emergency-stop)
+- [Human Escalation](#human-escalation)
 - [Design Principles](#design-principles)
 
 ---
@@ -846,6 +847,41 @@ Root-session circuit breaker for operator intervention.
 ```bash
 autonoetic gateway emergency-stop <root_session_id> --reason "Security incident"
 ```
+
+---
+
+## Human Escalation
+
+Mechanically enforced workflow suspension when an agent requests human guidance via `session.escalate(target="human")`.
+
+### How It Works
+
+1. **Agent calls `session.escalate(target="human", reason, context, urgency, suggested_actions)`**
+2. **Gateway creates `ApprovalRequest`** with `ScheduledAction::SessionEscalate` — this is a blocking approval, not advisory
+3. **Lifecycle detects `escalation_required: true`** sentinel in the tool response, saves a checkpoint with `YieldReason::HumanEscalation`, and returns `TurnOutcome::Escalated`
+4. **Agent session is suspended** — it cannot continue until the approval is resolved
+5. **Operator approves** via `autonoetic gateway approve apr-xxx --reason "guidance note"`
+6. **Gateway persists the operator's guidance** in the `decision_reason` column (separate from the agent's original `reason`)
+7. **Session resumes from checkpoint** — the operator's guidance note is injected as a system message into the conversation history
+
+### Authorization
+
+| Target | Blocking? | Creates Approval? |
+|--------|-----------|-------------------|
+| `human` | Yes | Yes — `SessionEscalate` approval |
+| `reasoning_llm` | No | No — advisory only |
+| `specialist` | No | No — advisory only |
+
+### Checkpoint Resume
+
+On checkpoint resume for `HumanEscalation`:
+- If approval is still pending → bail with "waiting for escalation approval"
+- If rejected/cancelled → bail with "escalation was rejected"
+- If approved → restore `LoopGuard` state, inject operator guidance as system message, resume execution
+
+### Design Rationale
+
+This follows the **Separation of Powers** principle: the agent can request help, but only the gateway can unblock execution. The operator's guidance is mechanically injected — no agent interpretation or filtering.
 
 ---
 
