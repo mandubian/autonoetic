@@ -786,4 +786,40 @@ mymod.do_thing()
         let analysis = RemoteAccessAnalyzer::analyze_code_with_workspace(main_code, &workspace);
         assert!(!analysis.requires_approval);
     }
+
+    #[test]
+    fn test_safe_inspection_commands() {
+        assert!(is_safe_inspection_command("pip list"));
+        assert!(is_safe_inspection_command("pip show requests"));
+        assert!(is_safe_inspection_command("pip --version"));
+        assert!(is_safe_inspection_command("pip3 list"));
+        assert!(is_safe_inspection_command("npm list"));
+        assert!(is_safe_inspection_command("npm version"));
+        assert!(!is_safe_inspection_command("pip install requests"));
+        assert!(!is_safe_inspection_command("npm install express"));
+        assert!(!is_safe_inspection_command("curl http://example.com"));
+    }
+}
+
+/// Commands that inspect the local package environment without network access.
+/// These are always safe to run without approval — they read local state only.
+const SAFE_INSPECTION_COMMANDS: &[&str] = &[
+    "pip list",
+    "pip show ",
+    "pip --version",
+    "pip3 list",
+    "pip3 show ",
+    "pip3 --version",
+    "npm list",
+    "npm version",
+    "npm --version",
+];
+
+/// Returns true if the command is a safe local inspection that does not
+/// require network access. These commands only read the local package index.
+pub fn is_safe_inspection_command(command: &str) -> bool {
+    let lower = command.trim().to_ascii_lowercase();
+    SAFE_INSPECTION_COMMANDS
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
 }

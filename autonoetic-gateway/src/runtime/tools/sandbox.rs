@@ -870,6 +870,20 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             approval_validated_for_command = true;
         }
 
+        let mut safe_inspection_bypass = false;
+        if remote_analysis.requires_approval
+            && !approval_validated_for_command
+            && crate::runtime::remote_access::is_safe_inspection_command(&effective_command)
+        {
+            tracing::info!(
+                target: "sandbox.exec",
+                command = %effective_command,
+                "Safe inspection command — skipping approval (no network needed)"
+            );
+            approval_validated_for_command = true;
+            safe_inspection_bypass = true;
+        }
+
         if !agent_has_network_access
             && !approval_validated_for_command
             && remote_analysis.requires_approval
@@ -1403,7 +1417,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
         let mut overrides =
             crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
 
-        if approval_validated_for_command {
+        if approval_validated_for_command && !safe_inspection_bypass {
             overrides.share_net = true;
         }
 
