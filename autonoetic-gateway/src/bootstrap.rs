@@ -2,8 +2,9 @@
 //!
 //! Scans `config.agents_dir` for agent bundles (directories with `SKILL.md`),
 //! creates revisions from their content, and auto-promotes them. Skips agents
-//! that already have revisions. Merges preset-level `thinking` config into
-//! the agent's `SKILL.md` when the agent doesn't already specify one.
+//! that already have revisions. Merges preset-level LLM config into the
+//! agent's `SKILL.md`: always overrides `provider`, `model`, `temperature`;
+//! fills missing `base_url`, `thinking`, `chat_only`, `api_key_env`.
 
 use crate::scheduler::gateway_store::GatewayStore;
 use anyhow::Result;
@@ -190,8 +191,11 @@ fn collect_files(base: &Path, current: &Path, out: &mut BTreeMap<String, Vec<u8>
     Ok(())
 }
 
-/// Merges missing `llm_config` fields from a preset into the SKILL.md file,
-/// preserving the original YAML structure. Merges: `base_url`, `thinking`.
+/// Merges preset-level `llm_config` fields into the SKILL.md file,
+/// preserving the original YAML structure. Always overrides `provider`,
+/// `model`, and `temperature` from the preset (when set). Fills missing
+/// `base_url`, `thinking`, `chat_only`, and `api_key_env` only if not
+/// already present in the agent's config.
 /// Returns `None` if no modification was needed or if the frontmatter couldn't
 /// be parsed.
 fn merge_preset_into_skill(skill_text: &str, preset: &LlmPreset) -> Option<String> {
@@ -227,11 +231,47 @@ fn merge_preset_into_skill(skill_text: &str, preset: &LlmPreset) -> Option<Strin
         if let Some(map) = cfg.as_mapping_mut() {
             let yaml_str = |s: &str| serde_yaml::Value::String(s.to_string());
 
+            // Always override these (infrastructure-level concerns controlled by config.yaml)
+            if let Some(ref provider) = preset.provider {
+                map.insert(yaml_str("provider"), serde_yaml::to_value(provider).ok()?);
+                modified = true;
+            }
+            if let Some(ref model) = preset.model {
+                map.insert(yaml_str("model"), serde_yaml::to_value(model).ok()?);
+                modified = true;
+            }
+            if let Some(temperature) = preset.temperature {
+                map.insert(
+                    yaml_str("temperature"),
+                    serde_yaml::to_value(temperature).ok()?,
+                );
+                modified = true;
+            }
+
+            // Fill-missing for these (agent-specific or optional)
             let base_url_key = yaml_str("base_url");
             let has_base_url = map.get(&base_url_key).map_or(false, |v| !v.is_null());
             if !has_base_url {
                 if let Some(ref base_url) = preset.base_url {
                     map.insert(base_url_key, serde_yaml::to_value(base_url).ok()?);
+                    modified = true;
+                }
+            }
+
+            let chat_only_key = yaml_str("chat_only");
+            let has_chat_only = map.get(&chat_only_key).map_or(false, |v| !v.is_null());
+            if !has_chat_only {
+                if let Some(chat_only) = preset.chat_only {
+                    map.insert(chat_only_key, serde_yaml::to_value(chat_only).ok()?);
+                    modified = true;
+                }
+            }
+
+            let api_key_env_key = yaml_str("api_key_env");
+            let has_api_key_env = map.get(&api_key_env_key).map_or(false, |v| !v.is_null());
+            if !has_api_key_env {
+                if let Some(ref api_key_env) = preset.api_key_env {
+                    map.insert(api_key_env_key, serde_yaml::to_value(api_key_env).ok()?);
                     modified = true;
                 }
             }
