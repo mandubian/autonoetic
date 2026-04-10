@@ -323,7 +323,7 @@ Important: Every significant workflow transition emits a causal chain entry (`wo
 
 ## Loop Guards
 
-The system has two layers of protection against runaway execution loops:
+The system has three layers of protection against runaway execution loops:
 
 ### Hard Gateway Guard
 
@@ -342,6 +342,26 @@ The planner's SKILL.md includes failure loop guard rules that trigger **before**
 2. **Approval timeout retry limit**: After 1 timeout on the same logical task, escalates to human instead of respawning
 3. **Functional failure retry limit**: After 2 retries, escalates to `debugger.default` for root cause analysis
 
+### LoopGuard (Per-Tool Failure Budget)
+
+The gateway-level `LoopGuard` tracks two independent trip conditions:
+
+| Condition | Counter | Reset by progress? |
+|-----------|---------|-------------------|
+| Max loops without progress | `current_loops` | Yes — any `ok: true` with a new fingerprint |
+| Per-tool failure budget | `tool_failure_counts[tool_name]` | **No** — never reset by progress |
+
+Additionally, `register_progress()` fingerprints each (tool_name, arguments) call. After `max_consecutive_same_progress` consecutive identical calls, further repeats stop resetting `current_loops`. This prevents agents from spinning on the same "successful" but useless tool call.
+
+Configured via `loop_guard:` in `config.yaml`:
+
+```yaml
+loop_guard:
+  max_loops_without_progress: 5   # default
+  max_tool_failures: 5            # default
+  max_consecutive_same_progress: 1  # default
+```
+
 ### Workflow State Fields
 
 `workflow.wait` and `workflow.state` expose failure data for the planner:
@@ -357,4 +377,18 @@ When `session.escalate` is called, the gateway:
 1. Emits a `workflow.escalated` event (visible in chat CLI with `🆘` icon)
 2. Includes `escalation_id` and `workflow_id` in the response
 3. Persists the escalation in the workflow events table for audit
+
+### Human Escalation Approval Flow
+
+When `session.escalate(target="human")` is called:
+
+1. **Creates `ApprovalRequest`** with `ScheduledAction::SessionEscalate` containing the agent's reason, context, urgency, and suggested actions
+2. **Returns `escalation_required: true`** — the lifecycle detects this sentinel and suspends the agent turn
+3. **Saves checkpoint** with `YieldReason::HumanEscalation { escalation_request_id }`
+4. **Operator approves** via `autonoetic gateway approve apr-xxx --reason "guidance note"`
+5. **Session resumes** from checkpoint — the operator's guidance note is injected as a system message
+
+The operator's guidance is persisted in the `decision_reason` column of the `approvals` table, separate from the agent's original `reason`. On checkpoint resume, the gateway reads `decision_reason` (not `reason`) so the agent receives the operator's actual guidance.
+
+`session.escalate(target="reasoning_llm")` and `session.escalate(target="specialist")` remain advisory — they return structured responses but do NOT create approvals or suspend execution.
 - `autonoetic-gateway/src/runtime/content_store.rs` — Content addressing, visibility, alias/handle resolution
