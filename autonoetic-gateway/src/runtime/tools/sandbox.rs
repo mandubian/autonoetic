@@ -22,6 +22,28 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 
 pub struct SandboxExecTool;
 
+/// True if `pattern` matches a package manager install command.
+/// Used to detect when a non-NetworkAccess agent is trying to install
+/// dependencies and should be redirected to packager.default.
+fn is_package_manager_command(pattern: &str) -> bool {
+    matches!(
+        pattern,
+        "pip install"
+            | "pip3 install"
+            | "npm install"
+            | "yarn install"
+            | "yarn add"
+            | "pnpm install"
+            | "bun install"
+            | "go get"
+            | "go mod download"
+            | "cargo install"
+            | "gem install"
+            | "composer install"
+            | "composer require"
+    )
+}
+
 /// True if `command` uses a content-store digest (`sha256:` + hex) like a shell path.
 /// Session files are mounted at `/tmp/<name>`; digests must only go to `content.read`, not `cp`/`python` argv.
 fn sandbox_command_misuses_content_digest_as_path(command: &str) -> bool {
@@ -846,6 +868,31 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 "Agent has NetworkAccess capability — auto-approving remote access patterns"
             );
             approval_validated_for_command = true;
+        }
+
+        if !agent_has_network_access
+            && !approval_validated_for_command
+            && remote_analysis.requires_approval
+        {
+            let is_dep_install = remote_analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "network_command" && is_package_manager_command(&p.pattern));
+            if is_dep_install {
+                let detected: Vec<String> = remote_analysis
+                    .detected_patterns
+                    .iter()
+                    .filter(|p| p.category == "network_command")
+                    .map(|p| p.pattern.clone())
+                    .collect();
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "dependency_layer_required": true,
+                    "recommended_agent": "packager.default",
+                    "reason": "External packages must be resolved into layers by packager.default before execution.",
+                    "detected_commands": detected,
+                }).to_string());
+            }
         }
 
         tracing::info!(

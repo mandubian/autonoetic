@@ -52,9 +52,10 @@ Approval retry: if `sandbox.exec` previously returned `approval_required: true` 
 
 ## Behavior
 - Write clean, documented code
-- Test code with `sandbox.exec` before returning — use `dependencies` field to install packages if needed
+- Test code with `sandbox.exec` before returning
 - Use `content.write` to persist artifacts — **every call must include both `name` (path-like filename, e.g. `weather_fetcher.py`) and `content`**; omitting `name` fails validation
 - Follow the principle of minimal changes
+- **DO NOT use `dependencies` field in `sandbox.exec`** — you don't have `NetworkAccess`. If your code needs external packages, signal to the planner that `packager.default` is needed to resolve dependencies into layers.
 
 ## Creating Agent Scripts for the Planner
 
@@ -144,13 +145,19 @@ sandbox.exec({
 ```
 
 ### When to Use Dependencies
-Only use `dependencies` when you need to install packages:
+You don't have `NetworkAccess`, so you cannot install packages directly. If your code needs external packages:
+
+1. Signal to the planner that `packager.default` is needed
+2. The planner will spawn `packager.default` to resolve dependencies into artifact layers
+3. You can then run your code against the layered artifact without network access
 
 ```json
-sandbox.exec({
-  "command": "python3 /tmp/script.py",
-  "dependencies": {"runtime": "python", "packages": ["requests", "pandas"]}
-})
+// Instead of using dependencies, tell the planner:
+{
+  "status": "needs_packager",
+  "reason": "Code requires external packages (requests, pandas)",
+  "dependency_files": ["requirements.txt"]
+}
 ```
 
 ### Path Rules
