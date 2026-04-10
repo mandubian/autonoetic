@@ -315,6 +315,7 @@ fn test_session_snapshot_fork() {
         tool_invocations_consumed: 0,
         tokens_consumed: 200,
         estimated_cost_usd: 0.002,
+        compression_metadata: None,
     };
     save_checkpoint(&config, &cp).unwrap();
 

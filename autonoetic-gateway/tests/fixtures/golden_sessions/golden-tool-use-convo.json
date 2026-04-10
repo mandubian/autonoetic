@@ -1,0 +1,56 @@
+{
+  "id": "golden-tool-use-convo",
+  "description": "Multi-turn conversation with tool use — validates compression preserves tool call sequences",
+  "system_prompt": "You are a helpful assistant with access to weather and search tools. When the user asks about weather, call weather.get. When they ask about facts, call search.query.",
+  "turns": [
+    {
+      "user_message": "What's the weather in Paris?",
+      "assistant_response": "Let me check the weather in Paris for you.",
+      "tool_calls": [
+        {
+          "id": "tc_weather_1",
+          "name": "weather.get",
+          "arguments": "{\"city\":\"Paris\"}"
+        }
+      ],
+      "end_turn": false
+    },
+    {
+      "user_message": "The weather is 72°F and sunny.",
+      "assistant_response": "Great! 72°F and sunny sounds like perfect weather in Paris. Enjoy!",
+      "tool_calls": [],
+      "end_turn": false
+    },
+    {
+      "user_message": "Now search for the population of Paris.",
+      "assistant_response": "I'll search for the population of Paris.",
+      "tool_calls": [
+        {
+          "id": "tc_search_1",
+          "name": "search.query",
+          "arguments": "{\"query\":\"population of Paris France\"}"
+        }
+      ],
+      "end_turn": false
+    },
+    {
+      "user_message": "The population is 2.1 million.",
+      "assistant_response": "Thank you! Paris has a population of approximately 2.1 million people within the city limits.",
+      "tool_calls": [],
+      "end_turn": true
+    }
+  ],
+  "expected_outcome": "Multi-turn tool use conversation completed with 2 tool calls (weather.get, search.query)",
+  "expected_tool_sequence": [
+    {
+      "id": "tc_weather_1",
+      "name": "weather.get",
+      "arguments": "{\"city\":\"Paris\"}"
+    },
+    {
+      "id": "tc_search_1",
+      "name": "search.query",
+      "arguments": "{\"query\":\"population of Paris France\"}"
+    }
+  ]
+}

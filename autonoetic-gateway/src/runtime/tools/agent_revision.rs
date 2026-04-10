@@ -903,6 +903,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
+            compression: None,
         };
 
         let canonical_skill = crate::runtime::install_contract::render_skill_document(

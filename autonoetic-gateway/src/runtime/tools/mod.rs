@@ -718,6 +718,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
+        compression: None,
         };
         let unfiltered = registry.available_definitions(&manifest);
         let filtered = registry.available_definitions_filtered(&manifest, None);
@@ -756,6 +757,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
+        compression: None,
         };
         let filter = ToolTierFilter::core_only();
         let filtered = registry.available_definitions_filtered(&manifest, Some(&filter));

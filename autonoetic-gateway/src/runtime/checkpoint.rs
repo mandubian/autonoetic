@@ -7,6 +7,7 @@
 //! Storage: `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json`
 
 use crate::llm::Message;
+use crate::runtime::compression::CompressionMetadata;
 use crate::runtime::guard::LoopGuardState;
 use autonoetic_types::config::GatewayConfig;
 use serde::{Deserialize, Serialize};
@@ -137,6 +138,11 @@ pub struct SessionCheckpoint {
     /// Estimated cost so far (USD).
     #[serde(default)]
     pub estimated_cost_usd: f64,
+
+    // --- Compression ---
+    /// Compression metadata if context compression was applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression_metadata: Option<CompressionMetadata>,
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +460,7 @@ mod tests {
             tool_invocations_consumed: 0,
             tokens_consumed: 100,
             estimated_cost_usd: 0.001,
+            compression_metadata: None,
         };
 
         save_checkpoint(&config, &checkpoint).expect("should save");
@@ -497,6 +504,7 @@ mod tests {
             tool_invocations_consumed: 0,
             tokens_consumed: 100,
             estimated_cost_usd: 0.001,
+            compression_metadata: None,
         };
 
         let mut c2 = c1.clone();
@@ -548,6 +556,7 @@ mod tests {
                 tool_invocations_consumed: 0,
                 tokens_consumed: 100,
                 estimated_cost_usd: 0.001,
+                compression_metadata: None,
             };
             save_checkpoint(&config, &checkpoint).unwrap();
         }

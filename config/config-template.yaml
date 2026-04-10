@@ -236,16 +236,12 @@ llm_preset_mapping:
   builder: agentic
   default: fallback
 
-
-# # ── Template → Preset Mapping ────────────────────────────────────────
-# # Used during 'agent bootstrap' and 'agent init --template <name>'.
-# # Values can be fixed preset names or routing preset names.
-# llm_preset_mapping:
-#   planner: smart             # routed
-#   coder: smart               # routed
-#   researcher: sonnet         # fixed
-#   debugger: haiku            # fixed
-#   evaluator: budget          # routed
-#   architect: opus            # fixed
-#   specialized_builder: agentic
-#   default: sonnet
+# ── Context Compression ──────────────────────────────────────────────
+# Summarizes old conversation turns when approaching context limits.
+# context_compression:
+#   enabled: false
+#   llm_preset: haiku
+#   threshold_pct: 60.0
+#   recent_turns_to_keep: 3
+#   max_summary_tokens: 500
+#   min_turns_between_compression: 3
