@@ -95,6 +95,7 @@ Concretely, the coder SKILL should state that response-contract repair has the s
 3. If the gateway issues a repair prompt, repair the evaluation output itself. That can mean rewriting the JSON report, reducing reply size, or returning the required named report artifact.
 4. Keep findings traceable to the reviewed `artifact_id` in both the report content and promotion record.
 5. If execution is blocked on approval, stop as instructed; do not force a partial report into a shape that looks complete just to satisfy validation.
+6. The gateway mechanically gates `promotion.record`: `pass=true` is rejected if any finding has `error`/`critical` severity, or if `warning` findings lack a non-empty `evidence` field. This is enforced at the gateway boundary — the evaluator cannot override it.
 
 Concretely, the evaluator SKILL should say that repair prompts are authoritative gateway feedback about the evaluation deliverable, not a request to reinterpret the findings.
 

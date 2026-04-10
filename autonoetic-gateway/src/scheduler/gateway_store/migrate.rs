@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 3;
+const SCHEMA_VERSION_LATEST: i64 = 4;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -481,6 +481,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
 
     apply_memories_expires_at_v2(conn)?;
     apply_memories_drop_allowed_agents_v3(conn)?;
+    apply_session_approval_grants_v4(conn)?;
 
     Ok(())
 }
@@ -611,6 +612,42 @@ pub(super) fn reconcile_stale_active_executions(conn: &Connection) -> Result<()>
     conn.execute(
         "UPDATE active_executions SET status = 'lost', stopped_at = ?1 WHERE status IN ('running', 'stop_requested') AND heartbeat_at < ?2",
         params![now, cutoff],
+    )?;
+    Ok(())
+}
+
+fn apply_session_approval_grants_v4(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 4 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_approval_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            host TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            source_approval_id TEXT,
+            UNIQUE(root_session_id, agent_id, host)
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_grants_root_agent
+          ON session_approval_grants(root_session_id, agent_id);
+        CREATE INDEX IF NOT EXISTS idx_session_grants_root
+          ON session_approval_grants(root_session_id);",
+    )?;
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            4_i64,
+            "session_approval_grants",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }

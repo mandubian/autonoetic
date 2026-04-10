@@ -713,6 +713,19 @@ impl AgentExecutor {
             }
         }
 
+        if !reason.contains("suspended") {
+            if let Some(gs) = self.gateway_store.as_ref() {
+                let root_sid = crate::runtime::content_store::root_session_id(&session_id);
+                if let Err(e) = gs.delete_session_grants(&root_sid) {
+                    tracing::warn!(
+                        root_session_id = %root_sid,
+                        error = %e,
+                        "Failed to delete session grants on session close"
+                    );
+                }
+            }
+        }
+
         if let Some(d) = self.live_digest.take() {
             if let Ok(mut g) = d.lock() {
                 let _ = g.write_session_summary(reason);

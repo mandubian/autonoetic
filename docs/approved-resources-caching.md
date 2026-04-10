@@ -153,10 +153,41 @@ Do NOT add `resource.revoke` as a runtime tool. Revocation is handled via Phase 
 
 ## Out of Scope for Phase 1
 
-- TTL / expiry (Phase 2)
 - Capability change detection (Phase 2)
-- Host-wide approval class (Phase 2)
 - Revocation CLI/API (Phase 2)
+
+## Phase 1.5: Session Approval Grants [COMPLETE]
+
+The exec cache (Phase 1) only works when ALL detected patterns are concrete (`url_literal` or `ip_address`). Code like `import requests; requests.get("https://api.example.com")` produces mixed concrete+opaque patterns and is never cached — causing repeated approval prompts for the same hosts within a session.
+
+Session approval grants solve this by recording **which hosts were approved** at the session level, independent of code fingerprinting:
+
+- When an operator approves a `sandbox.exec`, the detected hosts are stored as `(root_session_id, host)` pairs in the `session_approval_grants` SQLite table
+- On subsequent `sandbox.exec` calls, the gateway checks if the required hosts are a subset of already-granted hosts for this root session
+- If so, the call is auto-approved without operator interaction
+- Grants are scoped to the root session and cleaned up when the session ends
+- Grants require concrete targets (URL literals/IP addresses) — dynamic patterns are excluded by design
+
+This complements the exec cache: the cache handles identical code, while session grants handle different code accessing the same hosts.
+
+### Implementation
+
+| File | Changes |
+|------|---------|
+| `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Migration v4: `session_approval_grants` table |
+| `autonoetic-gateway/src/scheduler/gateway_store/approvals.rs` | Grant CRUD: `insert_session_grant`, `get_session_grants`, `session_grants_cover_targets`, `delete_session_grants` |
+| `autonoetic-gateway/src/scheduler/approval.rs` | Grant insertion on approval resolution |
+| `autonoetic-gateway/src/runtime/tools/sandbox.rs` | Grant check before new approval creation (both artifact and non-artifact paths) |
+| `autonoetic-gateway/src/runtime/lifecycle.rs` | Grant cleanup on session close (non-suspended only) |
+| `autonoetic-gateway/src/execution.rs` | Grant cleanup on emergency stop |
+| `autonoetic-types/src/background.rs` | `detected_hosts: Option<Vec<String>>` field on `SandboxExec` action |
+
+### Security Considerations
+
+- Grants are scoped by root session (not by agent) — all agents in the session benefit from the grant
+- The `agent_id` column is stored for audit/forensics but not used in the authorization check
+- Host normalization is consistent: both `normalize_targets()` and `extract_host_from_url()` lowercase and strip trailing dots
+- Grants are cleaned up on session close (completed/failed) and emergency stop, but preserved for suspended sessions
 
 ## Success Metrics
 

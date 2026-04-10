@@ -206,4 +206,79 @@ impl GatewayStore {
         }
         Ok(results)
     }
+
+    pub fn insert_session_grant(
+        &self,
+        root_session_id: &str,
+        agent_id: &str,
+        hosts: &[String],
+        granted_by: &str,
+        granted_at: &str,
+        source_approval_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        for host in hosts {
+            conn.execute(
+                "INSERT OR IGNORE INTO session_approval_grants
+                 (root_session_id, agent_id, host, granted_by, granted_at, source_approval_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    root_session_id,
+                    agent_id,
+                    host,
+                    granted_by,
+                    granted_at,
+                    source_approval_id
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_session_grants(&self, root_session_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT host FROM session_approval_grants
+             WHERE root_session_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            let host: String = row.get(0)?;
+            Ok(host)
+        })?;
+
+        let mut results = Vec::new();
+        for host_result in rows {
+            results.push(host_result?);
+        }
+        results.sort();
+        Ok(results)
+    }
+
+    pub fn session_grants_cover_targets(
+        &self,
+        root_session_id: &str,
+        required_targets: &[String],
+    ) -> bool {
+        if required_targets.is_empty() {
+            return false;
+        }
+        let granted = match self.get_session_grants(root_session_id) {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        if granted.is_empty() {
+            return false;
+        }
+        let granted_set: std::collections::BTreeSet<String> = granted.into_iter().collect();
+        required_targets.iter().all(|t| granted_set.contains(t))
+    }
+
+    pub fn delete_session_grants(&self, root_session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM session_approval_grants WHERE root_session_id = ?1",
+            params![root_session_id],
+        )?;
+        Ok(())
+    }
 }

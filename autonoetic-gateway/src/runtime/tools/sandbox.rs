@@ -634,7 +634,20 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                     false
                 };
 
-            if artifact_already_approved {
+            let session_grants_cover = if artifact_already_approved {
+                false
+            } else if let (Some(gw_store), Some(sid)) = (&gateway_store, session_id) {
+                let root_sid = crate::runtime::content_store::root_session_id(sid);
+                if artifact_domains.is_empty() {
+                    false
+                } else {
+                    gw_store.session_grants_cover_targets(&root_sid, &artifact_domains)
+                }
+            } else {
+                false
+            };
+
+            if artifact_already_approved || session_grants_cover {
                 approval_validated_for_command = true;
             } else {
                 if let Some(cfg) = config {
@@ -713,6 +726,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         }),
                         requires_approval: true,
                         evidence_ref: None,
+                        detected_hosts: Some(artifact_domains.clone()),
                     };
                     let approval_workflow_id = {
                         let sid = session_id.unwrap_or("");
@@ -1013,6 +1027,24 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 }
             } // end has_concrete guard
 
+            if !approval_validated_for_command {
+                if let (Some(gw_store), Some(sid)) = (&gateway_store, session_id) {
+                    let root_sid = crate::runtime::content_store::root_session_id(sid);
+                    if !normalized_targets.is_empty() {
+                        if gw_store.session_grants_cover_targets(&root_sid, &normalized_targets) {
+                            tracing::info!(
+                                target: "sandbox.exec",
+                                agent_id = %manifest.agent.id,
+                                root_session_id = %root_sid,
+                                targets = ?normalized_targets,
+                                "Session grant covers targets — auto-approving sandbox exec"
+                            );
+                            approval_validated_for_command = true;
+                        }
+                    }
+                }
+            }
+
             // If still not validated, check for pending approvals
             if !approval_validated_for_command {
                 if let Some(cfg) = config {
@@ -1106,6 +1138,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         }),
                         requires_approval: true,
                         evidence_ref: None,
+                        detected_hosts: Some(normalized_targets.clone()),
                     };
                     let approval_workflow_id = {
                         let sid = session_id.unwrap_or("");
@@ -1613,6 +1646,7 @@ mod approval_binding_tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: "2026-01-01T00:00:00Z".to_string(),
@@ -1640,6 +1674,7 @@ mod approval_binding_tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: "2026-01-01T00:00:00Z".to_string(),
@@ -1666,6 +1701,7 @@ mod approval_binding_tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             created_at: "2026-01-01T00:00:00Z".to_string(),
             reason: None,

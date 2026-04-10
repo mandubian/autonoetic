@@ -34,6 +34,7 @@ The system has three distinct human-interaction mechanisms that serve different 
 - **Durable**: Approval requests persist to SQLite
 - **Auto-resume**: Gateway automatically resumes the session when approval is resolved
 - **Domain-level reuse**: For `sandbox.exec` with artifact-based analysis, once a domain (e.g., `api.open-meteo.com`) is approved at the root workflow level, other sessions under the same root can reuse the approval without re-asking
+- **Session approval grants**: Once the operator approves network access to specific hosts for a root session, all subsequent `sandbox.exec` calls within that session targeting the same hosts are auto-approved — no repeated operator prompts
 - **Payload preservation**: For `agent.revision.promote`, the full promote args are stored in the approval request; on approval the gateway resumes the suspended turn with the real promotion result, preventing payload drift
 - **Deduplication**: Both `sandbox.exec` and `agent.revision.promote` prevent duplicate approval requests — if an approval is already pending (or recently approved) for the same operation, the existing request ID is returned instead of creating a new one
 
@@ -99,6 +100,7 @@ pub enum ScheduledAction {
         command: String,
         dependencies: Option<ScheduledActionDependencies>,
         requires_approval: bool,
+        detected_hosts: Option<Vec<String>>,
     },
     AgentRevisionPromote {
         agent_id: String,
@@ -122,18 +124,22 @@ pub enum ScheduledAction {
 │    → Extracts hosts: api.open-meteo.com, api.openweathermap.org │
 ├─────────────────────────────────────────────────────────────────┤
 │ 3. Check for existing approved/pending approvals                │
-│    → If domain already approved at root level → SKIP approval   │
-│    → If pending approval exists → REUSE it                      │
-│    → Otherwise → CREATE new approval request                    │
+│    a. Exec cache hit (same fingerprint) → SKIP approval         │
+│    b. Session grant covers targets → SKIP approval              │
+│    c. Domain already approved at root level → SKIP approval     │
+│    d. Pending approval exists → REUSE it                        │
+│    e. Otherwise → CREATE new approval request                   │
 ├─────────────────────────────────────────────────────────────────┤
 │ 4. Create ApprovalRequest, persist to SQLite                    │
-│    → Store command, detected hosts in reason field              │
+│    → Store command + detected_hosts in action payload           │
 ├─────────────────────────────────────────────────────────────────┤
 │ 5. Return approval_required response, suspend session           │
 ├─────────────────────────────────────────────────────────────────┤
 │ 6. Operator runs: gateway approvals approve apr-xxx             │
 ├─────────────────────────────────────────────────────────────────┤
-│ 7. Gateway resumes session, executes approved command           │
+│ 7. Gateway records session approval grants for detected hosts   │
+├─────────────────────────────────────────────────────────────────┤
+│ 8. Gateway resumes session, executes approved command           │
 │    → Injects real sandbox output into conversation              │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -175,6 +181,40 @@ This works because:
 - Artifacts are immutable (same files → same domains)
 - The approval reason includes detected domains
 - The check queries `get_approved_approvals_for_root()` for matching domains
+
+### Session Approval Grants
+
+When the operator approves a `sandbox.exec` that accesses specific hosts, the gateway creates **session approval grants** — `(root_session_id, host)` pairs stored in SQLite. These grants prevent repeated operator prompts for the same hosts within the same root session.
+
+**How it works:**
+
+1. Operator approves `sandbox.exec` accessing `api.open-meteo.com` and `nominatim.openstreetmap.org`
+2. Gateway extracts the detected hosts from the approval action and inserts them as session grants
+3. When the same agent (or any other agent in the same root session) calls `sandbox.exec` with code that accesses a **subset** of the already-granted hosts, the gateway auto-approves without operator interaction
+
+**Scope:**
+- Grants are scoped to the **root session** — all agents within the root session benefit (e.g., `coder.default` and `evaluator.default` working on the same artifact)
+- Grants require **concrete targets** (URL literals or IP addresses) — dynamic URLs that can't be statically resolved don't produce grants
+- Grants are cleaned up when the root session ends (completed, failed, or emergency-stopped)
+- Grants are **not** cleaned up for suspended sessions (which may resume and still need their grants)
+
+**Why root-session scoping?** Agents within a root session cooperate on the same workflow. If the operator trusts `api.open-meteo.com` for one agent in the session, it should be trusted for all. The `agent_id` is stored per grant row for audit/forensics purposes.
+
+**The approval check order is:**
+1. Approved exec cache (fingerprint-level, cross-session)
+2. Session approval grants (host-level, within root session)
+3. Existing approved/pending approvals (domain-level)
+4. New approval request
+
+### Promotion Severity Gating
+
+The `promotion.record` tool mechanically enforces that `pass=true` cannot be set when findings indicate the code hasn't been properly validated:
+
+- **Error/Critical findings**: `pass=true` is **rejected** — the gateway refuses to record a passing promotion when any finding has `error` or `critical` severity
+- **Warning findings**: `pass=true` is **rejected** unless every warning finding includes a non-empty `evidence` field containing concrete proof (e.g., sandbox output, test results) that the issue was actually investigated — not just an LLM's opinion that the warning is acceptable
+- **Info findings**: No restriction — `pass=true` is allowed
+
+This prevents the scenario where an evaluator sets `pass=true` despite code that has never been functionally validated (e.g., all sandbox exec returned 403 errors). The evidence requirement ensures the evaluator must provide factual proof, not just an assertion.
 
 ### Continuation-Based Resume (sandbox.exec)
 
@@ -318,10 +358,15 @@ autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
 
 | File | Role |
 |---|---|
-| `autonoetic-gateway/src/scheduler/approval.rs` | Approval lifecycle, resume logic, signal delivery, pending approval queries (`pending_approval_requests_for_root`, `pending_approval_requests_for_session`, `pending_sandbox_exec_requests_for_session`) |
-| `autonoetic-gateway/src/scheduler/gateway_store.rs` | Approval persistence (SQLite), queries (`get_approved_approvals_for_root`, `get_approved_approvals_for_session`) |
-| `autonoetic-gateway/src/runtime/tools/sandbox.rs` | Approval checks in `SandboxExecTool`; sandbox deduplication logic |
+| `autonoetic-gateway/src/scheduler/approval.rs` | Approval lifecycle, resume logic, signal delivery, pending approval queries, session grant insertion on approval |
+| `autonoetic-gateway/src/scheduler/gateway_store/approvals.rs` | Approval persistence (SQLite), session grant CRUD (`insert_session_grant`, `get_session_grants`, `session_grants_cover_targets`, `delete_session_grants`) |
+| `autonoetic-gateway/src/runtime/tools/sandbox.rs` | Approval checks in `SandboxExecTool`; session grant check; sandbox deduplication logic |
 | `autonoetic-gateway/src/runtime/tools/agent.rs` | Approval checks in `AgentRevisionPromoteTool`; promote deduplication logic |
+| `autonoetic-gateway/src/runtime/tools/promotion.rs` | Mechanical severity gating for `promotion.record` — rejects `pass=true` with error/critical findings or warnings without evidence |
 | `autonoetic-gateway/src/runtime/remote_access.rs` | URL/domain extraction from code (`RemoteAccessAnalyzer`) |
-| `autonoetic-gateway/src/runtime/approved_exec_cache.rs` | Domain normalization (`normalize_targets`), fingerprinting |
-| `autonoetic-types/src/background.rs` | `ApprovalRequest`, `ScheduledAction`, `ApprovalStatus` types |
+| `autonoetic-gateway/src/runtime/approved_exec_cache.rs` | Domain normalization (`normalize_targets`), fingerprinting, host normalization (lowercase + trailing dot stripping) |
+| `autonoetic-gateway/src/runtime/lifecycle.rs` | Session close — grant cleanup for non-suspended sessions |
+| `autonoetic-gateway/src/execution.rs` | Emergency stop — grant cleanup during circuit breaker |
+| `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Database migration v4: `session_approval_grants` table |
+| `autonoetic-types/src/background.rs` | `ApprovalRequest`, `ScheduledAction` (with `detected_hosts`), `ApprovalStatus` types |
+| `autonoetic-types/src/promotion.rs` | `PromotionRecordArgs` type |

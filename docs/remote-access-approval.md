@@ -78,9 +78,29 @@ Static analysis inspects the **actual code** to detect remote access patterns de
 │    ↓ allowed                                                │
 │ 2. Static analysis (remote_access.rs)                       │
 │    ├─ No remote patterns → Execute immediately              │
-│    └─ Remote patterns found → BLOCK + require approval      │
+│    └─ Remote patterns found → proceed to approval checks    │
+│ 3. Approval resolution checks (in order):                   │
+│    a. Exec cache hit (identical code fingerprint) → EXECUTE │
+│    b. Session grant covers targets → EXECUTE                │
+│    c. Existing approved/pending approval → REUSE            │
+│    d. None of the above → BLOCK + require approval          │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### Session Approval Grants
+
+When an operator approves `sandbox.exec` for specific hosts, those hosts are recorded as session-level grants. Subsequent `sandbox.exec` calls in the same root session that access a subset of the granted hosts are auto-approved. This prevents the common scenario where the evaluator, coder, and tester all trigger separate approval prompts for the same `api.open-meteo.com`.
+
+Grants are cleaned up when the session ends. See [Approval System](approval-system.md) for full details.
+
+### Promotion Severity Gating
+
+The `promotion.record` tool enforces mechanical validation:
+
+- `pass=true` with `error` or `critical` findings → **rejected by the gateway**
+- `pass=true` with `warning` findings → **rejected** unless every warning includes non-empty `evidence` (e.g., sandbox output proving the issue was investigated)
+
+This prevents evaluators from passing code that has never been functionally validated.
 
 ### When Remote Access Detected
 

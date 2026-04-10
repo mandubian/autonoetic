@@ -191,15 +191,13 @@ pub fn compute_fingerprint(agent_id: &str, targets: &[String], code_to_analyze: 
 /// - "https://api.example.com/v1/forecast" → "api.example.com"
 /// - "http://192.168.1.1:8080/api" → "192.168.1.1"
 fn extract_host_from_url(url: &str) -> Option<String> {
-    // Match scheme://host[:port][/path...]
-    // Host can be a domain name or IP address
     let re = regex::Regex::new(r"(?i)^[a-z]+://([^/:]+)").ok()?;
     let captures = re.captures(url)?;
     let host = captures.get(1)?.as_str();
     if host.is_empty() {
         None
     } else {
-        Some(host.to_string())
+        Some(host.trim_end_matches('.').to_ascii_lowercase())
     }
 }
 
