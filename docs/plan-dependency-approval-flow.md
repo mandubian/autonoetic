@@ -38,110 +38,39 @@ Reduce dependency-install approval churn by mechanically redirecting non-builder
 
 ## Implementation Phases
 
-### Phase 1: Mechanical redirect for non-builder agents
+### Phase 1: Mechanical redirect for non-builder agents ✅ DONE
 
 **Priority: Highest.** Stops evaluator/coder dep-install loops with minimal code.
 
-**File:** `autonoetic-gateway/src/runtime/tools/sandbox.rs`
+Implemented in commit `1839f66`.
 
-After remote access analysis (around line 830), before the approval check at line 862:
-
-1. Detect if the command contains `network_command` category patterns that are package-manager installs (`pip install`, `npm install`, etc.).
-2. Check if the agent has `NetworkAccess` capability (already computed at line 833).
-3. If the agent does NOT have `NetworkAccess` AND the detected patterns are exclusively package-manager commands:
-   ```rust
-   return Ok(json!({
-       "ok": false,
-       "dependency_layer_required": true,
-       "recommended_agent": "packager.default",
-       "reason": "External packages must be resolved into layers by packager.default before execution.",
-       "detected_patterns": [list of detected pip/npm/etc patterns],
-   }).to_string());
-   ```
-
-This is ~30 lines. No new types, no new approval actions, no schema changes.
-
-**Files to modify:**
-- `autonoetic-gateway/src/runtime/tools/sandbox.rs` — redirect logic
-- `agents/specialists/coder.default/SKILL.md` — instruct to expect `dependency_layer_required` and signal planner
-- `agents/specialists/evaluator.default/SKILL.md` — same
-- `agents/lead/planner.default/SKILL.md` — when coder's artifact has dependency files (requirements.txt, package.json), insert packager step before evaluator
-
-### Phase 2: Layer auto-mounting for evaluator
+### Phase 2: Layer auto-mounting for evaluator ✅ DONE
 
 **Priority: High.** Evaluator runs with builder's dependency layers without LLM assistance.
 
-**Current state:** Evaluator CAN mount layers by passing `artifact_id` in `sandbox.exec` (SandboxExecArgs already has this field, line 559 of tools/mod.rs). The existing code at sandbox.rs:1303-1334 auto-extracts and mounts artifact layers. But the LLM has to know the artifact_id and pass it manually.
+Implemented in commit `eb142e1`.
 
-**Approach:** Add `artifact_id` to `AgentExecutor` so it's mechanically available to all `sandbox.exec` calls in the child session.
-
-**Files to modify:**
-
-1. **`autonoetic-gateway/src/runtime/tools/agent.rs`** — Add `artifact_id: Option<String>` to `SpawnAgentArgs` JSON schema. When present, thread it through to `spawn_agent_once()`.
-
-2. **`autonoetic-gateway/src/execution.rs`** — Add `artifact_id: Option<String>` parameter to `spawn_agent_once()`. Store on `AgentExecutor` via `.with_artifact_id()` builder method.
-
-3. **`autonoetic-gateway/src/runtime/lifecycle.rs`** — Add `artifact_id: Option<String>` field to `AgentExecutor` (alongside existing `session_id`, `workflow_id`, etc.). Pass it to `NativeToolRunContext`.
-
-4. **`autonoetic-gateway/src/runtime/active_execution_registry.rs`** — Add `artifact_id: Option<String>` to `NativeToolRunContext`.
-
-5. **`autonoetic-gateway/src/runtime/tools/sandbox.rs`** — In the mount construction section (around line 1270): when `NativeToolRunContext` has `artifact_id` AND the current `sandbox.exec` call doesn't already have one in its args, auto-mount the artifact's layers using the existing logic at lines 1303-1334.
-
-6. **`autonoetic-gateway/src/sandbox.rs`** — Add `readonly: bool` to `SandboxMount`. In `bubblewrap_shell_command()`, use `--ro-bind` when `readonly` is true, `--bind` when false. Layer mounts from auto-mounting should set `readonly: true`.
-
-**Key invariant:** Auto-mounted layers are read-only. The evaluator inspects and runs against them but cannot mutate them.
-
-### Phase 3: Safe local inspection commands
+### Phase 3: Safe local inspection commands ✅ DONE
 
 **Priority: Medium.** Agents can inspect their environment without triggering approval.
 
-**File:** `autonoetic-gateway/src/runtime/remote_access.rs`
+Implemented in commit `60ec0a3`.
 
-Add a method `is_safe_inspection_command(command: &str) -> bool` that returns true for:
-- `pip list`, `pip show <pkg>`, `pip --version`
-- `npm list`, `npm version`
-- `python3 -c "import pkg; ..."` where the inline code has no socket/connect/requests patterns
+### Phase 4: Agent rename (builder → packager) ✅ DONE
 
-**File:** `autonoetic-gateway/src/runtime/tools/sandbox.rs`
+**Priority: Medium.** Done before Phase 1 to avoid updating references twice.
 
-Before the approval check (line 862): if `is_safe_inspection_command()` returns true AND the remote analysis found ONLY `network_command` patterns (no `url_literal`, `ip_address`, `import`, `function_call`), set `approval_validated_for_command = true` but keep `share_net = false`. These commands don't need network; they just inspect the local package index.
+Implemented in commit `ccf019a`.
 
-### Phase 4: Agent rename (builder → packager)
+### Phase 5: Tests ✅ DONE
 
-**Priority: Medium.** Should happen before or alongside Phase 1 to avoid updating references twice.
+Integration tests in `autonoetic-gateway/tests/dependency_redirect_integration.rs`.
 
-**Steps:**
-1. `mv agents/specialists/builder.default agents/specialists/packager.default`
-2. Update SKILL.md: `name: "packager.default"`, `agent.id: "packager.default"`
-3. Update `config/config-template.yaml`: `llm_preset_mapping: packager: ...` (was `builder`)
-4. Update `docs/AGENTS.md` — role table and delegation ladder
-5. Update all doc references (see grep results — ~100+ references across docs/)
-6. Update test fixtures referencing `builder.default`
-7. Update planner, coder, evaluator SKILL.md references to `builder.default` → `packager.default`
+Implemented in commit `905160e`.
 
-### Phase 5: Tests
+### Phase 6: Documentation updates
 
-**New files:**
-
-1. **`autonoetic-gateway/tests/dependency_redirect_integration.rs`**
-   - Non-builder agent runs `pip install requests` → gets `dependency_layer_required: true`
-   - Builder/packager agent runs `pip install requests` → proceeds normally (has NetworkAccess)
-
-2. **`autonoetic-gateway/tests/layer_auto_mount_integration.rs`**
-   - Planner spawns evaluator with `artifact_id` → evaluator's `sandbox.exec` auto-mounts artifact layers
-   - Layers are read-only in the sandbox
-
-3. **`autonoetic-gateway/tests/safe_inspection_integration.rs`**
-   - `pip list` runs without approval (no network needed)
-   - `pip install` still requires approval for non-builder agents
-
-### Phase 6: Documentation
-
-**Files to update:**
-- `docs/approval-system.md` — Add "Dependency Install Redirect" section
-- `docs/remote-access-approval.md` — Describe packager-owned dependency resolution path
-- `docs/ARCHITECTURE.md` — Update agent role table (builder → packager)
-- `docs/AGENTS.md` — Update role table and delegation ladder
+**Priority: Low.** In progress.
 
 ## Pluggability and Evolution
 
