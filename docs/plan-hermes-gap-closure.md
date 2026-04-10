@@ -17,7 +17,8 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 | 3 | Credential management | 250 / 1,130 | Low-Med | Unblocks agent-to-service interaction |
 | 4 | FTS session search | — / 915 | Medium | Biggest learning infrastructure unlock |
 | 5 | Agent Skills compatibility | — / 820 | Low | Ecosystem growth enabler |
-| 6 | User modeling | — / 500 | Medium | Lower urgency until multi-user is live |
+<<<<<<< HEAD
+| 6 | User modeling | ~500 / 500 | Medium | Phases A-C complete; Phase D (federation) deferred |
 | 7 | Context compression | ~590 / ~1000 | Med-High | All phases (A, B, C, D) complete |
 
 ---
@@ -293,26 +294,37 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 **Autonoetic constraints:** Multi-user, per-agent scoped visibility, cross-node federation, external approval entities.
 
+**Status (2026-04-06):** Phases A–C fully implemented. Phase D (federation) deferred.
+- `user_profiles` and `user_agent_bindings` tables with migration v2
+- `UserProfileRecord`, `BindingScope`, `UserAgentBinding` types in `autonoetic-types`
+- `UserProfileAccess` capability with read/write scope
+- `ProfileShare` ScheduledAction variant for approval-gated sharing
+- 4 native tools: `user.profile.read`, `user.profile.update`, `user.profile.share`, `user.profile.revoke`
+- `user_id` threaded through `NativeToolRunContext` and `AgentExecutor`
+- User context snippet injected into system prompt at session start (bounded to ~500 tokens)
+- `render_user_context_snippet()` respects `full`/`restricted`/`task_only` scopes
+- 9 unit tests for GatewayStore CRUD + 2 tool helper tests, all 414 lib tests passing
+
 ### Tasks
 
 #### Phase A — Schema + Storage (~150 lines)
 
-- [ ] **6A.1** Add `user_profiles` table (user_id, display_name, trust_domain, origin_node_id, profile_json, profile_version)
-- [ ] **6A.2** Add `user_agent_bindings` table (user_id, agent_id, scope: full/restricted/task_only, granted_at, granted_by)
-- [ ] **6A.3** GatewayStore CRUD methods for both tables
+- [x] **6A.1** Add `user_profiles` table (user_id, display_name, trust_domain, origin_node_id, profile_json, profile_version)
+- [x] **6A.2** Add `user_agent_bindings` table (user_id, agent_id, scope: full/restricted/task_only, granted_at, granted_by)
+- [x] **6A.3** GatewayStore CRUD methods for both tables
 
 #### Phase B — Tool Surface (~200 lines)
 
-- [ ] **6B.1** Implement `user.profile.read` tool (defaults to caller's bound user, respects binding scope)
-- [ ] **6B.2** Implement `user.profile.update` tool (requires user approval or pre-granted scope)
-- [ ] **6B.3** Implement `user.profile.share` tool (grants agent access, creates binding)
-- [ ] **6B.4** Implement `user.profile.revoke` tool (removes binding)
-- [ ] **6B.5** Add `UserProfileWrite` capability type
+- [x] **6B.1** Implement `user.profile.read` tool (defaults to caller's bound user, respects binding scope)
+- [x] **6B.2** Implement `user.profile.update` tool (requires user approval or pre-granted scope)
+- [x] **6B.3** Implement `user.profile.share` tool (grants agent access, creates binding)
+- [x] **6B.4** Implement `user.profile.revoke` tool (removes binding)
+- [x] **6B.5** Add `UserProfileAccess` capability type
 
 #### Phase C — Wake Injection (~80 lines)
 
-- [ ] **6C.1** At session start, inject bounded user context snippet into system prompt based on binding scope
-- [ ] **6C.2** Scope rules: `full` = full profile, `restricted` = preferences + constraints only, `task_only` = nothing injected
+- [x] **6C.1** At session start, inject bounded user context snippet into system prompt based on binding scope
+- [x] **6C.2** Scope rules: `full` = full profile, `restricted` = preferences + constraints only, `task_only` = nothing injected
 
 #### Phase D — Federation (~70 lines)
 

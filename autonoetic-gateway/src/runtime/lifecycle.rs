@@ -155,6 +155,16 @@ pub(crate) fn compose_system_instructions_with_metadata(
     manifest: &AgentManifest,
     metadata: Option<&serde_json::Value>,
 ) -> String {
+    compose_system_instructions_with_user_context(agent_instructions, manifest, metadata, None)
+}
+
+/// Full system prompt composition with optional user context injection.
+pub(crate) fn compose_system_instructions_with_user_context(
+    agent_instructions: &str,
+    manifest: &AgentManifest,
+    metadata: Option<&serde_json::Value>,
+    user_context_snippet: Option<&str>,
+) -> String {
     let foundation = compose_foundation(manifest);
 
     let tool_bridging = manifest
@@ -168,6 +178,9 @@ pub(crate) fn compose_system_instructions_with_metadata(
         let mut parts = vec![foundation.as_str()];
         if let Some(ref bridging) = tool_bridging {
             parts.push(bridging);
+        }
+        if let Some(snippet) = user_context_snippet {
+            parts.push(snippet);
         }
         if !trimmed.is_empty() {
             parts.push("---\n\nAgent-Specific Instructions\n\n");
@@ -236,6 +249,54 @@ pub(crate) fn compose_system_instructions_with_metadata(
     match contract_section {
         Some(section) => format!("{base}\n\n{section}"),
         None => base,
+    }
+}
+
+/// Build a bounded user context snippet for system prompt injection.
+/// Returns None if the scope is task_only or profile has no data.
+pub(crate) fn render_user_context_snippet(
+    profile: &autonoetic_types::agent::UserProfileRecord,
+    scope: &autonoetic_types::agent::BindingScope,
+) -> Option<String> {
+    use autonoetic_types::agent::BindingScope;
+
+    match scope {
+        BindingScope::TaskOnly => None,
+        BindingScope::Full | BindingScope::Restricted => {
+            let json_str = profile.profile_json.as_ref()?;
+            let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+
+            let filtered = if *scope == BindingScope::Restricted {
+                let mut restricted = serde_json::Map::new();
+                if let Some(obj) = parsed.as_object() {
+                    for key in &["preferences", "constraints"] {
+                        if let Some(val) = obj.get(*key) {
+                            restricted.insert((*key).to_string(), val.clone());
+                        }
+                    }
+                }
+                serde_json::Value::Object(restricted)
+            } else {
+                parsed
+            };
+
+            if filtered.is_null() || (filtered.is_object() && filtered.as_object().unwrap().is_empty()) {
+                return None;
+            }
+
+            let compact = serde_json::to_string(&filtered).ok()?;
+            // Bound to ~2000 chars (~500 tokens)
+            let bounded = if compact.len() > 2000 {
+                format!("{}...", &compact[..2000])
+            } else {
+                compact
+            };
+
+            Some(format!(
+                "---\n\nUser Profile Context\n\nYou have access to this user's profile data (scope: {}). Use it to personalize your behavior.\n\n```json\n{}\n```",
+                scope, bounded
+            ))
+        }
     }
 }
 
@@ -447,6 +508,8 @@ pub struct AgentExecutor {
     pub compression_metadata: crate::runtime::compression::CompressionMetadata,
     /// Shared HTTP client for compression and other gateway-side operations.
     pub http_client: reqwest::Client,
+    /// User ID for profile binding resolution (if authenticated).
+    pub user_id: Option<String>,
 }
 
 fn tool_result_counts_as_progress(result: &str) -> bool {
@@ -454,7 +517,8 @@ fn tool_result_counts_as_progress(result: &str) -> bool {
         if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
             return ok;
         }
-        if let Some(approval_required) = parsed.get("approval_required").and_then(|v| v.as_bool()) {
+        if let Some(approval_required) = parsed.get("approval_required").and_then(|v| v.as_bool())
+        {
             return !approval_required;
         }
         if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
@@ -504,6 +568,7 @@ impl AgentExecutor {
             session_started_at: None,
             compression_metadata: Default::default(),
             http_client: reqwest::Client::new(),
+            user_id: None,
         }
     }
 
@@ -570,6 +635,11 @@ impl AgentExecutor {
 
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.http_client = client;
+        self
+    }
+
+    pub fn with_user_id(mut self, user_id: Option<String>) -> Self {
+        self.user_id = user_id;
         self
     }
 
@@ -815,12 +885,26 @@ impl AgentExecutor {
         }
     }
 
+    /// Build user context snippet for system prompt injection.
+    fn build_user_context_snippet(&self) -> Option<String> {
+        let user_id = self.user_id.as_ref()?;
+        let store = self.gateway_store.as_ref()?;
+        let agent_id = &self.manifest.agent.id;
+
+        let binding = store.get_user_binding(user_id, agent_id).ok()??;
+        let profile = store.get_user_profile(user_id).ok()??;
+
+        render_user_context_snippet(&profile, &binding.scope)
+    }
+
     /// Run the agent loop until completion or guard trip.
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
-        let system_instructions = compose_system_instructions_with_metadata(
+        let user_context = self.build_user_context_snippet();
+        let system_instructions = compose_system_instructions_with_user_context(
             &self.instructions,
             &self.manifest,
             self.manifest.response_contract.as_ref(),
+            user_context.as_deref(),
         );
         let mut history: Vec<Message> = vec![
             Message::system(system_instructions),
@@ -1042,10 +1126,12 @@ impl AgentExecutor {
             }
 
             // Update system message — ensure exactly one system message at position 0
-            let system_instructions = compose_system_instructions_with_metadata(
+            let user_context = self.build_user_context_snippet();
+            let system_instructions = compose_system_instructions_with_user_context(
                 &self.instructions,
                 &self.manifest,
                 self.manifest.response_contract.as_ref(),
+                user_context.as_deref(),
             );
 
             // Remove any existing system messages (could be stale from previous turns)
@@ -1724,6 +1810,7 @@ impl AgentExecutor {
                             session_id: sid.clone(),
                             agent_id: self.manifest.agent.id.clone(),
                             live_digest: self.live_digest.clone(),
+                            user_id: self.user_id.clone(),
                         }
                     });
                     let mut processor = ToolCallProcessor::new(

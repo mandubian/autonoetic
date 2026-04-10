@@ -92,6 +92,11 @@ pub enum Capability {
         #[serde(default = "default_services_all")]
         services: Vec<String>,
     },
+
+    /// Access to user profile operations (read, update, share, revoke).
+    /// The `scopes` field controls which operations are allowed.
+    /// Use ["read"] for read-only, ["read", "write"] for full access.
+    UserProfileAccess { scopes: Vec<String> },
 }
 
 fn default_patterns_all() -> Vec<String> {

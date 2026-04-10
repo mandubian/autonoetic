@@ -118,6 +118,13 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+    /// Approval subject only: "this approval request is for sharing a user profile with an agent."
+    /// Not executed by the scheduler; the operator approves/denies, then the caller creates the binding.
+    ProfileShare {
+        user_id: String,
+        agent_id: String,
+        scope: String,
+    },
 }
 
 impl ScheduledAction {
@@ -129,6 +136,7 @@ impl ScheduledAction {
             Self::AgentInstall { .. }
                 | Self::CredentialPrompt { .. }
                 | Self::SessionContinue { .. }
+                | Self::ProfileShare { .. }
         )
     }
 
@@ -142,7 +150,8 @@ impl ScheduledAction {
             } => *requires_approval,
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
-            | Self::SessionContinue { .. } => true,
+            | Self::SessionContinue { .. }
+            | Self::ProfileShare { .. } => true,
         }
     }
 
@@ -153,6 +162,7 @@ impl ScheduledAction {
             Self::AgentInstall { .. } => "agent_install",
             Self::CredentialPrompt { .. } => "credential_prompt",
             Self::SessionContinue { .. } => "session_continue",
+            Self::ProfileShare { .. } => "profile_share",
         }
     }
 
@@ -162,7 +172,8 @@ impl ScheduledAction {
             Self::SandboxExec { evidence_ref, .. } => evidence_ref.clone(),
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
-            | Self::SessionContinue { .. } => None,
+            | Self::SessionContinue { .. }
+            | Self::ProfileShare { .. } => None,
         }
     }
 
@@ -176,7 +187,8 @@ impl ScheduledAction {
             } => *r = evidence_ref,
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
-            | Self::SessionContinue { .. } => {}
+            | Self::SessionContinue { .. }
+            | Self::ProfileShare { .. } => {}
         }
         self
     }

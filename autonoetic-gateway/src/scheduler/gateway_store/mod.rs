@@ -10,6 +10,7 @@ mod observability;
 mod row_decode;
 mod runtime_control;
 mod user_interactions;
+mod user_profiles;
 mod util;
 mod workflow;
 
