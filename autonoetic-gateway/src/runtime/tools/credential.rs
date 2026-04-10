@@ -740,6 +740,7 @@ impl NativeTool for CredentialSetupTool {
                         status: None,
                         decided_at: None,
                         decided_by: None,
+                        decision_reason: None,
                         approval_level: _config
                             .map(|c| {
                                 crate::scheduler::approval::resolve_approval_level(

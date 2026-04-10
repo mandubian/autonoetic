@@ -201,6 +201,7 @@ impl NativeTool for SessionEscalateTool {
                     status: None,
                     decided_at: None,
                     decided_by: None,
+                    decision_reason: None,
                     approval_level,
                 };
                 store.create_approval(&request)?;

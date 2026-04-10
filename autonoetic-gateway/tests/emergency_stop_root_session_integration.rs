@@ -308,6 +308,7 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
         status: None,
         decided_at: None,
         decided_by: None,
+        decision_reason: None,
         approval_level: ApprovalLevel::Operator,
     })?;
 

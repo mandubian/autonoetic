@@ -746,6 +746,7 @@ impl AgentExecutor {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
             approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
         };
         store.create_approval(&request)?;
@@ -3538,6 +3539,7 @@ mod tests {
                 "approved",
                 "operator",
                 &chrono::Utc::now().to_rfc3339(),
+                None,
             )
             .expect("decision should record");
 

@@ -291,6 +291,10 @@ pub struct ApprovalRequest {
     pub decided_at: Option<String>,
     #[serde(default)]
     pub decided_by: Option<String>,
+    /// Operator/decider's guidance note set at decision time (distinct from the
+    /// agent's original `reason`). Persisted via `decision_reason` column.
+    #[serde(default)]
+    pub decision_reason: Option<String>,
     /// Required approval level for this request (operator, admin, agent:xyz).
     /// Defaults to Operator. Set by the gateway based on config escalation rules.
     #[serde(default)]
@@ -317,7 +321,7 @@ impl ApprovalRequest {
             status,
             decided_at,
             decided_by,
-            reason: self.reason,
+            reason: self.decision_reason.or(self.reason),
             root_session_id: self.root_session_id,
             workflow_id: self.workflow_id,
             task_id: self.task_id,

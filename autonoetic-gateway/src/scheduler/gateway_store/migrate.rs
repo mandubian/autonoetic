@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 5;
+const SCHEMA_VERSION_LATEST: i64 = 6;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -483,6 +483,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_memories_drop_allowed_agents_v3(conn)?;
     apply_session_approval_grants_v4(conn)?;
     apply_user_profiles_v5(conn)?;
+    apply_approvals_decision_reason_v6(conn)?;
 
     Ok(())
 }
@@ -690,6 +691,34 @@ fn apply_user_profiles_v5(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![5_i64, "user_profiles", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_approvals_decision_reason_v6(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 6 {
+        return Ok(());
+    }
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('approvals') WHERE name = 'decision_reason'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute("ALTER TABLE approvals ADD COLUMN decision_reason TEXT", [])?;
+    }
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            6_i64,
+            "approvals_decision_reason",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }

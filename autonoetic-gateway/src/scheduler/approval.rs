@@ -864,6 +864,7 @@ fn decide_request(
                 },
                 &decision.decided_by,
                 &decision.decided_at,
+                decision.reason.as_deref(),
             )
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -1015,6 +1016,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
             approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&req).unwrap();
@@ -1057,6 +1059,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
         };
         store
             .create_approval(&req("apr-a", "root-a/coder-1"))
@@ -1104,6 +1107,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
         };
         store
             .create_approval(&req("apr-second", "2020-01-02T00:00:00Z"))
@@ -1132,6 +1136,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
             approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&install).unwrap();
@@ -1351,6 +1356,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
             approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&request).unwrap();
@@ -1465,6 +1471,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
             approval_level: ApprovalLevel::Admin,
         };
         store.create_approval(&request).unwrap();
@@ -1529,6 +1536,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
             approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&request).unwrap();

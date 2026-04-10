@@ -188,6 +188,7 @@ mod tests {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
             approval_level: ApprovalLevel::Operator,
         };
         store.create_approval(&req).unwrap();
@@ -224,6 +225,7 @@ mod tests {
                 "approved",
                 "test-user",
                 &chrono::Utc::now().to_rfc3339(),
+                None,
             )
             .unwrap();
 

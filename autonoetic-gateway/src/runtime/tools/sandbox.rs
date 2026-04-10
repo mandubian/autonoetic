@@ -762,6 +762,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         reason: Some(reason_text),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
+                        decision_reason: None,
                         approval_level: crate::scheduler::approval::resolve_approval_level(
                             cfg, &action,
                         ),
@@ -1169,6 +1170,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         }),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
+                        decision_reason: None,
                         approval_level: crate::scheduler::approval::resolve_approval_level(
                             cfg, &action,
                         ),
@@ -1712,6 +1714,7 @@ mod approval_binding_tests {
             status: Some(ApprovalStatus::Approved),
             decided_at: Some("2026-01-01T00:00:01Z".to_string()),
             decided_by: Some("operator".to_string()),
+            decision_reason: None,
             approval_level: ApprovalLevel::Operator,
         };
         assert!(approved_requests_cover_targets(

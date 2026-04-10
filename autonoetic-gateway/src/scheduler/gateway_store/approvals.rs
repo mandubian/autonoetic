@@ -38,7 +38,7 @@ impl GatewayStore {
         request_id: &str,
     ) -> Result<Option<ApprovalRequest>> {
         conn.query_row(
-            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level FROM approvals WHERE request_id = ?1",
+            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason FROM approvals WHERE request_id = ?1",
             params![request_id],
             |row| {
                 let action_payload: String = row.get(3)?;
@@ -68,6 +68,7 @@ impl GatewayStore {
                     decided_by: row.get(10)?,
                     reason: row.get(11)?,
                     evidence_ref: row.get(12)?,
+                    decision_reason: row.get(14)?,
                     approval_level,
                 })
             },
@@ -85,11 +86,12 @@ impl GatewayStore {
         status: &str,
         decided_by: &str,
         decided_at: &str,
+        decision_reason: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
-            "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3 WHERE request_id = ?4 AND status = 'pending'",
-            params![status, decided_by, decided_at, request_id],
+            "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3, decision_reason = ?4 WHERE request_id = ?5 AND status = 'pending'",
+            params![status, decided_by, decided_at, decision_reason, request_id],
         )?;
         if rows == 0 {
             anyhow::bail!(
