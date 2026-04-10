@@ -55,7 +55,7 @@ When a message arrives at the gateway:
 | **Lead** | `planner.default` | Decomposes goals, routes to specialists |
 | **Researcher** | `researcher.default` | Gathers evidence, cites sources |
 | **Architect** | `architect.default` | Defines structure, interfaces, trade-offs |
-| **Builder** | `builder.default` | Resolves and packages build-time dependencies into artifact layers |
+| **Packager** | `packager.default` | Resolves and packages build-time dependencies into artifact layers |
 | **Coder** | `coder.default` | Produces runnable artifacts |
 | **Debugger** | `debugger.default` | Isolates root causes, proposes fixes |
 | **Evaluator** | `evaluator.default` | Validates behavior with tests/metrics |
@@ -65,7 +65,8 @@ When a message arrives at the gateway:
 
 | Role | Agent ID | Purpose |
 |------|----------|---------|
-| **Builder** | `specialized_builder.default` | Installs new durable agents |
+| **Packager** | `packager.default` | Resolves and packages build-time dependencies into artifact layers |
+| **Installer** | `specialized_builder.default` | Installs new durable agents |
 | **Adapter** | `agent-adapter.default` | Generates wrapper agents for I/O gaps |
 | **Curator** | `memory-curator.default` | Distills durable learnings |
 | **Steward** | `evolution-steward.default` | Decides skill promotion |
@@ -601,7 +602,7 @@ autonoetic agent revision promote <rev-id> --alias myagent.default
 ```
 Planner: "Create a weather agent"
   → Spawns specialized_builder
-  → coder/builder provide artifact + semantic install intent + free-form instructions
+  → coder/packager provide artifact + semantic install intent + free-form instructions
   → specialized_builder calls agent.revision.create_from_intent
   → specialized_builder calls agent.revision.promote
   → Agent is active and discoverable

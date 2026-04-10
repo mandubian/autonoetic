@@ -166,7 +166,7 @@ Gateway: 1. Resolve name → handle from session manifest
 ### Build Layer Flow
 
 ```
-1. Builder agent (with network access) runs:
+1. Packager agent (with network access) runs:
    sandbox.exec({
      "command": "pip install -r /tmp/requirements.txt --target /tmp/venv",
      "capture_paths": [
@@ -180,7 +180,7 @@ Gateway: 1. Resolve name → handle from session manifest
    - Stores at .gateway/layers/layer_{digest}/
    - Returns captured_layer with layer_id, name, mount_path, digest
 
-3. Builder builds layered artifact:
+3. Packager builds layered artifact:
    artifact.build({
      "inputs": ["main.py", "requirements.txt"],
      "layers": [

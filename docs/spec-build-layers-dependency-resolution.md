@@ -204,12 +204,12 @@ No network needed. No pip install. Everything is self-contained.
 
 A new agent role (or extension of an existing one) responsible for build-time dependency resolution.
 
-**Option A**: New `builder.default` agent
+**Option A**: New `packager.default` agent
 **Option B**: Extend `specialized_builder.default` with build responsibilities
 
 Recommendation: **Option A** — a focused build agent. The specialized_builder already has a complex job (installing durable agents). Dependency resolution for artifacts is a different concern.
 
-Builder agent profile:
+Packager agent profile:
 
 ```yaml
 capabilities:
@@ -222,18 +222,18 @@ capabilities:
   - type: "CodeExecution"        # to run pip/npm/etc.
 ```
 
-The builder's sandbox must have network access. This is controlled by the gateway's sandbox configuration for the builder's agent directory, not by a runtime flag from the agent.
+The packager's sandbox must have network access. This is controlled by the gateway's sandbox configuration for the packager's agent directory, not by a runtime flag from the agent.
 
-**Network access for the builder**:
-- The builder agent directory gets a `sandbox.conf` (or env var) that tells the gateway to use `--share-net` for this agent's sandbox executions
+**Network access for the packager**:
+- The packager agent directory gets a `sandbox.conf` (or env var) that tells the gateway to use `--share-net` for this agent's sandbox executions
 - This is a deployment/admin decision, not an agent capability
-- The builder does NOT get `NetworkAccess` capability in the general sense — it only gets network during `sandbox.exec` for dep installation
+- The packager does NOT get `NetworkAccess` capability in the general sense — it only gets network during `sandbox.exec` for dep installation
 - Runtime code execution (by evaluator) still goes through the normal approval flow if it needs network
 
 Alternative: extend the existing `SandboxConfig` with a per-agent `share_net` flag:
 
 ```toml
-# agents/builder.default/sandbox.conf
+# agents/packager.default/sandbox.conf
 share_net = true
 ```
 
@@ -363,13 +363,13 @@ Layer creation fails if limits exceeded. This prevents a malicious/buggy agent f
 
 Remote agents can't write directly to the gateway filesystem. Options:
 
-**Phase 1 (current)**: Remote agents are not builders. Layers are created by local builder agents only.
+**Phase 1 (current)**: Remote agents are not packagers. Layers are created by local packager agents only.
 
 **Phase 2 (future)**: Add HTTP endpoints:
 - `POST /api/v1/layers` — upload a layer archive
 - `GET /api/v1/layers/{layer_id}` — download a layer archive
 
-The builder agent runs locally. Remote evaluators just reference artifact IDs with layers — the gateway handles mounting.
+The packager agent runs locally. Remote evaluators just reference artifact IDs with layers — the gateway handles mounting.
 
 ### 4.2 Cross-Gateway
 
@@ -390,11 +390,11 @@ Layers contain installed packages — a supply chain attack vector. Mitigations:
 
 ### 5.2 Network Isolation
 
-The builder agent's sandbox has network. Principles:
+The packager agent's sandbox has network. Principles:
 
 - Network is granted at the **sandbox configuration** level, not as an agent capability
-- The builder can only reach the network during `sandbox.exec` — all other tool calls go through the gateway's normal policy engine
-- The builder cannot exfiltrate data — content.write/read are still gateway-mediated
+- The packager can only reach the network during `sandbox.exec` — all other tool calls go through the gateway's normal policy engine
+- The packager cannot exfiltrate data — content.write/read are still gateway-mediated
 - Other agents (evaluator, coder, etc.) remain fully isolated
 
 ### 5.3 Layer Tampering
@@ -427,7 +427,7 @@ Use Docker images with common deps pre-installed.
 
 ### 6.4 Agent Writes Every File via content.write
 
-Builder does `content.write` for every file in `node_modules/`.
+Packager does `content.write` for every file in `node_modules/`.
 
 **Rejected because**: 30,000 content.write calls. Infeasible for LLM-driven agents.
 
@@ -439,7 +439,7 @@ Builder does `content.write` for every file in `node_modules/`.
 
 2. **Layer garbage collection**: When an artifact is deleted, should its layers be cleaned up? Reference counting? Or layers are permanent (dedup makes this cheap)?
 
-3. **Builder sandbox config**: Should `share_net` be an agent-level config file, a gateway-level config, or a per-session flag? Current proposal: agent-level `sandbox.conf` in agent directory, set by admin during agent deployment.
+3. **Packager sandbox config**: Should `share_net` be an agent-level config file, a gateway-level config, or a per-session flag? Current proposal: agent-level `sandbox.conf` in agent directory, set by admin during agent deployment.
 
 4. **PYTHONPATH / NODE_PATH**: Who is responsible for setting these — the agent in the command string, or the gateway via a manifest field? Current proposal: agent's responsibility (keeps gateway dumb).
 
@@ -453,6 +453,6 @@ Builder does `content.write` for every file in `node_modules/`.
 - [ ] Artifacts with no layers behave identically to current behavior
 - [ ] Layer dedup works: same deps → same layer ID
 - [ ] Evaluator never needs network for dependency installation
-- [ ] Builder agent completes dep installation in < 3 turns
+- [ ] Packager agent completes dep installation in < 3 turns
 - [ ] Layer extraction at sandbox mount completes in < 2s for typical Python deps
 - [ ] No gateway intelligence about languages, package managers, or build systems

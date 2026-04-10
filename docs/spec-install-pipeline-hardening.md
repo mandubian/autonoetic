@@ -11,14 +11,14 @@
 
 Demo-session-1 exposed a cascade of failures in the agent installation pipeline. A weather agent with `NetworkAccess` capability and external Python dependencies (`import requests` via `requirements.txt`) was installed and promoted without:
 
-1. **Dependencies being resolved** — no `builder.default` step was spawned; `requirements.txt` was bundled raw
+1. **Dependencies being resolved** — no `packager.default` step was spawned; `requirements.txt` was bundled raw
 2. **Promotion gate evidence** — neither `evaluator.default` nor `auditor.default` called `promotion.record`
-3. **Dependency detection** — `create_from_intent` didn't notice `requirements.txt` needed a builder step, and didn't detect `import requests` as an unresolved external dependency
+3. **Dependency detection** — `create_from_intent` didn't notice `requirements.txt` needed a packager step, and didn't detect `import requests` as an unresolved external dependency
 4. **Network failure surfacing** — `sandbox.exec` silently swallowed an HTTPS connection failure (the sandbox blocked it, Python caught the exception, `exit=0` was returned)
 
 ### Root Cause
 
-The pipeline relies entirely on **LLM judgment** to enforce safety invariants. The planner "forgot" to spawn `builder.default`. The evaluator "decided" to approve despite seeing a network error in stdout. No mechanical guardrails stopped either mistake.
+The pipeline relies entirely on **LLM judgment** to enforce safety invariants. The planner "forgot" to spawn `packager.default`. The evaluator "decided" to approve despite seeing a network error in stdout. No mechanical guardrails stopped either mistake.
 
 ### Resulting State of Installed Agent
 
@@ -53,7 +53,7 @@ The gateway enforces hard invariants that agents cannot bypass. Within its scope
 | Layer | What the gateway does | What the gateway never does |
 |-------|----------------------|----------------------------|
 | **Analyze** | Scan code for patterns, detect capabilities, find dependency gaps (same as existing `PatternAnalyzer`, `PythonAstAnalyzer`) | Interpret intent, decide what an agent "should" do |
-| **Gate** | **Refuse** operations when hard invariants are violated — promotion without records, unresolved dependencies on high-risk agents, missing capabilities. The refusal includes a structured error explaining what must be fixed. | Auto-fix problems, auto-spawn builder, make workflow decisions, provide escape hatches |
+| **Gate** | **Refuse** operations when hard invariants are violated — promotion without records, unresolved dependencies on high-risk agents, missing capabilities. The refusal includes a structured error explaining what must be fixed. | Auto-fix problems, auto-spawn packager, make workflow decisions, provide escape hatches |
 | **Explain** | Surface findings as structured data in tool responses (`warnings[]`, `BundleHealthReport`, error messages with `required_actions`). The calling agent uses this information to plan its next steps. | Decide *which* agent to spawn to fix the problem, or *whether* the problem is worth fixing |
 
 When the gate refuses an operation, the calling agent (typically `specialized_builder`) reports the structured error back to the planner. The planner decides how to resolve it — which agent to spawn, what steps to run. The gateway then re-checks the invariants on the next attempt. This creates a tight **gate → explain → plan → execute → re-check** loop where the gateway never trusts agent judgment on safety-critical rules.
@@ -127,7 +127,7 @@ if is_high_risk {
     anyhow::ensure!(
         !rev.has_unresolved_dependencies,
         "Promotion gate: revision has unresolved dependencies ({}). \
-         Run builder.default to install dependencies as layers, \
+          Run packager.default to install dependencies as layers, \
          then re-submit the revision.",
         rev.unresolved_dep_files.join(", ")
     );
@@ -192,7 +192,7 @@ if has_unresolved_dependencies {
     obj.insert("warnings", json!([
         format!(
             "Dependency files found ({}) but no layers in artifact. \
-             Run builder.default to install dependencies as layers before evaluation.",
+              Run packager.default to install dependencies as layers before evaluation.",
             found_dep_files.iter().map(|(f, eco)| format!("{f} ({eco})")).join(", ")
         )
     ]));
@@ -200,7 +200,7 @@ if has_unresolved_dependencies {
 }
 ```
 
-**Behavior:** The revision is still created (agents need it to iterate), but `has_unresolved_dependencies: true` is stored in the revision metadata. The promotion gate (3.1) **refuses** to promote any high-risk agent with unresolved dependencies — the warning alone is not sufficient, the agent must resolve dependencies (typically via `builder.default`) and re-submit before promotion is allowed.
+**Behavior:** The revision is still created (agents need it to iterate), but `has_unresolved_dependencies: true` is stored in the revision metadata. The promotion gate (3.1) **refuses** to promote any high-risk agent with unresolved dependencies — the warning alone is not sufficient, the agent must resolve dependencies (typically via `packager.default`) and re-submit before promotion is allowed.
 
 ---
 
@@ -317,8 +317,8 @@ After the coder task completes, read its implicit artifact (`impl_task-{id}`)
 and check `content.named_outputs` for ANY of these files:
 - `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`
 
-If found, you **MUST** spawn `builder.default` before `evaluator.default`. 
-The builder has `NetworkAccess` capability and will:
+If found, you **MUST** spawn `packager.default` before `evaluator.default`.
+The packager has `NetworkAccess` capability and will:
 1. Install dependencies (pip install, npm install, etc.)
 2. Capture installed packages as a layer
 3. Update the artifact with the dependency layer
@@ -346,7 +346,7 @@ Originally lower-priority follow-ups; **3.6–3.11 are implemented** (see Status
 | 3.10 | JSON-RPC ingress authentication | Require auth token on local JSON-RPC ingress (`event.ingest`, `agent.spawn`, and all methods). Gateway now validates request token against `AUTONOETIC_SHARED_SECRET` and rejects unauthenticated requests. | Medium | ✅ Done |
 | 3.11 | Strict env-override gating | Fail-closed handling for security-sensitive env overrides: `AUTONOETIC_BWRAP_*` and global `AUTONOETIC_LLM_*` overrides are ignored unless explicit allow flags are set (`AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES`, `AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES`). | Medium | ✅ Done |
 
-> **Note:** Auto-dependency resolution (having the gateway automatically invoke builder logic) was considered and **rejected** — it violates the narrow rule enforcer principle. The gateway reports unresolved dependencies; the planner decides whether and how to resolve them.
+> **Note:** Auto-dependency resolution (having the gateway automatically invoke packager logic) was considered and **rejected** — it violates the narrow rule enforcer principle. The gateway reports unresolved dependencies; the planner decides whether and how to resolve them.
 
 ---
 
@@ -386,7 +386,7 @@ For pure-transform agents (no I/O beyond `self.*`), the planner's existing matri
 | Unresolved dependency detection (3.2) | `agent_revision.rs` / `install_contract.rs` | Warns on missing layers for dependency files; blocks promotion |
 | External import detection (3.3) | `install_contract.rs` | Scans entrypoint files (or all files) for external imports |
 | Bundle health diagnostic (3.4) | `install_contract.rs` | Structured `BundleHealthReport` for diagnostic feedback |
-| Planner SKILL.md dependency check (3.5) | `planner.default/SKILL.md` | Decision Flow rule to spawn `builder.default` when needed |
+| Planner SKILL.md dependency check (3.5) | `planner.default/SKILL.md` | Decision Flow rule to spawn `packager.default` when needed |
 | `sandbox.exec` network-isolation policy (3.6) | `runtime/tools/sandbox.rs` | `detect_network_errors_in_output` + failed tool result (`ok: false`, `error_type: network_isolated`) when isolated run output matches |
 | Gateway lock identity (3.7) | `build.rs`, `install_contract.rs`, `runtime_lock.rs` | Source fingerprint (`sha256`, `build_tag`) + runtime executable digest (`binary_sha256`) populated by gateway |
 | `force_complete` gate (A.1) | `workflow.rs` | Refuses `Succeeded` status without child session evidence |
@@ -460,7 +460,7 @@ test_render_skill_document_omits_null_optional_fields             ✅
 1. Re-run the demo-session-1 equivalent workflow
 2. Verify `promote` fails when evaluator doesn't call `promotion.record`
 3. Verify `create_from_intent` warnings show unresolved `requirements.txt`
-4. Verify planner spawns `builder.default` before evaluator when `named_outputs` includes dependency files
+4. Verify planner spawns `packager.default` before evaluator when `named_outputs` includes dependency files
 5. Verify `create_from_intent` refuses bare `"NetworkAccess"` and returns scoped capability error
 6. Verify `force_complete` refuses `succeeded` when child session has no completion evidence
 7. Verify JSON-RPC ingress rejects requests without `auth_token` when gateway is running with `AUTONOETIC_SHARED_SECRET`
@@ -568,7 +568,7 @@ Low-risk capabilities (`SandboxFunctions`, `ReadAccess`, `WriteAccess`, `Evaluat
 Turn 20  planner spawns coder.default
 Turn 22  coder writes requirements.txt (import requests)
 Turn 23  coder writes weather_agent.py
-         ← MISSING: builder.default should have been spawned here
+         ← MISSING: packager.default should have been spawned here
 Turn 28  planner spawns evaluator.default (no builder step)
 Turn 35  evaluator runs sandbox.exec → works (requests pre-installed on host)
 Turn 36  evaluator runs live HTTPS call → NetworkError (sandbox blocks it)

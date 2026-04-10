@@ -18,7 +18,7 @@ These establish the safe floor of runtime robustness and capabilities without pr
 ### ❌ What the Gateway Should NOT Do
 
 **Domain-specific business logic or workflow routing**:
-- "Auto-spawn a builder agent when dependencies are missing" (Routing)
+- "Auto-spawn a packager agent when dependencies are missing" (Routing)
 - "Decide if an agent's problem is worth fixing" (Workflow Decision)
 - "Prevent research→builder transitions unless research returned data" (Business Logic)
 
@@ -28,7 +28,7 @@ These routing and workflow decisions hardcode assumptions about agent deployment
 
 **In agent SKILL.md instructions** (not platform code):
 - Guardrails 8 & 9 in planner.default tell the agent: "If research has no actionable data, stop and return failure instead of delegating"
-- The `specialized_builder` or `planner` handles the gateway's structured error refusing deployment, decides it needs to generate a `builder.default` dependency resolution task, and executes that task before retrying.
+- The `specialized_builder` or `planner` handles the gateway's structured error refusing deployment, decides it needs to generate a `packager.default` dependency resolution task, and executes that task before retrying.
 - The agent *chooses* to follow these rules through LLM instruction-following, creating a **gate → explain → plan → execute → re-check** loop.
 
 ## Rationale
@@ -42,4 +42,4 @@ These routing and workflow decisions hardcode assumptions about agent deployment
 
 Session-1 failure showed that an agent could deploy a broken artifact (`import requests` with no `requirements.txt` installed) because the pipeline relied entirely on LLM judgement. The fix was **not** to have the gateway automatically invoke a builder logic (which violates the narrow rule enforcer principle), but to:
 1. Hard-gate the promotion mechanically so missing dependencies trigger a refusal.
-2. Send the structured explanation back and let the planner agent deploy the builder resolution step.
+2. Send the structured explanation back and let the planner agent deploy the packager resolution step.

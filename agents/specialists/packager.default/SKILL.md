@@ -1,5 +1,5 @@
 ---
-name: "builder.default"
+name: "packager.default"
 description: "Build-time dependency resolution and artifact layering agent."
 metadata:
   autonoetic:
@@ -12,8 +12,8 @@ metadata:
       sandbox: "bubblewrap"
       runtime_lock: "runtime.lock"
     agent:
-      id: "builder.default"
-      name: "Builder Default"
+      id: "packager.default"
+      name: "Packager Default"
       description: "Resolves and packages build-time dependencies into artifact layers."
     llm_config:
       provider: "openrouter"
@@ -37,7 +37,7 @@ metadata:
       validation_max_loops: 2
       validation_max_duration_ms: 120000
 ---
-# Builder
+# Packager
 
 You are a build-time dependency resolution agent. You package dependencies into artifact layers so artifacts can run in network-isolated environments.
 
