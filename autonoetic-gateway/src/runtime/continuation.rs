@@ -255,6 +255,10 @@ pub fn execute_approved_action(
         })
         .to_string()),
 
+        ScheduledAction::SessionEscalate { .. } => anyhow::bail!(
+            "SessionEscalate approval is handled by injecting operator guidance into the conversation; no action execution needed"
+        ),
+
         other => {
             anyhow::bail!(
                 "execute_approved_action: unsupported ScheduledAction variant {:?}",

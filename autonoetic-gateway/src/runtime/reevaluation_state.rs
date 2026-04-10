@@ -126,6 +126,9 @@ pub fn execute_scheduled_action(
         ScheduledAction::ProfileShare { .. } => anyhow::bail!(
             "ProfileShare is not directly executable; bindings are created after approval"
         ),
+        ScheduledAction::SessionEscalate { .. } => anyhow::bail!(
+            "SessionEscalate is not directly executable; it only gates session continuation by operator approval"
+        ),
     }
 }
 
@@ -165,7 +168,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
-        compression: None,
+            compression: None,
         }
     }
 

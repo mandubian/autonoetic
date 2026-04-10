@@ -523,8 +523,12 @@ impl GatewayExecutionService {
                 turn_counter: 0,
                 loop_guard_state: LoopGuardState {
                     max_loops_without_progress: 32,
+                    max_tool_failures: 5,
+                    max_consecutive_same_progress: 0,
                     current_loops: 0,
                     tool_failure_counts: std::collections::HashMap::new(),
+                    last_progress_fingerprint: None,
+                    consecutive_progress_count: 0,
                 },
                 agent_id: lead.to_string(),
                 session_id: root_session_id.to_string(),
@@ -1145,6 +1149,79 @@ impl GatewayExecutionService {
                                     .await?
                                 }
                             }
+                        } else if let crate::runtime::checkpoint::YieldReason::HumanEscalation {
+                            escalation_request_id: ref esc_rid,
+                        } = &checkpoint.yield_reason
+                        {
+                            let store = self.gateway_store.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "GatewayStore is required to resume escalation checkpoints"
+                                )
+                            })?;
+                            let req = store.get_approval(esc_rid)?.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Escalation approval '{}' from checkpoint not found in store",
+                                    esc_rid
+                                )
+                            })?;
+                            let esc_status = req.status.clone();
+                            match esc_status {
+                                None => {
+                                    anyhow::bail!(
+                                        "Session '{}' is waiting for escalation approval '{}'; approve or reject it before continuing",
+                                        session_id,
+                                        esc_rid
+                                    );
+                                }
+                                Some(autonoetic_types::background::ApprovalStatus::Rejected)
+                                | Some(autonoetic_types::background::ApprovalStatus::Cancelled) => {
+                                    anyhow::bail!(
+                                        "Escalation approval '{}' was {:?}; session '{}' cannot continue",
+                                        esc_rid,
+                                        esc_status,
+                                        session_id
+                                    );
+                                }
+                                Some(autonoetic_types::background::ApprovalStatus::Approved) => {
+                                    tracing::info!(
+                                        target: "checkpoint",
+                                        agent_id = %runtime.manifest.agent.id,
+                                        session_id = %session_id,
+                                        turn_counter = checkpoint.turn_counter,
+                                        escalation_request_id = %esc_rid,
+                                        "Resuming session from human escalation checkpoint"
+                                    );
+                                    runtime.guard = crate::runtime::guard::LoopGuard::restore(
+                                        checkpoint.loop_guard_state.clone(),
+                                    );
+                                    runtime.session_started = true;
+                                    runtime.turn_counter = checkpoint.turn_counter;
+                                    runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+                                    let mut history = checkpoint.history.clone();
+                                    let operator = req.decided_by.as_deref().unwrap_or("operator");
+                                    let guidance_note = req.reason.as_deref().unwrap_or("");
+                                    let escalation_msg = if guidance_note.is_empty() {
+                                        format!(
+                                            "Operator '{}' approved your escalation. You may now continue.",
+                                            operator
+                                        )
+                                    } else {
+                                        format!(
+                                            "Operator '{}' approved your escalation with guidance:\n\n{}",
+                                            operator, guidance_note
+                                        )
+                                    };
+                                    history.push(crate::llm::Message::system(escalation_msg));
+                                    let initial_msg = checkpoint
+                                        .history
+                                        .iter()
+                                        .find(|m| matches!(m.role, crate::llm::Role::User))
+                                        .map(|m| m.content.clone())
+                                        .unwrap_or_default();
+                                    let outcome = runtime.execute_with_history(&mut history).await?;
+                                    (outcome, initial_msg, Some(checkpoint.turn_id))
+                                }
+                            }
                         } else if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason)
                         {
                             tracing::info!(
@@ -1320,6 +1397,79 @@ impl GatewayExecutionService {
                                 .await?
                             }
                         }
+                    } else if let crate::runtime::checkpoint::YieldReason::HumanEscalation {
+                        escalation_request_id: ref esc_rid,
+                    } = &checkpoint.yield_reason
+                    {
+                        let store = self.gateway_store.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "GatewayStore is required to resume escalation checkpoints"
+                            )
+                        })?;
+                        let req = store.get_approval(esc_rid)?.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Escalation approval '{}' from checkpoint not found in store",
+                                esc_rid
+                            )
+                        })?;
+                        let esc_status = req.status.clone();
+                        match esc_status {
+                            None => {
+                                anyhow::bail!(
+                                    "Session '{}' is waiting for escalation approval '{}'; approve or reject it before continuing",
+                                    session_id,
+                                    esc_rid
+                                );
+                            }
+                            Some(autonoetic_types::background::ApprovalStatus::Rejected)
+                            | Some(autonoetic_types::background::ApprovalStatus::Cancelled) => {
+                                anyhow::bail!(
+                                    "Escalation approval '{}' was {:?}; session '{}' cannot continue",
+                                    esc_rid,
+                                    esc_status,
+                                    session_id
+                                );
+                            }
+                            Some(autonoetic_types::background::ApprovalStatus::Approved) => {
+                                tracing::info!(
+                                    target: "checkpoint",
+                                    agent_id = %runtime.manifest.agent.id,
+                                    session_id = %session_id,
+                                    turn_counter = checkpoint.turn_counter,
+                                    escalation_request_id = %esc_rid,
+                                    "Resuming session from human escalation checkpoint"
+                                );
+                                runtime.guard = crate::runtime::guard::LoopGuard::restore(
+                                    checkpoint.loop_guard_state.clone(),
+                                );
+                                runtime.session_started = true;
+                                runtime.turn_counter = checkpoint.turn_counter;
+                                runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+                                let mut history = checkpoint.history.clone();
+                                let operator = req.decided_by.as_deref().unwrap_or("operator");
+                                let guidance_note = req.reason.as_deref().unwrap_or("");
+                                let escalation_msg = if guidance_note.is_empty() {
+                                    format!(
+                                        "Operator '{}' approved your escalation. You may now continue.",
+                                        operator
+                                    )
+                                } else {
+                                    format!(
+                                        "Operator '{}' approved your escalation with guidance:\n\n{}",
+                                        operator, guidance_note
+                                    )
+                                };
+                                history.push(crate::llm::Message::system(escalation_msg));
+                                let initial_msg = checkpoint
+                                    .history
+                                    .iter()
+                                    .find(|m| matches!(m.role, crate::llm::Role::User))
+                                    .map(|m| m.content.clone())
+                                    .unwrap_or_default();
+                                let outcome = runtime.execute_with_history(&mut history).await?;
+                                (outcome, initial_msg, Some(checkpoint.turn_id))
+                            }
+                        }
                     } else if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
                         tracing::info!(
                             target: "checkpoint",
@@ -1395,6 +1545,12 @@ impl GatewayExecutionService {
                     // Checkpoint already saved by execute_with_history with
                     // YieldReason::UserInputRequired. Signal that the session
                     // is blocked on user input (not "completed empty").
+                    (None, None, true)
+                }
+                TurnOutcome::Escalated { .. } => {
+                    // Checkpoint already saved by execute_with_history with
+                    // YieldReason::HumanEscalation. Signal that the session
+                    // is blocked on operator approval.
                     (None, None, true)
                 }
             };
@@ -2104,6 +2260,7 @@ impl GatewayExecutionService {
                 ..
             } => (None, Some(approval_request_id), false),
             TurnOutcome::SuspendedUserInput { interaction_id: _ } => (None, None, true),
+            TurnOutcome::Escalated { .. } => (None, None, true),
         };
 
         let initial_msg = history
@@ -3115,8 +3272,12 @@ fn resolve_pending_prefers_checkpoint_pending_tool_state() {
         turn_counter: 0,
         loop_guard_state: LoopGuardState {
             max_loops_without_progress: 1,
+            max_tool_failures: 5,
+            max_consecutive_same_progress: 0,
             current_loops: 0,
             tool_failure_counts: std::collections::HashMap::new(),
+            last_progress_fingerprint: None,
+            consecutive_progress_count: 0,
         },
         agent_id: "a".into(),
         session_id: "s".into(),

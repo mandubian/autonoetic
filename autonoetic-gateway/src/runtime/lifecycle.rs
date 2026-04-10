@@ -142,6 +142,11 @@ pub enum TurnOutcome {
     /// the caller should record this outcome so the session is visible
     /// as blocked on user input (not "completed empty").
     SuspendedUserInput { interaction_id: String },
+
+    /// The turn was suspended because the agent escalated to a human operator.
+    /// The checkpoint has already been saved; the session resumes when the
+    /// operator approves the escalation and provides guidance.
+    Escalated { escalation_request_id: String },
 }
 
 /// Build the system prompt given agent instructions and (optionally) raw agent
@@ -583,6 +588,7 @@ impl AgentExecutor {
     }
 
     pub fn with_config(mut self, config: Arc<GatewayConfig>) -> Self {
+        self.guard = LoopGuard::with_config(&config.loop_guard);
         self.config = Some(config);
         self
     }
@@ -925,6 +931,12 @@ impl AgentExecutor {
                 // User interaction checkpoint already saved. End the session;
                 // resume happens via the interaction answer path.
                 let _ = self.close_session("execute_loop_suspended_user_input");
+                Ok(())
+            }
+            Ok(TurnOutcome::Escalated { .. }) => {
+                // Escalation checkpoint already saved. End the session;
+                // resume happens via approval resolution.
+                let _ = self.close_session("execute_loop_escalated");
                 Ok(())
             }
             Err(e) => {
@@ -2006,29 +2018,69 @@ impl AgentExecutor {
                         });
                     }
 
+                    // Check whether the last executed tool call requires human escalation.
+                    let escalation_info = results.last().and_then(|(_id, _name, result_json)| {
+                        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                        if parsed
+                            .get("escalation_required")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            let request_id = parsed
+                                .get("request_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_default();
+                            Some(request_id)
+                        } else {
+                            None
+                        }
+                    });
+
+                    if let Some(request_id) = escalation_info {
+                        let cp = self.build_checkpoint(
+                            history,
+                            &turn_id,
+                            YieldReason::HumanEscalation {
+                                escalation_request_id: request_id.clone(),
+                            },
+                            None,
+                        );
+                        self.save_checkpoint_if_possible(&cp);
+
+                        tracing::info!(
+                            target: "escalation",
+                            agent_id = %self.manifest.agent.id,
+                            session_id = %session_id,
+                            escalation_request_id = %request_id,
+                            "Turn suspended for human escalation"
+                        );
+
+                        let _ = tracer.end_digest_turn();
+                        return Ok(TurnOutcome::Escalated {
+                            escalation_request_id: request_id,
+                        });
+                    }
+
                     // No approval or interaction required — commit assistant message + tool results to history.
                     history.push(assistant_msg);
-                    for (id, name, result) in &results {
+                    for (id, _name, result) in &results {
                         history.push(Message::tool_result(
                             id.clone(),
-                            name.clone(),
+                            _name.clone(),
                             result.clone(),
                         ));
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
                             if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
-                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id)
-                                {
+                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id) {
                                     self.guard.register_failure(&tc.name, &tc.arguments);
+                                }
+                            } else if tool_result_counts_as_progress(result) {
+                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id) {
+                                    self.guard.register_progress(&tc.name, &tc.arguments);
                                 }
                             }
                         }
-                    }
-
-                    let any_logical_success = results
-                        .iter()
-                        .any(|(_id, _name, result)| tool_result_counts_as_progress(result));
-                    if any_logical_success {
-                        self.guard.register_progress();
                     }
 
                     let _ = tracer.end_digest_turn();

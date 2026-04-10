@@ -125,6 +125,20 @@ pub enum ScheduledAction {
         agent_id: String,
         scope: String,
     },
+    /// Approval subject only: "agent is stuck and needs human guidance."
+    /// Not executed by the scheduler; once approved, the operator's guidance is injected
+    /// as a system message and the session resumes.
+    SessionEscalate {
+        session_id: String,
+        root_session_id: String,
+        requested_by_agent_id: String,
+        reason: String,
+        context: String,
+        urgency: String,
+        suggested_actions: Vec<String>,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
 }
 
 impl ScheduledAction {
@@ -137,6 +151,7 @@ impl ScheduledAction {
                 | Self::CredentialPrompt { .. }
                 | Self::SessionContinue { .. }
                 | Self::ProfileShare { .. }
+                | Self::SessionEscalate { .. }
         )
     }
 
@@ -151,7 +166,8 @@ impl ScheduledAction {
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
             | Self::SessionContinue { .. }
-            | Self::ProfileShare { .. } => true,
+            | Self::ProfileShare { .. }
+            | Self::SessionEscalate { .. } => true,
         }
     }
 
@@ -163,6 +179,7 @@ impl ScheduledAction {
             Self::CredentialPrompt { .. } => "credential_prompt",
             Self::SessionContinue { .. } => "session_continue",
             Self::ProfileShare { .. } => "profile_share",
+            Self::SessionEscalate { .. } => "session_escalate",
         }
     }
 
@@ -173,7 +190,8 @@ impl ScheduledAction {
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
             | Self::SessionContinue { .. }
-            | Self::ProfileShare { .. } => None,
+            | Self::ProfileShare { .. }
+            | Self::SessionEscalate { .. } => None,
         }
     }
 
@@ -188,7 +206,8 @@ impl ScheduledAction {
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
             | Self::SessionContinue { .. }
-            | Self::ProfileShare { .. } => {}
+            | Self::ProfileShare { .. }
+            | Self::SessionEscalate { .. } => {}
         }
         self
     }

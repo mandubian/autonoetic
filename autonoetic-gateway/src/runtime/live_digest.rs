@@ -792,6 +792,20 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
                         cell(tool_name),
                         cell(&truncate_chars(err, 120))
                     )
+                } else if let Some(msg) = as_str(&v, "message") {
+                    // ToolError JSON uses `message`, not `error`
+                    let et = as_str(&v, "error_type").unwrap_or("");
+                    let prefix = if et.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} — ", et)
+                    };
+                    format!(
+                        "`{}` — {}{}",
+                        cell(tool_name),
+                        cell(&prefix),
+                        cell(&truncate_chars(&redact_text_for_logs(msg), 200))
+                    )
                 } else {
                     format!("`{}` — (no result)", cell(tool_name),)
                 }
@@ -949,6 +963,15 @@ mod tests {
         assert!(s.contains("exit=1"));
         assert!(s.contains("stdout"));
         assert!(s.contains("stderr"));
+    }
+
+    #[test]
+    fn format_content_write_shows_tool_error_message() {
+        let j = r#"{"ok":false,"error_type":"validation","message":"Invalid JSON arguments for 'content.write': missing field `name`"}"#;
+        let s = format_tool_digest_result("content.write", j);
+        assert!(s.contains("validation"));
+        assert!(s.contains("missing field"));
+        assert!(!s.contains("(no result)"));
     }
 
     #[test]
