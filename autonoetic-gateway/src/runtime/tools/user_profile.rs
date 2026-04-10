@@ -50,9 +50,10 @@ impl NativeTool for UserProfileReadTool {
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest.capabilities.iter().any(|c| {
-            matches!(c, Capability::UserProfileAccess { .. })
-        })
+        manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::UserProfileAccess { .. }))
     }
 
     fn execute(
@@ -78,7 +79,8 @@ impl NativeTool for UserProfileReadTool {
             return Ok(json!({
                 "ok": false,
                 "error": "Gateway store not available"
-            }).to_string());
+            })
+            .to_string());
         };
 
         let agent_id = &manifest.agent.id;
@@ -92,7 +94,8 @@ impl NativeTool for UserProfileReadTool {
             return Ok(json!({
                 "ok": false,
                 "error": "No user_id provided and no bound user found for this agent"
-            }).to_string());
+            })
+            .to_string());
         }
 
         // Check binding
@@ -112,7 +115,8 @@ impl NativeTool for UserProfileReadTool {
                 "scope": "task_only",
                 "profile": null,
                 "message": "Binding exists with task_only scope — no profile data is accessible"
-            }).to_string());
+            })
+            .to_string());
         }
 
         let profile = store.get_user_profile(&user_id)?;
@@ -124,12 +128,14 @@ impl NativeTool for UserProfileReadTool {
                 "profile": null,
                 "display_name": null,
                 "message": "No profile has been created for this user yet"
-            }).to_string());
+            })
+            .to_string());
         };
 
         let profile_data = match &profile.profile_json {
             Some(json_str) => {
-                let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or(json!(null));
+                let parsed: serde_json::Value =
+                    serde_json::from_str(json_str).unwrap_or(json!(null));
                 if binding.scope == BindingScope::Restricted {
                     // Extract only preferences and constraints
                     filter_restricted_profile(&parsed)
@@ -147,7 +153,8 @@ impl NativeTool for UserProfileReadTool {
             "display_name": profile.display_name,
             "profile": profile_data,
             "version": profile.profile_version
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -229,7 +236,8 @@ impl NativeTool for UserProfileUpdateTool {
             return Ok(json!({
                 "ok": false,
                 "error": "No user_id provided and no bound user found"
-            }).to_string());
+            })
+            .to_string());
         }
 
         // Verify binding exists (agents can only update bound users)
@@ -271,9 +279,9 @@ impl NativeTool for UserProfileUpdateTool {
         version += 1;
         let profile = UserProfileRecord {
             user_id: user_id.clone(),
-            display_name: args.display_name.or_else(|| {
-                existing.as_ref().and_then(|p| p.display_name.clone())
-            }),
+            display_name: args
+                .display_name
+                .or_else(|| existing.as_ref().and_then(|p| p.display_name.clone())),
             trust_domain: existing
                 .as_ref()
                 .map(|p| p.trust_domain.clone())
@@ -293,7 +301,8 @@ impl NativeTool for UserProfileUpdateTool {
             "ok": true,
             "user_id": user_id,
             "version": version
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -337,9 +346,10 @@ impl NativeTool for UserProfileShareTool {
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest.capabilities.iter().any(|c| {
-            matches!(c, Capability::UserProfileAccess { .. })
-        })
+        manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::UserProfileAccess { .. }))
     }
 
     fn execute(
@@ -378,7 +388,8 @@ impl NativeTool for UserProfileShareTool {
                 "already_bound": true,
                 "scope": existing.unwrap().scope.to_string(),
                 "message": "Binding already exists"
-            }).to_string());
+            })
+            .to_string());
         }
 
         // Create approval request
@@ -406,6 +417,7 @@ impl NativeTool for UserProfileShareTool {
             status: None,
             decided_at: None,
             decided_by: None,
+            decision_reason: None,
             approval_level: ApprovalLevel::Operator,
         };
 
@@ -418,7 +430,8 @@ impl NativeTool for UserProfileShareTool {
             "user_id": args.user_id,
             "scope": args.scope,
             "message": "Profile share request created. Awaiting user approval."
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -494,7 +507,8 @@ impl NativeTool for UserProfileRevokeTool {
                 "user_id": args.user_id,
                 "agent_id": target_agent_id,
                 "message": "Profile binding revoked"
-            }).to_string())
+            })
+            .to_string())
         } else {
             Ok(json!({
                 "ok": false,
