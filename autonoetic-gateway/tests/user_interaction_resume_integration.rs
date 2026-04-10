@@ -147,6 +147,7 @@ async fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> 
             None,
             None,
             None,
+            None,
         )
         .await?;
 
@@ -181,6 +182,7 @@ async fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> 
             session_id,
             None,
             false,
+            None,
             None,
             None,
             None,
@@ -288,6 +290,7 @@ async fn test_user_ask_resume_option_selected_value() -> anyhow::Result<()> {
             None,
             None,
             None,
+            None,
         )
         .await?;
 
@@ -306,7 +309,7 @@ async fn test_user_ask_resume_option_selected_value() -> anyhow::Result<()> {
 
     let second = execution
         .spawn_agent_once(
-            agent_id, "resume", session_id, None, false, None, None, None, None,
+            agent_id, "resume", session_id, None, false, None, None, None, None, None,
         )
         .await?;
 
@@ -390,6 +393,7 @@ async fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
             None,
             None,
             None,
+            None,
         )
         .await?;
 
@@ -408,7 +412,7 @@ async fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
 
     execution
         .spawn_agent_once(
-            agent_id, "resume", session_id, None, false, None, None, None, None,
+            agent_id, "resume", session_id, None, false, None, None, None, None, None,
         )
         .await?;
 

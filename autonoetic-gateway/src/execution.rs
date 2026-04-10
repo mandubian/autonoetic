@@ -608,6 +608,8 @@ impl GatewayExecutionService {
         // Workflow / task context for turn continuation saves on approval suspension.
         workflow_id: Option<&str>,
         task_id: Option<&str>,
+        // Artifact ID whose layers should be auto-mounted in the child's sandbox.
+        artifact_id: Option<&str>,
     ) -> anyhow::Result<SpawnResult> {
         let span = tracing::info_span!(
             "spawn_agent_once",
@@ -873,7 +875,8 @@ impl GatewayExecutionService {
                 task_id.map(String::from),
             )
             .with_active_executions(Some(self.active_executions.clone()))
-            .with_http_client(self.http_client.clone());
+            .with_http_client(self.http_client.clone())
+            .with_artifact_id(artifact_id.map(String::from));
 
             use crate::runtime::lifecycle::TurnOutcome;
 
@@ -2136,6 +2139,7 @@ impl GatewayExecutionService {
             None,
             interaction.workflow_id.as_deref(),
             interaction.task_id.as_deref(),
+            None,
         )
         .await
     }

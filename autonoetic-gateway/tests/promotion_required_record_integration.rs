@@ -80,6 +80,7 @@ async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<(
             })),
             None,
             None,
+            None,
         )
         .await
         .expect_err("spawn should fail when required promotion record is missing");
@@ -133,6 +134,7 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
                 "promotion_artifact_id": artifact_id,
                 "promotion_role": "evaluator"
             })),
+            None,
             None,
             None,
         )

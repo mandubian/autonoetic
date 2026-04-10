@@ -670,6 +670,7 @@ impl JsonRpcRouter {
                 metadata,
                 workflow_id.as_deref(),
                 task_id.as_deref(),
+                None,
             )
             .await
     }

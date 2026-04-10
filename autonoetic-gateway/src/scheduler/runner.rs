@@ -216,7 +216,7 @@ pub async fn handle_due_wake(
         Some(
             execution
                 .spawn_agent_once(
-                    agent_id, &kickoff, session_id, None, false, None, None, None, None,
+                    agent_id, &kickoff, session_id, None, false, None, None, None, None, None,
                 )
                 .await
                 .map(|spawn| spawn.assistant_reply.unwrap_or_default()),

@@ -112,6 +112,7 @@ async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> any
             None,
             None,
             None,
+            None,
         )
         .await?;
 
@@ -128,6 +129,7 @@ async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> any
             valid_session_id,
             None,
             false,
+            None,
             None,
             None,
             None,
