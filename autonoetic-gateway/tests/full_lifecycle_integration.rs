@@ -228,16 +228,16 @@ fn test_cross_session_content_sharing() {
 }
 
 /// Test: Knowledge store and recall across sessions
-#[test]
-fn test_knowledge_persistence() {
+#[tokio::test]
+async fn test_knowledge_persistence() {
     let workspace = TestWorkspace::new().unwrap();
     let gateway_dir = workspace.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
 
-    use autonoetic_gateway::runtime::memory::Tier2Memory;
+    use autonoetic_gateway::runtime::memory::{Tier2Memory, SqliteMemoryStore};
 
     // Create Tier2Memory (knowledge store)
-    let memory = Tier2Memory::new(&gateway_dir, "test-agent").unwrap();
+    let memory = Tier2Memory::open_sqlite(&gateway_dir, "test-agent").unwrap();
 
     // Store a fact
     memory
@@ -248,15 +248,16 @@ fn test_knowledge_persistence() {
             "test-session",
             "open-meteo",
         )
+        .await
         .unwrap();
 
     // Recall the fact
-    let recalled = memory.recall("weather-api").unwrap();
+    let recalled = memory.recall("weather-api").await.unwrap();
     assert_eq!(recalled.content, "open-meteo");
     assert_eq!(recalled.owner_agent_id, "test-agent");
 
     // Search by scope (owner matches, so it should be readable)
-    let results = memory.search("api", None).unwrap();
+    let results = memory.search("api", None).await.unwrap();
     assert!(
         !results.is_empty(),
         "Search should find the stored knowledge"

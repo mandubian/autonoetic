@@ -506,10 +506,12 @@ fn dispatch_sdk_method(
                 .and_then(|v| v.as_str())
                 .unwrap_or("sdk");
             let agent_id = agent_id_from_agent_dir(agent_dir)?;
-            let mem = crate::runtime::memory::Tier2Memory::new(gateway_dir, &agent_id)?;
+            let mem = crate::runtime::memory::Tier2Memory::open_sqlite(gateway_dir, &agent_id)?;
             let source_ref = format!("sdk_bridge:{}", agent_id);
             let content = serde_json::to_string(&value)?;
-            let memory = mem.remember(key, scope, &agent_id, &source_ref, &content)?;
+            let memory = crate::runtime::tools::block_on_memory(
+                mem.remember(key, scope, &agent_id, &source_ref, &content)
+            )?;
             let _ = log_sdk_memory_event(
                 agent_dir,
                 "remember",
@@ -532,8 +534,8 @@ fn dispatch_sdk_method(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("memory.recall requires key"))?;
             let agent_id = agent_id_from_agent_dir(agent_dir)?;
-            let mem = crate::runtime::memory::Tier2Memory::new(gateway_dir, &agent_id)?;
-            match mem.recall(key) {
+            let mem = crate::runtime::memory::Tier2Memory::open_sqlite(gateway_dir, &agent_id)?;
+            match crate::runtime::tools::block_on_memory(mem.recall(key)) {
                 Ok(memory) => {
                     let parsed = serde_json::from_str::<serde_json::Value>(&memory.content)
                         .unwrap_or_else(|_| serde_json::Value::String(memory.content.clone()));
@@ -566,9 +568,10 @@ fn dispatch_sdk_method(
                 .and_then(|v| v.as_str())
                 .unwrap_or("sdk");
             let agent_id = agent_id_from_agent_dir(agent_dir)?;
-            let mem = crate::runtime::memory::Tier2Memory::new(gateway_dir, &agent_id)?;
+            let mem = crate::runtime::memory::Tier2Memory::open_sqlite(gateway_dir, &agent_id)?;
+            let search_results = crate::runtime::tools::block_on_memory(mem.search(scope, None))?;
             let mut results = Vec::<String>::new();
-            for memory in mem.search(scope, None)? {
+            for memory in search_results {
                 let hay = format!("{} {}", memory.memory_id, memory.content).to_ascii_lowercase();
                 if hay.contains(&query) {
                     results.push(format!("{}: {}", memory.memory_id, memory.content));

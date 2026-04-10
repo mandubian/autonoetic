@@ -1,5 +1,8 @@
 //! Integration tests for Tier 2 memory provenance and session/global visibility.
 
+use std::sync::Arc;
+
+use autonoetic_gateway::runtime::memory::{MemoryStore, SqliteMemoryStore, Tier2Memory};
 use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
 use tempfile::tempdir;
 
@@ -11,8 +14,8 @@ fn create_test_gateway() -> tempfile::TempDir {
 }
 
 /// Session-visible facts are readable by any agent in the same session_id.
-#[test]
-fn test_tier2_memory_cross_agent_session_visibility() {
+#[tokio::test]
+async fn test_tier2_memory_cross_agent_session_visibility() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
@@ -32,6 +35,7 @@ fn test_tier2_memory_cross_agent_session_visibility() {
             "session:demo-session:turn:1",
             "Paris is the capital of France",
         )
+        .await
         .unwrap();
 
     assert_eq!(memory.memory_id, "fact_123");
@@ -46,17 +50,17 @@ fn test_tier2_memory_cross_agent_session_visibility() {
     )
     .unwrap();
 
-    let err = mem_reader.recall("fact_123").unwrap_err();
+    let err = mem_reader.recall("fact_123").await.unwrap_err();
     assert!(err.to_string().contains("not accessible"));
 
     // Widen to session (same pattern as knowledge.store upsert)
-    let mut m = mem_writer.recall("fact_123").unwrap();
+    let mut m = mem_writer.recall("fact_123").await.unwrap();
     m.visibility = MemoryVisibility::Session {
         session_id: "demo-session".into(),
     };
-    mem_writer.save_memory(&m).unwrap();
+    mem_writer.save_memory(&m).await.unwrap();
 
-    let recalled = mem_reader.recall("fact_123").unwrap();
+    let recalled = mem_reader.recall("fact_123").await.unwrap();
     assert_eq!(recalled.content, "Paris is the capital of France");
     assert_eq!(recalled.owner_agent_id, "writer-agent");
     match &recalled.visibility {
@@ -66,8 +70,8 @@ fn test_tier2_memory_cross_agent_session_visibility() {
 }
 
 /// Test that unauthorized agents cannot read private memories.
-#[test]
-fn test_tier2_memory_unauthorized_access_denied() {
+#[tokio::test]
+async fn test_tier2_memory_unauthorized_access_denied() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
@@ -82,21 +86,22 @@ fn test_tier2_memory_unauthorized_access_denied() {
             "test:unauthorized",
             "This is agent A's secret",
         )
+        .await
         .unwrap();
 
-    let recalled = mem_a.recall("private_fact").unwrap();
+    let recalled = mem_a.recall("private_fact").await.unwrap();
     assert_eq!(recalled.content, "This is agent A's secret");
 
     let mem_b =
         autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "agent-b").unwrap();
 
-    let err = mem_b.recall("private_fact").unwrap_err();
+    let err = mem_b.recall("private_fact").await.unwrap_err();
     assert!(err.to_string().contains("not accessible"));
     assert!(err.to_string().contains("agent-b"));
 }
 
-#[test]
-fn test_tier2_memory_provenance_tracking() {
+#[tokio::test]
+async fn test_tier2_memory_provenance_tracking() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
@@ -111,6 +116,7 @@ fn test_tier2_memory_provenance_tracking() {
             "session:abc123:turn:5",
             "Test content for provenance",
         )
+        .await
         .unwrap();
 
     assert_eq!(memory.memory_id, "provenance_test");
@@ -129,8 +135,8 @@ fn test_tier2_memory_provenance_tracking() {
     assert_eq!(memory.content_hash, expected_hash);
 }
 
-#[test]
-fn test_tier2_memory_search_with_visibility() {
+#[tokio::test]
+async fn test_tier2_memory_search_with_visibility() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
@@ -144,6 +150,7 @@ fn test_tier2_memory_search_with_visibility() {
         "test:1",
         "Paris is sunny",
     )
+    .await
     .unwrap();
 
     mem.remember(
@@ -153,6 +160,7 @@ fn test_tier2_memory_search_with_visibility() {
         "test:2",
         "London is rainy",
     )
+    .await
     .unwrap();
 
     mem.remember(
@@ -162,21 +170,22 @@ fn test_tier2_memory_search_with_visibility() {
         "test:3",
         "Paris is in France",
     )
+    .await
     .unwrap();
 
-    let results = mem.search("weather", None).unwrap();
+    let results = mem.search("weather", None).await.unwrap();
     assert_eq!(results.len(), 2);
 
-    let results = mem.search("weather", Some("Paris")).unwrap();
+    let results = mem.search("weather", Some("Paris")).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].memory_id, "fact_1");
 
-    let results = mem.search("nonexistent", None).unwrap();
+    let results = mem.search("nonexistent", None).await.unwrap();
     assert_eq!(results.len(), 0);
 }
 
-#[test]
-fn test_tier2_memory_global_visibility() {
+#[tokio::test]
+async fn test_tier2_memory_global_visibility() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
@@ -199,23 +208,24 @@ fn test_tier2_memory_global_visibility() {
             "test:global",
             "This is public knowledge",
         )
+        .await
         .unwrap();
 
-    assert!(mem_reader1.recall("global_fact").is_err());
-    assert!(mem_reader2.recall("global_fact").is_err());
+    assert!(mem_reader1.recall("global_fact").await.is_err());
+    assert!(mem_reader2.recall("global_fact").await.is_err());
 
-    let global = mem_owner.make_global("global_fact").unwrap();
+    let global = mem_owner.make_global("global_fact").await.unwrap();
     assert_eq!(global.visibility, MemoryVisibility::Global);
 
-    let r1 = mem_reader1.recall("global_fact").unwrap();
+    let r1 = mem_reader1.recall("global_fact").await.unwrap();
     assert_eq!(r1.content, "This is public knowledge");
 
-    let r2 = mem_reader2.recall("global_fact").unwrap();
+    let r2 = mem_reader2.recall("global_fact").await.unwrap();
     assert_eq!(r2.content, "This is public knowledge");
 }
 
-#[test]
-fn test_tier2_memory_only_owner_can_make_global() {
+#[tokio::test]
+async fn test_tier2_memory_only_owner_can_make_global() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
@@ -246,55 +256,53 @@ fn test_tier2_memory_only_owner_can_make_global() {
     obj.visibility = MemoryVisibility::Session {
         session_id: "wf-1".into(),
     };
-    mem_owner.save_memory(&obj).unwrap();
+    mem_owner.save_memory(&obj).await.unwrap();
 
-    assert!(mem_non_owner.recall("owned_fact").is_ok());
+    assert!(mem_non_owner.recall("owned_fact").await.is_ok());
 
-    let err = mem_non_owner.make_global("owned_fact").unwrap_err();
+    let err = mem_non_owner.make_global("owned_fact").await.unwrap_err();
     assert!(err
         .to_string()
         .contains("Only the owner can make a memory global"));
 }
 
-#[test]
-fn test_tier2_memory_list_scopes() {
+#[tokio::test]
+async fn test_tier2_memory_list_scopes() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
 
     let mem =
         autonoetic_gateway::runtime::memory::Tier2Memory::new(&gateway_dir, "scope-agent").unwrap();
 
-    let scopes = mem.list_scopes().unwrap();
+    let scopes = mem.list_scopes().await.unwrap();
     assert!(scopes.is_empty());
 
     mem.remember("f1", "scope_a", "scope-agent", "t:1", "content1")
+        .await
         .unwrap();
     mem.remember("f2", "scope_b", "scope-agent", "t:2", "content2")
+        .await
         .unwrap();
     mem.remember("f3", "scope_a", "scope-agent", "t:3", "content3")
+        .await
         .unwrap();
 
-    let scopes = mem.list_scopes().unwrap();
+    let scopes = mem.list_scopes().await.unwrap();
     assert_eq!(scopes.len(), 2);
     assert!(scopes.contains(&"scope_a".to_string()));
     assert!(scopes.contains(&"scope_b".to_string()));
 }
 
-#[test]
-fn test_tier2_memory_search_by_tags_cross_agent_session() {
-    use std::sync::Arc;
-
+#[tokio::test]
+async fn test_tier2_memory_search_by_tags_cross_agent_session() {
     let ws = create_test_gateway();
     let gateway_dir = ws.path().join(".gateway");
     let store = Arc::new(
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
     );
+    let mem_store: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(Arc::clone(&store)));
 
-    let writer = autonoetic_gateway::runtime::memory::Tier2Memory::with_store(
-        Arc::clone(&store),
-        "writer-agent",
-        None,
-    );
+    let writer = Tier2Memory::with_store(Arc::clone(&mem_store), "writer-agent", None);
 
     let mut memory = MemoryObject::new(
         "tagged_fact".into(),
@@ -308,13 +316,9 @@ fn test_tier2_memory_search_by_tags_cross_agent_session() {
     memory.visibility = MemoryVisibility::Session {
         session_id: "root-sess".into(),
     };
-    writer.save_memory(&memory).unwrap();
+    writer.save_memory(&memory).await.unwrap();
 
-    let reader = autonoetic_gateway::runtime::memory::Tier2Memory::with_store(
-        store,
-        "reader-agent",
-        Some("root-sess".into()),
-    );
+    let reader = Tier2Memory::with_store(mem_store, "reader-agent", Some("root-sess".into()));
     let found = reader
         .search_by_tags(
             "lessons",
@@ -322,6 +326,7 @@ fn test_tier2_memory_search_by_tags_cross_agent_session() {
             None,
             10,
         )
+        .await
         .unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].memory_id, "tagged_fact");
@@ -333,6 +338,7 @@ fn test_tier2_memory_search_by_tags_cross_agent_session() {
             None,
             10,
         )
+        .await
         .unwrap();
     assert!(not_found.is_empty());
 }

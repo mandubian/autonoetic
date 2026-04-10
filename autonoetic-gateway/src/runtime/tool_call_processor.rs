@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(parsed["approval_required"], true);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_in_session_repair_loop_recovery_from_structured_error() {
         let temp = tempdir().unwrap();
         let gw_dir = temp.path().join("gateway");
