@@ -21,6 +21,11 @@ The system has three distinct human-interaction mechanisms that serve different 
 - `agent.revision.promote` for high-risk bundles (NetworkAccess, CodeExecution, broad WriteAccess)
 - Dangerous operations (sudo, rm -rf, dd, mkfs) — blocked by policy
 
+**When it does NOT trigger (auto-approved):**
+- Agents with `NetworkAccess` capability — all remote access patterns auto-approved
+- Safe local inspection commands (`pip list`, `pip show`, `npm list`, etc.) — no network needed
+- Dependency install redirect — non-NetworkAccess agents get `dependency_layer_required: true` instead of an approval prompt, directing the planner to route through `packager.default`
+
 **How it works:**
 1. Tool detects the operation requires approval
 2. Creates an `ApprovalRequest` persisted to SQLite
