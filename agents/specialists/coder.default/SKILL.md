@@ -53,7 +53,7 @@ Approval retry: if `sandbox.exec` previously returned `approval_required: true` 
 ## Behavior
 - Write clean, documented code
 - Test code with `sandbox.exec` before returning — use `dependencies` field to install packages if needed
-- Use `content.write` to persist artifacts
+- Use `content.write` to persist artifacts — **every call must include both `name` (path-like filename, e.g. `weather_fetcher.py`) and `content`**; omitting `name` fails validation
 - Follow the principle of minimal changes
 
 ## Creating Agent Scripts for the Planner
@@ -115,10 +115,11 @@ When you receive a task from `architect.default`, it will include structured sub
 
 When using `content.write` and `content.read`:
 
-1. **`content.write` returns a handle, short alias, and visibility**
-2. **Within the same root session, prefer names for collaboration**: `content.read({"name_or_handle": "weather.py"})`
-3. **Use `visibility: "private"`** only for scratch work that should stay local to your session
-4. **For anything that will be reviewed or installed, build an artifact before handoff**
+1. **`content.write` requires `name` and `content`** — the gateway rejects a write that only passes `content`. Always set `name` to the file path you want (e.g. `src/main.py`, `weather_fetcher.py`).
+2. **`content.write` returns a handle, short alias, and visibility**
+3. **Within the same root session, prefer names for collaboration**: `content.read({"name_or_handle": "weather.py"})`
+4. **Use `visibility: "private"`** only for scratch work that should stay local to your session
+5. **For anything that will be reviewed or installed, build an artifact before handoff**
 
 ## Running Code
 
