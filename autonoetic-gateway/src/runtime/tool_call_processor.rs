@@ -190,6 +190,9 @@ impl<'a> ToolCallProcessor<'a> {
             if tool_result_requires_approval(&results.last().expect("just pushed result").2) {
                 break;
             }
+            if tool_result_requires_escalation(&results.last().expect("just pushed result").2) {
+                break;
+            }
         }
 
         Ok((had_any_success, results))
@@ -387,6 +390,13 @@ fn tool_result_requires_approval(result: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(result)
         .ok()
         .and_then(|parsed| parsed.get("approval_required").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+fn tool_result_requires_escalation(result: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|parsed| parsed.get("escalation_required").and_then(|v| v.as_bool()))
         .unwrap_or(false)
 }
 

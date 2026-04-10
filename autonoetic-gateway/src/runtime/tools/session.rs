@@ -144,14 +144,77 @@ impl NativeTool for SessionEscalateTool {
                 })
             }
             "human" => {
+                let Some(store) = gateway_store.as_ref() else {
+                    return Err(anyhow::anyhow!(
+                        "GatewayStore is required for human escalation approval"
+                    ));
+                };
+                let sid = session_id.ok_or_else(|| {
+                    anyhow::anyhow!("session_id is required for human escalation")
+                })?;
+                let root_session_id =
+                    crate::runtime::content_store::root_session_id(sid).to_string();
+                let request_id =
+                    format!("esc-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+                let action = autonoetic_types::background::ScheduledAction::SessionEscalate {
+                    session_id: sid.to_string(),
+                    root_session_id: root_session_id.clone(),
+                    requested_by_agent_id: manifest.agent.id.clone(),
+                    reason: args.reason.clone(),
+                    context: args.context.clone(),
+                    urgency: args.urgency.clone(),
+                    suggested_actions: suggested_actions.clone(),
+                    payload: None,
+                };
+                let fallback_config = GatewayConfig {
+                    agents_dir: agent_dir.parent().unwrap_or(agent_dir).to_path_buf(),
+                    ..GatewayConfig::default()
+                };
+                let gw_config = config.unwrap_or(&fallback_config);
+                let wf_id = crate::scheduler::resolve_workflow_id_for_root_session(
+                    gw_config,
+                    &root_session_id,
+                )
+                .ok()
+                .flatten();
+                let task_id = wf_id.as_ref().and_then(|wf| {
+                    crate::scheduler::resolve_task_id_for_session(gw_config, None, wf, sid)
+                        .ok()
+                        .flatten()
+                });
+                let approval_level =
+                    crate::scheduler::approval::resolve_approval_level(gw_config, &action);
+                let request = autonoetic_types::background::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    agent_id: manifest.agent.id.clone(),
+                    session_id: sid.to_string(),
+                    action: action.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    reason: Some(format!(
+                        "Agent '{}' is stuck and needs human guidance. Urgency: {}. Reason: {}",
+                        manifest.agent.id, args.urgency, args.reason
+                    )),
+                    evidence_ref: None,
+                    root_session_id: Some(root_session_id),
+                    workflow_id: wf_id.clone(),
+                    task_id,
+                    status: None,
+                    decided_at: None,
+                    decided_by: None,
+                    approval_level,
+                };
+                store.create_approval(&request)?;
+
                 serde_json::json!({
                     "escalation_type": "human",
-                    "message": "This escalation has been logged. A human operator will review your request.",
+                    "message": "Escalation logged. A human operator will review your request.",
                     "urgency": args.urgency,
                     "reason": args.reason,
                     "context": args.context,
                     "suggested_actions": suggested_actions.clone(),
-                    "note": "You should EndTurn after escalating to human to allow them to review and respond."
+                    "escalation_required": true,
+                    "request_id": request_id.clone(),
+                    "note": "The session is suspended pending operator approval. Do not continue executing tools."
                 })
             }
             _ => {

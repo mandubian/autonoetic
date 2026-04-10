@@ -211,6 +211,18 @@ pub async fn handle_gateway_approvals(
                     } => {
                         format!("install: {} ({})", agent_id, summary)
                     }
+                    autonoetic_types::background::ScheduledAction::SessionEscalate {
+                        reason,
+                        urgency,
+                        ..
+                    } => {
+                        let truncated = if reason.len() > 40 {
+                            format!("{}...", &reason[..40])
+                        } else {
+                            reason.clone()
+                        };
+                        format!("escalation ({}): {}", urgency, truncated)
+                    }
                     other => format!("{}", other.kind()),
                 };
                 println!(
@@ -365,6 +377,14 @@ async fn run_interactive_approvals(
                         autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, summary, .. } => {
                             ("agent_install", format!("{} ({})", agent_id, summary))
                         }
+                        autonoetic_types::background::ScheduledAction::SessionEscalate { urgency, reason, .. } => {
+                            let truncated: String = if reason.len() > 40 {
+                                format!("{}...", &reason[..40])
+                            } else {
+                                reason.clone()
+                            };
+                            ("escalation", format!("[{}] {}", urgency, truncated))
+                        }
                         other => ("other", other.kind().to_string()),
                     };
                     let reason_str = req.reason.as_deref().unwrap_or("");
@@ -468,6 +488,30 @@ async fn run_interactive_approvals(
                                     ]));
                                 }
                             }
+                        }
+                    }
+                    autonoetic_types::background::ScheduledAction::SessionEscalate {
+                        reason, context, urgency, suggested_actions, ..
+                    } => {
+                        lines.push(Line::from(vec![
+                            Span::styled("Urgency: ", Style::default().fg(Color::Gray)),
+                            Span::styled(urgency.clone(), Style::default().fg(Color::Yellow)),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("Reason:  ", Style::default().fg(Color::Gray)),
+                            Span::styled(reason.clone(), Style::default().fg(Color::Green)),
+                        ]));
+                        if !context.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled("Context: ", Style::default().fg(Color::Gray)),
+                                Span::styled(context.clone(), Style::default().fg(Color::Green)),
+                            ]));
+                        }
+                        if !suggested_actions.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled("Actions: ", Style::default().fg(Color::Gray)),
+                                Span::styled(suggested_actions.join("; "), Style::default().fg(Color::Green)),
+                            ]));
                         }
                     }
                     other => {

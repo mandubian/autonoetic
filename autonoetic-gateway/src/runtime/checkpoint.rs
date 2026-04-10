@@ -33,6 +33,8 @@ pub enum YieldReason {
     ManualStop,
     /// Recoverable error.
     Error(String),
+    /// Agent escalated to human operator for guidance.
+    HumanEscalation { escalation_request_id: String },
 }
 
 /// Snapshot of LLM configuration needed for reproducible execution.
@@ -441,8 +443,12 @@ mod tests {
             turn_counter: 1,
             loop_guard_state: LoopGuardState {
                 max_loops_without_progress: 10,
+                max_tool_failures: 5,
+                max_consecutive_same_progress: 0,
                 current_loops: 0,
                 tool_failure_counts: std::collections::HashMap::new(),
+                last_progress_fingerprint: None,
+                consecutive_progress_count: 0,
             },
             agent_id: "test-agent".to_string(),
             session_id: "session-123".to_string(),
@@ -485,8 +491,12 @@ mod tests {
             turn_counter: 1,
             loop_guard_state: LoopGuardState {
                 max_loops_without_progress: 10,
+                max_tool_failures: 5,
+                max_consecutive_same_progress: 0,
                 current_loops: 0,
                 tool_failure_counts: std::collections::HashMap::new(),
+                last_progress_fingerprint: None,
+                consecutive_progress_count: 0,
             },
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
@@ -537,8 +547,12 @@ mod tests {
                 turn_counter: i,
                 loop_guard_state: LoopGuardState {
                     max_loops_without_progress: 10,
+                    max_tool_failures: 5,
+                    max_consecutive_same_progress: 0,
                     current_loops: 0,
                     tool_failure_counts: std::collections::HashMap::new(),
+                    last_progress_fingerprint: None,
+                    consecutive_progress_count: 0,
                 },
                 agent_id: "test-agent".to_string(),
                 session_id: session_id.to_string(),

@@ -480,6 +480,7 @@ fn resume_session_after_approval(
         &decision.action,
         autonoetic_types::background::ScheduledAction::AgentInstall { .. }
             | autonoetic_types::background::ScheduledAction::SandboxExec { .. }
+            | autonoetic_types::background::ScheduledAction::SessionEscalate { .. }
     );
 
     if !is_supported_action {
@@ -545,6 +546,27 @@ fn resume_session_after_approval(
                     "approval_cancelled:sandbox_exec:{}:cancelled",
                     decision.request_id
                 ),
+            };
+            (decision.agent_id.clone(), msg)
+        }
+        autonoetic_types::background::ScheduledAction::SessionEscalate { .. } => {
+            let guidance = decision.reason.as_deref().unwrap_or("");
+            let msg = match decision.status {
+                ApprovalStatus::Approved => format!(
+                    "escalation_resumed:{}:approved{}",
+                    decision.request_id,
+                    if guidance.is_empty() {
+                        String::new()
+                    } else {
+                        format!(":guidance={}", guidance)
+                    }
+                ),
+                ApprovalStatus::Rejected => {
+                    format!("escalation_rejected:{}:rejected", decision.request_id)
+                }
+                ApprovalStatus::Cancelled => {
+                    format!("escalation_cancelled:{}:cancelled", decision.request_id)
+                }
             };
             (decision.agent_id.clone(), msg)
         }
@@ -734,6 +756,7 @@ fn unblock_task_on_approval(
         "action_type": match &decision.action {
             autonoetic_types::background::ScheduledAction::SandboxExec { .. } => "sandbox_exec",
             autonoetic_types::background::ScheduledAction::AgentInstall { .. } => "agent_install",
+            autonoetic_types::background::ScheduledAction::SessionEscalate { .. } => "session_escalate",
             _ => "unknown",
         },
     });

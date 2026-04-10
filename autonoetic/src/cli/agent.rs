@@ -1347,6 +1347,13 @@ pub async fn run_agent_with_runtime_with_driver(
             );
             runtime.close_session("headless_suspended_user_input")?;
         }
+        Ok(TurnOutcome::Escalated { escalation_request_id }) => {
+            println!(
+                "[Turn suspended pending human escalation: {}]",
+                escalation_request_id
+            );
+            runtime.close_session("headless_escalated")?;
+        }
         Err(e) => {
             let _ = runtime.close_session("headless_error");
             return Err(e);
@@ -1412,6 +1419,18 @@ pub async fn run_interactive_session(
                     .await?;
                 stdout.flush().await?;
             }
+            Ok(TurnOutcome::Escalated { escalation_request_id }) => {
+                stdout
+                    .write_all(
+                        format!(
+                            "[Turn suspended pending human escalation: {}]\n",
+                            escalation_request_id
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
+                stdout.flush().await?;
+            }
             Err(e) => {
                 let _ = runtime.close_session("interactive_error");
                 return Err(e);
@@ -1470,6 +1489,18 @@ pub async fn run_interactive_session(
                         format!(
                             "[Turn suspended pending user interaction: {}]\n",
                             interaction_id
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
+                stdout.flush().await?;
+            }
+            Ok(TurnOutcome::Escalated { escalation_request_id }) => {
+                stdout
+                    .write_all(
+                        format!(
+                            "[Turn suspended pending human escalation: {}]\n",
+                            escalation_request_id
                         )
                         .as_bytes(),
                     )
