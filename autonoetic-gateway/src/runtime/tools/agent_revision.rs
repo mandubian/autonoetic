@@ -1425,7 +1425,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             anyhow::ensure!(
                 !has_unresolved,
                 "Promotion gate: revision has unresolved dependencies. \
-                 Run builder.default to install dependencies as layers, \
+                 Run packager.default to install dependencies as layers, \
                  then re-submit the revision.",
             );
         }

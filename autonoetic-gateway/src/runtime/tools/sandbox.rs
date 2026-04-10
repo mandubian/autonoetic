@@ -193,7 +193,7 @@ fn apply_network_isolation_failure_to_result(
              namespace (e.g. missing operator approval or misconfiguration)."
         } else {
             "This agent does not declare NetworkAccess: outbound calls are blocked. \
-             Add scoped NetworkAccess, or use builder.default layers so tests run offline."
+             Add scoped NetworkAccess, or use packager.default layers so tests run offline."
         }
     );
     if let Some(obj) = body.as_object_mut() {

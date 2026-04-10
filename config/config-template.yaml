@@ -243,7 +243,7 @@ llm_preset_mapping:
   evaluator: coding          # routed
   architect: coding            # fixed
   specialized_builder: agentic
-  builder: agentic
+  packager: agentic
   default: fallback
 
 # ── Context Compression ──────────────────────────────────────────────

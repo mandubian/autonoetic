@@ -143,11 +143,11 @@ After `runner.process.wait_with_output()`:
 
 ---
 
-## Phase 5: Builder Agent
+## Phase 5: Packager Agent
 
-### Task 5.1: Create builder agent directory
+### Task 5.1: Create packager agent directory
 
-**File:** `agents/specialists/builder.default/`
+**File:** `agents/specialists/packager.default/`
 
 - [x] Create `SKILL.md` with:
   - Role: build-time dependency resolution and artifact layering
@@ -160,9 +160,9 @@ After `runner.process.wait_with_output()`:
 
 **File:** `agents/lead/planner.default/SKILL.md`
 
-- [x] Add builder to delegation ladder between coder and evaluator
-- [x] Rule: "if artifact has a dependency file (requirements.txt, package.json, etc.), delegate to builder before evaluator"
-- [x] Builder receives artifact ID + dependency file name, returns layered artifact ID
+- [x] Add packager to delegation ladder between coder and evaluator
+- [x] Rule: "if artifact has a dependency file (requirements.txt, package.json, etc.), delegate to packager before evaluator"
+- [x] Packager receives artifact ID + dependency file name, returns layered artifact ID
 
 ### Task 5.3: Update evaluator instructions
 
@@ -230,7 +230,7 @@ Phase 4 (sandbox mounting)  ← depends on 1.1, 3.1
   └── 4.2 Update inspect
 
 Phase 5 (agents)            ← depends on 2, 3, 4 being complete
-  ├── 5.1 Builder agent
+  ├── 5.1 Packager agent
   ├── 5.2 Planner routing update
   └── 5.3 Evaluator instructions
 

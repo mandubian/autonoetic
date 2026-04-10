@@ -11,9 +11,9 @@ Sandbox network isolation (`--unshare-all`) is a **global** setting controlled b
 
 1. **Evaluator cannot test network-dependent artifacts** — weather-fetcher smoke tests return `NETWORK_ERROR` because the evaluator's sandbox has no network, even though the artifact was approved with `NetworkAccess` capability.
 2. **Installed agents cannot use their approved capabilities** — `weather-fetcher` was approved with `NetworkAccess(hosts: [api.open-meteo.com])` but its runtime sandbox still runs `--unshare-all`.
-3. **Builder.default `sandbox.conf` is dead code** — nothing reads per-agent sandbox config files.
+3. **Packager.default `sandbox.conf` is dead code** — nothing reads per-agent sandbox config files.
 
-Additionally, the planner's agent creation flow (Steps 1-7) does not include `builder.default`, so artifacts with `requirements.txt` never get their dependencies layered.
+Additionally, the planner's agent creation flow (Steps 1-7) does not include `packager.default`, so artifacts with `requirements.txt` never get their dependencies layered.
 
 ## Solution
 
@@ -43,14 +43,14 @@ Add an explicit **Step 2a** to the planner's agent creation flow between coder a
 
 ```
 Step 2a: If artifact contains dependency files (requirements.txt, package.json, etc.),
-         delegate to builder.default to create a layered artifact before evaluation.
+         delegate to packager.default to create a layered artifact before evaluation.
 ```
 
-This makes builder invocation deterministic rather than relying on the LLM noticing the decision flow table entry.
+This makes packager invocation deterministic rather than relying on the LLM noticing the decision flow table entry.
 
 ### 3. Cleanup
 
-- Remove dead `agents/specialists/builder.default/sandbox.conf` (not read by anything)
+- Remove dead `agents/specialists/packager.default/sandbox.conf` (not read by anything)
 - The global `share_net` config and gated env var remain as fallback/admin override
 
 ## What Changes
@@ -73,10 +73,10 @@ This makes builder invocation deterministic rather than relying on the LLM notic
 
 ### `agents/lead/planner.default/SKILL.md`
 - Add explicit Step 2a between coder and evaluator for dependency layering
-- Make builder.default a required step when requirements.txt/package.json exists
+- Make packager.default a required step when requirements.txt/package.json exists
 
 ### Cleanup
-- Delete `agents/specialists/builder.default/sandbox.conf`
+- Delete `agents/specialists/packager.default/sandbox.conf`
 
 ## What Does NOT Change
 

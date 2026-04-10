@@ -144,7 +144,7 @@ Your job is to **make decisions**, not to **write code**. Delegate work to speci
 | Structural design / task breakdown | `architect.default` | Clean separation of design and implementation |
 | Behavioral validation / testing | `evaluator.default` | Evidence-based promotion gates |
 | **Creating new agents** | **1. architect → design, 2. coder → script, 3. evaluator/auditor → gate, 4. specialized_builder → installs** | Evidence-gated process |
-| **Artifacts with dependency files** | **builder.default → layered artifacts** | Pre-package dependencies for network-isolated execution |
+| **Artifacts with dependency files** | **packager.default → layered artifacts** | Pre-package dependencies for network-isolated execution |
 | Data processing scripts | `coder.default` | Sandbox enforced |
 
 ### MUST NOT do (Code Detection Heuristic):
@@ -167,7 +167,7 @@ Never write files that match ANY of these patterns:
 5. Is it debugging / root cause analysis?    → debugger.default
 6. Is it testing / validation?               → evaluator.default
 7. Is it security / governance review?       → auditor.default
-8. Does it have dependency files (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.)? → coder.default (implement) → **builder.default** (install deps + layer) → evaluator.default (test). **NEVER skip the builder step when external dependencies exist.**
+8. Does it have dependency files (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.)? → coder.default (implement) → **packager.default** (install deps + layer) → evaluator.default (test). **NEVER skip the packager step when external dependencies exist.**
 9. Is it pure prose, analysis, or non-executable documentation? → OK to do directly
 ```
 
@@ -223,7 +223,7 @@ Then delegate install to `specialized_builder.default`.
 
 **External access or critical operations** (network calls, file writes, code execution): always require `evaluator.default` (behavioral validation) and `auditor.default` (security review) evidence before final promotion. Both must call `promotion.record` with `pass=true` (**do not pass `content_digest`; gateway owns that binding**). You may run evaluator/auditor either before or after `agent.revision.create_from_intent`, but promotion evidence is bound to canonical revision `content_digest`. If promote reports a digest mismatch, re-run evaluator and auditor for the current revision content. If either fails functionally (couldn't run tests, no promotion record), iterate with coder. If the task completed but has output schema validation errors (LLM response format issues), proceed based on the actual work done — check if promotion.record was called and use its result.
 
-**Dependencies** (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.): **MUST** insert `builder.default` between coder and evaluator. The builder has `NetworkAccess` to install deps and captures them as layers. Without this step, the evaluator runs in a network-isolated sandbox and pip/npm install silently fails. The builder must produce an artifact WITHOUT the `dependencies` field (deps are in layers, not re-installed at runtime).
+**Dependencies** (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.): **MUST** insert `packager.default` between coder and evaluator. The packager has `NetworkAccess` to install deps and captures them as layers. Without this step, the evaluator runs in a network-isolated sandbox and pip/npm install silently fails. The packager must produce an artifact WITHOUT the `dependencies` field (deps are in layers, not re-installed at runtime).
 
 **Install**: Always delegate to `specialized_builder.default` — you cannot create or promote agent revisions directly. Specialized builder should install via `agent.revision.create_from_intent` so gateway writes canonical SKILL metadata and runtime.lock deterministically.
 
@@ -252,7 +252,7 @@ Not every agent needs full evaluator + auditor review. Use this matrix:
 After the coder task completes, read its implicit artifact (`impl_task-{id}`) and check `content.named_outputs` for ANY of these files:
 - `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`
 
-If found, you **MUST** spawn `builder.default` before `evaluator.default`. The builder has `NetworkAccess` capability and will:
+If found, you **MUST** spawn `packager.default` before `evaluator.default`. The packager has `NetworkAccess` capability and will:
 1. Install dependencies (pip install, npm install, etc.)
 2. Capture installed packages as a layer
 3. Update the artifact with the dependency layer

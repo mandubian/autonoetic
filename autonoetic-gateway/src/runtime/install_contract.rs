@@ -708,7 +708,7 @@ pub fn analyze_bundle_health(
     if report.has_unresolved_dependencies {
         report.warnings.push(format!(
             "Dependency files found ({}) but no layers in artifact. \
-             Run builder.default to install dependencies as layers before evaluation.",
+             Run packager.default to install dependencies as layers before evaluation.",
             found_dep_files
                 .iter()
                 .map(|(f, eco)| format!("{f} ({eco})"))

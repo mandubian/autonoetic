@@ -43,18 +43,18 @@
 
 ---
 
-## Phase 2: Fix Planner Builder Invocation
+## Phase 2: Fix Planner Packager Invocation
 
 ### Task 2.1: Add mandatory Step 2a to planner
 
 **File:** `agents/lead/planner.default/SKILL.md`
 
 - [x] Add explicit **Step 2a** between Step 2 (coder) and Step 2b (artifact fallback):
-  ```
-  Step 2a: If the artifact contains dependency files (requirements.txt, package.json, etc.),
-           delegate to builder.default to install deps and create a layered artifact.
-           Use the new layered artifact_id for all subsequent steps.
-  ```
+   ```
+   Step 2a: If the artifact contains dependency files (requirements.txt, package.json, etc.),
+            delegate to packager.default to install deps and create a layered artifact.
+            Use the new layered artifact_id for all subsequent steps.
+   ```
 
 ---
 
@@ -62,7 +62,7 @@
 
 ### Task 3.1: Remove dead sandbox.conf
 
-- [x] Delete `agents/specialists/builder.default/sandbox.conf` (not read by any code)
+- [x] Delete `agents/specialists/packager.default/sandbox.conf` (not read by any code)
 
 ---
 

@@ -193,7 +193,7 @@ llm_preset_mapping:
   debugger: coding
   auditor: agentic
   evaluator: agentic
-  specialized_builder: agentic
+  specialized_  packager: agentic
   default: agentic
 EOF
 ```

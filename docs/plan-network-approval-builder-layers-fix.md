@@ -1,4 +1,4 @@
-# Plan: Network Approval Detection & Builder/Layer Integration Fix
+# Plan: Network Approval Detection & Packager/Layer Integration Fix
 
 **Date:** 2026-04-05
 **Status:** Phase 1–3 Complete; Phase 4 Future
@@ -11,9 +11,9 @@
 Demo session `demo-session-1` failed because network approvals never fire and the builder/layer workflow is broken:
 
 1. **`RemoteAccessAnalyzer` misses critical cases** — only scans command text; ignores `dependencies.packages`, network commands (`pip install`, `curl`), transitive imports, and non-entrypoint artifact files
-2. **Builder agent lacks `NetworkAccess` capability** — can't install deps even when invoked
+2. **Packager agent lacks `NetworkAccess` capability** — can't install deps even when invoked
 3. **Planner doesn't delegate to builder** — goes straight from coder → evaluator, skipping the builder step that the layer architecture was designed for
-4. **Builder artifacts should not include `dependencies`** — when deps are in layers, the `dependencies` field must be absent so `compose_entrypoint` skips pip install
+4. **Packager artifacts should not include `dependencies`** — when deps are in layers, the `dependencies` field must be absent so `compose_entrypoint` skips pip install
 5. **`AnalysisProvider` trait unused in sandbox** — pluggable analysis exists but is wired for `agent.install` only
 
 ### Design Principle
@@ -85,13 +85,13 @@ Demo session `demo-session-1` failed because network approvals never fire and th
 
 ---
 
-## Phase 3: Fix Builder Agent & Layer Workflow — Agent Intelligence
+## Phase 3: Fix Packager Agent & Layer Workflow — Agent Intelligence
 
 **No gateway code changes.** The gateway already mounts layers and respects absent `dependencies`. The fix is in agent SKILL.md files.
 
-### Task 3.1: Add `NetworkAccess` to builder capabilities
+### Task 3.1: Add `NetworkAccess` to packager capabilities
 
-**File:** `agents/specialists/builder.default/SKILL.md`
+**File:** `agents/specialists/packager.default/SKILL.md`
 
 - [x] Add `NetworkAccess` capability to YAML frontmatter:
   ```yaml
@@ -101,16 +101,16 @@ Demo session `demo-session-1` failed because network approvals never fire and th
 - [x] Removed stale `sandbox.conf share_net = true` references
 - [x] This makes `BwrapIsolationOverrides::from_capabilities()` return `share_net: true` automatically
 
-### Task 3.2: Builder workflow: layered artifacts WITHOUT `dependencies`
+### Task 3.2: Packager workflow: layered artifacts WITHOUT `dependencies`
 
-**File:** `agents/specialists/builder.default/SKILL.md`
+**File:** `agents/specialists/packager.default/SKILL.md`
 
-- [x] Added CRITICAL note: builder must NOT include `dependencies` field in layered artifacts
+- [x] Added CRITICAL note: packager must NOT include `dependencies` field in layered artifacts
 - [x] Documented that `mount_path` should match the `--target` path used in sandbox.exec
 - [x] Added entrypoint setup guidance (PYTHONPATH for Python, NODE_PATH for Node.js)
 - [x] Gateway already handles this correctly — no code changes needed
 
-### Task 3.3: Strengthen planner's builder delegation
+### Task 3.3: Strengthen planner's packager delegation
 
 **File:** `agents/lead/planner.default/SKILL.md`
 
@@ -118,8 +118,8 @@ Demo session `demo-session-1` failed because network approvals never fire and th
   - Any artifact with `requirements.txt`, `package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`
   - Code using network libraries (`import requests`, `import httpx`, etc.)
   - `sandbox.exec` including `dependencies: {packages: [...]}`
-- [x] Builder MUST happen between coder and evaluator — **NEVER skip when deps exist**
-- [x] Updated dependencies section with explanation of why builder is mandatory
+- [x] Packager MUST happen between coder and evaluator — **NEVER skip when deps exist**
+- [x] Updated dependencies section with explanation of why packager is mandatory
 
 ---
 
@@ -155,9 +155,9 @@ Architectural cleanup — makes `code_analysis` config affect `sandbox.exec`, no
 - [x] New unit tests for all new detection methods pass (22 total in remote_access)
 - [ ] Replay weather agent demo → full pipeline completes:
   - Coder produces files with `requirements.txt`
-  - Planner delegates to builder (not evaluator)
-  - Builder installs deps (network works), captures layers
-  - Builder builds artifact WITHOUT `dependencies` field
+  - Planner delegates to packager (not evaluator)
+  - Packager installs deps (network works), captures layers
+  - Packager builds artifact WITHOUT `dependencies` field
   - Evaluator runs offline — layers provide deps
   - No 50-turn loops
 - [ ] Non-layered path: `dependencies: {packages: ["requests"]}` → approval triggered → approved → `share_net: true` → success

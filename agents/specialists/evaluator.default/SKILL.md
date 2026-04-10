@@ -270,7 +270,7 @@ When validating artifacts that import external packages (Python, Node.js, Go, Ru
 
 **If layers are MISSING:**
 - Report this as a critical finding: `artifact missing required layers for dependencies`
-- Recommend delegating to `builder.default` to layer the artifact before evaluation
+- Recommend delegating to `packager.default` to layer the artifact before evaluation
 - Do not try to work around missing layers by installing in-network (evaluator sandbox has no network)
 
 ## Allowed Commands
