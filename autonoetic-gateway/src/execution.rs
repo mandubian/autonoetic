@@ -481,6 +481,15 @@ impl GatewayExecutionService {
             store.cancel_user_interaction(&inter.interaction_id, &cancel_note)?;
         }
 
+        if let Err(e) = store.delete_session_grants(root_session_id) {
+            tracing::warn!(
+                target: "emergency_stop",
+                root_session_id = %root_session_id,
+                error = %e,
+                "Failed to delete session grants during emergency stop"
+            );
+        }
+
         let wf_lead = workflow_id
             .as_deref()
             .and_then(|wid| {

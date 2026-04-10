@@ -84,7 +84,9 @@ Reference bundles are under `agents/`:
 - **Cognitive Capsule**: Portable export of an agent bundle plus its runtime closure
 - **Skill Promotion**: Successful tactics can be crystallized into reusable Skills
 - **Turn Continuation**: Approval-gated workflow turns are suspended to disk (`.gateway/continuations/<task_id>.json`) and resumed with real tool results, avoiding synthetic retry prompts
-- **Emergency Stop**: Root-session circuit breaker that kills processes, aborts tasks, cancels pending gates
+- **Session Approval Grants**: Once the operator approves network access to specific hosts, subsequent `sandbox.exec` calls within the same root session targeting those hosts are auto-approved (stored in `session_approval_grants` SQLite table, cleaned up on session end)
+- **Promotion Severity Gating**: `promotion.record` mechanically rejects `pass=true` when findings contain `error`/`critical` severity, or `warning` findings without concrete `evidence` — preventing evaluators from passing unvalidated code
+- **Emergency Stop**: Root-session circuit breaker that kills processes, aborts tasks, cancels pending gates, deletes session grants
 - **Retention Policy**: Configurable pruning of `execution_traces` (default: 30 days) and `causal_events` (default: 90 days)
 
 ### HTTP API

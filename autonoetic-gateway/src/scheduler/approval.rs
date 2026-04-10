@@ -851,6 +851,45 @@ fn decide_request(
             })?;
     }
 
+    if matches!(status, ApprovalStatus::Approved) {
+        if let ScheduledAction::SandboxExec {
+            detected_hosts: Some(ref hosts),
+            ..
+        } = decision.action
+        {
+            if !hosts.is_empty() {
+                if let Some(root_sid) = &decision.root_session_id {
+                    if let Some(store) = gateway_store {
+                        if let Err(e) = store.insert_session_grant(
+                            root_sid,
+                            &decision.agent_id,
+                            &hosts,
+                            &decision.decided_by,
+                            &decision.decided_at,
+                            Some(&decision.request_id),
+                        ) {
+                            tracing::warn!(
+                                target: "approval",
+                                request_id = %decision.request_id,
+                                error = %e,
+                                "Failed to insert session approval grants — session grant auto-approval will not be available for this session"
+                            );
+                        } else {
+                            tracing::info!(
+                                target: "approval",
+                                request_id = %decision.request_id,
+                                agent_id = %decision.agent_id,
+                                root_session_id = %root_sid,
+                                hosts = ?hosts,
+                                "Inserted session approval grants for approved sandbox exec"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let background_session_id = super::decision::background_session_id;
     let load_background_state = super::store::load_background_state;
     let save_background_state = super::store::save_background_state;
@@ -942,6 +981,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
             reason: None,
@@ -982,6 +1022,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             approval_level: ApprovalLevel::Operator,
             created_at: "2020-01-01T00:00:00Z".to_string(),
@@ -1028,6 +1069,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             approval_level: ApprovalLevel::Operator,
             created_at: created.to_string(),
@@ -1118,6 +1160,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1142,6 +1185,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1166,6 +1210,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1190,6 +1235,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1215,6 +1261,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1326,6 +1373,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1356,6 +1404,7 @@ mod tests {
             dependencies: None,
             requires_approval: true,
             evidence_ref: None,
+            detected_hosts: None,
         };
         let level = super::resolve_approval_level(&cfg, &action);
         assert_eq!(level, ApprovalLevel::Operator);
@@ -1382,6 +1431,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
             reason: None,
@@ -1445,6 +1495,7 @@ mod tests {
                 dependencies: None,
                 requires_approval: true,
                 evidence_ref: None,
+                detected_hosts: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
             reason: None,

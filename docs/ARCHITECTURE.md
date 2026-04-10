@@ -583,11 +583,12 @@ When a tool call requires operator approval, the turn is **suspended to disk** r
 
 1. Operator approves (or rejects) the approval request
 2. Gateway loads the continuation from disk
-3. Gateway executes the approved action (sandbox exec, revision promote, etc.)
-4. Gateway injects the real tool result into conversation history
-5. Gateway executes any remaining tool calls from the original batch
-6. Gateway reconstructs the full history and resumes the reasoning loop
-7. Continuation file is deleted
+3. For `sandbox.exec` approvals: gateway records session approval grants for the detected hosts (enabling auto-approval of subsequent calls to the same hosts within this root session)
+4. Gateway executes the approved action (sandbox exec, revision promote, etc.)
+5. Gateway injects the real tool result into conversation history
+6. Gateway executes any remaining tool calls from the original batch
+7. Gateway reconstructs the full history and resumes the reasoning loop
+8. Continuation file is deleted
 
 #### Approval Timeout
 
@@ -836,8 +837,9 @@ Root-session circuit breaker for operator intervention.
 3. Kill sandbox child processes (SIGKILL)
 4. Abort running tokio tasks
 5. Cancel pending approvals and user interactions
-6. Write terminal checkpoint with `YieldReason::EmergencyStop`
-7. Finalize status to `EmergencyStopped`
+6. Delete session approval grants (prevent post-stop auto-approval)
+7. Write terminal checkpoint with `YieldReason::EmergencyStop`
+8. Finalize status to `EmergencyStopped`
 
 ### CLI
 

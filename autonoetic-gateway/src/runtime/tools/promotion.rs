@@ -109,6 +109,50 @@ impl NativeTool for PromotionRecordTool {
             "content_digest is gateway-owned and must not be provided to promotion.record"
         );
 
+        let has_error_or_critical = args.findings.iter().any(|f| {
+            matches!(
+                f.severity,
+                autonoetic_types::promotion::FindingSeverity::Error
+                    | autonoetic_types::promotion::FindingSeverity::Critical
+            )
+        });
+
+        if args.pass && has_error_or_critical {
+            anyhow::bail!(
+                "Cannot set pass=true when findings contain 'error' or 'critical' severity. \
+                 Fix the issues and re-evaluate, or set pass=false."
+            );
+        }
+
+        if args.pass {
+            let warnings_without_evidence: Vec<String> = args
+                .findings
+                .iter()
+                .filter(|f| {
+                    matches!(
+                        f.severity,
+                        autonoetic_types::promotion::FindingSeverity::Warning
+                    ) && f.evidence.as_ref().map_or(true, |e| e.trim().is_empty())
+                })
+                .map(|f| {
+                    let desc = &f.description;
+                    if desc.len() > 80 {
+                        format!("{}...", &desc[..80])
+                    } else {
+                        desc.clone()
+                    }
+                })
+                .collect();
+            if !warnings_without_evidence.is_empty() {
+                anyhow::bail!(
+                    "Cannot set pass=true when warning findings lack evidence. \
+                     The following warnings need concrete evidence (e.g., sandbox output, test results) \
+                     to prove the issue was investigated:\n  - {}",
+                    warnings_without_evidence.join("\n  - ")
+                );
+            }
+        }
+
         let Some(gw_dir) = gateway_dir else {
             anyhow::bail!("Promotion store requires gateway directory to be configured");
         };

@@ -84,6 +84,8 @@ pub enum ScheduledAction {
         requires_approval: bool,
         #[serde(default)]
         evidence_ref: Option<String>,
+        #[serde(default)]
+        detected_hosts: Option<Vec<String>>,
     },
     /// Approval subject only: "this approval request is for an agent install." Not executed by the scheduler; install is performed by the caller retrying `agent.install` with `install_approval_ref`.
     AgentInstall {
