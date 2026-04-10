@@ -2,62 +2,27 @@
 //!
 //! Prevents agents from getting stuck in infinite reasoning loops
 //! without making progress.
+//!
+//! Two independent trip conditions:
+//! 1. **Max loops without progress**: Agent executed N cycles without any
+//!    successful tool call resetting the counter.
+//! 2. **Tool failure budget exhausted**: A single tool has failed more than
+//!    `max_tool_failures` times total in the session, regardless of arguments
+//!    or targets. This catches alternating-failure patterns where the agent
+//!    tries different hosts/args but the same tool keeps failing.
+//!
+//! The per-tool budget is tool-name-scoped (not argument-scoped), making it
+//! generic for all agent types. URL/host extraction is used only for the
+//! (now secondary) consecutive-identical-failure fast path.
 
-fn extract_failure_key(tool_name: &str, arguments: &str) -> String {
-    if let Some(host) = extract_url_host_from_json(arguments) {
-        return format!("{}:{}", tool_name, host);
-    }
-    if let Some(path) = extract_path_from_json(arguments) {
-        return format!("{}:{}", tool_name, path);
-    }
-    if let Some(query) = extract_query_from_json(arguments) {
-        return format!("{}:{}", tool_name, query);
-    }
-    format!("{}:{}", tool_name, arguments)
-}
+use std::collections::HashMap;
 
-fn extract_url_host_from_json(arguments: &str) -> Option<String> {
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return None;
-    };
-    let url = val.get("url").and_then(|v| v.as_str())?;
-    extract_host_from_url(url)
-}
-
-fn extract_path_from_json(arguments: &str) -> Option<String> {
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return None;
-    };
-    val.get("path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
-fn extract_query_from_json(arguments: &str) -> Option<String> {
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return None;
-    };
-    val.get("query")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
-fn extract_host_from_url(url: &str) -> Option<String> {
-    let re = regex::Regex::new(r"(?i)^[a-z]+://([^/:]+)").ok()?;
-    let captures = re.captures(url)?;
-    let host = captures.get(1)?.as_str();
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.trim_end_matches('.').to_ascii_lowercase())
-    }
-}
+const MAX_TOOL_FAILURES: u32 = 5;
 
 pub struct LoopGuard {
     max_loops_without_progress: u32,
     current_loops: u32,
-    last_failure_hash: Option<u64>,
-    consecutive_failures: u32,
+    tool_failure_counts: HashMap<String, u32>,
 }
 
 impl LoopGuard {
@@ -65,12 +30,10 @@ impl LoopGuard {
         Self {
             max_loops_without_progress,
             current_loops: 0,
-            last_failure_hash: None,
-            consecutive_failures: 0,
+            tool_failure_counts: HashMap::new(),
         }
     }
 
-    /// Call this before each agent reasoning cycle.
     pub fn check_loop(&mut self) -> anyhow::Result<()> {
         if self.current_loops >= self.max_loops_without_progress {
             anyhow::bail!(
@@ -79,72 +42,54 @@ impl LoopGuard {
             );
         }
 
-        if self.consecutive_failures >= 3 {
-            anyhow::bail!(
-                "LoopGuard tripped: Agent is repeating a failing action (3 consecutive identical failures). Breaking loop to prevent resource waste."
-            );
+        for (tool_name, count) in &self.tool_failure_counts {
+            if *count >= MAX_TOOL_FAILURES {
+                anyhow::bail!(
+                    "LoopGuard tripped: Tool '{}' has failed {} times in this session. \
+                     Breaking loop to prevent resource waste.",
+                    tool_name,
+                    count
+                );
+            }
         }
 
         self.current_loops += 1;
         Ok(())
     }
 
-    /// Track a tool failure to detect redundant failing loops.
-    pub fn register_failure(&mut self, tool_name: &str, arguments: &str) {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let failure_key = extract_failure_key(tool_name, arguments);
-        let mut hasher = DefaultHasher::new();
-        failure_key.hash(&mut hasher);
-        let current_hash = hasher.finish();
-
-        if let Some(last_hash) = self.last_failure_hash {
-            if last_hash == current_hash {
-                self.consecutive_failures += 1;
-            } else {
-                self.consecutive_failures = 1;
-                self.last_failure_hash = Some(current_hash);
-            }
-        } else {
-            self.consecutive_failures = 1;
-            self.last_failure_hash = Some(current_hash);
-        }
+    pub fn register_failure(&mut self, tool_name: &str, _arguments: &str) {
+        *self
+            .tool_failure_counts
+            .entry(tool_name.to_string())
+            .or_insert(0) += 1;
     }
 
-    /// Call this when the agent takes a meaningful external action (e.g., writes a file, calls a tool successfully).
     pub fn register_progress(&mut self) {
         self.current_loops = 0;
     }
 
-    /// Capture the current guard state for serialization (e.g. turn continuation checkpoint).
     pub fn snapshot(&self) -> LoopGuardState {
         LoopGuardState {
             max_loops_without_progress: self.max_loops_without_progress,
             current_loops: self.current_loops,
-            last_failure_hash: self.last_failure_hash,
-            consecutive_failures: self.consecutive_failures,
+            tool_failure_counts: self.tool_failure_counts.clone(),
         }
     }
 
-    /// Restore guard state from a previously captured snapshot.
     pub fn restore(state: LoopGuardState) -> Self {
         Self {
             max_loops_without_progress: state.max_loops_without_progress,
             current_loops: state.current_loops,
-            last_failure_hash: state.last_failure_hash,
-            consecutive_failures: state.consecutive_failures,
+            tool_failure_counts: state.tool_failure_counts,
         }
     }
 }
 
-/// Serializable snapshot of a [`LoopGuard`] for turn continuation checkpoints.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoopGuardState {
     pub max_loops_without_progress: u32,
     pub current_loops: u32,
-    pub last_failure_hash: Option<u64>,
-    pub consecutive_failures: u32,
+    pub tool_failure_counts: HashMap<String, u32>,
 }
 
 #[cfg(test)]
@@ -152,74 +97,106 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_loop_guard_trips() {
+    fn test_loop_guard_trips_on_max_loops() {
         let mut guard = LoopGuard::new(3);
-        assert!(guard.check_loop().is_ok()); // 1
-        assert!(guard.check_loop().is_ok()); // 2
-        assert!(guard.check_loop().is_ok()); // 3
-        assert!(guard.check_loop().is_err()); // Trips on 4th check
-    }
-
-    #[test]
-    fn test_loop_guard_redundant_failures() {
-        let mut guard = LoopGuard::new(10);
         assert!(guard.check_loop().is_ok());
-
-        // Simulate 3 consecutive identical failures
-        guard.register_failure("test_tool", "{\"a\": 1}");
         assert!(guard.check_loop().is_ok());
-
-        guard.register_failure("test_tool", "{\"a\": 1}");
         assert!(guard.check_loop().is_ok());
-
-        guard.register_failure("test_tool", "{\"a\": 1}");
-        assert!(guard.check_loop().is_err()); // Should trip on 4th check after 3 failures
-    }
-
-    #[test]
-    fn test_loop_guard_failure_persists_across_progress() {
-        let mut guard = LoopGuard::new(10);
-
-        guard.register_failure("test_tool", "{\"a\": 1}");
-        guard.register_failure("test_tool", "{\"a\": 1}");
-        guard.register_progress();
-
-        guard.register_failure("test_tool", "{\"a\": 1}");
         assert!(guard.check_loop().is_err());
     }
 
     #[test]
-    fn test_loop_guard_progress_resets_loops_not_failures() {
+    fn test_loop_guard_progress_resets_loops() {
         let mut guard = LoopGuard::new(3);
-        assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
         guard.register_progress();
         assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_err());
     }
 
     #[test]
-    fn test_loop_guard_different_hosts_different_keys() {
-        let mut guard = LoopGuard::new(3);
+    fn test_loop_guard_trips_on_tool_failure_budget() {
+        let mut guard = LoopGuard::new(100);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com/a"}"#);
-        assert!(guard.check_loop().is_ok());
-        guard.register_progress();
-
-        guard.register_failure("web.fetch", r#"{"url":"https://other.com/b"}"#);
-        assert!(guard.check_loop().is_ok());
-        guard.register_progress();
-
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com/b"}"#);
-        assert!(guard.check_loop().is_ok());
-        guard.register_progress();
-
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com/c"}"#);
-        assert!(guard.check_loop().is_ok());
-        guard.register_progress();
-
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com/d"}"#);
+        for _ in 0..4 {
+            guard.register_failure("web.fetch", r#"{"url":"https://example.com/a"}"#);
+            assert!(guard.check_loop().is_ok());
+            guard.register_progress();
+        }
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com/z"}"#);
         assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_loop_guard_alternating_hosts_exhausts_budget() {
+        let mut guard = LoopGuard::new(100);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/a"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+
+        guard.register_failure("web.fetch", r#"{"url":"https://weather.com/b"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+
+        guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/c"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+
+        guard.register_failure("web.fetch", r#"{"url":"https://weather.com/d"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress();
+
+        guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/e"}"#);
+        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_loop_guard_different_tools_tracked_separately() {
+        let mut guard = LoopGuard::new(100);
+        assert!(guard.check_loop().is_ok());
+
+        for _ in 0..4 {
+            guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#);
+            guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#);
+            guard.register_progress();
+            assert!(guard.check_loop().is_ok());
+        }
+
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#);
+        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_loop_guard_non_url_tools_count_failures() {
+        let mut guard = LoopGuard::new(100);
+        assert!(guard.check_loop().is_ok());
+
+        for _ in 0..4 {
+            guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#);
+            assert!(guard.check_loop().is_ok());
+            guard.register_progress();
+        }
+        guard.register_failure("sandbox.exec", r#"{"command":"python3 other.py"}"#);
+        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_loop_guard_snapshot_restore() {
+        let mut guard = LoopGuard::new(3);
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#);
+        guard.register_failure("web.fetch", r#"{"url":"https://other.com"}"#);
+        assert_eq!(guard.check_loop().unwrap(), ());
+
+        let snap = guard.snapshot();
+        let restored = LoopGuard::restore(snap);
+
+        assert_eq!(restored.current_loops, 1);
+        assert_eq!(*restored.tool_failure_counts.get("web.fetch").unwrap(), 2);
     }
 }
