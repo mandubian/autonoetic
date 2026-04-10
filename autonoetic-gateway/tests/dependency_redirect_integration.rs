@@ -1,0 +1,113 @@
+mod support;
+
+use autonoetic_gateway::runtime::tools::default_registry;
+use autonoetic_gateway::policy::PolicyEngine;
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
+use autonoetic_types::capability::Capability;
+
+fn make_manifest(has_network: bool) -> AgentManifest {
+    let mut caps = vec![
+        Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string(), "pip ".to_string(), "bash -c ".to_string()],
+        },
+    ];
+    if has_network {
+        caps.push(Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        });
+    }
+    AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "test-coder".to_string(),
+            name: "Test Coder".to_string(),
+            description: "test".to_string(),
+        },
+        llm_config: None,
+        limits: None,
+        capabilities: caps,
+        background: None,
+        middleware: None,
+        execution_mode: ExecutionMode::Reasoning,
+        script_entry: None,
+        gateway_url: None,
+        gateway_token: None,
+        agentskills_import: None,
+        io: None,
+        disclosure: None,
+        response_contract: None,
+        compression: None,
+        allowed_tool_tiers: vec![],
+    }
+}
+
+fn exec_sandbox(manifest: &AgentManifest, command: &str) -> serde_json::Value {
+    let registry = default_registry();
+    let policy = PolicyEngine::new(manifest.clone());
+    let tmpdir = tempfile::tempdir().unwrap();
+    let agent_dir = tmpdir.path().join("test-agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let args = serde_json::json!({ "command": command });
+    let result = registry.execute(
+        "sandbox.exec",
+        manifest,
+        &policy,
+        &agent_dir,
+        None::<&std::path::Path>,
+        &serde_json::to_string(&args).unwrap(),
+        Some("test-session"),
+        None,
+        None::<&autonoetic_types::config::GatewayConfig>,
+        None,
+        None,
+    ).unwrap();
+
+    serde_json::from_str(&result).unwrap()
+}
+
+#[test]
+fn test_pip_install_from_non_network_agent_returns_redirect() {
+    let manifest = make_manifest(false);
+    let parsed = exec_sandbox(&manifest, "pip install requests flask");
+
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["dependency_layer_required"], true);
+    assert_eq!(parsed["recommended_agent"], "packager.default");
+}
+
+#[test]
+fn test_npm_install_from_non_network_agent_returns_redirect() {
+    let manifest = make_manifest(false);
+    let parsed = exec_sandbox(&manifest, "bash -c \"cd /tmp/project && npm install express\"");
+
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["dependency_layer_required"], true);
+    assert_eq!(parsed["recommended_agent"], "packager.default");
+}
+
+#[test]
+fn test_safe_inspection_pip_list_skips_approval() {
+    let manifest = make_manifest(false);
+    let parsed = exec_sandbox(&manifest, "pip list");
+
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed.get("approval_required"), None);
+}
+
+#[test]
+fn test_safe_inspection_pip_show_skips_approval() {
+    let manifest = make_manifest(false);
+    let parsed = exec_sandbox(&manifest, "pip show requests");
+
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed.get("approval_required"), None);
+}
