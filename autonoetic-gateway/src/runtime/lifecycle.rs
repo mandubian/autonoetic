@@ -515,6 +515,10 @@ pub struct AgentExecutor {
     pub http_client: reqwest::Client,
     /// User ID for profile binding resolution (if authenticated).
     pub user_id: Option<String>,
+    /// Artifact ID whose layers should be auto-mounted into sandbox.exec calls.
+    /// Set when a parent agent spawns this agent with an artifact reference
+    /// (typically for evaluator sessions that need packager's dependency layers).
+    pub artifact_id: Option<String>,
 }
 
 fn tool_result_counts_as_progress(result: &str) -> bool {
@@ -574,6 +578,7 @@ impl AgentExecutor {
             compression_metadata: Default::default(),
             http_client: reqwest::Client::new(),
             user_id: None,
+            artifact_id: None,
         }
     }
 
@@ -646,6 +651,11 @@ impl AgentExecutor {
 
     pub fn with_user_id(mut self, user_id: Option<String>) -> Self {
         self.user_id = user_id;
+        self
+    }
+
+    pub fn with_artifact_id(mut self, artifact_id: Option<String>) -> Self {
+        self.artifact_id = artifact_id;
         self
     }
 
@@ -1824,6 +1834,7 @@ impl AgentExecutor {
                             agent_id: self.manifest.agent.id.clone(),
                             live_digest: self.live_digest.clone(),
                             user_id: self.user_id.clone(),
+                            artifact_id: self.artifact_id.clone(),
                         }
                     });
                     let mut processor = ToolCallProcessor::new(

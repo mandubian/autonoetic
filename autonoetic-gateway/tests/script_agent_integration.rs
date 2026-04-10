@@ -79,6 +79,7 @@ async fn test_script_agent_execution_returns_stdout() -> anyhow::Result<()> {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -121,6 +122,7 @@ async fn test_script_agent_logs_causal_events() -> anyhow::Result<()> {
             session_id,
             None,
             false,
+            None,
             None,
             None,
             None,
@@ -209,7 +211,7 @@ async fn test_script_agent_with_sandbox_failure_returns_error() -> anyhow::Resul
 
     let result = execution
         .spawn_agent_once(
-            agent_id, "test", session_id, None, false, None, None, None, None,
+            agent_id, "test", session_id, None, false, None, None, None, None, None,
         )
         .await;
 
@@ -286,7 +288,7 @@ async fn test_script_agent_without_capabilities_cannot_access_tools() -> anyhow:
 
     let result = execution
         .spawn_agent_once(
-            agent_id, "test", session_id, None, false, None, None, None, None,
+            agent_id, "test", session_id, None, false, None, None, None, None, None,
         )
         .await;
 
@@ -329,6 +331,7 @@ async fn test_script_agent_execution_time_under_100ms() -> anyhow::Result<()> {
             session_id,
             None,
             false,
+            None,
             None,
             None,
             None,

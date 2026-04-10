@@ -39,6 +39,11 @@ struct SpawnAgentArgs {
     /// Join group name. Tasks in the same join group are awaited together by the planner.
     #[serde(default)]
     join_group: Option<String>,
+    /// Artifact ID whose layers should be auto-mounted into the child's sandbox.
+    /// When set, all sandbox.exec calls in the child session automatically
+    /// mount the artifact's dependency layers (read-only).
+    #[serde(default)]
+    artifact_id: Option<String>,
 }
 
 /// Keeps a workflow task's `updated_at` fresh while synchronous `agent.spawn` blocks.
@@ -425,6 +430,7 @@ impl NativeTool for AgentSpawnTool {
         // --- Synchronous branch (existing behavior) ---
         let wf_id_clone = workflow_id.clone();
         let tid_clone = task_id.clone();
+        let artifact_id_clone = args.artifact_id.clone();
         let spawn_future = async move {
             execution
                 .spawn_agent_once(
@@ -437,6 +443,7 @@ impl NativeTool for AgentSpawnTool {
                     args.metadata.as_ref(),
                     Some(&wf_id_clone),
                     Some(&tid_clone),
+                    artifact_id_clone.as_deref(),
                 )
                 .await
         };

@@ -876,6 +876,7 @@ async fn spawn_task_execution(
             metadata.as_ref(),
             Some(&wf_id),
             Some(&t_id),
+            None,
         )
         .await;
 

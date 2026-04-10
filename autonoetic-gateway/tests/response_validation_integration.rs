@@ -99,6 +99,7 @@ async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<(
             None,
             None,
             None,
+            None,
         )
         .await?;
     assert!(result.assistant_reply.is_some());
@@ -144,6 +145,7 @@ async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> 
             false,
             None,
             Some(&metadata),
+            None,
             None,
             None,
         )
@@ -192,6 +194,7 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
             false,
             None,
             Some(&metadata),
+            None,
             None,
             None,
         )
@@ -258,6 +261,7 @@ async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<(
             Some(&metadata),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -314,6 +318,7 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
             false,
             None,
             Some(&metadata),
+            None,
             None,
             None,
         )
@@ -376,6 +381,7 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
             Some(&metadata),
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -428,6 +434,7 @@ async fn test_response_validation_skipped_on_suspended_session() -> anyhow::Resu
             None,
             None,
             None,
+            None,
         )
         .await?;
     assert!(result.suspended_for_approval.is_none());
@@ -476,6 +483,7 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
             false,
             None,
             Some(&metadata),
+            None,
             None,
             None,
         )
@@ -555,6 +563,7 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
             false,
             None,
             Some(&metadata),
+            None,
             None,
             None,
         )
@@ -656,6 +665,7 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
             false,
             None,
             Some(&metadata),
+            None,
             None,
             None,
         )

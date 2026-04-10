@@ -1321,7 +1321,14 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Agent directory is not valid UTF-8"))?;
 
-        let session_content_mounts = if let Some(artifact_id) = &args.artifact_id {
+        // Resolve effective artifact_id: explicit arg takes priority, then fall back to
+        // the artifact_id from the tool run context (set by parent agent.spawn).
+        let effective_artifact_id = args
+            .artifact_id
+            .as_ref()
+            .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
+
+        let session_content_mounts = if let Some(artifact_id) = effective_artifact_id {
             let Some(gw_dir) = gateway_dir else {
                 anyhow::bail!("artifact_id requires gateway directory to be configured");
             };
