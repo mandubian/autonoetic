@@ -21,8 +21,12 @@ fn test_config(temp: &tempfile::TempDir) -> GatewayConfig {
 fn default_guard_state() -> LoopGuardState {
     LoopGuardState {
         max_loops_without_progress: 10,
+        max_tool_failures: 5,
+        max_consecutive_same_progress: 2,
         current_loops: 0,
         tool_failure_counts: std::collections::HashMap::new(),
+        last_progress_fingerprint: None,
+        consecutive_progress_count: 0,
     }
 }
 

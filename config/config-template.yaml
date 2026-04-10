@@ -110,6 +110,16 @@ retention:
 # Circuit breaker: max turns per session before forced suspension.
 max_session_turns: 12
 
+# ── Loop Guard ───────────────────────────────────────────────────────
+# Per-session circuit breaker for stuck agents. Two independent trip conditions:
+#   max_loops_without_progress: consecutive LLM rounds without any ok:true tool result
+#   max_tool_failures: total failures for a single tool name (regardless of arguments/hosts)
+#   max_consecutive_same_progress: after N identical tool+args calls, stop counting as progress
+#loop_guard:
+#  max_loops_without_progress: 5
+#  max_tool_failures: 5
+#  max_consecutive_same_progress: 1
+
 # ── Prompt Budget ─────────────────────────────────────────────────────
 # Transparency and enforcement for context window usage.
 # Uncomment to customize (defaults: warn_at 80%, 4096 margin tokens).

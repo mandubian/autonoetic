@@ -28,8 +28,12 @@ fn test_checkpoint(
         turn_counter,
         loop_guard_state: LoopGuardState {
             max_loops_without_progress: 10,
+            max_tool_failures: 5,
+            max_consecutive_same_progress: 2,
             current_loops: 0,
             tool_failure_counts: std::collections::HashMap::new(),
+            last_progress_fingerprint: None,
+            consecutive_progress_count: 0,
         },
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),

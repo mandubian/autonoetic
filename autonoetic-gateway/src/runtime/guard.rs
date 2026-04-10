@@ -5,32 +5,54 @@
 //!
 //! Two independent trip conditions:
 //! 1. **Max loops without progress**: Agent executed N cycles without any
-//!    successful tool call resetting the counter.
+//!    *meaningful* tool call resetting the counter.
 //! 2. **Tool failure budget exhausted**: A single tool has failed more than
 //!    `max_tool_failures` times total in the session, regardless of arguments
-//!    or targets. This catches alternating-failure patterns where the agent
-//!    tries different hosts/args but the same tool keeps failing.
+//!    or targets. This catches alternating-failure patterns.
 //!
-//! The per-tool budget is tool-name-scoped (not argument-scoped), making it
-//! generic for all agent types. URL/host extraction is used only for the
-//! (now secondary) consecutive-identical-failure fast path.
+//! "Meaningful progress" is determined by a fingerprint of the last
+//! successful tool call. Repeated calls with the same (tool, arguments)
+//! hash do not count as new progress — the agent is spinning on the same
+//! operation. A call is considered "repeated" after
+//! `max_consecutive_same_progress` consecutive occurrences.
 
-use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-const MAX_TOOL_FAILURES: u32 = 5;
+use autonoetic_types::config::LoopGuardConfig;
 
 pub struct LoopGuard {
     max_loops_without_progress: u32,
+    max_tool_failures: u32,
+    max_consecutive_same_progress: u32,
     current_loops: u32,
-    tool_failure_counts: HashMap<String, u32>,
+    tool_failure_counts: std::collections::HashMap<String, u32>,
+    last_progress_fingerprint: Option<(String, u64)>,
+    consecutive_progress_count: u32,
 }
 
 impl LoopGuard {
     pub fn new(max_loops_without_progress: u32) -> Self {
         Self {
             max_loops_without_progress,
+            max_tool_failures: 5,
+            max_consecutive_same_progress: 1,
             current_loops: 0,
-            tool_failure_counts: HashMap::new(),
+            tool_failure_counts: std::collections::HashMap::new(),
+            last_progress_fingerprint: None,
+            consecutive_progress_count: 0,
+        }
+    }
+
+    pub fn with_config(cfg: &LoopGuardConfig) -> Self {
+        Self {
+            max_loops_without_progress: cfg.max_loops_without_progress,
+            max_tool_failures: cfg.max_tool_failures,
+            max_consecutive_same_progress: cfg.max_consecutive_same_progress,
+            current_loops: 0,
+            tool_failure_counts: std::collections::HashMap::new(),
+            last_progress_fingerprint: None,
+            consecutive_progress_count: 0,
         }
     }
 
@@ -43,7 +65,7 @@ impl LoopGuard {
         }
 
         for (tool_name, count) in &self.tool_failure_counts {
-            if *count >= MAX_TOOL_FAILURES {
+            if *count >= self.max_tool_failures {
                 anyhow::bail!(
                     "LoopGuard tripped: Tool '{}' has failed {} times in this session. \
                      Breaking loop to prevent resource waste.",
@@ -57,6 +79,7 @@ impl LoopGuard {
         Ok(())
     }
 
+    /// Track a tool failure — failures accumulate per tool name regardless of arguments.
     pub fn register_failure(&mut self, tool_name: &str, _arguments: &str) {
         *self
             .tool_failure_counts
@@ -64,32 +87,69 @@ impl LoopGuard {
             .or_insert(0) += 1;
     }
 
-    pub fn register_progress(&mut self) {
-        self.current_loops = 0;
+    /// Track a successful tool call. Only counts as "progress" (resets current_loops)
+    /// if this is a different tool call than the last successful one, or if the same
+    /// tool+args has not repeated more than `max_consecutive_same_progress` times.
+    /// This prevents agents from spinning on repeated identical successful calls
+    /// (e.g., web.search returning the same cached results).
+    pub fn register_progress(&mut self, tool_name: &str, arguments: &str) {
+        let fp = compute_fingerprint(tool_name, arguments);
+        let is_new = self.last_progress_fingerprint.as_ref() != Some(&fp);
+
+        if is_new {
+            self.consecutive_progress_count = 1;
+        } else {
+            self.consecutive_progress_count += 1;
+        }
+
+        if is_new || self.consecutive_progress_count <= self.max_consecutive_same_progress {
+            self.current_loops = 0;
+        }
+
+        self.last_progress_fingerprint = Some(fp);
     }
 
     pub fn snapshot(&self) -> LoopGuardState {
         LoopGuardState {
             max_loops_without_progress: self.max_loops_without_progress,
+            max_tool_failures: self.max_tool_failures,
+            max_consecutive_same_progress: self.max_consecutive_same_progress,
             current_loops: self.current_loops,
             tool_failure_counts: self.tool_failure_counts.clone(),
+            last_progress_fingerprint: self.last_progress_fingerprint.clone(),
+            consecutive_progress_count: self.consecutive_progress_count,
         }
     }
 
     pub fn restore(state: LoopGuardState) -> Self {
         Self {
             max_loops_without_progress: state.max_loops_without_progress,
+            max_tool_failures: state.max_tool_failures,
+            max_consecutive_same_progress: state.max_consecutive_same_progress,
             current_loops: state.current_loops,
             tool_failure_counts: state.tool_failure_counts,
+            last_progress_fingerprint: state.last_progress_fingerprint,
+            consecutive_progress_count: state.consecutive_progress_count,
         }
     }
+}
+
+fn compute_fingerprint(tool_name: &str, arguments: &str) -> (String, u64) {
+    let mut hasher = DefaultHasher::new();
+    tool_name.hash(&mut hasher);
+    arguments.hash(&mut hasher);
+    (tool_name.to_string(), hasher.finish())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoopGuardState {
     pub max_loops_without_progress: u32,
+    pub max_tool_failures: u32,
+    pub max_consecutive_same_progress: u32,
     pub current_loops: u32,
-    pub tool_failure_counts: HashMap<String, u32>,
+    pub tool_failure_counts: std::collections::HashMap<String, u32>,
+    pub last_progress_fingerprint: Option<(String, u64)>,
+    pub consecutive_progress_count: u32,
 }
 
 #[cfg(test)]
@@ -110,7 +170,7 @@ mod tests {
         let mut guard = LoopGuard::new(3);
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
-        guard.register_progress();
+        guard.register_progress("web.fetch", r#"{"url":"https://a.com"}"#);
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
@@ -124,8 +184,8 @@ mod tests {
 
         for _ in 0..4 {
             guard.register_failure("web.fetch", r#"{"url":"https://example.com/a"}"#);
+            guard.register_progress("web.fetch", r#"{"url":"https://example.com/a"}"#);
             assert!(guard.check_loop().is_ok());
-            guard.register_progress();
         }
         guard.register_failure("web.fetch", r#"{"url":"https://example.com/z"}"#);
         assert!(guard.check_loop().is_err());
@@ -136,21 +196,16 @@ mod tests {
         let mut guard = LoopGuard::new(100);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/a"}"#);
-        assert!(guard.check_loop().is_ok());
-        guard.register_progress();
-
-        guard.register_failure("web.fetch", r#"{"url":"https://weather.com/b"}"#);
-        assert!(guard.check_loop().is_ok());
-        guard.register_progress();
-
-        guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/c"}"#);
-        assert!(guard.check_loop().is_ok());
-        guard.register_progress();
-
-        guard.register_failure("web.fetch", r#"{"url":"https://weather.com/d"}"#);
-        assert!(guard.check_loop().is_ok());
-        guard.register_progress();
+        for i in 0..4 {
+            let url = if i % 2 == 0 {
+                "https://accuweather.com/a"
+            } else {
+                "https://weather.com/b"
+            };
+            guard.register_failure("web.fetch", &format!(r#"{{"url":"{}"}}"#, url));
+            guard.register_progress("web.fetch", &format!(r#"{{"url":"{}"}}"#, url));
+            assert!(guard.check_loop().is_ok());
+        }
 
         guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/e"}"#);
         assert!(guard.check_loop().is_err());
@@ -164,7 +219,7 @@ mod tests {
         for _ in 0..4 {
             guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#);
             guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#);
-            guard.register_progress();
+            guard.register_progress("sandbox.exec", r#"{"command":"python3 test.py"}"#);
             assert!(guard.check_loop().is_ok());
         }
 
@@ -179,8 +234,8 @@ mod tests {
 
         for _ in 0..4 {
             guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#);
+            guard.register_progress("sandbox.exec", r#"{"command":"python3 test.py"}"#);
             assert!(guard.check_loop().is_ok());
-            guard.register_progress();
         }
         guard.register_failure("sandbox.exec", r#"{"command":"python3 other.py"}"#);
         assert!(guard.check_loop().is_err());
@@ -198,5 +253,101 @@ mod tests {
 
         assert_eq!(restored.current_loops, 1);
         assert_eq!(*restored.tool_failure_counts.get("web.fetch").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_repeated_same_tool_call_does_not_reset() {
+        let mut guard = LoopGuard::new(4);
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_different_tool_resets_consecutive_count() {
+        let mut guard = LoopGuard::new(4);
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("content.read", r#"{"name":"file.txt"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_different_args_resets_consecutive_count() {
+        let mut guard = LoopGuard::new(4);
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        assert!(guard.check_loop().is_ok());
+
+        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_alternating_same_calls_eventually_trip() {
+        let mut guard = LoopGuard::new(3);
+
+        for i in 0..6 {
+            let q = if i % 2 == 0 {
+                r#"{"query":"weather"}"#
+            } else {
+                r#"{"query":"forecast"}"#
+            };
+            guard.register_progress("web.search", q);
+            guard.check_loop().ok();
+        }
+
+        // The alternating pattern keeps resetting current_loops because each
+        // fingerprint is different. Now call check_loop without progress to exhaust the budget.
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_err());
     }
 }
