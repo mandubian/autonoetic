@@ -544,6 +544,10 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_session_turns")]
     pub max_session_turns: u32,
 
+    /// Loop guard configuration — per-session circuit breaker for stuck agents.
+    #[serde(default)]
+    pub loop_guard: LoopGuardConfig,
+
     /// Prompt budget transparency and enforcement configuration.
     #[serde(default)]
     pub prompt_budget: PromptBudgetConfig,
@@ -686,6 +690,48 @@ impl Default for SandboxConfig {
 
 fn default_sandbox_dev_mode() -> String {
     "legacy".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopGuardConfig {
+    /// Max consecutive LLM rounds without any successful tool call before tripping.
+    #[serde(default = "default_max_loops_without_progress")]
+    pub max_loops_without_progress: u32,
+
+    /// Max total failures for a single tool name before tripping.
+    /// Counts all failures regardless of arguments or targets.
+    #[serde(default = "default_max_tool_failures")]
+    pub max_tool_failures: u32,
+
+    /// Max consecutive "progress" resets from the same tool+args fingerprint.
+    /// After this many identical consecutive tool calls, they stop resetting
+    /// current_loops — the agent is spinning on the same operation.
+    /// Set to 1 so repeating the same call twice immediately stops counting
+    /// as progress (first call resets, second+ call does not).
+    #[serde(default = "default_max_consecutive_same_progress")]
+    pub max_consecutive_same_progress: u32,
+}
+
+impl Default for LoopGuardConfig {
+    fn default() -> Self {
+        Self {
+            max_loops_without_progress: default_max_loops_without_progress(),
+            max_tool_failures: default_max_tool_failures(),
+            max_consecutive_same_progress: default_max_consecutive_same_progress(),
+        }
+    }
+}
+
+fn default_max_loops_without_progress() -> u32 {
+    5
+}
+
+fn default_max_tool_failures() -> u32 {
+    5
+}
+
+fn default_max_consecutive_same_progress() -> u32 {
+    1
 }
 
 /// Configuration for pluggable code analysis.
@@ -1014,6 +1060,7 @@ impl Default for GatewayConfig {
             response_validation: ResponseValidationConfig::default(),
             sandbox: SandboxConfig::default(),
             max_session_turns: default_max_session_turns(),
+            loop_guard: LoopGuardConfig::default(),
             prompt_budget: PromptBudgetConfig::default(),
             llm_routing: None,
             chat: ChatConfig::default(),

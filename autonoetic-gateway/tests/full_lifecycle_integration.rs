@@ -296,8 +296,12 @@ fn test_session_snapshot_fork() {
         turn_counter: 2,
         loop_guard_state: LoopGuardState {
             max_loops_without_progress: 10,
+            max_tool_failures: 5,
+            max_consecutive_same_progress: 2,
             current_loops: 0,
             tool_failure_counts: std::collections::HashMap::new(),
+            last_progress_fingerprint: None,
+            consecutive_progress_count: 0,
         },
         agent_id: "test-agent".to_string(),
         session_id: "original-session".to_string(),
