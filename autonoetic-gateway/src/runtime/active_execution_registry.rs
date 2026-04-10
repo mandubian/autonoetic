@@ -15,6 +15,8 @@ pub struct NativeToolRunContext {
     pub session_id: String,
     pub agent_id: String,
     pub live_digest: Option<Arc<Mutex<crate::runtime::live_digest::LiveDigestWriter>>>,
+    /// User ID for profile binding resolution (if authenticated).
+    pub user_id: Option<String>,
 }
 
 #[derive(Clone)]

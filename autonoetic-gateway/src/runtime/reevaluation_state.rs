@@ -123,6 +123,9 @@ pub fn execute_scheduled_action(
         ScheduledAction::SessionContinue { .. } => anyhow::bail!(
             "SessionContinue is not directly executable; it only gates session continuation by approval"
         ),
+        ScheduledAction::ProfileShare { .. } => anyhow::bail!(
+            "ProfileShare is not directly executable; bindings are created after approval"
+        ),
     }
 }
 
