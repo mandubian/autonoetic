@@ -209,7 +209,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - `extract_searchable_excerpt()` helper (bounded plaintext, max 8KB)
 - `GatewayStore.upsert_session_transcript()` and `GatewayStore.search_session_transcripts()` methods
 - `session.search` native tool (FTS5 MATCH with bm25 ranking, filters by agent_id, root_session_id, status, since; ACL enforcement)
-- `session.summarize` native tool (reads transcript via handle, produces bounded summary with turn statistics)
+- `session.peek` native tool (reads transcript via handle, produces bounded summary with turn statistics)
 - `SessionTranscriptRecord` type added to `autonoetic-types`
 - All 376 lib tests passing
 
@@ -239,7 +239,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - [x] **4D.3** Register tool in tools module
 - [x] **4D.4** Tests for search, ACL filtering, ranking
 
-#### Phase E — session.summarize Tool (optional, ~120 lines)
+#### Phase E — session.peek Tool (optional, ~120 lines)
 
 - [x] **4E.1** Implement `SessionSummarizeTool` (reads full transcripts via transcript_handle, produces bounded summary with turn statistics)
 - [x] **4E.2** Tests

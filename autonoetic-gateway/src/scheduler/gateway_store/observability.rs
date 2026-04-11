@@ -409,6 +409,43 @@ impl GatewayStore {
         }
     }
 
+    pub fn find_transcript_by_session_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<autonoetic_types::causal_chain::SessionTranscriptRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT transcript_id, session_id, root_session_id, agent_id,
+                    revision_id, user_id, started_at, ended_at, status,
+                    turn_count, transcript_handle, excerpt, origin_node_id
+             FROM session_transcripts
+             WHERE session_id = ?1
+             LIMIT 1",
+        )?;
+        let result = stmt.query_row(params![session_id], |row| {
+            Ok(autonoetic_types::causal_chain::SessionTranscriptRecord {
+                transcript_id: row.get(0)?,
+                session_id: row.get(1)?,
+                root_session_id: row.get(2)?,
+                agent_id: row.get(3)?,
+                revision_id: row.get(4)?,
+                user_id: row.get(5)?,
+                started_at: row.get(6)?,
+                ended_at: row.get(7)?,
+                status: row.get(8)?,
+                turn_count: row.get(9)?,
+                transcript_handle: row.get(10)?,
+                excerpt: row.get(11)?,
+                origin_node_id: row.get(12)?,
+            })
+        });
+        match result {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn search_session_transcripts(
         &self,
         query: Option<&str>,

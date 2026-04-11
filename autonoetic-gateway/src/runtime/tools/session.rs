@@ -404,7 +404,7 @@ pub struct SessionSummarizeTool;
 
 impl NativeTool for SessionSummarizeTool {
     fn name(&self) -> &'static str {
-        "session.summarize"
+        "session.peek"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -414,13 +414,13 @@ impl NativeTool for SessionSummarizeTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Summarize a session transcript. Reads the full conversation via transcript_handle and produces a structured summary.".to_string(),
+            description: "Read the raw transcript of a past or current session. Returns turn counts, role breakdown, and a truncated text excerpt. Accepts either a transcript_handle or a session_id.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "transcript_handle": {
                         "type": "string",
-                        "description": "Handle of the session transcript to summarize"
+                        "description": "Handle of the session transcript or session_id to read"
                     },
                     "max_length": {
                         "type": "integer",
@@ -493,9 +493,20 @@ impl NativeTool for SessionSummarizeTool {
 
         let transcript_record = store
             .find_transcript_by_handle(&args.transcript_handle)?
-            .ok_or_else(|| anyhow::anyhow!("Transcript not found for handle"))?;
+            .or_else(|| {
+                store
+                    .find_transcript_by_session_id(&args.transcript_handle)
+                    .ok()
+                    .flatten()
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Transcript not found for handle or session_id: {}",
+                    args.transcript_handle
+                )
+            })?;
 
-        enforce_summarize_acl(
+        enforce_peek_acl(
             caller_id,
             &transcript_record.agent_id,
             &transcript_record.root_session_id,
@@ -503,7 +514,11 @@ impl NativeTool for SessionSummarizeTool {
         )?;
 
         let content_store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
-        let bytes = content_store.read(&args.transcript_handle)?;
+        let handle = transcript_record
+            .transcript_handle
+            .clone()
+            .unwrap_or(args.transcript_handle.clone());
+        let bytes = content_store.read(&handle)?;
         let messages: Vec<crate::llm::Message> = serde_json::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("Failed to parse transcript: {}", e))?;
 
@@ -574,7 +589,7 @@ fn enforce_search_acl(
     Ok((requested_agent_id.map(|s| s.to_string()), effective_root))
 }
 
-fn enforce_summarize_acl(
+fn enforce_peek_acl(
     caller_id: &str,
     transcript_agent_id: &str,
     transcript_root: &str,
@@ -676,31 +691,28 @@ mod tests {
     }
 
     #[test]
-    fn summarize_acl_allows_own_agent() {
+    fn peek_acl_allows_own_agent() {
         assert!(
-            enforce_summarize_acl("agent-a", "agent-a", "root-123", Some("root-123/child"),)
-                .is_ok()
+            enforce_peek_acl("agent-a", "agent-a", "root-123", Some("root-123/child"),).is_ok()
         );
     }
 
     #[test]
-    fn summarize_acl_allows_child_under_same_root() {
+    fn peek_acl_allows_child_under_same_root() {
         assert!(
-            enforce_summarize_acl("agent-a", "agent-b", "root-123", Some("root-123/child"),)
-                .is_ok()
+            enforce_peek_acl("agent-a", "agent-b", "root-123", Some("root-123/child"),).is_ok()
         );
     }
 
     #[test]
-    fn summarize_acl_denies_different_root() {
+    fn peek_acl_denies_different_root() {
         assert!(
-            enforce_summarize_acl("agent-a", "agent-b", "root-other", Some("root-123/child"),)
-                .is_err()
+            enforce_peek_acl("agent-a", "agent-b", "root-other", Some("root-123/child"),).is_err()
         );
     }
 
     #[test]
-    fn summarize_acl_denies_no_session_context() {
-        assert!(enforce_summarize_acl("agent-a", "agent-b", "root-other", None,).is_err());
+    fn peek_acl_denies_no_session_context() {
+        assert!(enforce_peek_acl("agent-a", "agent-b", "root-other", None,).is_err());
     }
 }
