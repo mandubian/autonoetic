@@ -2092,6 +2092,9 @@ impl AgentExecutor {
                                     self.guard.register_progress(&tc.name, &tc.arguments);
                                 }
                             }
+                            if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {
+                                self.guard.register_child_failure();
+                            }
                         }
                     }
 

@@ -23,10 +23,12 @@ fn default_guard_state() -> LoopGuardState {
         max_loops_without_progress: 10,
         max_tool_failures: 5,
         max_consecutive_same_progress: 2,
+        max_child_failures: 3,
         current_loops: 0,
         tool_failure_counts: std::collections::HashMap::new(),
         last_progress_fingerprint: None,
         consecutive_progress_count: 0,
+        child_failure_count: 0,
     }
 }
 

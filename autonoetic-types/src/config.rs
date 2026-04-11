@@ -710,6 +710,14 @@ pub struct LoopGuardConfig {
     /// as progress (first call resets, second+ call does not).
     #[serde(default = "default_max_consecutive_same_progress")]
     pub max_consecutive_same_progress: u32,
+
+    /// Max child agent task failures before tripping.
+    /// Each time workflow.wait returns any_failed:true, the counter increments.
+    /// Unlike tool failures, child failures do NOT reset on progress — once a
+    /// child task fails, that's a permanent budget hit. Prevents lead agents
+    /// from re-spawning failed specialist tasks indefinitely.
+    #[serde(default = "default_max_child_failures")]
+    pub max_child_failures: u32,
 }
 
 impl Default for LoopGuardConfig {
@@ -718,6 +726,7 @@ impl Default for LoopGuardConfig {
             max_loops_without_progress: default_max_loops_without_progress(),
             max_tool_failures: default_max_tool_failures(),
             max_consecutive_same_progress: default_max_consecutive_same_progress(),
+            max_child_failures: default_max_child_failures(),
         }
     }
 }
@@ -732,6 +741,10 @@ fn default_max_tool_failures() -> u32 {
 
 fn default_max_consecutive_same_progress() -> u32 {
     1
+}
+
+fn default_max_child_failures() -> u32 {
+    3
 }
 
 /// Configuration for pluggable code analysis.
