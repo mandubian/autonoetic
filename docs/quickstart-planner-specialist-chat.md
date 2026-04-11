@@ -437,7 +437,7 @@ Current runtime behavior is a hybrid:
 - Tier 1 local state lives under each agent directory (`state/`) and is suitable for deterministic, near-term continuity.
 - Tier 2 durable memory is gateway-managed (`memory.db`) and should be used for reusable/cross-session facts.
 - Gateway injects compact session context for same-session continuity; this is not yet a full automatic `state/summary.md` pipeline.
-- **Session transcripts** are automatically persisted at hibernation and session close and indexed with SQLite FTS5 for full-text search. Agents can search past sessions with `session.search` and summarize them with `session.summarize` (see `docs/fts-session-search.md`).
+- **Session transcripts** are automatically persisted at hibernation and session close and indexed with SQLite FTS5 for full-text search. Agents can search past sessions with `session.search` and summarize them with `session.peek` (see `docs/fts-session-search.md`).
 
 For multi-step tasks that benefit from explicit textual state, prefer these conventions:
 

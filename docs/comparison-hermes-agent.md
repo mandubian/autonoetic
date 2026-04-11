@@ -1068,12 +1068,12 @@ fn enforce_search_acl(
 }
 ```
 
-#### `session.summarize` (optional, separate tool)
+#### `session.peek` (optional, separate tool)
 
 Post-processing step on search results. Uses a cheap model to summarize multiple sessions. Not part of FTS5.
 
 ```
-session.summarize(session_ids: [string]) → {
+session.peek(session_ids: [string]) → {
     summary, common_themes, decisions, open_items
 }
 ```

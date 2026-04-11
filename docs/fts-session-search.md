@@ -7,7 +7,7 @@
 Autonoetic automatically persists conversation history at hibernation points and session close, indexes it with SQLite FTS5, and exposes two tools:
 
 - **`session.search`** — FTS5 full-text search with bm25 ranking
-- **`session.summarize`** — Read and summarize a session transcript
+- **`session.peek`** — Read the raw transcript of a session (turn counts, role breakdown, truncated excerpt)
 
 ## Architecture
 
@@ -39,7 +39,7 @@ persist_history_to_content_store()
 - Prefixes each message with role label (`[system]`, `[user]`, `[assistant]`, `[tool]`)
 - Skips empty messages
 - Caps at 8,000 characters
-- Used for both FTS indexing and `session.summarize`
+- Used for both FTS indexing and `session.peek`
 
 ## Tools
 
@@ -76,10 +76,10 @@ result = sdk.tools.invoke("session.search", {
 
 **ACL:** Agents can only search their own sessions and child sessions of the current root. Cross-agent searches are restricted to the caller's own agent ID.
 
-### session.summarize
+### session.peek
 
 ```python
-result = sdk.tools.invoke("session.summarize", {
+result = sdk.tools.invoke("session.peek", {
     "transcript_handle": "sha256:abc123...",    # From session.search results
     "max_length": 500                            # 50-5000, default 500
 })
@@ -93,7 +93,7 @@ result = sdk.tools.invoke("session.summarize", {
 #   }
 ```
 
-Reads the full transcript from the content store and produces a bounded summary with turn statistics. No LLM call — deterministic truncation.
+Reads the full transcript from the content store and returns a truncated text excerpt with turn statistics. No LLM call — deterministic truncation. Accepts either a `transcript_handle` or a `session_id`.
 
 ## Schema
 
