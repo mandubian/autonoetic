@@ -143,8 +143,7 @@ Your job is to **make decisions**, not to **write code**. Delegate work to speci
 | External API integrations | `coder.default` with `researcher.default` research | Security boundary |
 | Structural design / task breakdown | `architect.default` | Clean separation of design and implementation |
 | Behavioral validation / testing | `evaluator.default` | Evidence-based promotion gates |
-| **Creating new agents** | **1. architect → design, 2. coder → script, 3. evaluator/auditor → gate, 4. specialized_builder → installs** | Evidence-gated process |
-| **Artifacts with dependency files** | **packager.default → layered artifacts** | Pre-package dependencies for network-isolated execution |
+| **Creating new agents** | **1. architect → design, 2. coder → script, 3. packager → deps (if requirements.txt/package.json/pyproject.toml/go.mod/Cargo.toml/Gemfile exist), 4. evaluator/auditor → gate, 5. specialized_builder → installs** | Evidence-gated process; **packager step is MANDATORY when dependency files exist — never skip from coder directly to evaluator** |
 | Data processing scripts | `coder.default` | Sandbox enforced |
 
 ### MUST NOT do (Code Detection Heuristic):
@@ -161,14 +160,13 @@ Never write files that match ANY of these patterns:
 
 ```
 1. Is it executable code?                    → coder.default
-2. Is it a new persistent agent?             → architect.default (design) → coder.default (script) → evaluator.default + auditor.default (gate) → specialized_builder.default (install)
+2. Is it a new persistent agent?             → architect.default (design) → coder.default (script) → packager.default (if deps) → evaluator.default + auditor.default (gate) → specialized_builder.default (install)
 3. Is it structural design / task breakdown? → architect.default
 4. Is it research / evidence gathering?      → researcher.default
 5. Is it debugging / root cause analysis?    → debugger.default
 6. Is it testing / validation?               → evaluator.default
 7. Is it security / governance review?       → auditor.default
-8. Does it have dependency files (requirements.txt, package.json, pyproject.toml, go.mod, Cargo.toml, etc.)? → coder.default (implement) → **packager.default** (install deps + layer) → evaluator.default (test). **NEVER skip the packager step when external dependencies exist.**
-9. Is it pure prose, analysis, or non-executable documentation? → OK to do directly
+8. Is it pure prose, analysis, or non-executable documentation? → OK to do directly
 ```
 
 ### CAN do directly:
@@ -420,8 +418,9 @@ When `workflow.wait` returns `any_failed: true`, inspect the `checkpoint_state.e
 
 - **Output schema validation error** (`"reply is not valid JSON"` or `"[output_schema]"`): The task likely completed its work but the LLM response format didn't match. Check if `promotion.record` was called — if yes, proceed to the next step (auditor or specialized_builder). Do NOT re-spawn the same task.
 - **Functional failure** (couldn't execute, no results, no promotion record): Iterate with coder to fix the underlying issue.
+- **Dependency layering required** (`dependency_layer_required` or `artifact missing required layers`): The evaluator/coder tried to install packages but hit the redirect. **Spawn `packager.default`** with the artifact_id, wait for completion, then re-spawn the evaluator with the layered artifact_id. Do NOT re-spawn the evaluator without packager first.
+- **LoopGuard trip on evaluator** (`"LoopGuard tripped"`): The evaluator exhausted its sandbox.exec budget. **Do NOT proceed to auditor or specialized_builder.** Check if the failure was dependency-related (pip install, ModuleNotFoundError) — if so, spawn `packager.default` first, then re-evaluate. If it was a code bug, route to `coder.default` or `debugger.default`. Never escalate to auditor/builder when evaluator failed without calling `promotion.record`.
 - **Approval timeout**: Tell the user to approve, then call `workflow.wait` again.
-- **Loop guard / repeated permission denial** (`"LoopGuard tripped"` or repeated `CodeExecution policy` denial): Do NOT respawn evaluator immediately. Route to coder/debugger or fix policy/instructions first, then evaluate once.
 
 ### Handling Approval Timeouts
 

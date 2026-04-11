@@ -74,14 +74,14 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
    })
    ```
 6. **Return the artifact_id + install intent payload** to the planner. Include:
-   - `agent_id`
-   - `description`
-   - `instructions` (free-form markdown body)
-   - `execution_mode`
-   - `script_entry` (required for script mode)
-   - `llm_config` (required for reasoning mode)
-   - `capabilities`
-   - optional `io` / `middleware` / `response_contract`
+    - `agent_id`
+    - `description`
+    - `instructions` (free-form markdown body)
+    - `execution_mode`: **Use `"script"` when the agent is a standalone script that accepts CLI args or stdin.** Use `"reasoning"` only when the agent needs an LLM to interpret free-form user input.
+    - `script_entry` (required for script mode — the main entry script filename)
+    - `llm_config` (required for reasoning mode)
+    - `capabilities`
+    - optional `io` / `middleware` / `response_contract`
 7. Suggested handoff text:
    "Artifact ready with semantic install intent. Ask specialized_builder.default to call agent.revision.create_from_intent then agent.revision.promote."
 8. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
