@@ -305,6 +305,7 @@ pub(crate) fn load_session_content_mounts(
             mounts.push(SandboxMount {
                 source: temp_file,
                 dest: dest_path,
+                readonly: false,
             });
 
             tracing::debug!(
