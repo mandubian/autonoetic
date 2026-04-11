@@ -144,6 +144,24 @@ impl SandboxRunner {
         dependencies: Option<&DependencyPlan>,
         overrides: Option<&BwrapIsolationOverrides>,
     ) -> anyhow::Result<Self> {
+        Self::spawn_with_driver_and_dependencies_and_env(
+            driver,
+            agent_dir,
+            entrypoint,
+            dependencies,
+            overrides,
+            &[],
+        )
+    }
+
+    pub fn spawn_with_driver_and_dependencies_and_env(
+        driver: SandboxDriverKind,
+        agent_dir: &str,
+        entrypoint: &str,
+        dependencies: Option<&DependencyPlan>,
+        overrides: Option<&BwrapIsolationOverrides>,
+        extra_env: &[(String, String)],
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
             "entrypoint must not be empty"
@@ -186,6 +204,14 @@ impl SandboxRunner {
             sdk_bridge = Some(bridge.guard);
         }
 
+        for (key, value) in extra_env {
+            if key == PYTHONPATH_ENV {
+                inject_pythonpath_value(&mut command, value);
+            } else {
+                command.env(key, value);
+            }
+        }
+
         let child = command.spawn()?;
         Ok(Self {
             process: child,
@@ -203,6 +229,26 @@ impl SandboxRunner {
         dependencies: Option<&DependencyPlan>,
         session_content_mounts: Vec<SandboxMount>,
         overrides: Option<&BwrapIsolationOverrides>,
+    ) -> anyhow::Result<Self> {
+        Self::spawn_with_session_content_and_env(
+            driver,
+            agent_dir,
+            entrypoint,
+            dependencies,
+            session_content_mounts,
+            overrides,
+            &[],
+        )
+    }
+
+    pub fn spawn_with_session_content_and_env(
+        driver: SandboxDriverKind,
+        agent_dir: &str,
+        entrypoint: &str,
+        dependencies: Option<&DependencyPlan>,
+        session_content_mounts: Vec<SandboxMount>,
+        overrides: Option<&BwrapIsolationOverrides>,
+        extra_env: &[(String, String)],
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
@@ -239,6 +285,14 @@ impl SandboxRunner {
             let bridge = start_sdk_bridge(agent_dir)?;
             command.env(CCOS_SOCKET_ENV, bridge.socket_path_sandbox);
             sdk_bridge = Some(bridge.guard);
+        }
+
+        for (key, value) in extra_env {
+            if key == PYTHONPATH_ENV {
+                inject_pythonpath_value(&mut command, value);
+            } else {
+                command.env(key, value);
+            }
         }
 
         let child = command.spawn()?;
@@ -509,9 +563,13 @@ fn dispatch_sdk_method(
             let mem = crate::runtime::memory::Tier2Memory::open_sqlite(gateway_dir, &agent_id)?;
             let source_ref = format!("sdk_bridge:{}", agent_id);
             let content = serde_json::to_string(&value)?;
-            let memory = crate::runtime::tools::block_on_memory(
-                mem.remember(key, scope, &agent_id, &source_ref, &content)
-            )?;
+            let memory = crate::runtime::tools::block_on_memory(mem.remember(
+                key,
+                scope,
+                &agent_id,
+                &source_ref,
+                &content,
+            ))?;
             let _ = log_sdk_memory_event(
                 agent_dir,
                 "remember",
@@ -661,6 +719,21 @@ fn inject_pythonpath(command: &mut Command, sdk_path: &str) {
     }
 }
 
+fn inject_pythonpath_value(command: &mut Command, extra_path: &str) {
+    let current = command
+        .get_envs()
+        .find(|(k, _)| *k == PYTHONPATH_ENV)
+        .and_then(|(_, v)| v.map(|s| s.to_string_lossy().to_string()));
+    match current {
+        Some(existing) => {
+            command.env(PYTHONPATH_ENV, format!("{}:{}", extra_path, existing));
+        }
+        None => {
+            command.env(PYTHONPATH_ENV, extra_path.to_string());
+        }
+    }
+}
+
 fn split_entrypoint(entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
     let parts: Vec<&str> = entrypoint.split_whitespace().collect();
     anyhow::ensure!(!parts.is_empty(), "entrypoint must not be empty");
@@ -696,7 +769,8 @@ fn bubblewrap_command(
 #[derive(Debug, Clone)]
 pub struct SandboxMount {
     pub source: std::path::PathBuf,
-    pub dest: String, // Path inside sandbox
+    pub dest: String,
+    pub readonly: bool,
 }
 
 fn bubblewrap_shell_command(
@@ -735,7 +809,12 @@ fn bubblewrap_shell_command(
                 let _ = std::fs::create_dir_all(&mount.source);
             }
         }
-        argv.push("--bind".to_string());
+        let bind_flag = if mount.readonly {
+            "--ro-bind".to_string()
+        } else {
+            "--bind".to_string()
+        };
+        argv.push(bind_flag);
         argv.push(mount.source.to_string_lossy().to_string());
         argv.push(mount.dest.clone());
     }
