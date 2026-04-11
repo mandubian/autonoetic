@@ -8,6 +8,7 @@ use crate::runtime::artifact::Artifact;
 use crate::runtime::live_digest::{
     base_session_id, format_tool_action_line, format_tool_digest_result, LiveDigestWriter,
 };
+use crate::runtime::session_report::SessionReportWriter;
 use autonoetic_types::causal_chain::EntryStatus;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -168,6 +169,8 @@ pub struct SessionTracer {
     evidence_store: EvidenceStore,
     /// Progressive digest written to `.gateway/sessions/{base}/digest.md`.
     live_digest: Option<Arc<Mutex<LiveDigestWriter>>>,
+    /// Structured live/final report written beside `digest.md`.
+    live_report: Option<Arc<Mutex<SessionReportWriter>>>,
     /// Optional GatewayStore for dual-write to causal_events table.
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
 }
@@ -203,6 +206,7 @@ impl SessionTracer {
             event_seq: 0,
             evidence_store,
             live_digest: None,
+            live_report: None,
             gateway_store: None,
         })
     }
@@ -213,9 +217,17 @@ impl SessionTracer {
         self
     }
 
+    pub fn with_session_report(mut self, writer: Arc<Mutex<SessionReportWriter>>) -> Self {
+        self.live_report = Some(writer);
+        self
+    }
+
     pub fn start_digest_turn(&mut self) -> anyhow::Result<()> {
         if let Some(w) = &self.live_digest {
             w.lock().unwrap().start_turn()?;
+        }
+        if let Some(w) = &self.live_report {
+            w.lock().unwrap().start_turn(self.turn_id.as_deref())?;
         }
         self.append_live_digest_event("turn.start", None);
         Ok(())
@@ -453,6 +465,19 @@ impl SessionTracer {
                 );
             }
         }
+        if let Some(w) = &self.live_report {
+            let preview = session_payload
+                .get("trigger_preview")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if let Err(e) = w.lock().unwrap().start_session(preview) {
+                tracing::warn!(
+                    target: "session_report",
+                    error = %e,
+                    "Failed to write session report start"
+                );
+            }
+        }
         self.append_live_digest_event(
             "session.start",
             Some(serde_json::json!({
@@ -550,6 +575,26 @@ impl SessionTracer {
                     if let Err(e) = guard.record_action(&line) {
                         tracing::warn!(target: "live_digest", error = %e, "digest record_action failed");
                     }
+                }
+            }
+        }
+        if tool_name != "digest.annotate" {
+            if let Some(w) = &self.live_report {
+                let mut guard = w.lock().unwrap();
+                if tool_name == "agent.spawn" {
+                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) {
+                        let target = args["agent_id"].as_str().unwrap_or("unknown");
+                        let msg = args["message"].as_str().unwrap_or("");
+                        let _ = guard.record_delegation_start(target, msg, self.turn_id.as_deref());
+                    }
+                } else if let Err(e) =
+                    guard.record_tool_requested(tool_name, &redacted_args, self.turn_id.as_deref())
+                {
+                    tracing::warn!(
+                        target: "session_report",
+                        error = %e,
+                        "session report record_tool_requested failed"
+                    );
                 }
             }
         }
@@ -683,6 +728,22 @@ impl SessionTracer {
                 };
                 if let Err(e) = r {
                     tracing::warn!(target: "live_digest", error = %e, "digest record result/error failed");
+                }
+            }
+        }
+        if tool_name != "digest.annotate" {
+            if let Some(w) = &self.live_report {
+                if let Err(e) = w.lock().unwrap().record_tool_completed(
+                    tool_name,
+                    result,
+                    approval_ref,
+                    self.turn_id.as_deref(),
+                ) {
+                    tracing::warn!(
+                        target: "session_report",
+                        error = %e,
+                        "session report record_tool_completed failed"
+                    );
                 }
             }
         }
@@ -876,6 +937,7 @@ impl SessionTracer {
                 base_dir: None,
             },
             live_digest: None,
+            live_report: None,
             gateway_store: None,
         }
     }
@@ -900,6 +962,7 @@ impl SessionTracer {
                 base_dir: None,
             },
             live_digest: None,
+            live_report: None,
             gateway_store: Some(store),
         }
     }

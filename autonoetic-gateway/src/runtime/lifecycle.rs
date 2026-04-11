@@ -505,6 +505,9 @@ pub struct AgentExecutor {
         Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
     /// Shared live digest (`digest.md`) when `gateway_dir` is set.
     pub live_digest: Option<Arc<std::sync::Mutex<crate::runtime::live_digest::LiveDigestWriter>>>,
+    /// Shared structured live/session report written beside `digest.md`.
+    pub live_report:
+        Option<Arc<std::sync::Mutex<crate::runtime::session_report::SessionReportWriter>>>,
     /// Last conversation history from `execute_with_history`, retained for `close_session` transcript persistence.
     pub last_history: Vec<Message>,
     /// Session start timestamp (ISO 8601), captured when session_id is first assigned.
@@ -573,6 +576,7 @@ impl AgentExecutor {
             runtime_lock_hash: None,
             active_executions: None,
             live_digest: None,
+            live_report: None,
             last_history: Vec::new(),
             session_started_at: None,
             compression_metadata: Default::default(),
@@ -830,6 +834,17 @@ impl AgentExecutor {
                 let _ = g.write_session_summary(reason);
             }
         }
+        if let Some(r) = self.live_report.take() {
+            if let Ok(mut g) = r.lock() {
+                let latest_assistant = self
+                    .last_history
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m.role, crate::llm::Role::Assistant))
+                    .map(|m| m.content.as_str());
+                let _ = g.finish_session(reason, latest_assistant);
+            }
+        }
         let mut tracer = SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?;
         tracer.log_session_end(reason);
         self.session_started = false;
@@ -1037,6 +1052,26 @@ impl AgentExecutor {
                     }
                 }
             }
+            if self.live_report.is_none() {
+                let agent_id = &self.manifest.agent.id;
+                match crate::runtime::session_report::SessionReportWriter::open(
+                    gw,
+                    &session_id,
+                    agent_id,
+                ) {
+                    Ok(w) => {
+                        self.live_report = Some(Arc::new(std::sync::Mutex::new(w)));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "session_report",
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to open session report writer"
+                        );
+                    }
+                }
+            }
         }
 
         let evidence_mode_raw = self
@@ -1062,6 +1097,12 @@ impl AgentExecutor {
             .with_turn_id(&turn_id);
             if let Some(ld) = self.live_digest.clone() {
                 t = t.with_live_digest(ld);
+            }
+            if let Some(lr) = self.live_report.clone() {
+                t = t.with_session_report(lr);
+            }
+            if let Some(gs) = self.gateway_store.clone() {
+                t = t.with_gateway_store(Some(gs));
             }
             t
         };
@@ -1833,6 +1874,7 @@ impl AgentExecutor {
                             session_id: sid.clone(),
                             agent_id: self.manifest.agent.id.clone(),
                             live_digest: self.live_digest.clone(),
+                            live_report: self.live_report.clone(),
                             user_id: self.user_id.clone(),
                             artifact_id: self.artifact_id.clone(),
                         }

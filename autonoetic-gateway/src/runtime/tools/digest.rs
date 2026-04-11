@@ -79,6 +79,12 @@ impl NativeTool for DigestAnnotateTool {
                     g.record_annotation(&args.annotation_type, &args.content)?;
                 }
             }
+            if let Some(w) = &ctx.live_report {
+                if let Ok(mut g) = w.lock() {
+                    let _ =
+                        g.record_annotation(&args.annotation_type, &args.content, _turn_id);
+                }
+            }
             if let Some(store) = _gateway_store.as_ref() {
                 let _ = store.create_live_digest_event(
                     &crate::scheduler::gateway_store::LiveDigestEventRecord {
