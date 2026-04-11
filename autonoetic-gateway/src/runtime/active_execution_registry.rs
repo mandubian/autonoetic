@@ -15,6 +15,7 @@ pub struct NativeToolRunContext {
     pub session_id: String,
     pub agent_id: String,
     pub live_digest: Option<Arc<Mutex<crate::runtime::live_digest::LiveDigestWriter>>>,
+    pub live_report: Option<Arc<Mutex<crate::runtime::session_report::SessionReportWriter>>>,
     /// User ID for profile binding resolution (if authenticated).
     pub user_id: Option<String>,
     /// Artifact ID whose layers should be auto-mounted into sandbox.exec calls.

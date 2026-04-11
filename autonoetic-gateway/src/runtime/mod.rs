@@ -33,6 +33,7 @@ pub mod remote_access;
 pub mod response_validation;
 pub mod session_budget;
 pub mod session_context;
+pub mod session_report;
 pub mod session_tracer;
 pub mod store;
 pub mod tool_call_processor;
