@@ -103,6 +103,52 @@ fn test_safe_inspection_pip_list_skips_approval() {
     assert_eq!(parsed.get("approval_required"), None);
 }
 
+fn exec_sandbox_with_artifact(
+    manifest: &AgentManifest,
+    command: &str,
+    artifact_id: &str,
+) -> serde_json::Value {
+    let registry = default_registry();
+    let policy = PolicyEngine::new(manifest.clone());
+    let tmpdir = tempfile::tempdir().unwrap();
+    let agent_dir = tmpdir.path().join("test-agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let args = serde_json::json!({
+        "command": command,
+        "artifact_id": artifact_id,
+    });
+    let result = registry.execute(
+        "sandbox.exec",
+        manifest,
+        &policy,
+        &agent_dir,
+        Some(tmpdir.path()),
+        &serde_json::to_string(&args).unwrap(),
+        Some("test-session"),
+        None,
+        None::<&autonoetic_types::config::GatewayConfig>,
+        None,
+        None,
+    ).unwrap();
+
+    serde_json::from_str(&result).unwrap()
+}
+
+#[test]
+fn test_pip_install_redirect_fires_with_artifact_id() {
+    let manifest = make_manifest(false);
+    let parsed = exec_sandbox_with_artifact(
+        &manifest,
+        "pip install -r requirements.txt && python3 -m pytest test.py",
+        "test-artifact-123",
+    );
+
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["dependency_layer_required"], true);
+    assert_eq!(parsed["recommended_agent"], "packager.default");
+}
+
 #[test]
 fn test_safe_inspection_pip_show_skips_approval() {
     let manifest = make_manifest(false);

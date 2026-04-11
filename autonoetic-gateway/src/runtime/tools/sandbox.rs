@@ -539,6 +539,35 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
         let code_to_analyze =
             extract_code_for_analysis(&effective_command, agent_dir, gateway_dir, session_id);
 
+        let agent_has_network_access = manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::NetworkAccess { .. }));
+
+        if !agent_has_network_access && !approval_validated_for_command {
+            let early_analysis =
+                crate::runtime::remote_access::RemoteAccessAnalyzer::detect_network_commands(
+                    &code_to_analyze,
+                );
+            let is_dep_install = early_analysis
+                .iter()
+                .any(|p| p.category == "network_command" && is_package_manager_command(&p.pattern));
+            if is_dep_install {
+                let detected: Vec<String> = early_analysis
+                    .iter()
+                    .filter(|p| p.category == "network_command")
+                    .map(|p| p.pattern.clone())
+                    .collect();
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "dependency_layer_required": true,
+                    "recommended_agent": "packager.default",
+                    "reason": "External packages must be resolved into layers by packager.default before execution.",
+                    "detected_commands": detected,
+                }).to_string());
+            }
+        }
+
         let artifact_id_for_approval = args.artifact_id.clone();
         let artifact_remote_needs_approval = if let Some(ref aid) = args.artifact_id {
             if let Some(gw_dir) = &gateway_dir {
@@ -1342,6 +1371,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             .as_ref()
             .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
 
+        let mut layer_python_paths: Vec<String> = Vec::new();
         let session_content_mounts = if let Some(artifact_id) = effective_artifact_id {
             let Some(gw_dir) = gateway_dir else {
                 anyhow::bail!("artifact_id requires gateway directory to be configured");
@@ -1365,6 +1395,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 mounts.push(SandboxMount {
                     source: temp_file,
                     dest: dest_path,
+                    readonly: false,
                 });
             }
 
@@ -1397,7 +1428,17 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                     mounts.push(SandboxMount {
                         source: layer_temp_base,
                         dest: layer.mount_path.clone(),
+                        readonly: true,
                     });
+
+                    let python_site_packages = std::path::Path::new(&layer.mount_path)
+                        .join("lib")
+                        .join("python3.12")
+                        .join("site-packages");
+                    if python_site_packages.starts_with("/") {
+                        layer_python_paths.push(python_site_packages.to_string_lossy().to_string());
+                    }
+                    layer_python_paths.push(layer.mount_path.clone());
                 }
             }
 
@@ -1421,13 +1462,21 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             overrides.share_net = true;
         }
 
+        let layer_python_path_str = layer_python_paths.join(":");
+        let extra_env: Vec<(String, String)> = if !layer_python_path_str.is_empty() {
+            vec![("PYTHONPATH".to_string(), layer_python_path_str)]
+        } else {
+            vec![]
+        };
+
         let runner = if session_content_mounts.is_empty() {
-            SandboxRunner::spawn_with_driver_and_dependencies(
+            SandboxRunner::spawn_with_driver_and_dependencies_and_env(
                 driver,
                 agent_dir_str,
                 &effective_command,
                 dep_plan.as_ref(),
                 Some(&overrides),
+                &extra_env,
             )?
         } else {
             tracing::info!(
@@ -1435,13 +1484,14 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 mount_count = session_content_mounts.len(),
                 "Mounting session content files into sandbox"
             );
-            SandboxRunner::spawn_with_session_content(
+            SandboxRunner::spawn_with_session_content_and_env(
                 driver,
                 agent_dir_str,
                 &effective_command,
                 dep_plan.as_ref(),
                 session_content_mounts,
                 Some(&overrides),
+                &extra_env,
             )?
         };
 

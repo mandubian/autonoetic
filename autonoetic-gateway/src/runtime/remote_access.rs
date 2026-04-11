@@ -249,7 +249,7 @@ impl RemoteAccessAnalyzer {
     /// regardless of language. This is a generic capability detection mechanism —
     /// these commands *always* need network, so their presence means the sandbox
     /// must have network access (via approval or agent capability).
-    fn detect_network_commands(code: &str) -> Vec<DetectedPattern> {
+    pub fn detect_network_commands(code: &str) -> Vec<DetectedPattern> {
         let mut patterns = Vec::new();
 
         let command_patterns: &[(&str, &str)] = &[
