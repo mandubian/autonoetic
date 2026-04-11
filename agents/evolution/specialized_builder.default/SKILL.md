@@ -123,6 +123,27 @@ Activates the created revision.
 
 **The gateway automatically analyzes executable behavior to detect required capabilities.** If your `capabilities` don't match what the artifact/runtime behavior actually uses, the install will be REJECTED.
 
+**CRITICAL: Capability format requires specific fields.** Use this exact structure:
+
+```json
+"capabilities": [
+  {"type": "NetworkAccess", "hosts": ["*"]},
+  {"type": "CodeExecution"},
+  {"type": "ReadAccess", "scopes": ["*"]},
+  {"type": "WriteAccess", "scopes": ["self.*"]}
+]
+```
+
+| Capability | Required Fields | Example |
+|---|---|---|
+| `NetworkAccess` | `hosts` (array) | `{"type": "NetworkAccess", "hosts": ["*"]}` |
+| `CodeExecution` | none | `{"type": "CodeExecution"}` |
+| `ReadAccess` | `scopes` (array) | `{"type": "ReadAccess", "scopes": ["*"]}` |
+| `WriteAccess` | `scopes` (array) | `{"type": "WriteAccess", "scopes": ["self.*"]}` |
+| `SandboxFunctions` | none | `{"type": "SandboxFunctions"}` |
+
+**Common mistake:** `{"type": "NetworkAccess"}` WITHOUT `"hosts"` will FAIL validation. You MUST include `"hosts": ["*"]`.
+
 **Capability Detection Rules:**
 
 | Executable Pattern | Required Capability |
@@ -241,6 +262,15 @@ Before calling `agent.revision.create_from_intent`, ensure:
 1. First call may return "approval_required: true"
 2. If "approval_required: true", STOP and tell user to approve
 3. DO NOT retry until user approves - wait for approval message
+
+### Promotion Gate Failure
+
+When `agent.revision.promote` returns `"Promotion gate: no promotion.record found"`:
+
+1. **STOP immediately** — do NOT retry `agent.revision.promote` or `agent.revision.create_from_intent`
+2. **Report back to planner** that the evaluator and/or auditor must be re-run to produce `promotion.record` entries
+3. Do NOT attempt to create promotion records yourself — only evaluator and auditor can call `promotion.record`
+4. Do NOT retry the promote call — the promotion gate is mechanically enforced and will always block until the records exist
 
 ### Other Revision Tools
 
