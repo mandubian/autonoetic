@@ -838,21 +838,6 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
         let artifact_store = crate::ArtifactStore::new(gateway_dir)?;
 
-        let mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
-        match mode {
-            ExecutionMode::Script => anyhow::ensure!(
-                args.script_entry
-                    .as_ref()
-                    .map(|v| !v.trim().is_empty())
-                    .unwrap_or(false),
-                "script_entry is required when execution_mode is 'script'"
-            ),
-            ExecutionMode::Reasoning => anyhow::ensure!(
-                args.llm_config.is_some(),
-                "llm_config is required when execution_mode is 'reasoning'"
-            ),
-        }
-
         let bundle = artifact_store
             .inspect(&args.artifact_id)
             .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", args.artifact_id, e))?;
@@ -862,6 +847,57 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             args.artifact_id,
             bundle.kind
         );
+
+        let mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
+        let resolved_mode = if mode == ExecutionMode::Reasoning
+            && args.script_entry.is_none()
+            && args.llm_config.is_none()
+        {
+            if bundle.entrypoints.len() == 1 {
+                tracing::info!(
+                    target: "revision",
+                    artifact_id = %args.artifact_id,
+                    entrypoint = %bundle.entrypoints[0],
+                    "No execution_mode or llm_config specified, but artifact has a single entrypoint — defaulting to script mode"
+                );
+                ExecutionMode::Script
+            } else {
+                ExecutionMode::Reasoning
+            }
+        } else {
+            mode
+        };
+        match resolved_mode {
+            ExecutionMode::Script => {
+                let has_entry = args
+                    .script_entry
+                    .as_ref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+                    || !bundle.entrypoints.is_empty();
+                anyhow::ensure!(
+                    has_entry,
+                    "script_entry is required when execution_mode is 'script'"
+                );
+            }
+            ExecutionMode::Reasoning => anyhow::ensure!(
+                args.llm_config.is_some(),
+                "llm_config is required when execution_mode is 'reasoning'"
+            ),
+        }
+
+        let resolved_script_entry = args
+            .script_entry
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                if resolved_mode == ExecutionMode::Script {
+                    bundle.entrypoints.clone().into_iter().next()
+                } else {
+                    None
+                }
+            });
 
         let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for (path, bytes) in artifact_store.resolve_files(&args.artifact_id)? {
@@ -878,7 +914,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             &file_map,
             &args.capabilities,
             has_layers,
-            args.script_entry.as_deref(),
+            resolved_script_entry.as_deref(),
         );
 
         let target_manifest = AgentManifest {
@@ -897,8 +933,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             io: args.io.clone(),
             middleware: args.middleware.clone(),
             response_contract: args.response_contract.clone(),
-            execution_mode: mode,
-            script_entry: args.script_entry.clone(),
+            execution_mode: resolved_mode,
+            script_entry: resolved_script_entry,
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
