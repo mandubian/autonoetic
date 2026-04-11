@@ -25,10 +25,12 @@ pub struct LoopGuard {
     max_loops_without_progress: u32,
     max_tool_failures: u32,
     max_consecutive_same_progress: u32,
+    max_child_failures: u32,
     current_loops: u32,
     tool_failure_counts: std::collections::HashMap<String, u32>,
     last_progress_fingerprint: Option<(String, u64)>,
     consecutive_progress_count: u32,
+    child_failure_count: u32,
 }
 
 impl LoopGuard {
@@ -37,10 +39,12 @@ impl LoopGuard {
             max_loops_without_progress,
             max_tool_failures: 5,
             max_consecutive_same_progress: 1,
+            max_child_failures: 3,
             current_loops: 0,
             tool_failure_counts: std::collections::HashMap::new(),
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
+            child_failure_count: 0,
         }
     }
 
@@ -49,10 +53,12 @@ impl LoopGuard {
             max_loops_without_progress: cfg.max_loops_without_progress,
             max_tool_failures: cfg.max_tool_failures,
             max_consecutive_same_progress: cfg.max_consecutive_same_progress,
+            max_child_failures: cfg.max_child_failures,
             current_loops: 0,
             tool_failure_counts: std::collections::HashMap::new(),
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
+            child_failure_count: 0,
         }
     }
 
@@ -75,6 +81,14 @@ impl LoopGuard {
             }
         }
 
+        if self.child_failure_count >= self.max_child_failures {
+            anyhow::bail!(
+                "LoopGuard tripped: {} child agent tasks have failed in this session. \
+                 Breaking delegation loop — escalate to human or change strategy.",
+                self.child_failure_count
+            );
+        }
+
         self.current_loops += 1;
         Ok(())
     }
@@ -85,6 +99,14 @@ impl LoopGuard {
             .tool_failure_counts
             .entry(tool_name.to_string())
             .or_insert(0) += 1;
+    }
+
+    /// Track a child agent task failure (from workflow.wait returning any_failed: true).
+    /// Counts against a separate budget from tool failures — a planner can only waste
+    /// so many delegation rounds before tripping. Unlike tool failures, this does NOT
+    /// reset on progress — once a child fails, that's a permanent budget hit.
+    pub fn register_child_failure(&mut self) {
+        self.child_failure_count += 1;
     }
 
     /// Track a successful tool call. Only counts as "progress" (resets current_loops)
@@ -114,10 +136,12 @@ impl LoopGuard {
             max_loops_without_progress: self.max_loops_without_progress,
             max_tool_failures: self.max_tool_failures,
             max_consecutive_same_progress: self.max_consecutive_same_progress,
+            max_child_failures: self.max_child_failures,
             current_loops: self.current_loops,
             tool_failure_counts: self.tool_failure_counts.clone(),
             last_progress_fingerprint: self.last_progress_fingerprint.clone(),
             consecutive_progress_count: self.consecutive_progress_count,
+            child_failure_count: self.child_failure_count,
         }
     }
 
@@ -126,10 +150,12 @@ impl LoopGuard {
             max_loops_without_progress: state.max_loops_without_progress,
             max_tool_failures: state.max_tool_failures,
             max_consecutive_same_progress: state.max_consecutive_same_progress,
+            max_child_failures: state.max_child_failures,
             current_loops: state.current_loops,
             tool_failure_counts: state.tool_failure_counts,
             last_progress_fingerprint: state.last_progress_fingerprint,
             consecutive_progress_count: state.consecutive_progress_count,
+            child_failure_count: state.child_failure_count,
         }
     }
 }
@@ -146,10 +172,12 @@ pub struct LoopGuardState {
     pub max_loops_without_progress: u32,
     pub max_tool_failures: u32,
     pub max_consecutive_same_progress: u32,
+    pub max_child_failures: u32,
     pub current_loops: u32,
     pub tool_failure_counts: std::collections::HashMap<String, u32>,
     pub last_progress_fingerprint: Option<(String, u64)>,
     pub consecutive_progress_count: u32,
+    pub child_failure_count: u32,
 }
 
 #[cfg(test)]
