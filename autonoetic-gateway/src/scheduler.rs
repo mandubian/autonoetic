@@ -17,6 +17,7 @@ pub mod approval;
 pub mod decision;
 pub mod eval_runner;
 pub mod gateway_store;
+pub mod hooks;
 pub mod runner;
 pub mod signal;
 pub mod store;

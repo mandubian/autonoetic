@@ -18,6 +18,12 @@ fn should_fallback_to_like(err: &rusqlite::Error, query: &str) -> bool {
     )
 }
 
+fn is_sqlite_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<rusqlite::Error>()
+        .map(|e| matches!(e, rusqlite::Error::SqliteFailure(_, _)))
+        .unwrap_or(false)
+}
+
 impl GatewayStore {
     /// Prune execution_traces older than `days`. 0 = no pruning.
     pub fn prune_execution_traces(&self, days: u32) -> Result<u64> {
@@ -599,6 +605,183 @@ impl GatewayStore {
         let mut results = Vec::new();
         for res in rows {
             results.push(res?);
+        }
+        Ok(results)
+    }
+
+    pub fn upsert_published_session_report(
+        &self,
+        record: &autonoetic_types::causal_chain::PublishedSessionReportRecord,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO published_session_reports (
+                root_session_id, report_handle, overview_handle, html_handle,
+                narrative_handle, title, status, started_at, ended_at,
+                agent_count, error_count, approval_count, search_text,
+                generated_at, report_version
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            ON CONFLICT(root_session_id) DO UPDATE SET
+                report_handle = excluded.report_handle,
+                overview_handle = excluded.overview_handle,
+                html_handle = excluded.html_handle,
+                narrative_handle = excluded.narrative_handle,
+                title = excluded.title,
+                status = excluded.status,
+                ended_at = COALESCE(excluded.ended_at, published_session_reports.ended_at),
+                agent_count = excluded.agent_count,
+                error_count = excluded.error_count,
+                approval_count = excluded.approval_count,
+                search_text = excluded.search_text,
+                generated_at = excluded.generated_at,
+                report_version = excluded.report_version",
+            params![
+                &record.root_session_id,
+                &record.report_handle,
+                record.overview_handle.as_deref(),
+                record.html_handle.as_deref(),
+                record.narrative_handle.as_deref(),
+                &record.title,
+                &record.status,
+                record.started_at.as_deref(),
+                record.ended_at.as_deref(),
+                record.agent_count,
+                record.error_count,
+                record.approval_count,
+                &record.search_text,
+                &record.generated_at,
+                record.report_version,
+            ],
+        )?;
+
+        conn.execute(
+            "DELETE FROM published_session_reports_fts WHERE root_session_id = ?1",
+            params![&record.root_session_id],
+        )?;
+        conn.execute(
+            "INSERT INTO published_session_reports_fts (root_session_id, title, search_text, status) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                &record.root_session_id,
+                &record.title,
+                &record.search_text,
+                &record.status,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn find_published_report(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Option<autonoetic_types::causal_chain::PublishedSessionReportRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT root_session_id, report_handle, overview_handle, html_handle,
+                    narrative_handle, title, status, started_at, ended_at,
+                    agent_count, error_count, approval_count, search_text,
+                    generated_at, report_version
+             FROM published_session_reports
+             WHERE root_session_id = ?1",
+            params![root_session_id],
+            |row| {
+                Ok(
+                    autonoetic_types::causal_chain::PublishedSessionReportRecord {
+                        root_session_id: row.get(0)?,
+                        report_handle: row.get(1)?,
+                        overview_handle: row.get(2)?,
+                        html_handle: row.get(3)?,
+                        narrative_handle: row.get(4)?,
+                        title: row.get(5)?,
+                        status: row.get(6)?,
+                        started_at: row.get(7)?,
+                        ended_at: row.get(8)?,
+                        agent_count: row.get(9)?,
+                        error_count: row.get(10)?,
+                        approval_count: row.get(11)?,
+                        search_text: row.get(12)?,
+                        generated_at: row.get(13)?,
+                        report_version: row.get(14)?,
+                    },
+                )
+            },
+        );
+        match result {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn search_published_reports(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<autonoetic_types::causal_chain::PublishedSessionReportRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let fts_sql = "\
+            SELECT r.root_session_id, r.report_handle, r.overview_handle, r.html_handle,
+                    r.narrative_handle, r.title, r.status, r.started_at, r.ended_at,
+                    r.agent_count, r.error_count, r.approval_count, r.search_text,
+                    r.generated_at, r.report_version
+             FROM published_session_reports r
+             WHERE r.root_session_id IN (
+                 SELECT f.root_session_id FROM published_session_reports_fts f WHERE f MATCH ?1
+             )
+             ORDER BY r.generated_at DESC
+             LIMIT ?2";
+
+        match Self::read_published_rows(&conn, fts_sql, params![query, limit]) {
+            Ok(rows) => return Ok(rows),
+            Err(e) => {
+                tracing::debug!(target: "observability", error = %e, "FTS search failed, falling back to LIKE");
+                // Always fall back to LIKE on FTS error
+            }
+        }
+
+        let like_sql = "\
+            SELECT root_session_id, report_handle, overview_handle, html_handle,
+                    narrative_handle, title, status, started_at, ended_at,
+                    agent_count, error_count, approval_count, search_text,
+                    generated_at, report_version
+             FROM published_session_reports
+             WHERE search_text LIKE ?1
+             ORDER BY generated_at DESC
+             LIMIT ?2";
+        Self::read_published_rows(&conn, like_sql, params![format!("%{}%", query), limit])
+    }
+
+    fn read_published_rows(
+        conn: &rusqlite::Connection,
+        sql: &str,
+        p: impl rusqlite::Params,
+    ) -> Result<Vec<autonoetic_types::causal_chain::PublishedSessionReportRecord>> {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(p, |row| {
+            Ok(
+                autonoetic_types::causal_chain::PublishedSessionReportRecord {
+                    root_session_id: row.get(0)?,
+                    report_handle: row.get(1)?,
+                    overview_handle: row.get(2)?,
+                    html_handle: row.get(3)?,
+                    narrative_handle: row.get(4)?,
+                    title: row.get(5)?,
+                    status: row.get(6)?,
+                    started_at: row.get(7)?,
+                    ended_at: row.get(8)?,
+                    agent_count: row.get(9)?,
+                    error_count: row.get(10)?,
+                    approval_count: row.get(11)?,
+                    search_text: row.get(12)?,
+                    generated_at: row.get(13)?,
+                    report_version: row.get(14)?,
+                },
+            )
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
         }
         Ok(results)
     }

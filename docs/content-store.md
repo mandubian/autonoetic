@@ -13,8 +13,11 @@ The content store provides **content-addressable storage** (SHA-256 based) for a
 └── ab/c123...               ← Content indexed by hash
 
 .gateway/sessions/
-├── demo-session/            ← Root session manifest
-│   └── manifest.json
+├── demo-session/            ← Root session manifest + reports
+│   ├── manifest.json
+│   ├── session_report.json  ← Structured session report (JSON)
+│   ├── session_report.md    ← Human-readable report (markdown)
+│   └── session_report.html  ← HTML report
 └── demo-session/coder-abc123/  ← Child session manifest
     └── manifest.json
 
@@ -33,6 +36,7 @@ The content store provides **content-addressable storage** (SHA-256 based) for a
 | **Session Manifest** | Maps names/handles to content with visibility |
 | **Root Session ID** | Top-level session for visibility grouping |
 | **Artifact** | Immutable file bundle for review/install/execution |
+| **Published Report** | Session report stored in content store, registered in `published_session_reports` catalog for cross-session discovery via `observability.search`/`observability.read` |
 
 ## Visibility Model
 

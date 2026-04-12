@@ -149,37 +149,45 @@ impl<'a> ToolCallProcessor<'a> {
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
                 Ok(res) => {
-                    self.record_execution_trace(tc, &res, started_at.elapsed(), None)?;
-                    self.log_memory_tool_event(tracer, &tc.name, &res);
-                    tracer.log_tool_completed_with_approval(
+                    let event_id = tracer.log_tool_completed_with_approval(
                         &tc.name,
                         &res,
                         approval_ref.as_deref(),
                     )?;
+                    self.record_execution_trace(tc, &res, started_at.elapsed(), None, Some(event_id))?;
+                    self.log_memory_tool_event(tracer, &tc.name, &res);
                     had_any_success = true;
                     res
                 }
                 Err(e) => {
                     let tool_error: ToolError = e.into();
                     let error_json = tool_error.to_json_string();
-                    self.record_execution_trace(
-                        tc,
-                        &error_json,
-                        started_at.elapsed(),
-                        Some(&tool_error),
-                    )?;
-                    self.log_tool_failure(tracer, tc, &tool_error)?;
+                    let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
                     if !tool_error.is_recoverable() {
+                        self.record_execution_trace(
+                            tc,
+                            &error_json,
+                            started_at.elapsed(),
+                            Some(&tool_error),
+                            Some(failure_event_id),
+                        )?;
                         return Err(anyhow::anyhow!(
                             "Fatal tool error in {}: {}",
                             tc.name,
                             tool_error.message
                         ));
                     }
-                    tracer.log_tool_completed_with_approval(
+                    let event_id = tracer.log_tool_completed_with_approval(
                         &tc.name,
                         &error_json,
                         approval_ref.as_deref(),
+                    )?;
+                    self.record_execution_trace(
+                        tc,
+                        &error_json,
+                        started_at.elapsed(),
+                        Some(&tool_error),
+                        Some(event_id),
                     )?;
                     error_json
                 }
@@ -204,6 +212,7 @@ impl<'a> ToolCallProcessor<'a> {
         result_json: &str,
         duration: Duration,
         tool_error: Option<&ToolError>,
+        event_id: Option<String>,
     ) -> anyhow::Result<()> {
         let Some(store) = &self.gateway_store else {
             return Ok(());
@@ -247,7 +256,7 @@ impl<'a> ToolCallProcessor<'a> {
 
         let trace = ExecutionTraceRecord {
             trace_id: uuid::Uuid::new_v4().to_string(),
-            event_id: None,
+            event_id,
             agent_id: self.manifest.agent.id.clone(),
             session_id: session_id.clone(),
             turn_id: self.turn_id.clone(),
@@ -337,7 +346,7 @@ impl<'a> ToolCallProcessor<'a> {
         tracer: &mut SessionTracer,
         tc: &ToolCall,
         error: &ToolError,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         let payload = serde_json::json!({
             "tool_name": tc.name,
             "tool_id": tc.id,

@@ -335,10 +335,10 @@ pub struct GatewayExecutionService {
     execution_semaphore: Arc<Semaphore>,
     agent_admission: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     agent_execution_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Shared per-session budget counters for all spawns using this gateway process.
     session_budget: Arc<SessionBudgetRegistry>,
     gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     active_executions: Arc<ActiveExecutionRegistry>,
+    hook_executor: Arc<crate::scheduler::hooks::HookExecutor>,
 }
 
 impl GatewayExecutionService {
@@ -347,6 +347,12 @@ impl GatewayExecutionService {
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     ) -> Self {
         let session_budget = Arc::new(SessionBudgetRegistry::new(config.session_budget.clone()));
+        let hook_executor = Arc::new(crate::scheduler::hooks::HookExecutor::new(
+            config.hooks.clone(),
+            gateway_store.clone(),
+            config.port,
+            config.signal_delivery_timeout_secs,
+        ));
         Self {
             execution_semaphore: Arc::new(Semaphore::new(config.max_concurrent_spawns.max(1))),
             agent_admission: Arc::new(Mutex::new(HashMap::new())),
@@ -356,6 +362,7 @@ impl GatewayExecutionService {
             session_budget,
             gateway_store,
             active_executions: ActiveExecutionRegistry::new(),
+            hook_executor,
         }
     }
 
@@ -1594,6 +1601,26 @@ impl GatewayExecutionService {
             };
             let digest_turn_count = runtime.turn_counter;
             runtime.close_session(close_reason)?;
+            {
+                let root_id = crate::runtime::live_digest::base_session_id(&resolved_session_id).to_string();
+                let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
+                let gw_dir = self.config.agents_dir.join(".gateway");
+                let ctx = autonoetic_types::hooks::HookContext::for_session_closed(
+                    &root_id,
+                    &resolved_session_id,
+                    agent_id,
+                    close_reason,
+                    digest_turn_count,
+                    Some(&gw_dir),
+                );
+                if is_suspended {
+                    let mut suspended_ctx = ctx.clone();
+                    suspended_ctx.event = autonoetic_types::hooks::HookEvent::SessionSuspended;
+                    self.hook_executor.dispatch_async(suspended_ctx);
+                } else {
+                    self.hook_executor.dispatch_async(ctx);
+                }
+            }
             crate::runtime::post_session_digest::maybe_run_post_session_digest(
                 self.config.as_ref(),
                 &self.config.agents_dir.join(".gateway"),
@@ -2293,6 +2320,25 @@ impl GatewayExecutionService {
         };
         let digest_turn_count = runtime.turn_counter;
         runtime.close_session(close_reason)?;
+        {
+            let root_id = crate::runtime::live_digest::base_session_id(&resolved_session_id).to_string();
+            let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
+            let ctx = autonoetic_types::hooks::HookContext::for_session_closed(
+                &root_id,
+                &resolved_session_id,
+                agent_id,
+                close_reason,
+                digest_turn_count,
+                Some(&self.config.agents_dir.join(".gateway")),
+            );
+            if is_suspended {
+                let mut suspended_ctx = ctx.clone();
+                suspended_ctx.event = autonoetic_types::hooks::HookEvent::SessionSuspended;
+                self.hook_executor.dispatch_async(suspended_ctx);
+            } else {
+                self.hook_executor.dispatch_async(ctx);
+            }
+        }
         crate::runtime::post_session_digest::maybe_run_post_session_digest(
             self.config.as_ref(),
             &self.config.agents_dir.join(".gateway"),

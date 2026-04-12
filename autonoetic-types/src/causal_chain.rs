@@ -109,3 +109,22 @@ pub struct SessionTranscriptRecord {
     pub excerpt: Option<String>,
     pub origin_node_id: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishedSessionReportRecord {
+    pub root_session_id: String,
+    pub report_handle: String,
+    pub overview_handle: Option<String>,
+    pub html_handle: Option<String>,
+    pub narrative_handle: Option<String>,
+    pub title: String,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub agent_count: i32,
+    pub error_count: i32,
+    pub approval_count: i32,
+    pub search_text: String,
+    pub generated_at: String,
+    pub report_version: i32,
+}

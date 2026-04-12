@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 6;
+const SCHEMA_VERSION_LATEST: i64 = 7;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -484,6 +484,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_approval_grants_v4(conn)?;
     apply_user_profiles_v5(conn)?;
     apply_approvals_decision_reason_v6(conn)?;
+    apply_published_reports_and_hooks_v7(conn)?;
 
     Ok(())
 }
@@ -717,6 +718,65 @@ fn apply_approvals_decision_reason_v6(conn: &mut Connection) -> Result<()> {
         params![
             6_i64,
             "approvals_decision_reason",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_published_reports_and_hooks_v7(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 7 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS published_session_reports (
+            root_session_id TEXT PRIMARY KEY,
+            report_handle TEXT NOT NULL,
+            overview_handle TEXT,
+            html_handle TEXT,
+            narrative_handle TEXT,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT,
+            ended_at TEXT,
+            agent_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            approval_count INTEGER NOT NULL DEFAULT 0,
+            search_text TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            report_version INTEGER NOT NULL DEFAULT 1
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS published_session_reports_fts
+            USING fts5(root_session_id, title, search_text, status);
+
+        CREATE TABLE IF NOT EXISTS hook_deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            hook_event TEXT NOT NULL,
+            hook_action TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_hook_deliveries_event
+            ON hook_deliveries(event_id, hook_event, hook_action);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            7_i64,
+            "published_reports_and_hooks",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

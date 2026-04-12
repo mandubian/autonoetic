@@ -420,6 +420,36 @@ retention:
 
 ---
 
+## Hooks
+
+Reactive bindings from gateway events to actions. When an event fires (e.g., session closes, approval resolves), the matching hooks are dispatched.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `hooks[].on` | string | required | Event name: `session.closed`, `session.suspended`, `approval.resolved`, `approval.requested`, `workflow.join.satisfied`, `artifact.created`, `agent.promoted`, `emergency_stop` |
+| `hooks[].action` | string | required | Action: `publish_report`, `deliver_signal`, `agent.spawn`, `http.callback` |
+| `hooks[].async` | bool | `false` | If true, the hook runs in a background task without blocking the event |
+| `hooks[].params` | object | `{}` | Action-specific parameters |
+
+Example:
+
+```yaml
+hooks:
+  - on: "session.closed"
+    action: "publish_report"
+    async: true
+
+  - on: "approval.resolved"
+    action: "deliver_signal"
+    async: true
+
+  - on: "workflow.join.satisfied"
+    action: "deliver_signal"
+    async: true
+```
+
+---
+
 ## Post-Session Digest
 
 LLM summarization and Tier-2 memory extraction after agent sessions complete. Off by default.
