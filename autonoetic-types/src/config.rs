@@ -580,6 +580,49 @@ pub struct GatewayConfig {
     /// Default: 60.
     #[serde(default = "default_signal_delivery_timeout_secs")]
     pub signal_delivery_timeout_secs: u64,
+
+    /// Scheduled jobs (cron) configuration.
+    #[serde(default)]
+    pub scheduled_jobs: ScheduledJobsConfig,
+}
+
+/// Scheduled jobs (cron) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledJobsConfig {
+    /// Minimum allowed interval between job triggers in seconds.
+    /// Prevents abusive high-frequency schedules. Default: 60.
+    #[serde(default = "default_scheduled_jobs_min_interval_secs")]
+    pub min_interval_secs: u64,
+
+    /// Maximum number of scheduled jobs per root session. Default: 50.
+    #[serde(default = "default_scheduled_jobs_max_per_root")]
+    pub max_per_root: usize,
+
+    /// Maximum number of due scheduled jobs admitted per scheduler tick. Default: 16.
+    #[serde(default = "default_scheduled_jobs_max_due_per_tick")]
+    pub max_due_per_tick: usize,
+}
+
+impl Default for ScheduledJobsConfig {
+    fn default() -> Self {
+        Self {
+            min_interval_secs: default_scheduled_jobs_min_interval_secs(),
+            max_per_root: default_scheduled_jobs_max_per_root(),
+            max_due_per_tick: default_scheduled_jobs_max_due_per_tick(),
+        }
+    }
+}
+
+fn default_scheduled_jobs_min_interval_secs() -> u64 {
+    60
+}
+
+fn default_scheduled_jobs_max_per_root() -> usize {
+    50
+}
+
+fn default_scheduled_jobs_max_due_per_tick() -> usize {
+    16
 }
 
 /// Chat TUI configuration.
@@ -1092,6 +1135,7 @@ impl Default for GatewayConfig {
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
+            scheduled_jobs: ScheduledJobsConfig::default(),
         }
     }
 }
