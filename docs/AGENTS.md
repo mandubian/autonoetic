@@ -207,6 +207,7 @@ Capabilities fall into three categories:
 | `AgentSpawn` | `max_children: number` | Create child agent sessions |
 | `AgentMessage` | `patterns: [string]` | Send messages to other agents |
 | `BackgroundReevaluation` | `min_interval_secs: number, allow_reasoning: boolean` | Periodic wake-ups for background processing |
+| `SchedulerAccess` | `patterns: [string]` | Create, list, pause, resume, cancel scheduled cron jobs (e.g., `scheduler.cron.*`) |
 
 ### Capability Semantics
 
