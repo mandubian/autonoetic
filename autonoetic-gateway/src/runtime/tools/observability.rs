@@ -134,7 +134,7 @@ impl NativeTool for ObservabilityReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Read an observability resource by URI. Fetches published session reports and their sub-resources (agents, timeline, approvals, errors). The view parameter controls depth: 'metadata' returns structure only, 'summary' returns compact body (default), 'full' returns complete redacted detail. Unlike execution.search (raw tool traces), this returns high-level session reports suitable for cross-session learning.".to_string(),
+            description: "Read an observability resource by URI. Fetches published session report metadata and sub-resource summaries. The view parameter controls depth: 'metadata' returns structure only, 'summary' returns compact body (default), 'full' returns complete detail. Published reports are sanitized — input/output previews, tool details, and approval reasons are stripped before storage. Unlike execution.search (raw tool traces), this returns high-level session reports suitable for cross-session learning.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
