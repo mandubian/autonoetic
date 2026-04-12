@@ -580,6 +580,9 @@ pub struct GatewayConfig {
     /// Default: 60.
     #[serde(default = "default_signal_delivery_timeout_secs")]
     pub signal_delivery_timeout_secs: u64,
+
+    #[serde(default)]
+    pub hooks: Vec<crate::hooks::HookConfig>,
 }
 
 /// Chat TUI configuration.
@@ -1092,6 +1095,7 @@ impl Default for GatewayConfig {
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
+            hooks: Vec::new(),
         }
     }
 }

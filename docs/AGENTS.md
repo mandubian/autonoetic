@@ -326,6 +326,23 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 | `promotion.record` | `(artifact_id: string, ...) → record` | Record evaluator/auditor evidence for promotion. Canonical `content_digest` binding is gateway-owned and attached during revision create/promote. |
 | `promotion.query` | `(scope: string, ...) → [records]` | Query promotion records |
 
+### Execution Tools (Same-Session Debugging)
+
+For searching raw tool execution traces within sessions. Returns stdout, stderr, exit codes, duration — the low-level debugging surface.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `execution.search` | `(tool_name?, success?, error_type?, command_pattern?, agent_id?, session_id?, limit?) → traces` | Search raw execution traces by tool name, success/failure, error type, command pattern, or agent. Returns full execution detail. For cross-session discovery of summaries, use `observability.search`. |
+
+### Observability Tools (Cross-Session Discovery)
+
+For discovering and reading published session reports across sessions. The high-level observability surface — complements `execution.search` (which is for raw tool traces).
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `observability.search` | `(query: string, limit?) → reports` | Discover published session reports by text search. Returns matching reports with URIs and summaries. |
+| `observability.read` | `(uri: string, view?) → resource` | Read an observability resource by URI. `view`: `metadata` (structure only), `summary` (default, compact body), `full` (complete detail). URIs follow `autonoetic://observability/roots/<root>/report[/...]`. |
+
 ---
 
 ## Agent Lifecycle

@@ -448,6 +448,7 @@ agent_dir/history/causal_chain.jsonl
 
 ```json
 {
+  "event_id": "uuid-v4",
   "session_id": "session-123",
   "turn_id": "turn-abc",
   "event_seq": 42,
@@ -459,6 +460,8 @@ agent_dir/history/causal_chain.jsonl
   "prev_hash": "sha256:..."
 }
 ```
+
+The `event_id` is the universal correlation key: execution traces, session reports, and the observability surface all join back to the causal chain via this field.
 
 ### Key Events
 
@@ -697,6 +700,7 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 | Column | Description |
 |--------|-------------|
 | `trace_id` | UUID |
+| `event_id` | Joins to `causal_events.event_id` — the universal correlation key |
 | `tool_name` | sandbox.exec, agent.revision.promote... |
 | `command` | The executed command |
 | `exit_code` | Process exit code |
@@ -765,6 +769,82 @@ Agent: {agent_id} | Started: {timestamp}
 
 ---
 
+## Observability Surface
+
+The observability surface lets agents discover and inspect session reports across sessions. It is built on top of the causal chain (the authoritative spine) and is complementary to `execution.search` (which searches raw tool traces within a session).
+
+### Architecture
+
+1. **Session reports** are written to the session directory during execution (JSON, markdown, HTML)
+2. On session close, the **hook system** fires a `session.closed` event
+3. The `publish_report` hook action reads the report, writes it to the content store, and registers it in the `published_session_reports` catalog
+4. Agents use `observability.search` to discover reports and `observability.read` to fetch them by URI
+
+### URI Scheme
+
+All observability resources use `autonoetic://observability/roots/<root>/...`:
+
+| URI | Resource |
+|-----|----------|
+| `.../report` | Full session report |
+| `.../report/overview` | Compact overview (status, counts) |
+| `.../report/agents` | Agent list |
+
+### Report Links
+
+Every node in the JSON report includes a `links` object with URI backlinks:
+
+- **Agent nodes** → self, session, causal, traces
+- **Timeline events** (when `event_id` present) → self, session, causal
+- **Error items** (when `event_id` present) → self, session, causal
+- **Approval items** → self, session, causal
+
+---
+
+## Hook System
+
+The gateway has a configurable hook system that replaces hardcoded reactive behaviors. Hooks bind gateway events to actions:
+
+```yaml
+hooks:
+  - on: "session.closed"
+    action: "publish_report"
+    async: true
+  - on: "approval.resolved"
+    action: "deliver_signal"
+    async: true
+```
+
+### Available Events
+
+| Event | Trigger |
+|-------|---------|
+| `session.closed` | Session finishes normally |
+| `session.suspended` | Session suspends for approval or user input |
+| `approval.resolved` | An approval request is approved, rejected, or cancelled |
+| `approval.requested` | A new approval request is created |
+| `workflow.join.satisfied` | A workflow join condition is met |
+| `artifact.created` | A new artifact is built |
+| `agent.promoted` | An agent revision is promoted |
+| `emergency_stop` | Emergency stop is triggered |
+
+### Available Actions
+
+| Action | Description |
+|--------|-------------|
+| `publish_report` | Reads session report, writes to content store, registers in catalog |
+| `deliver_signal` | Delivers a signal to a waiting session (approval, workflow join) |
+| `agent.spawn` | *(reserved)* Spawns an agent in response to an event |
+| `http.callback` | *(reserved)* Sends an HTTP POST to an external URL |
+
+### Hook Dispatch
+
+- **Async hooks** return immediately; the action runs in a background tokio task
+- **Sync hooks** block the triggering operation until the action completes
+- Failed hooks log a warning but do not fail the triggering operation
+
+---
+
 ## Unified Gateway Database
 
 All transactional state in a single SQLite database:
@@ -801,7 +881,12 @@ All transactional state in a single SQLite database:
 ├── memories               # Tier 2 durable memory
 ├── memory_tags            # Tag index for knowledge.search_by_tags
 ├── artifact_refs          # Short ref → digest mapping
-└── short_id_index         # LLM-friendly short IDs for revisions and runs
+├── short_id_index         # LLM-friendly short IDs for revisions and runs
+│
+│   ── Observability & Hooks ──
+├── published_session_reports      # Published report catalog (root_session_id → handles + metadata)
+├── published_session_reports_fts  # FTS5 index for observability.search
+└── hook_deliveries                # Hook dispatch tracking (idempotency + retry state)
 ```
 
 ### Retention Policy

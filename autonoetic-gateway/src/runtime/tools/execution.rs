@@ -24,7 +24,7 @@ impl NativeTool for ExecutionSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Search past execution traces to learn from previous sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns full execution details including stdout, stderr, exit codes, and duration. Available to all agents for cross-session learning.".to_string(),
+            description: "Search raw execution traces for tool-level debugging within sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns full execution details including stdout, stderr, exit codes, and duration. For cross-session discovery of high-level session summaries, use observability.search instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

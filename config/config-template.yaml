@@ -51,6 +51,26 @@ approval_timeout_secs: 600
 # + tool calls). Default: 60.
 # signal_delivery_timeout_secs: 60
 
+# ── Hooks ──────────────────────────────────────────────────────────────
+# Reactive bindings from gateway events to actions.
+# Available events: session.closed, session.suspended, approval.resolved,
+#   approval.requested, workflow.join.satisfied, artifact.created,
+#   agent.promoted, emergency_stop
+# Available actions: publish_report, deliver_signal, agent.spawn, http.callback
+#
+# hooks:
+#   - on: "session.closed"
+#     action: "publish_report"
+#     async: true
+#
+#   - on: "approval.resolved"
+#     action: "deliver_signal"
+#     async: true
+#
+#   - on: "workflow.join.satisfied"
+#     action: "deliver_signal"
+#     async: true
+
 # ── Chat TUI ──────────────────────────────────────────────────────────
 # Inline approval from the chat interface (Ctrl+A).
 chat:

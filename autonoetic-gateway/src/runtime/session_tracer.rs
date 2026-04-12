@@ -354,7 +354,7 @@ impl SessionTracer {
         action: &str,
         status: EntryStatus,
         payload: Option<serde_json::Value>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         let event_seq = self.next_event_seq();
         let event_id = uuid::Uuid::new_v4().to_string();
 
@@ -420,7 +420,7 @@ impl SessionTracer {
             }
         }
 
-        Ok(())
+        Ok(event_id)
     }
 
     pub fn log_session_start(
@@ -631,7 +631,7 @@ impl SessionTracer {
         Ok(())
     }
 
-    pub fn log_tool_completed(&mut self, tool_name: &str, result: &str) -> anyhow::Result<()> {
+    pub fn log_tool_completed(&mut self, tool_name: &str, result: &str) -> anyhow::Result<String> {
         self.log_tool_completed_with_approval(tool_name, result, None)
     }
 
@@ -640,7 +640,7 @@ impl SessionTracer {
         tool_name: &str,
         result: &str,
         approval_ref: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         let mut completed_payload = serde_json::json!({
             "tool_name": tool_name,
             "result_len": result.len(),
@@ -672,7 +672,7 @@ impl SessionTracer {
         if let Some(evidence_ref) = evidence_ref {
             completed_payload["evidence_ref"] = serde_json::json!(evidence_ref);
         }
-        self.log_event(
+        let event_id = self.log_event(
             "tool_invoke",
             "completed",
             EntryStatus::Success,
@@ -743,6 +743,7 @@ impl SessionTracer {
                     result,
                     approval_ref,
                     self.turn_id.as_deref(),
+                    Some(&event_id),
                 ) {
                     tracing::warn!(
                         target: "session_report",
@@ -759,7 +760,7 @@ impl SessionTracer {
                 "result": crate::log_redaction::redact_text_for_logs(result)
             })),
         );
-        Ok(())
+        Ok(event_id)
     }
 
     pub fn log_artifact_detected(&mut self, artifact: &Artifact) -> anyhow::Result<()> {
@@ -771,7 +772,8 @@ impl SessionTracer {
                 "type": artifact.artifact_type,
                 "name": artifact.name
             }))),
-        )
+        )?;
+        Ok(())
     }
 
     pub fn log_hibernate(&mut self, stop_reason: &str) {

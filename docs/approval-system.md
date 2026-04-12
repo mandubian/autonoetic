@@ -211,6 +211,15 @@ When the operator approves a `sandbox.exec` that accesses specific hosts, the ga
 3. Existing approved/pending approvals (domain-level)
 4. New approval request
 
+### Hook-Based Reactive Dispatch
+
+When an approval is resolved (approved, rejected, or cancelled), the gateway's **hook system** can trigger actions:
+
+- **`deliver_signal`** — Dispatches an `ApprovalResolved` signal to the waiting session, resuming the agent's turn. Currently wired through the existing `write_signal` path in `approval.rs`.
+- **`publish_report`** — Can be triggered on `approval.resolved` to update observability data.
+
+Hooks are configured in `config.yaml` (see `docs/config-reference.md` → Hooks). The `approval.resolved` hook receives a `HookContext` with `request_id`, `decision`, `session_id`, `agent_id`, and `root_session_id`.
+
 ### Promotion Severity Gating
 
 The `promotion.record` tool mechanically enforces that `pass=true` cannot be set when findings indicate the code hasn't been properly validated:
@@ -373,5 +382,8 @@ autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
 | `autonoetic-gateway/src/runtime/lifecycle.rs` | Session close — grant cleanup for non-suspended sessions |
 | `autonoetic-gateway/src/execution.rs` | Emergency stop — grant cleanup during circuit breaker |
 | `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Database migration v4: `session_approval_grants` table |
+| `autonoetic-gateway/src/scheduler/hooks.rs` | Hook system — configurable reactive dispatch (`publish_report`, `deliver_signal`). Future: hook-based approval auto-resolution |
+| `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Database migration v7: `published_session_reports`, `published_session_reports_fts`, `hook_deliveries` tables |
 | `autonoetic-types/src/background.rs` | `ApprovalRequest`, `ScheduledAction` (with `detected_hosts`), `ApprovalStatus` types |
+| `autonoetic-types/src/hooks.rs` | `HookEvent`, `HookAction`, `HookConfig`, `HookContext` types |
 | `autonoetic-types/src/promotion.rs` | `PromotionRecordArgs` type |

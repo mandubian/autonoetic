@@ -13,6 +13,7 @@ pub mod causal_chain;
 pub mod config;
 pub mod disclosure;
 pub mod evaluation;
+pub mod hooks;
 pub mod id_format;
 pub mod layer;
 pub mod memory;

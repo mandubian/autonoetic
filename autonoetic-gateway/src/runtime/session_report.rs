@@ -54,10 +54,13 @@ struct AgentReport {
     errors: Vec<ErrorItem>,
     artifacts: Vec<ArtifactItem>,
     delegations: Vec<DelegationItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    links: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ApprovalItem {
+    event_id: Option<String>,
     request_id: String,
     status: String,
     kind: String,
@@ -67,13 +70,18 @@ struct ApprovalItem {
     created_at: String,
     resolved_at: Option<String>,
     resolution_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    links: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ErrorItem {
+    event_id: Option<String>,
     created_at: String,
     tool_name: Option<String>,
     summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    links: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +103,7 @@ struct DelegationItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReportEvent {
+    event_id: Option<String>,
     created_at: String,
     session_id: String,
     agent_id: String,
@@ -104,6 +113,8 @@ struct ReportEvent {
     important: bool,
     details: Option<Value>,
     payload_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    links: Option<Value>,
 }
 
 pub struct SessionReportWriter {
@@ -117,6 +128,7 @@ pub struct SessionReportWriter {
     agent_id: String,
     depth: usize,
     payload_counter: u32,
+    content_store: Option<crate::runtime::content_store::ContentStore>,
 }
 
 impl SessionReportState {
@@ -160,6 +172,7 @@ impl AgentReport {
             errors: Vec::new(),
             artifacts: Vec::new(),
             delegations: Vec::new(),
+            links: None,
         }
     }
 }
@@ -174,6 +187,7 @@ impl SessionReportWriter {
         let payload_counter = std::fs::read_dir(&report_data_dir)
             .map(|entries| entries.filter_map(|e| e.ok()).count())
             .unwrap_or(0) as u32;
+        let content_store = crate::runtime::content_store::ContentStore::new(gateway_dir).ok();
         Ok(Self {
             state_path: dir.join("session_report.live.json"),
             live_md_path: dir.join("session_overview.md"),
@@ -185,6 +199,7 @@ impl SessionReportWriter {
             agent_id: agent_id.to_string(),
             depth: session_depth(session_id),
             payload_counter,
+            content_store,
         })
     }
 
@@ -212,6 +227,7 @@ impl SessionReportWriter {
             push_event(
                 state,
                 ReportEvent {
+                    event_id: None,
                     created_at: now,
                     session_id: self.session_id.clone(),
                     agent_id: self.agent_id.clone(),
@@ -221,6 +237,7 @@ impl SessionReportWriter {
                     important: true,
                     details: None,
                     payload_ref: None,
+                    links: None,
                 },
             );
         })
@@ -239,6 +256,7 @@ impl SessionReportWriter {
             push_event(
                 state,
                 ReportEvent {
+                    event_id: None,
                     created_at: now,
                     session_id: self.session_id.clone(),
                     agent_id: self.agent_id.clone(),
@@ -248,6 +266,7 @@ impl SessionReportWriter {
                     important: false,
                     details: None,
                     payload_ref: None,
+                    links: None,
                 },
             );
         })
@@ -268,6 +287,7 @@ impl SessionReportWriter {
             push_event(
                 state,
                 ReportEvent {
+                    event_id: None,
                     created_at: now,
                     session_id: self.session_id.clone(),
                     agent_id: self.agent_id.clone(),
@@ -277,6 +297,7 @@ impl SessionReportWriter {
                     important: false,
                     details: None,
                     payload_ref: None,
+                    links: None,
                 },
             );
         })
@@ -302,6 +323,7 @@ impl SessionReportWriter {
             push_event(
                 state,
                 ReportEvent {
+                    event_id: None,
                     created_at: now,
                     session_id: self.session_id.clone(),
                     agent_id: self.agent_id.clone(),
@@ -311,6 +333,7 @@ impl SessionReportWriter {
                     important: !is_poll_tool(tool_name),
                     details: parse_truncated_json(arguments_redacted, 200),
                     payload_ref: None,
+                    links: None,
                 },
             );
         })
@@ -322,6 +345,7 @@ impl SessionReportWriter {
         result_json: &str,
         approval_ref: Option<&str>,
         turn_id: Option<&str>,
+        event_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let save_payload = result_json.len() > LARGE_PAYLOAD_THRESHOLD;
         let session_id = self.session_id.clone();
@@ -329,6 +353,7 @@ impl SessionReportWriter {
         let depth = self.depth;
         let mut counter = self.payload_counter;
         let mut payload_filename: Option<String> = None;
+        let event_id_owned = event_id.map(String::from);
         self.update_state(|state| {
             let now = chrono::Utc::now().to_rfc3339();
             let parsed = serde_json::from_str::<Value>(result_json).ok();
@@ -383,14 +408,30 @@ impl SessionReportWriter {
                 let summary = summarize_tool_result(tool_name, parsed.as_ref(), result_json);
                 let payload_ref = if save_payload {
                     counter += 1;
-                    let filename = format!(
-                        "event-{}-{}-{}.json",
-                        counter,
-                        tool_name.replace('.', "_"),
-                        turn_id.unwrap_or("none"),
-                    );
-                    payload_filename = Some(filename.clone());
-                    Some(filename)
+                    if let Some(ref cs) = self.content_store {
+                        let payload = serde_json::json!({
+                            "tool": tool_name,
+                            "turn_id": turn_id,
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "raw_result": result_json,
+                        });
+                        match serde_json::to_string_pretty(&payload) {
+                            Ok(body) => match cs.write(body.as_bytes()) {
+                                Ok(handle) => Some(handle),
+                                Err(_) => None,
+                            },
+                            Err(_) => None,
+                        }
+                    } else {
+                        let filename = format!(
+                            "event-{}-{}-{}.json",
+                            counter,
+                            tool_name.replace('.', "_"),
+                            turn_id.unwrap_or("none"),
+                        );
+                        payload_filename = Some(filename.clone());
+                        Some(filename)
+                    }
                 } else {
                     None
                 };
@@ -418,9 +459,11 @@ impl SessionReportWriter {
             } else if !ok {
                 agent.error_count = agent.error_count.saturating_add(1);
                 agent.errors.push(ErrorItem {
+                    event_id: event_id_owned.clone(),
                     created_at: now.clone(),
                     tool_name: Some(tool_name.to_string()),
                     summary: summary.to_string(),
+                    links: None,
                 });
             } else {
                 maybe_record_output(agent, tool_name, parsed.as_ref(), &summary, &now);
@@ -429,6 +472,7 @@ impl SessionReportWriter {
             push_event(
                 state,
                 ReportEvent {
+                    event_id: event_id_owned,
                     created_at: now,
                     session_id: session_id.clone(),
                     agent_id: agent_id.clone(),
@@ -438,19 +482,22 @@ impl SessionReportWriter {
                     important,
                     details,
                     payload_ref,
+                    links: None,
                 },
             );
         })?;
         self.payload_counter = counter;
         if let Some(filename) = payload_filename {
-            let payload = serde_json::json!({
-                "tool": tool_name,
-                "turn_id": turn_id,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "raw_result": result_json,
-            });
-            if let Ok(body) = serde_json::to_string_pretty(&payload) {
-                let _ = std::fs::write(self.report_data_dir.join(&filename), body);
+            if self.content_store.is_none() {
+                let payload = serde_json::json!({
+                    "tool": tool_name,
+                    "turn_id": turn_id,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "raw_result": result_json,
+                });
+                if let Ok(body) = serde_json::to_string_pretty(&payload) {
+                    let _ = std::fs::write(self.report_data_dir.join(&filename), body);
+                }
             }
         }
         Ok(())
@@ -473,6 +520,7 @@ impl SessionReportWriter {
             push_event(
                 state,
                 ReportEvent {
+                    event_id: None,
                     created_at: now,
                     session_id: self.session_id.clone(),
                     agent_id: self.agent_id.clone(),
@@ -487,6 +535,7 @@ impl SessionReportWriter {
                     important: true,
                     details: None,
                     payload_ref: None,
+                    links: None,
                 },
             );
         })
@@ -514,6 +563,7 @@ impl SessionReportWriter {
             push_event(
                 state,
                 ReportEvent {
+                    event_id: None,
                     created_at: now,
                     session_id: self.session_id.clone(),
                     agent_id: self.agent_id.clone(),
@@ -523,6 +573,7 @@ impl SessionReportWriter {
                     important: true,
                     details: None,
                     payload_ref: None,
+                    links: None,
                 },
             );
         })
@@ -557,6 +608,7 @@ impl SessionReportWriter {
             push_event(
                 state,
                 ReportEvent {
+                    event_id: None,
                     created_at: now,
                     session_id: self.session_id.clone(),
                     agent_id: self.agent_id.clone(),
@@ -567,6 +619,7 @@ impl SessionReportWriter {
                     details: latest_assistant_output
                         .map(|s| Value::String(truncate_chars(&redact_text_for_logs(s), 800))),
                     payload_ref: None,
+                    links: None,
                 },
             );
         })
@@ -594,6 +647,7 @@ impl SessionReportWriter {
         let mut state = self.load_state()?;
         f(&mut state);
         state.generated_at = chrono::Utc::now().to_rfc3339();
+        attach_links(&mut state);
         let live_md = render_live_markdown(&state);
         let final_md = render_final_markdown(&state);
         let final_html = render_html_report(&state);
@@ -636,6 +690,70 @@ fn push_event(state: &mut SessionReportState, event: ReportEvent) {
     if state.timeline.len() > MAX_EVENTS {
         let drop_n = state.timeline.len().saturating_sub(MAX_EVENTS);
         state.timeline.drain(0..drop_n);
+    }
+}
+
+fn obs_uri(root: &str, tail: &str) -> String {
+    format!("autonoetic://observability/roots/{}/{}", root, tail)
+}
+
+fn encoded_session(sid: &str) -> String {
+    sid.replace('/', "%2F")
+}
+
+fn attach_links(state: &mut SessionReportState) {
+    let root = &state.root_session_id;
+
+    for agent in state.agents.values_mut() {
+        let enc = encoded_session(&agent.session_id);
+        agent.links = Some(serde_json::json!({
+            "self": obs_uri(root, &format!("report/agents/{}", enc)),
+            "session": obs_uri(root, &format!("sessions/{}", enc)),
+            "causal": obs_uri(root, &format!("sessions/{}/causal", enc)),
+            "traces": obs_uri(root, &format!("sessions/{}/traces", enc)),
+        }));
+
+        for err in &mut agent.errors {
+            let mut links = serde_json::json!({
+                "session": obs_uri(root, &format!("sessions/{}", enc)),
+            });
+            if let Some(ref eid) = err.event_id {
+                links["causal"] =
+                    serde_json::json!(obs_uri(root, &format!("sessions/{}/causal/{}", enc, eid)));
+                links["self"] = serde_json::json!(obs_uri(root, &format!("report/errors/{}", eid)));
+            }
+            err.links = Some(links);
+        }
+
+        for appr in &mut agent.approvals {
+            let mut links = serde_json::json!({
+                "self": obs_uri(root, &format!("report/approvals/{}", appr.request_id)),
+                "session": obs_uri(root, &format!("sessions/{}", enc)),
+            });
+            if let Some(ref eid) = appr.event_id {
+                links["causal"] =
+                    serde_json::json!(obs_uri(root, &format!("sessions/{}/causal/{}", enc, eid)));
+            }
+            appr.links = Some(links);
+        }
+    }
+
+    for ev in &mut state.timeline {
+        if ev.event_id.is_none() {
+            continue;
+        }
+        let enc = encoded_session(&ev.session_id);
+        let eid = ev.event_id.as_ref().unwrap();
+        let mut links = serde_json::json!({
+            "self": obs_uri(root, &format!("report/timeline/{}", eid)),
+            "session": obs_uri(root, &format!("sessions/{}", enc)),
+            "causal": obs_uri(root, &format!("sessions/{}/causal/{}", enc, eid)),
+        });
+        if ev.kind == "TOOL_COMPLETE" || ev.kind == "TOOL_ERROR" {
+            links["trace_collection"] =
+                serde_json::json!(obs_uri(root, &format!("sessions/{}/traces", enc)));
+        }
+        ev.links = Some(links);
     }
 }
 
@@ -943,6 +1061,7 @@ fn upsert_approval(agent: &mut AgentReport, parsed: Option<&Value>, now: &str) {
         return;
     }
     agent.approvals.push(ApprovalItem {
+        event_id: None,
         request_id: request_id.to_string(),
         status: "pending".to_string(),
         kind: kind.to_string(),
@@ -952,6 +1071,7 @@ fn upsert_approval(agent: &mut AgentReport, parsed: Option<&Value>, now: &str) {
         created_at: now.to_string(),
         resolved_at: None,
         resolution_summary: None,
+        links: None,
     });
 }
 
@@ -2241,6 +2361,7 @@ mod tests {
                 r#"{"approval_required":true,"request_id":"apr-1","approval":{"kind":"sandbox_exec","summary":"remote access detected","reason":"api.open-meteo.com"},"ok":false}"#,
                 None,
                 Some("turn-1"),
+                None,
             )
             .unwrap();
         writer

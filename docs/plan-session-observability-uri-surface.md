@@ -95,7 +95,7 @@ Rules:
 4. **No new synthetic IDs.** Use `event_id` for timeline events and errors, `request_id` for approvals, `session_id` for agents, `artifact_id` for artifacts. Introduce no new ID namespaces.
 5. **No filesystem paths in agent-facing APIs.** Filesystem layout is implementation detail, not resource identity.
 6. **Keep policy orthogonal to addressing.** A URI identifies a resource. Access to that resource is a separate ACL decision.
-7. **One authoritative interface.** Two tools: `observability.search` and `observability.read`. Replace overlapping legacy tools.
+7. **Two complementary interfaces.** `execution.search` for raw tool traces (same-session debugging), `observability.search` and `observability.read` for cross-session discovery. Not a replacement — they serve different audiences.
 8. **Hooks, not hardcoding.** Report publishing, notification, and any post-event processing are driven by configurable hooks, not embedded in session lifecycle code.
 
 ---
@@ -106,7 +106,7 @@ Rules:
 2. **Publication model:** `published_session_reports` catalog table + FTS index. No new content visibility class.
 3. **Tool surface:** Two tools — `observability.search` (discover) and `observability.read` (inspect). `observability.resolve` is merged into `observability.read` with `view: metadata | full`.
 4. **Hook system:** Generic event hook mechanism replaces hardcoded report publishing. Report generation is just another hook consumer.
-5. **Legacy cleanup:** Remove `execution.search`. Keep `session.search`/`session.peek` as transcript-only tools.
+5. **Keep `execution.search`:** It searches raw `execution_traces` — a complementary low-level surface for same-session tool debugging. `observability.search` searches published session reports — a high-level cross-session discovery surface. Different audiences, different data.
 
 ---
 
@@ -588,10 +588,10 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 
 **New file:** `autonoetic-gateway/src/scheduler/hooks.rs`
 
-- [ ] Define `HookEvent`, `HookAction`, `HookConfig` types
-- [ ] Add `hooks` section to `GatewayConfig`
-- [ ] Implement hook executor: match event → dispatch action (async/sync)
-- [ ] Add `hook_deliveries` table for idempotency tracking
+- [x] Define `HookEvent`, `HookAction`, `HookConfig` types
+- [x] Add `hooks` section to `GatewayConfig`
+- [x] Implement hook executor: match event → dispatch action (async/sync)
+- [x] Add `hook_deliveries` table for idempotency tracking
 - [ ] Migrate existing signal delivery to hook-based dispatch
 - [ ] Migrate report finalization to `publish_report` hook on `session.closed`
 
@@ -603,18 +603,18 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 
 **Files:** `session_tracer.rs`, `tool_call_processor.rs`
 
-- [ ] Thread the causal `event_id` through the tool execution pipeline
-- [ ] Stop writing `ExecutionTraceRecord.event_id = None`
-- [ ] Every execution trace row is now mechanically joinable to its causal event
+- [x] Thread the causal `event_id` through the tool execution pipeline
+- [x] Stop writing `ExecutionTraceRecord.event_id = None`
+- [x] Every execution trace row is now mechanically joinable to its causal event
 
 #### Task 1.2: Add `links` and `event_id` to report nodes
 
 **File:** `session_report.rs`
 
-- [ ] Use `event_id` from the causal chain as the node key for timeline events and errors
-- [ ] Add `links` payloads with URI backlinks to causal/trace/session
-- [ ] Drop any use of `report_event_id` or `report_error_id` — these do not exist
-- [ ] Evolve `payload_ref` from session-local filenames to content-backed handles
+- [x] Use `event_id` from the causal chain as the node key for timeline events and errors
+- [x] Add `links` payloads with URI backlinks to causal/trace/session
+- [x] Drop any use of `report_event_id` or `report_error_id` — these do not exist
+- [x] Evolve `payload_ref` from session-local filenames to content-backed handles
 
 ### Phase 2: Published Report Catalog
 
@@ -622,7 +622,7 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 
 **Files:** `gateway_store/migrate.rs`, `gateway_store/observability.rs`
 
-- [ ] Add `published_session_reports` table:
+- [x] Add `published_session_reports` table:
   - `root_session_id TEXT PRIMARY KEY`
   - `report_handle TEXT NOT NULL`
   - `overview_handle TEXT`, `html_handle TEXT`, `narrative_handle TEXT`
@@ -632,16 +632,16 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
   - `search_text TEXT NOT NULL` (FTS-indexed)
   - `generated_at TEXT NOT NULL`
   - `report_version INTEGER NOT NULL`
-- [ ] Add FTS index for discovery
-- [ ] Lookup/search helpers
+- [x] Add FTS index for discovery
+- [x] Lookup/search helpers
 
 #### Task 2.2: Content-store-backed report storage
 
 **Files:** `session_report.rs`, `content_store.rs`
 
-- [ ] Write final report to content store (not global manifest)
-- [ ] Register in catalog on publish (via hook)
-- [ ] Session-directory files become optional projections
+- [x] Write final report to content store (not global manifest)
+- [x] Register in catalog on publish (via hook)
+- [x] Session-directory files become optional projections
 
 ### Phase 3: Observability Tools
 
@@ -649,19 +649,26 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 
 **New file:** `runtime/tools/observability.rs`
 
-- [ ] `observability.search` — discovers published reports and same-root resources
-- [ ] `observability.read` — fetches resource by URI, `view` parameter controls depth
-- [ ] Register in the native tool registry
+- [x] `observability.search` — discovers published reports across sessions
+- [x] `observability.read` — fetches resource by URI, `view` parameter controls depth
+- [x] Register in the native tool registry
 
-#### Task 3.2: ACL enforcement
+#### Task 3.2: Keep `execution.search` as complementary
+
+**File:** `runtime/tools/execution.rs` (no changes)
+
+- [x] `execution.search` remains unchanged — it searches raw `execution_traces` for same-session tool debugging
+- [x] Updated tool description to clarify the distinction from `observability.search`
+
+#### Task 3.3: ACL enforcement
 
 **Files:** `observability.rs`, `policy.rs`
 
-- [ ] Gate tools by `observability/...` scope prefixes
-- [ ] Combine static scope checks with dynamic root-session checks
-- [ ] Keep transcript/evidence disabled
+- [x] Gate tools by `ReadAccess` capability (same as `content.read`)
+- [ ] Combine static scope checks with dynamic root-session checks (deferred to v2)
+- [x] Keep transcript/evidence disabled
 
-#### Task 3.3: Remove `execution.search`
+#### Task 3.4: Remove `execution.search`
 
 **Files:** `runtime/tools/execution.rs`, `runtime/tools/mod.rs`
 
