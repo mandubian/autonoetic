@@ -21,6 +21,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Unified Gateway Database](#unified-gateway-database)
 - [Emergency Stop](#emergency-stop)
 - [Human Escalation](#human-escalation)
+- [Scheduled Tasks](#scheduled-tasks)
 - [Design Principles](#design-principles)
 
 ---
@@ -882,6 +883,66 @@ On checkpoint resume for `HumanEscalation`:
 ### Design Rationale
 
 This follows the **Separation of Powers** principle: the agent can request help, but only the gateway can unblock execution. The operator's guidance is mechanically injected — no agent interpretation or filtering.
+
+---
+
+## Scheduled Tasks
+
+The gateway provides first-class scheduled task support through `scheduler.cron.*` tools, allowing agents to register recurring work that is durably persisted and triggered by the background scheduler tick.
+
+### Data Model
+
+Scheduled jobs are stored in the `scheduled_jobs` SQLite table (schema v7) with the following key fields:
+
+| Field | Description |
+|-------|-------------|
+| `job_id` | Primary key (e.g., `sj-<uuid>`) |
+| `owner_agent_id` | The agent that created the job (bound to `manifest.agent.id` at creation) |
+| `root_session_id` | Root session scope for the job |
+| `target_agent_id` | Agent to trigger when the job fires |
+| `message` | Prompt/message sent to the target agent |
+| `cron_expr` | Normalized 5-field cron expression |
+| `timezone` | Always `UTC` in v1 |
+| `next_run_at` | RFC3339 timestamp of next trigger |
+| `status` | `active`, `paused`, or `cancelled` |
+| `generation` | Optimistic locking counter for atomic claim |
+
+### Execution Model
+
+1. **Scheduler tick** loads active jobs where `next_run_at <= now`
+2. **Atomic claim-and-advance**: the job's `next_run_at` is advanced to the next occurrence in the same UPDATE that claims it, preventing duplicate triggers
+3. **Workflow enqueue**: the job creates a `QueuedTaskRun` in a durable workflow, reusing the existing async task execution path
+4. **Error backoff**: if enqueue fails, the job records `last_error` and advances `next_run_at` by 60 seconds
+
+### Cron Expression Support
+
+Both explicit cron and constrained natural-language phrases are supported:
+
+| Pattern | Example | Normalized Cron |
+|---------|---------|-----------------|
+| Interval | `every 5 minutes` | `0/5 * * * *` |
+| Interval | `every 2 hours` | `0 0/2 * * *` |
+| Daily | `every day at 09:00` | `0 9 * * *` |
+| Weekly | `every monday at 14:30` | `0 14 * * 1` |
+| Explicit | `*/15 * * * *` | `*/15 * * * *` |
+
+Second-resolution scheduling (`every N seconds`) is explicitly **not supported** — the minimum interval is 1 minute.
+
+### Security Model
+
+- **Ownership isolation**: agents can only list, pause, resume, or cancel jobs they own
+- **Capability gating**: `SchedulerAccess` capability required for all `scheduler.cron.*` operations
+- **Approval preservation**: scheduled task execution uses the same workflow paths, so sandbox approvals and remote-access checks still apply
+- **Guardrails**: `min_interval_secs` (default 60) prevents abusive high-frequency schedules; `max_per_root` (default 50) caps jobs per root session
+
+### Configuration
+
+```yaml
+scheduled_jobs:
+  min_interval_secs: 60    # Minimum interval between triggers
+  max_per_root: 50         # Max jobs per root session
+  max_due_per_tick: 16     # Max due jobs processed per tick
+```
 
 ---
 
