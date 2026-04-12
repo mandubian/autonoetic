@@ -14,6 +14,7 @@
 //! ```
 
 use crate::runtime::content_store::{root_session_id, ContentStore};
+use anyhow::Context;
 use autonoetic_types::artifact::{ArtifactBundle, ArtifactFileEntry, ArtifactKind};
 use autonoetic_types::layer::ArtifactLayer;
 use sha2::{Digest, Sha256};
@@ -238,16 +239,34 @@ impl ArtifactStore {
 
         // Phase 1: Resolve all inputs to file handles
         for input_name in inputs {
-            // Same resolution as `content.read` (`cnt_*`, bare alias, `sha256:`, logical names).
-            let handle = self.content_store.resolve_name_or_handle_to_handle(
-                builder_session_id,
-                input_name,
-            )?;
+            if input_name.starts_with("art_") {
+                let bundle = self
+                    .inspect(input_name)
+                    .with_context(|| format!("artifact '{}' not found", input_name))?;
+                for file in &bundle.files {
+                    let content = self.content_store.read(&file.handle)?;
+                    anyhow::ensure!(
+                        !content.is_empty(),
+                        "artifact input '{}' (via {}) resolved to empty content",
+                        file.handle,
+                        input_name
+                    );
+                    file_handles.push(file.handle.clone());
+                    files.push(ArtifactFileEntry {
+                        name: file.name.clone(),
+                        handle: file.handle.clone(),
+                        alias: file.alias.clone(),
+                    });
+                }
+                continue;
+            }
+            let handle = self
+                .content_store
+                .resolve_name_or_handle_to_handle(builder_session_id, input_name)?;
             let content = self.content_store.read(&handle)?;
 
             let alias = ContentStore::get_short_alias(&handle);
 
-            // Verify content is non-empty
             anyhow::ensure!(
                 !content.is_empty(),
                 "artifact input '{}' resolved to empty content",
@@ -260,6 +279,65 @@ impl ArtifactStore {
                 handle,
                 alias,
             });
+        }
+
+        anyhow::ensure!(
+            !files.is_empty(),
+            "artifact resolved to zero files from inputs: {:?}",
+            inputs
+        );
+
+        // Dedup: later entries win (explicit inputs override artifact expansion).
+        // 1) Dedup by handle (same content, same name is fine — but same handle is redundant).
+        {
+            let mut seen_handles: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut deduped_files = Vec::new();
+            let mut deduped_handles = Vec::new();
+            for (i, entry) in files.into_iter().enumerate() {
+                if seen_handles.contains(&entry.handle) {
+                    // Replace existing entry if the later one has a different (presumably better) name
+                    if let Some(pos) = deduped_files
+                        .iter()
+                        .position(|f: &ArtifactFileEntry| f.handle == entry.handle)
+                    {
+                        deduped_files[pos] = entry;
+                        // deduped_handles stays the same — handle already present
+                    }
+                    continue;
+                }
+                seen_handles.insert(entry.handle.clone());
+                deduped_handles.push(file_handles[i].clone());
+                deduped_files.push(entry);
+            }
+            files = deduped_files;
+            file_handles = deduped_handles;
+        }
+
+        // 2) Dedup by name — if two different handles share the same filename, last wins.
+        {
+            let mut seen_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut deduped_files = Vec::new();
+            let mut deduped_handles = Vec::new();
+            for (i, entry) in files.into_iter().enumerate() {
+                if seen_names.contains(&entry.name) {
+                    if let Some(pos) = deduped_files
+                        .iter()
+                        .position(|f: &ArtifactFileEntry| f.name == entry.name)
+                    {
+                        // Replace with later entry — remove old handle too
+                        deduped_handles[pos] = file_handles[i].clone();
+                        deduped_files[pos] = entry;
+                    }
+                    continue;
+                }
+                seen_names.insert(entry.name.clone());
+                deduped_handles.push(file_handles[i].clone());
+                deduped_files.push(entry);
+            }
+            files = deduped_files;
+            file_handles = deduped_handles;
         }
 
         // Validate entrypoints before dedup so we never "reuse" with invalid args.
@@ -872,5 +950,179 @@ mod tests {
         // Root can build artifact from child's session-visible content
         let bundle = store.build(&["code.py".into()], None, None, root).unwrap();
         assert_eq!(bundle.files.len(), 1);
+    }
+
+    #[test]
+    fn test_artifact_expansion_from_artifact_id() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h1 = content_store.write(b"print('hello')").unwrap();
+        content_store
+            .register_name("session-1", "main.py", &h1)
+            .unwrap();
+        let h2 = content_store.write(b"flask").unwrap();
+        content_store
+            .register_name("session-1", "requirements.txt", &h2)
+            .unwrap();
+
+        // Build first artifact
+        let inner = store
+            .build(
+                &["main.py".into(), "requirements.txt".into()],
+                Some(&["main.py".into()]),
+                None,
+                "session-1",
+            )
+            .unwrap();
+
+        // Build second artifact from first artifact's ID
+        let outer = store
+            .build_with_kind(
+                &[inner.artifact_id.clone(), "requirements.txt".into()],
+                Some(&["main.py".into()]),
+                None,
+                ArtifactKind::AgentBundle,
+                "session-1",
+            )
+            .unwrap();
+
+        // Outer should have 2 files (deduped: requirements.txt appears in both inner and explicit input)
+        assert_eq!(outer.files.len(), 2);
+        assert!(outer.files.iter().any(|f| f.name == "main.py"));
+        assert!(outer.files.iter().any(|f| f.name == "requirements.txt"));
+    }
+
+    #[test]
+    fn test_artifact_expansion_nonexistent_gives_clear_error() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+
+        let err = store
+            .build(&["art_nonexistent".into()], None, None, "session-1")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("artifact 'art_nonexistent' not found"),
+            "expected clear artifact error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_artifact_expansion_mixed_artifact_and_content() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h1 = content_store.write(b"agent code").unwrap();
+        content_store
+            .register_name("session-1", "agent.py", &h1)
+            .unwrap();
+
+        let h3 = content_store.write(b"config data").unwrap();
+        content_store
+            .register_name("session-1", "config.yaml", &h3)
+            .unwrap();
+
+        let inner = store
+            .build(&["agent.py".into()], None, None, "session-1")
+            .unwrap();
+
+        let outer = store
+            .build(
+                &[inner.artifact_id.clone(), "config.yaml".into()],
+                None,
+                None,
+                "session-1",
+            )
+            .unwrap();
+
+        assert_eq!(outer.files.len(), 2);
+        assert!(outer.files.iter().any(|f| f.name == "agent.py"));
+        assert!(outer.files.iter().any(|f| f.name == "config.yaml"));
+    }
+
+    #[test]
+    fn test_artifact_expansion_dedup_by_handle() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h1 = content_store.write(b"shared content").unwrap();
+        content_store
+            .register_name("session-1", "main.py", &h1)
+            .unwrap();
+
+        let inner = store
+            .build(&["main.py".into()], None, None, "session-1")
+            .unwrap();
+
+        // Build with artifact ID + same content name — handle deduped
+        let outer = store
+            .build(
+                &[inner.artifact_id.clone(), "main.py".into()],
+                None,
+                None,
+                "session-1",
+            )
+            .unwrap();
+
+        assert_eq!(outer.files.len(), 1);
+        assert_eq!(outer.files[0].name, "main.py");
+    }
+
+    #[test]
+    fn test_artifact_expansion_dedup_by_name_last_wins() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h1 = content_store.write(b"old main.py").unwrap();
+        content_store
+            .register_name("session-1", "main.py", &h1)
+            .unwrap();
+
+        let inner = store
+            .build(&["main.py".into()], None, None, "session-1")
+            .unwrap();
+
+        // Write new content with the same name
+        let h2 = content_store.write(b"new main.py").unwrap();
+        content_store
+            .register_name("session-1", "main.py", &h2)
+            .unwrap();
+
+        // Re-create the store to avoid stale manifest cache
+        let store = ArtifactStore::new(&gw).unwrap();
+
+        // Artifact expansion + new content with same name — last wins
+        let outer = store
+            .build(
+                &[inner.artifact_id.clone(), "main.py".into()],
+                None,
+                None,
+                "session-1",
+            )
+            .unwrap();
+
+        assert_eq!(outer.files.len(), 1);
+        let resolved = store.resolve_files(&outer.artifact_id).unwrap();
+        assert_eq!(resolved[0].1, b"new main.py");
     }
 }

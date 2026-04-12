@@ -129,7 +129,7 @@ impl NativeTool for ArtifactBuildTool {
         }
 
         let raw_kind = args.kind.clone();
-        let kind = raw_kind
+        let explicit_kind = raw_kind
             .as_deref()
             .map(|raw| {
                 serde_json::from_value::<autonoetic_types::artifact::ArtifactKind>(
@@ -139,8 +139,24 @@ impl NativeTool for ArtifactBuildTool {
             .transpose()
             .map_err(|_| {
                 anyhow::anyhow!("Invalid artifact kind '{}'", raw_kind.unwrap_or_default())
-            })?
-            .unwrap_or(autonoetic_types::artifact::ArtifactKind::Binary);
+            })?;
+
+        let kind = if let Some(k) = explicit_kind {
+            k
+        } else {
+            let mut inherited: Option<autonoetic_types::artifact::ArtifactKind> = None;
+            for input in &args.inputs {
+                if input.starts_with("art_") {
+                    if let Ok(bundle) = store.inspect(input) {
+                        if bundle.kind != autonoetic_types::artifact::ArtifactKind::Binary {
+                            inherited = Some(bundle.kind.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            inherited.unwrap_or(autonoetic_types::artifact::ArtifactKind::Binary)
+        };
 
         let bundle = store.build_with_kind(
             &args.inputs,
