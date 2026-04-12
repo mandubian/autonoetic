@@ -44,6 +44,13 @@ approval_timeout_secs: 600
 # If omitted, derives from background_tick_secs (clamped 1..=5). Valid range: 1..=30.
 # workflow_task_heartbeat_secs: 2
 
+# ── Signal Delivery ────────────────────────────────────────────────────
+# Timeout in seconds for signal delivery responses (approval resolution,
+# workflow join notifications). The signal sender waits this long for the
+# planner to finish processing the triggered event.ingest turn (LLM inference
+# + tool calls). Default: 60.
+# signal_delivery_timeout_secs: 60
+
 # ── Chat TUI ──────────────────────────────────────────────────────────
 # Inline approval from the chat interface (Ctrl+A).
 chat:
