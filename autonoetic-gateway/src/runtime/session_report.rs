@@ -17,6 +17,7 @@ static SESSION_REPORT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()
 
 const MAX_EVENTS: usize = 400;
 const MAX_RECENT_EVENTS_PER_AGENT: usize = 12;
+const LARGE_PAYLOAD_THRESHOLD: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionReportState {
@@ -52,6 +53,7 @@ struct AgentReport {
     approvals: Vec<ApprovalItem>,
     errors: Vec<ErrorItem>,
     artifacts: Vec<ArtifactItem>,
+    delegations: Vec<DelegationItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +63,7 @@ struct ApprovalItem {
     kind: String,
     summary: String,
     reason: Option<String>,
+    decision: Option<String>,
     created_at: String,
     resolved_at: Option<String>,
     resolution_summary: Option<String>,
@@ -82,6 +85,15 @@ struct ArtifactItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct DelegationItem {
+    created_at: String,
+    target_agent: String,
+    task_preview: String,
+    output_preview: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReportEvent {
     created_at: String,
     session_id: String,
@@ -91,6 +103,7 @@ struct ReportEvent {
     summary: String,
     important: bool,
     details: Option<Value>,
+    payload_ref: Option<String>,
 }
 
 pub struct SessionReportWriter {
@@ -98,9 +111,12 @@ pub struct SessionReportWriter {
     live_md_path: PathBuf,
     final_md_path: PathBuf,
     final_json_path: PathBuf,
+    final_html_path: PathBuf,
+    report_data_dir: PathBuf,
     session_id: String,
     agent_id: String,
     depth: usize,
+    payload_counter: u32,
 }
 
 impl SessionReportState {
@@ -143,6 +159,7 @@ impl AgentReport {
             approvals: Vec::new(),
             errors: Vec::new(),
             artifacts: Vec::new(),
+            delegations: Vec::new(),
         }
     }
 }
@@ -152,14 +169,22 @@ impl SessionReportWriter {
         let base = base_session_id(session_id);
         let dir = gateway_dir.join("sessions").join(base);
         std::fs::create_dir_all(&dir)?;
+        let report_data_dir = dir.join("report-data");
+        std::fs::create_dir_all(&report_data_dir)?;
+        let payload_counter = std::fs::read_dir(&report_data_dir)
+            .map(|entries| entries.filter_map(|e| e.ok()).count())
+            .unwrap_or(0) as u32;
         Ok(Self {
             state_path: dir.join("session_report.live.json"),
             live_md_path: dir.join("session_overview.md"),
             final_md_path: dir.join("session_report.md"),
             final_json_path: dir.join("session_report.json"),
+            final_html_path: dir.join("session_report.html"),
+            report_data_dir: dir.join("report-data"),
             session_id: session_id.to_string(),
             agent_id: agent_id.to_string(),
             depth: session_depth(session_id),
+            payload_counter,
         })
     }
 
@@ -195,6 +220,7 @@ impl SessionReportWriter {
                     summary: "session started".to_string(),
                     important: true,
                     details: None,
+                    payload_ref: None,
                 },
             );
         })
@@ -204,10 +230,10 @@ impl SessionReportWriter {
         self.update_state(|state| {
             let now = chrono::Utc::now().to_rfc3339();
             let turn_count = {
-            let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
-            agent.turn_count = agent.turn_count.saturating_add(1);
-            agent.status = "running".to_string();
-            touch_agent(agent, "TURN", "turn started", &now);
+                let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
+                agent.turn_count = agent.turn_count.saturating_add(1);
+                agent.status = "running".to_string();
+                touch_agent(agent, "TURN", "turn started", &now);
                 agent.turn_count
             };
             push_event(
@@ -221,6 +247,7 @@ impl SessionReportWriter {
                     summary: format!("turn {}", turn_count),
                     important: false,
                     details: None,
+                    payload_ref: None,
                 },
             );
         })
@@ -249,6 +276,7 @@ impl SessionReportWriter {
                     summary,
                     important: false,
                     details: None,
+                    payload_ref: None,
                 },
             );
         })
@@ -265,7 +293,11 @@ impl SessionReportWriter {
             let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
             agent.tool_count = agent.tool_count.saturating_add(1);
             let summary = summarize_tool_request(tool_name, arguments_redacted);
-            let kind = if is_poll_tool(tool_name) { "POLL" } else { "ACTION" };
+            let kind = if is_poll_tool(tool_name) {
+                "POLL"
+            } else {
+                "ACTION"
+            };
             touch_agent(agent, kind, &summary, &now);
             push_event(
                 state,
@@ -278,6 +310,7 @@ impl SessionReportWriter {
                     summary,
                     important: !is_poll_tool(tool_name),
                     details: parse_truncated_json(arguments_redacted, 200),
+                    payload_ref: None,
                 },
             );
         })
@@ -290,6 +323,12 @@ impl SessionReportWriter {
         approval_ref: Option<&str>,
         turn_id: Option<&str>,
     ) -> anyhow::Result<()> {
+        let save_payload = result_json.len() > LARGE_PAYLOAD_THRESHOLD;
+        let session_id = self.session_id.clone();
+        let agent_id = self.agent_id.clone();
+        let depth = self.depth;
+        let mut counter = self.payload_counter;
+        let mut payload_filename: Option<String> = None;
         self.update_state(|state| {
             let now = chrono::Utc::now().to_rfc3339();
             let parsed = serde_json::from_str::<Value>(result_json).ok();
@@ -302,12 +341,13 @@ impl SessionReportWriter {
                 .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
                 != Some(false);
 
-            let (kind, important, summary, details) = if is_approval {
+            let (kind, important, summary, details, payload_ref) = if is_approval {
                 (
                     "APPROVAL",
                     true,
                     summarize_approval(parsed.as_ref()),
                     parsed.as_ref().map(|v| truncate_json(v, 200)),
+                    None,
                 )
             } else if approval_ref.is_some() {
                 (
@@ -319,6 +359,7 @@ impl SessionReportWriter {
                         summarize_tool_result(tool_name, parsed.as_ref(), result_json)
                     ),
                     parsed.as_ref().map(|v| truncate_json(v, 200)),
+                    None,
                 )
             } else if !ok {
                 (
@@ -326,6 +367,7 @@ impl SessionReportWriter {
                     true,
                     summarize_tool_error(tool_name, parsed.as_ref(), result_json),
                     parsed.as_ref().map(|v| truncate_json(v, 200)),
+                    None,
                 )
             } else if is_poll_tool(tool_name) {
                 let summary = summarize_tool_result(tool_name, parsed.as_ref(), result_json);
@@ -335,17 +377,33 @@ impl SessionReportWriter {
                     important,
                     summary,
                     parsed.as_ref().map(|v| truncate_json(v, 200)),
+                    None,
                 )
             } else {
+                let summary = summarize_tool_result(tool_name, parsed.as_ref(), result_json);
+                let payload_ref = if save_payload {
+                    counter += 1;
+                    let filename = format!(
+                        "event-{}-{}-{}.json",
+                        counter,
+                        tool_name.replace('.', "_"),
+                        turn_id.unwrap_or("none"),
+                    );
+                    payload_filename = Some(filename.clone());
+                    Some(filename)
+                } else {
+                    None
+                };
                 (
                     "RESULT",
                     true,
-                    summarize_tool_result(tool_name, parsed.as_ref(), result_json),
+                    summary,
                     parsed.as_ref().map(|v| truncate_json(v, 200)),
+                    payload_ref,
                 )
             };
 
-            let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
+            let agent = ensure_agent(state, &session_id, &agent_id, depth);
             touch_agent(agent, kind, &summary, &now);
 
             if is_approval {
@@ -353,7 +411,7 @@ impl SessionReportWriter {
                 agent.approval_count = agent.approval_count.saturating_add(1);
                 upsert_approval(agent, parsed.as_ref(), &now);
             } else if let Some(request_id) = approval_ref {
-                resolve_approval(agent, request_id, &summary, &now);
+                resolve_approval(agent, request_id, "approved", &summary, &now);
                 if agent.status == "awaiting_approval" {
                     agent.status = "running".to_string();
                 }
@@ -362,7 +420,7 @@ impl SessionReportWriter {
                 agent.errors.push(ErrorItem {
                     created_at: now.clone(),
                     tool_name: Some(tool_name.to_string()),
-                    summary: summary.clone(),
+                    summary: summary.to_string(),
                 });
             } else {
                 maybe_record_output(agent, tool_name, parsed.as_ref(), &summary, &now);
@@ -372,13 +430,63 @@ impl SessionReportWriter {
                 state,
                 ReportEvent {
                     created_at: now,
-                    session_id: self.session_id.clone(),
-                    agent_id: self.agent_id.clone(),
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.clone(),
                     turn_id: turn_id.map(String::from),
                     kind: kind.to_string(),
-                    summary,
+                    summary: summary.to_string(),
                     important,
                     details,
+                    payload_ref,
+                },
+            );
+        })?;
+        self.payload_counter = counter;
+        if let Some(filename) = payload_filename {
+            let payload = serde_json::json!({
+                "tool": tool_name,
+                "turn_id": turn_id,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "raw_result": result_json,
+            });
+            if let Ok(body) = serde_json::to_string_pretty(&payload) {
+                let _ = std::fs::write(self.report_data_dir.join(&filename), body);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn record_approval_resolved(
+        &mut self,
+        request_id: &str,
+        decision: &str,
+        summary: &str,
+    ) -> anyhow::Result<()> {
+        self.update_state(|state| {
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(agent) = state.agents.get_mut(&self.session_id) {
+                resolve_approval(agent, request_id, decision, summary, &now);
+                if agent.status == "awaiting_approval" && decision == "approved" {
+                    agent.status = "running".to_string();
+                }
+            }
+            push_event(
+                state,
+                ReportEvent {
+                    created_at: now,
+                    session_id: self.session_id.clone(),
+                    agent_id: self.agent_id.clone(),
+                    turn_id: None,
+                    kind: "APPROVAL".to_string(),
+                    summary: format!(
+                        "approval `{}` {}: {}",
+                        request_id,
+                        decision,
+                        truncate_chars(summary, 140)
+                    ),
+                    important: true,
+                    details: None,
+                    payload_ref: None,
                 },
             );
         })
@@ -396,6 +504,13 @@ impl SessionReportWriter {
             let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
             let summary = format!("delegated to `{}`: {}", target_agent, preview);
             touch_agent(agent, "DELEGATE", &summary, &now);
+            agent.delegations.push(DelegationItem {
+                created_at: now.clone(),
+                target_agent: target_agent.to_string(),
+                task_preview: preview.clone(),
+                output_preview: None,
+                status: "started".to_string(),
+            });
             push_event(
                 state,
                 ReportEvent {
@@ -407,6 +522,7 @@ impl SessionReportWriter {
                     summary,
                     important: true,
                     details: None,
+                    payload_ref: None,
                 },
             );
         })
@@ -426,7 +542,10 @@ impl SessionReportWriter {
             agent.status = status.to_string();
             agent.ended_at = Some(now.clone());
             agent.close_reason = Some(reason.to_string());
-            if let Some(text) = latest_assistant_output.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(text) = latest_assistant_output
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 agent.output_preview = Some(truncate_chars(&redact_text_for_logs(text), 800));
             }
             touch_agent(
@@ -447,6 +566,7 @@ impl SessionReportWriter {
                     important: true,
                     details: latest_assistant_output
                         .map(|s| Value::String(truncate_chars(&redact_text_for_logs(s), 800))),
+                    payload_ref: None,
                 },
             );
         })
@@ -476,10 +596,12 @@ impl SessionReportWriter {
         state.generated_at = chrono::Utc::now().to_rfc3339();
         let live_md = render_live_markdown(&state);
         let final_md = render_final_markdown(&state);
+        let final_html = render_html_report(&state);
         write_json_atomic(&self.state_path, &state)?;
         write_string_atomic(&self.live_md_path, &live_md)?;
         write_json_atomic(&self.final_json_path, &state)?;
         write_string_atomic(&self.final_md_path, &final_md)?;
+        write_string_atomic(&self.final_html_path, &final_html)?;
         Ok(())
     }
 
@@ -599,7 +721,11 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
             let count = parsed
                 .and_then(|v| v.get("result_count").and_then(|x| x.as_u64()))
                 .unwrap_or(0);
-            format!("search `{}` -> {} result(s)", truncate_chars(query, 80), count)
+            format!(
+                "search `{}` -> {} result(s)",
+                truncate_chars(query, 80),
+                count
+            )
         }
         "web.fetch" => {
             let url = extract_field_str(parsed, &["url"]).unwrap_or("url");
@@ -610,7 +736,11 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
                 .and_then(|v| v.get("truncated").and_then(|x| x.as_bool()))
                 .unwrap_or(false);
             if truncated {
-                format!("fetch `{}` -> {} (truncated)", truncate_chars(url, 80), status)
+                format!(
+                    "fetch `{}` -> {} (truncated)",
+                    truncate_chars(url, 80),
+                    status
+                )
             } else {
                 format!("fetch `{}` -> {}", truncate_chars(url, 80), status)
             }
@@ -624,7 +754,11 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
                 .map(|s| truncate_chars(s.trim(), 100))
                 .filter(|s| !s.is_empty());
             if let Some(stdout) = stdout {
-                format!("command exit={} stdout=`{}`", exit, redact_text_for_logs(&stdout))
+                format!(
+                    "command exit={} stdout=`{}`",
+                    exit,
+                    redact_text_for_logs(&stdout)
+                )
             } else {
                 format!("command exit={}", exit)
             }
@@ -679,7 +813,10 @@ fn summarize_workflow_wait(parsed: Option<&Value>) -> String {
         .filter_map(|task| {
             let status = task.get("status").and_then(|x| x.as_str()).unwrap_or("");
             if status == "AwaitingApproval" || status == "Running" || status == "Runnable" {
-                let agent = task.get("agent_id").and_then(|x| x.as_str()).unwrap_or("agent");
+                let agent = task
+                    .get("agent_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("agent");
                 let summary = task
                     .get("result_summary")
                     .and_then(|x| x.as_str())
@@ -811,19 +948,27 @@ fn upsert_approval(agent: &mut AgentReport, parsed: Option<&Value>, now: &str) {
         kind: kind.to_string(),
         summary: truncate_chars(&redact_text_for_logs(summary), 140),
         reason,
+        decision: None,
         created_at: now.to_string(),
         resolved_at: None,
         resolution_summary: None,
     });
 }
 
-fn resolve_approval(agent: &mut AgentReport, request_id: &str, summary: &str, now: &str) {
+fn resolve_approval(
+    agent: &mut AgentReport,
+    request_id: &str,
+    decision: &str,
+    summary: &str,
+    now: &str,
+) {
     if let Some(existing) = agent
         .approvals
         .iter_mut()
         .find(|approval| approval.request_id == request_id)
     {
         existing.status = "resolved".to_string();
+        existing.decision = Some(decision.to_string());
         existing.resolved_at = Some(now.to_string());
         existing.resolution_summary = Some(truncate_chars(summary, 200));
     }
@@ -908,7 +1053,6 @@ fn poll_result_is_important(tool_name: &str, parsed: Option<&Value>) -> bool {
 
 fn render_live_markdown(state: &SessionReportState) -> String {
     let mut out = String::new();
-    let agents = sorted_agents(state);
     let open_blockers = collect_open_blockers(state, false);
     let recent_events: Vec<&ReportEvent> = state
         .timeline
@@ -933,11 +1077,7 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         "| Started | {} |",
         state.started_at.as_deref().unwrap_or("—")
     );
-    let _ = writeln!(
-        out,
-        "| Last updated | {} |",
-        state.generated_at
-    );
+    let _ = writeln!(out, "| Last updated | {} |", state.generated_at);
     let _ = writeln!(out);
     let _ = writeln!(out, "## Active Agents");
     let _ = writeln!(out);
@@ -946,39 +1086,71 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         "| Agent | Session | Parent | Status | Started | Last Event | Output | Errors |"
     );
     let _ = writeln!(out, "|---|---|---|---|---|---|---|---:|");
-    for agent in agents {
+    for (depth, agent) in agents_by_tree(state, None) {
+        let indent = "  ".repeat(depth);
         let _ = writeln!(
             out,
-            "| `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} |",
+            "| `{}{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} |",
+            indent,
             agent.agent_id,
             short_session_id(&agent.session_id),
-            agent.parent_session_id
+            agent
+                .parent_session_id
                 .as_deref()
                 .map(short_session_id)
                 .unwrap_or("—"),
             agent.status,
             format_timestamp(agent.started_at.as_deref()),
-            truncate_chars(agent.last_event_summary.as_deref().unwrap_or("—"), 70),
-            truncate_chars(agent.output_preview.as_deref().unwrap_or("—"), 50),
+            truncate_chars(agent.last_event_summary.as_deref().unwrap_or("—"), 100),
+            truncate_chars(agent.output_preview.as_deref().unwrap_or("—"), 80),
             agent.error_count
         );
     }
     let _ = writeln!(out);
-    let _ = writeln!(out, "## Open Blockers");
+    let error_blockers: Vec<_> = open_blockers.iter().filter(|b| b.2 == "error").collect();
+    let _ = writeln!(out, "## Open Errors");
     let _ = writeln!(out);
-    if open_blockers.is_empty() {
+    if error_blockers.is_empty() {
         let _ = writeln!(out, "_(none)_");
     } else {
-        let _ = writeln!(out, "| Time | Agent | Type | Summary |");
-        let _ = writeln!(out, "|---|---|---|---|");
-        for blocker in open_blockers {
+        let _ = writeln!(out, "| Time | Agent | Summary |");
+        let _ = writeln!(out, "|---|---|---|");
+        for blocker in &error_blockers {
             let _ = writeln!(
                 out,
-                "| {} | `{}` | {} | {} |",
+                "| {} | `{}` | {} |",
                 format_timestamp(Some(&blocker.0)),
                 blocker.1,
-                blocker.2,
-                truncate_chars(&blocker.3, 110)
+                truncate_chars(&blocker.3, 160)
+            );
+        }
+    }
+    let _ = writeln!(out);
+
+    let pending_approvals: Vec<_> = collect_all_approvals(state)
+        .into_iter()
+        .filter(|a| a.status == "pending")
+        .collect();
+    let _ = writeln!(out, "## Open Approvals");
+    let _ = writeln!(out);
+    if pending_approvals.is_empty() {
+        let _ = writeln!(out, "_(none)_");
+    } else {
+        let _ = writeln!(
+            out,
+            "| Time | Agent | Request ID | Kind | Summary | Reason |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|---|---|");
+        for a in &pending_approvals {
+            let _ = writeln!(
+                out,
+                "| {} | `{}` | `{}` | {} | {} | {} |",
+                format_timestamp(Some(&a.created_at)),
+                a.agent_id,
+                a.request_id,
+                a.kind,
+                truncate_chars(&a.summary, 120),
+                a.reason.as_deref().unwrap_or("—"),
             );
         }
     }
@@ -1035,19 +1207,23 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         if let Some(reason) = &agent.close_reason {
             let _ = writeln!(out, "- Close reason: {}", truncate_chars(reason, 180));
         }
-        let unresolved: Vec<&ApprovalItem> = agent
-            .approvals
-            .iter()
-            .filter(|approval| approval.status == "pending")
-            .collect();
-        if !unresolved.is_empty() {
-            let _ = writeln!(out, "- Pending approvals:");
-            for approval in unresolved {
+        if !agent.approvals.is_empty() {
+            let _ = writeln!(out, "- Approvals:");
+            for approval in &agent.approvals {
+                let status_str = match approval.status.as_str() {
+                    "pending" => "PENDING".to_string(),
+                    _ => format!(
+                        "{}: {}",
+                        approval.status.to_uppercase(),
+                        approval.decision.as_deref().unwrap_or("unknown")
+                    ),
+                };
                 let _ = writeln!(
                     out,
-                    "  - `{}` {}",
+                    "  - `{}` {} — {}",
                     approval.request_id,
-                    truncate_chars(&approval.summary, 120)
+                    status_str,
+                    truncate_chars(&approval.summary, 200)
                 );
             }
         }
@@ -1058,7 +1234,7 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                     out,
                     "  - `{}` {}",
                     artifact.artifact_id,
-                    truncate_chars(&artifact.summary, 120)
+                    truncate_chars(&artifact.summary, 200)
                 );
             }
         }
@@ -1077,7 +1253,7 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                     "  - [{}] {} {}",
                     format_timestamp(Some(&event.created_at)),
                     event.kind,
-                    truncate_chars(&event.summary, 120)
+                    truncate_chars(&event.summary, 200)
                 );
             }
         }
@@ -1089,7 +1265,7 @@ fn render_live_markdown(state: &SessionReportState) -> String {
 fn render_final_markdown(state: &SessionReportState) -> String {
     let mut out = String::new();
     let agents = sorted_agents(state);
-    let blockers = collect_open_blockers(state, true);
+    let _blockers = collect_open_blockers(state, true);
     let total_errors: u32 = state.agents.values().map(|a| a.error_count).sum();
     let total_approvals: u32 = state.agents.values().map(|a| a.approval_count).sum();
 
@@ -1123,45 +1299,122 @@ fn render_final_markdown(state: &SessionReportState) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "| Agent | Session | Parent | Started | Ended | Duration | Status | Input | Output | Errors |"
+        "| Agent | Session | Parent | Started | Ended | Duration | Turns | Status | Input | Output | Errors |"
     );
-    let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---:|");
-    for agent in agents {
+    let _ = writeln!(out, "|---|---|---|---|---|---|---:|---|---|---|---:|");
+    for agent in &agents {
         let _ = writeln!(
             out,
-            "| `{}` | `{}` | `{}` | {} | {} | {} | `{}` | {} | {} | {} |",
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {} | `{}` | {} | {} | {} |",
             agent.agent_id,
             short_session_id(&agent.session_id),
-            agent.parent_session_id
+            agent
+                .parent_session_id
                 .as_deref()
                 .map(short_session_id)
                 .unwrap_or("—"),
             format_timestamp(agent.started_at.as_deref()),
             format_timestamp(agent.ended_at.as_deref()),
             format_duration(agent.started_at.as_deref(), agent.ended_at.as_deref()),
+            agent.turn_count,
             agent.status,
-            truncate_chars(agent.input_preview.as_deref().unwrap_or("—"), 48),
-            truncate_chars(agent.output_preview.as_deref().unwrap_or("—"), 48),
+            truncate_chars(agent.input_preview.as_deref().unwrap_or("—"), 120),
+            truncate_chars(agent.output_preview.as_deref().unwrap_or("—"), 120),
             agent.error_count
         );
     }
     let _ = writeln!(out);
-    let _ = writeln!(out, "## Errors And Approvals");
+    let _ = writeln!(out, "## Sub-Agent Ledger");
     let _ = writeln!(out);
-    if blockers.is_empty() {
+    let has_delegations = state.agents.values().any(|a| !a.delegations.is_empty());
+    if has_delegations {
+        let _ = writeln!(
+            out,
+            "| Parent Agent | Target Agent | Session | Task | Status | Output |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|---|---|");
+        for agent in &agents {
+            let mut per_target_counter: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for d in &agent.delegations {
+                let idx = *per_target_counter
+                    .entry(&d.target_agent)
+                    .and_modify(|c| {
+                        *c += 1;
+                    })
+                    .or_insert(0);
+                let child = find_child_agent(state, &agent.session_id, &d.target_agent, idx);
+                let child_status = child.map(|a| a.status.as_str()).unwrap_or("unknown");
+                let child_session = child
+                    .map(|a| short_session_id(&a.session_id))
+                    .unwrap_or("—");
+                let child_output = child
+                    .and_then(|a| a.output_preview.as_deref())
+                    .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
+                let _ = writeln!(
+                    out,
+                    "| `{}` | `{}` | `{}` | {} | `{}` | {} |",
+                    escape_html(&agent.agent_id),
+                    escape_html(&d.target_agent),
+                    child_session,
+                    truncate_chars(&d.task_preview, 80),
+                    child_status,
+                    truncate_chars(child_output, 80),
+                );
+            }
+        }
+    } else {
+        let _ = writeln!(out, "_No sub-agent delegations recorded._");
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Errors");
+    let _ = writeln!(out);
+    let errors: Vec<_> = state
+        .agents
+        .values()
+        .flat_map(|a| a.errors.iter().map(move |e| (a.agent_id.as_str(), e)))
+        .collect();
+    if errors.is_empty() {
         let _ = writeln!(out, "_(none)_");
     } else {
-        let _ = writeln!(out, "| Time | Agent | Type | Summary | Resolution |");
-        let _ = writeln!(out, "|---|---|---|---|---|");
-        for blocker in blockers {
+        let _ = writeln!(out, "| Time | Agent | Tool | Summary |");
+        let _ = writeln!(out, "|---|---|---|---|");
+        for (agent_id, error) in &errors {
             let _ = writeln!(
                 out,
-                "| {} | `{}` | {} | {} | {} |",
-                format_timestamp(Some(&blocker.0)),
-                blocker.1,
-                blocker.2,
-                truncate_chars(&blocker.3, 100),
-                blocker.4.unwrap_or_else(|| "—".to_string())
+                "| {} | `{}` | {} | {} |",
+                format_timestamp(Some(&error.created_at)),
+                agent_id,
+                error.tool_name.as_deref().unwrap_or("—"),
+                truncate_chars(&error.summary, 200),
+            );
+        }
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Approvals");
+    let _ = writeln!(out);
+    let approvals = collect_all_approvals(state);
+    if approvals.is_empty() {
+        let _ = writeln!(out, "_(none)_");
+    } else {
+        let _ = writeln!(out, "| Time | Agent | Request ID | Kind | Status | Decision | Summary | Reason | Resolved |");
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|");
+        for a in &approvals {
+            let _ = writeln!(
+                out,
+                "| {} | `{}` | `{}` | {} | `{}` | {} | {} | {} | {} |",
+                format_timestamp(Some(&a.created_at)),
+                a.agent_id,
+                a.request_id,
+                a.kind,
+                a.status,
+                a.decision.as_deref().unwrap_or("—"),
+                truncate_chars(&a.summary, 120),
+                a.reason.as_deref().unwrap_or("—"),
+                a.resolved_at
+                    .as_deref()
+                    .map(|t| format_timestamp(Some(t)))
+                    .unwrap_or_else(|| "—".to_string()),
             );
         }
     }
@@ -1171,7 +1424,12 @@ fn render_final_markdown(state: &SessionReportState) -> String {
     let artifact_rows: Vec<(&AgentReport, &ArtifactItem)> = state
         .agents
         .values()
-        .flat_map(|agent| agent.artifacts.iter().map(move |artifact| (agent, artifact)))
+        .flat_map(|agent| {
+            agent
+                .artifacts
+                .iter()
+                .map(move |artifact| (agent, artifact))
+        })
         .collect();
     if artifact_rows.is_empty() {
         let _ = writeln!(out, "_(no artifacts captured)_");
@@ -1216,6 +1474,491 @@ fn render_final_markdown(state: &SessionReportState) -> String {
     out
 }
 
+fn render_html_report(state: &SessionReportState) -> String {
+    let agents = sorted_agents(state);
+    let _blockers = collect_open_blockers(state, true);
+    let total_errors: u32 = state.agents.values().map(|a| a.error_count).sum();
+    let total_approvals: u32 = state.agents.values().map(|a| a.approval_count).sum();
+
+    let mut out = String::new();
+    out.push_str("<!DOCTYPE html>\n<html><head>\n");
+    out.push_str("<meta charset=\"UTF-8\">\n");
+    out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
+    out.push_str(&format!(
+        "<title>Session Report: {}</title>\n",
+        escape_html(&state.root_session_id)
+    ));
+    out.push_str(r#"<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29928; --orange: #db6d28;
+  --blue: #58a6ff; --purple: #bc8cff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.6;
+  padding: 2rem; max-width: 1200px; margin: 0 auto;
+}
+h1 { font-size: 1.8rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+h2 { font-size: 1.3rem; margin: 1.5rem 0 0.75rem; color: var(--accent); }
+h3 { font-size: 1.05rem; margin: 1rem 0 0.5rem; color: var(--text-dim); }
+p { margin-bottom: 0.5rem; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+th, td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+th { background: var(--surface); font-weight: 600; white-space: nowrap; }
+tr:hover td { background: #1c2128; }
+code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85em; }
+.badge {
+  display: inline-block; padding: 0.1rem 0.5rem; border-radius: 99px;
+  font-size: 0.75rem; font-weight: 600;
+}
+.badge-running { background: #1f6feb33; color: var(--blue); }
+.badge-completed { background: #3fb95033; color: var(--green); }
+.badge-failed { background: #f8514933; color: var(--red); }
+.badge-suspended { background: #d2992833; color: var(--yellow); }
+.badge-awaiting_approval { background: #db6d2833; color: var(--orange); }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 1rem 0; }
+.stat-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.75rem 1rem; text-align: center;
+}
+.stat-card .stat-value { font-size: 1.5rem; font-weight: 700; }
+.stat-card .stat-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; }
+.tree-node { margin-left: 1.5rem; border-left: 2px solid var(--border); padding-left: 0.75rem; }
+.kind-ACTION { color: var(--blue); }
+.kind-RESULT { color: var(--green); }
+.kind-ERROR { color: var(--red); }
+.kind-APPROVAL { color: var(--orange); }
+.kind-POLL { color: var(--text-dim); }
+.kind-DELEGATE { color: var(--purple); }
+.kind-NOTE { color: var(--text-dim); }
+.kind-SESSION, .kind-FINAL { color: var(--accent); }
+details { margin: 0.5rem 0; }
+summary { cursor: pointer; color: var(--text-dim); font-size: 0.9rem; }
+summary:hover { color: var(--text); }
+pre { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem; overflow-x: auto; font-size: 0.8rem; }
+.agent-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 1rem; margin: 1rem 0;
+}
+.agent-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+.agent-header h3 { margin: 0; flex: 1; }
+.meta-row { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.85rem; color: var(--text-dim); margin-bottom: 0.5rem; }
+.meta-row strong { color: var(--text); }
+.preview { background: #21262d; border-left: 3px solid var(--border); padding: 0.5rem 0.75rem; margin: 0.5rem 0; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word; }
+.timeline-item { display: flex; gap: 0.75rem; padding: 0.4rem 0; font-size: 0.85rem; border-bottom: 1px solid var(--border); }
+.timeline-time { color: var(--text-dim); white-space: nowrap; min-width: 70px; }
+.timeline-kind { font-weight: 600; min-width: 80px; }
+.timeline-summary { flex: 1; }
+.section-note { color: var(--text-dim); font-style: italic; font-size: 0.9rem; }
+</style>
+</head><body>\n"#);
+
+    out.push_str(&format!(
+        "<h1>Session Report: <code>{}</code></h1>\n",
+        escape_html(&state.root_session_id)
+    ));
+
+    out.push_str("<h2>Overview</h2>\n");
+    out.push_str("<div class=\"stat-grid\">\n");
+    out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\">{}</div><div class=\"stat-label\">Status</div></div>\n",
+        match state.status.as_str() {
+            "completed" => r#"<span class="badge badge-completed">Completed</span>"#,
+            "failed" => r#"<span class="badge badge-failed">Failed</span>"#,
+            "suspended" => r#"<span class="badge badge-suspended">Suspended</span>"#,
+            "running" => r#"<span class="badge badge-running">Running</span>"#,
+            s => s,
+        }));
+    out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\">{}</div><div class=\"stat-label\">Agents</div></div>\n", agents.len()));
+    out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\" style=\"color:{}\">{}</div><div class=\"stat-label\">Errors</div></div>\n",
+        if total_errors > 0 { "var(--red)" } else { "var(--text)" }, total_errors));
+    out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\">{}</div><div class=\"stat-label\">Approvals</div></div>\n", total_approvals));
+    out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\">{}</div><div class=\"stat-label\">Events</div></div>\n", state.timeline.len()));
+    out.push_str("</div>\n");
+    out.push_str(&format!("<p><strong>Started:</strong> {} &nbsp;|&nbsp; <strong>Ended:</strong> {} &nbsp;|&nbsp; <strong>Duration:</strong> {}</p>\n",
+        state.started_at.as_deref().unwrap_or("—"),
+        state.ended_at.as_deref().unwrap_or("—"),
+        format_duration(state.started_at.as_deref(), state.ended_at.as_deref())));
+
+    out.push_str("<h2>Agent Hierarchy</h2>\n");
+    render_agent_tree_html(&mut out, state, None, 0);
+
+    out.push_str("<h2>Sub-Agent Ledger</h2>\n");
+    let has_delegations = state.agents.values().any(|a| !a.delegations.is_empty());
+    if has_delegations {
+        out.push_str("<table><thead><tr><th>Parent Agent</th><th>Target Agent</th><th>Session</th><th>Task</th><th>Status</th><th>Output</th></tr></thead><tbody>\n");
+        for agent in &agents {
+            let mut per_target_counter: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for d in &agent.delegations {
+                let idx = *per_target_counter
+                    .entry(&d.target_agent)
+                    .and_modify(|c| {
+                        *c += 1;
+                    })
+                    .or_insert(0);
+                let child = find_child_agent(state, &agent.session_id, &d.target_agent, idx);
+                let child_status = child.map(|a| a.status.as_str()).unwrap_or("unknown");
+                let child_session = child
+                    .map(|a| short_session_id(&a.session_id))
+                    .unwrap_or("—");
+                let child_output = child
+                    .and_then(|a| a.output_preview.as_deref())
+                    .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
+                out.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td></tr>\n",
+                    escape_html(&agent.agent_id),
+                    escape_html(&d.target_agent),
+                    escape_html(child_session),
+                    truncate_html(&d.task_preview, 60),
+                    status_to_badge_class(child_status),
+                    child_status,
+                    truncate_html(child_output, 60),
+                ));
+            }
+        }
+        out.push_str("</tbody></table>\n");
+    } else {
+        out.push_str("<p class=\"section-note\">No sub-agent delegations recorded.</p>\n");
+    }
+
+    out.push_str("<h2>Agent Summary</h2>\n");
+    out.push_str("<table><thead><tr><th>Agent</th><th>Session</th><th>Parent</th><th>Status</th><th>Turns</th><th>Tools</th><th>Errors</th><th>Duration</th></tr></thead><tbody>\n");
+    for agent in &agents {
+        out.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+            escape_html(&agent.agent_id),
+            escape_html(short_session_id(&agent.session_id)),
+            agent.parent_session_id.as_deref().map(|s| format!("<code>{}</code>", escape_html(short_session_id(s)))).unwrap_or_else(|| "—".to_string()),
+            status_to_badge_class(&agent.status),
+            agent.status,
+            agent.turn_count,
+            agent.tool_count,
+            agent.error_count,
+            format_duration(agent.started_at.as_deref(), agent.ended_at.as_deref()),
+        ));
+    }
+    out.push_str("</tbody></table>\n");
+
+    let html_errors: Vec<_> = state
+        .agents
+        .values()
+        .flat_map(|a| a.errors.iter().map(move |e| (a.agent_id.as_str(), e)))
+        .collect();
+    if !html_errors.is_empty() {
+        out.push_str("<h2>Errors</h2>\n");
+        out.push_str("<table><thead><tr><th>Time</th><th>Agent</th><th>Tool</th><th>Summary</th></tr></thead><tbody>\n");
+        for (agent_id, error) in &html_errors {
+            out.push_str(&format!(
+                "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>\n",
+                format_timestamp(Some(&error.created_at)),
+                escape_html(agent_id),
+                escape_html(error.tool_name.as_deref().unwrap_or("—")),
+                truncate_html(&error.summary, 120),
+            ));
+        }
+        out.push_str("</tbody></table>\n");
+    }
+
+    let html_approvals = collect_all_approvals(state);
+    if !html_approvals.is_empty() {
+        out.push_str("<h2>Approvals</h2>\n");
+        out.push_str("<table><thead><tr><th>Time</th><th>Agent</th><th>Request ID</th><th>Kind</th><th>Status</th><th>Decision</th><th>Summary</th><th>Resolved</th></tr></thead><tbody>\n");
+        for a in &html_approvals {
+            let status_badge_class = if a.status == "pending" {
+                "badge-awaiting_approval"
+            } else {
+                "badge-completed"
+            };
+            let decision_html = a
+                .decision
+                .as_deref()
+                .map(|d| {
+                    let cls = if d == "approved" {
+                        "badge-completed"
+                    } else {
+                        "badge-failed"
+                    };
+                    format!("<span class=\"badge {}\">{}</span>", cls, escape_html(d))
+                })
+                .unwrap_or_else(|| "—".to_string());
+            out.push_str(&format!(
+                "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge {}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                format_timestamp(Some(&a.created_at)),
+                escape_html(&a.agent_id),
+                escape_html(&a.request_id),
+                escape_html(&a.kind),
+                status_badge_class,
+                a.status,
+                decision_html,
+                truncate_html(&a.summary, 80),
+                a.resolved_at.as_deref().map(|t| format_timestamp(Some(t))).unwrap_or_else(|| "—".to_string()),
+            ));
+        }
+        out.push_str("</tbody></table>\n");
+    }
+
+    let artifact_rows: Vec<(&AgentReport, &ArtifactItem)> = state
+        .agents
+        .values()
+        .flat_map(|agent| {
+            agent
+                .artifacts
+                .iter()
+                .map(move |artifact| (agent, artifact))
+        })
+        .collect();
+    if !artifact_rows.is_empty() {
+        out.push_str("<h2>Artifacts</h2>\n");
+        out.push_str("<table><thead><tr><th>Agent</th><th>Artifact</th><th>Tool</th><th>Summary</th></tr></thead><tbody>\n");
+        for (agent, artifact) in &artifact_rows {
+            out.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>\n",
+                escape_html(&agent.agent_id),
+                escape_html(&artifact.artifact_id),
+                escape_html(&artifact.tool_name),
+                truncate_html(&artifact.summary, 100),
+            ));
+        }
+        out.push_str("</tbody></table>\n");
+    }
+
+    out.push_str("<h2>Timeline</h2>\n");
+    let important_events: Vec<_> = state.timeline.iter().filter(|e| e.important).collect();
+    let all_events: Vec<_> = state.timeline.iter().collect();
+    out.push_str(&format!(
+        "<p>Showing {} important events out of {} total.</p>\n",
+        important_events.len(),
+        all_events.len()
+    ));
+
+    for event in all_events {
+        let badge_class = format!("badge-{}", escape_html(&event.kind.to_lowercase()));
+        out.push_str(&format!("<div class=\"timeline-item\"><span class=\"timeline-time\">{}</span><span class=\"timeline-kind kind-{}\"><span class=\"badge {}\">{}</span></span><span class=\"timeline-summary\"><code>{}</code> {}</span>",
+            format_timestamp(Some(&event.created_at)),
+            escape_html(&event.kind.to_lowercase()),
+            badge_class,
+            escape_html(&event.kind),
+            escape_html(&event.agent_id),
+            truncate_html(&event.summary, 150),
+        ));
+        if let Some(ref pref) = event.payload_ref {
+            out.push_str(&format!(" <a href=\"report-data/{}\" style=\"font-size:0.75rem;color:var(--accent);\">[payload]</a>", escape_html(pref)));
+        }
+        out.push_str("</div>\n");
+    }
+
+    out.push_str("<h2>Agent Details</h2>\n");
+    for agent in &agents {
+        out.push_str(&format!("<div class=\"agent-card\">\n"));
+        out.push_str(&format!("<div class=\"agent-header\"><h3><code>{}</code></h3><span class=\"badge badge-{}\">{}</span></div>\n",
+            escape_html(&agent.agent_id), status_to_badge_class(&agent.status), agent.status));
+        out.push_str("<div class=\"meta-row\">\n");
+        out.push_str(&format!(
+            "<span><strong>Session:</strong> <code>{}</code></span>\n",
+            escape_html(short_session_id(&agent.session_id))
+        ));
+        out.push_str(&format!(
+            "<span><strong>Turns:</strong> {}</span>\n",
+            agent.turn_count
+        ));
+        out.push_str(&format!(
+            "<span><strong>Tools:</strong> {}</span>\n",
+            agent.tool_count
+        ));
+        out.push_str(&format!(
+            "<span><strong>Errors:</strong> {}</span>\n",
+            agent.error_count
+        ));
+        out.push_str(&format!(
+            "<span><strong>Approvals:</strong> {}</span>\n",
+            agent.approval_count
+        ));
+        out.push_str("</div>\n");
+        if let Some(ref input) = agent.input_preview {
+            let _ = writeln!(
+                out,
+                "<p><strong>Input:</strong></p><div class=\"preview\">{}</div>",
+                escape_html(input)
+            );
+        }
+        if let Some(ref output) = agent.output_preview {
+            let _ = writeln!(
+                out,
+                "<p><strong>Output:</strong></p><div class=\"preview\">{}</div>",
+                escape_html(output)
+            );
+        }
+        if !agent.approvals.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Approvals ({})</summary>",
+                agent.approvals.len()
+            );
+            out.push_str("<table><thead><tr><th>Request ID</th><th>Kind</th><th>Status</th><th>Decision</th><th>Summary</th><th>Resolved</th></tr></thead><tbody>\n");
+            for a in &agent.approvals {
+                let status_cls = if a.status == "pending" {
+                    "badge-awaiting_approval"
+                } else {
+                    "badge-completed"
+                };
+                let decision_html = a
+                    .decision
+                    .as_deref()
+                    .map(|d| {
+                        let cls = if d == "approved" {
+                            "badge-completed"
+                        } else {
+                            "badge-failed"
+                        };
+                        format!("<span class=\"badge {}\">{}</span>", cls, escape_html(d))
+                    })
+                    .unwrap_or_else(|| "—".to_string());
+                out.push_str(&format!("<tr><td><code>{}</code></td><td>{}</td><td><span class=\"badge {}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    escape_html(&a.request_id), escape_html(&a.kind),
+                    status_cls, a.status, decision_html,
+                    truncate_html(&a.summary, 80),
+                    a.resolved_at.as_deref().map(|t| format_timestamp(Some(t))).unwrap_or_else(|| "—".to_string()),
+                ));
+            }
+            out.push_str("</tbody></table></details>\n");
+        }
+        if !agent.errors.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Errors ({})</summary>",
+                agent.errors.len()
+            );
+            out.push_str("<table><thead><tr><th>Time</th><th>Tool</th><th>Summary</th></tr></thead><tbody>\n");
+            for e in &agent.errors {
+                out.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    format_timestamp(Some(&e.created_at)),
+                    escape_html(e.tool_name.as_deref().unwrap_or("—")),
+                    truncate_html(&e.summary, 100),
+                ));
+            }
+            out.push_str("</tbody></table></details>\n");
+        }
+        if !agent.artifacts.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Artifacts ({})</summary>",
+                agent.artifacts.len()
+            );
+            for a in &agent.artifacts {
+                out.push_str(&format!(
+                    "<p><code>{}</code> via <code>{}</code>: {}</p>\n",
+                    escape_html(&a.artifact_id),
+                    escape_html(&a.tool_name),
+                    truncate_html(&a.summary, 120)
+                ));
+            }
+            out.push_str("</details>\n");
+        }
+        let recent: Vec<_> = state
+            .timeline
+            .iter()
+            .filter(|e| e.session_id == agent.session_id)
+            .rev()
+            .take(MAX_RECENT_EVENTS_PER_AGENT)
+            .collect();
+        if !recent.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Recent Events ({})</summary>",
+                recent.len()
+            );
+            for event in recent.into_iter().rev() {
+                out.push_str(&format!("<div class=\"timeline-item\"><span class=\"timeline-time\">{}</span><span class=\"timeline-kind kind-{}\">{}</span><span class=\"timeline-summary\">{}</span></div>\n",
+                    format_timestamp(Some(&event.created_at)),
+                    event.kind.to_lowercase(),
+                    event.kind,
+                    truncate_html(&event.summary, 120),
+                ));
+            }
+            out.push_str("</details>\n");
+        }
+        out.push_str("</div>\n");
+    }
+
+    out.push_str(&format!("\n<p style=\"color:var(--text-dim);font-size:0.8rem;margin-top:2rem;\">Generated at {} &bull; Session Report v{} &bull; <a href=\"session_report.json\" style=\"color:var(--accent);\">JSON</a> &bull; <a href=\"session_overview.md\" style=\"color:var(--accent);\">Overview</a></p>\n",
+        state.generated_at, state.version));
+
+    out.push_str("</body></html>");
+    out
+}
+
+fn render_agent_tree_html(
+    out: &mut String,
+    state: &SessionReportState,
+    parent: Option<&str>,
+    depth: usize,
+) {
+    let indent = "  ".repeat(depth);
+    let mut agents: Vec<_> = state.agents.values().collect();
+    agents.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+
+    for agent in &agents {
+        let agent_parent = agent.parent_session_id.as_deref();
+        if agent_parent != parent {
+            continue;
+        }
+        let badge = format!(
+            "<span class=\"badge badge-{}\">{}</span>",
+            status_to_badge_class(&agent.status),
+            agent.status
+        );
+        out.push_str(&format!("{}<div style=\"margin:0.25rem 0;\"><code>{}</code> ({}) — {} turns, {} tools, {} errors {}\n",
+            indent, escape_html(&agent.agent_id), escape_html(short_session_id(&agent.session_id)),
+            agent.turn_count, agent.tool_count, agent.error_count, badge));
+
+        if agent_parent == parent {
+            render_agent_tree_html(out, state, Some(&agent.session_id), depth + 1);
+        }
+        out.push_str("</div>\n");
+    }
+}
+
+fn status_to_badge_class(status: &str) -> &str {
+    match status {
+        "completed" => "badge-completed",
+        "failed" => "badge-failed",
+        "suspended" => "badge-suspended",
+        "running" => "badge-running",
+        "awaiting_approval" => "badge-awaiting_approval",
+        _ => "badge-running",
+    }
+}
+
+fn truncate_html(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return escape_html(s);
+    }
+    let mut chars = s.chars();
+    let chunk: String = chars.by_ref().take(max).collect();
+    let escaped = escape_html(&chunk);
+    if chars.next().is_some() {
+        format!("{}…", escaped)
+    } else {
+        escaped
+    }
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn sorted_agents(state: &SessionReportState) -> Vec<&AgentReport> {
     let mut agents: Vec<&AgentReport> = state.agents.values().collect();
     agents.sort_by(|a, b| {
@@ -1225,6 +1968,42 @@ fn sorted_agents(state: &SessionReportState) -> Vec<&AgentReport> {
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
     agents
+}
+
+fn find_child_agent<'a>(
+    state: &'a SessionReportState,
+    parent_session_id: &str,
+    target_agent: &str,
+    delegation_index: usize,
+) -> Option<&'a AgentReport> {
+    let mut candidates: Vec<&'a AgentReport> = state
+        .agents
+        .values()
+        .filter(|agent| {
+            agent.parent_session_id.as_deref() == Some(parent_session_id)
+                && agent.agent_id == target_agent
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    candidates.get(delegation_index).copied()
+}
+
+fn agents_by_tree<'a>(
+    state: &'a SessionReportState,
+    parent: Option<&str>,
+) -> Vec<(usize, &'a AgentReport)> {
+    let mut agents: Vec<&AgentReport> = state.agents.values().collect();
+    agents.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    let mut result = Vec::new();
+    for agent in agents {
+        let agent_parent = agent.parent_session_id.as_deref();
+        if agent_parent != parent {
+            continue;
+        }
+        result.push((agent.depth, agent));
+        result.extend(agents_by_tree(state, Some(&agent.session_id)));
+    }
+    result
 }
 
 fn status_rank(status: &str) -> u8 {
@@ -1267,6 +2046,41 @@ fn collect_open_blockers(
     }
     items.sort_by(|a, b| a.0.cmp(&b.0));
     items
+}
+
+struct ApprovalRow {
+    created_at: String,
+    agent_id: String,
+    request_id: String,
+    kind: String,
+    status: String,
+    decision: Option<String>,
+    summary: String,
+    reason: Option<String>,
+    resolved_at: Option<String>,
+    resolution_summary: Option<String>,
+}
+
+fn collect_all_approvals(state: &SessionReportState) -> Vec<ApprovalRow> {
+    let mut rows = Vec::new();
+    for agent in state.agents.values() {
+        for a in &agent.approvals {
+            rows.push(ApprovalRow {
+                created_at: a.created_at.clone(),
+                agent_id: agent.agent_id.clone(),
+                request_id: a.request_id.clone(),
+                kind: a.kind.clone(),
+                status: a.status.clone(),
+                decision: a.decision.clone(),
+                summary: a.summary.clone(),
+                reason: a.reason.clone(),
+                resolved_at: a.resolved_at.clone(),
+                resolution_summary: a.resolution_summary.clone(),
+            });
+        }
+    }
+    rows.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    rows
 }
 
 fn status_from_close_reason(reason: &str) -> &'static str {
@@ -1336,13 +2150,30 @@ fn write_string_atomic(path: &Path, body: &str) -> anyhow::Result<()> {
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
-    let mut iter = s.chars();
+    let sanitized = sanitize_md_cell(s);
+    let mut iter = sanitized.chars();
     let chunk: String = iter.by_ref().take(max).collect();
     if iter.next().is_some() {
         format!("{}…", chunk)
     } else {
         chunk
     }
+}
+
+fn sanitize_md_cell(s: &str) -> String {
+    let mut out = String::new();
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let stripped = trimmed.replace("**", "").replace('|', "\\|");
+        out.push_str(stripped.trim());
+    }
+    out
 }
 
 fn format_timestamp(timestamp: Option<&str>) -> String {
@@ -1389,9 +2220,12 @@ mod tests {
         let gateway_dir = tmp.path().join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
 
-        let mut writer =
-            SessionReportWriter::open(&gateway_dir, "root/evaluator.default-abcd", "evaluator.default")
-                .unwrap();
+        let mut writer = SessionReportWriter::open(
+            &gateway_dir,
+            "root/evaluator.default-abcd",
+            "evaluator.default",
+        )
+        .unwrap();
         writer.start_session("Evaluate artifact art_123").unwrap();
         writer.start_turn(Some("turn-1")).unwrap();
         writer
@@ -1409,19 +2243,22 @@ mod tests {
                 Some("turn-1"),
             )
             .unwrap();
-        writer.finish_session("session suspended awaiting approval", None).unwrap();
+        writer
+            .finish_session("session suspended awaiting approval", None)
+            .unwrap();
 
         let session_dir = gateway_dir.join("sessions").join("root");
         let live = std::fs::read_to_string(session_dir.join("session_overview.md")).unwrap();
         let final_md = std::fs::read_to_string(session_dir.join("session_report.md")).unwrap();
-        let final_json =
-            std::fs::read_to_string(session_dir.join("session_report.json")).unwrap();
+        let final_json = std::fs::read_to_string(session_dir.join("session_report.json")).unwrap();
 
         assert!(live.contains("Active Agents"));
         assert!(live.contains("suspended"));
         assert!(live.contains("apr-1"));
+        assert!(live.contains("Open Approvals"));
         assert!(final_md.contains("Agent Summary"));
-        assert!(final_md.contains("Errors And Approvals"));
+        assert!(final_md.contains("## Errors"));
+        assert!(final_md.contains("## Approvals"));
         assert!(final_json.contains("\"request_id\": \"apr-1\""));
     }
 }

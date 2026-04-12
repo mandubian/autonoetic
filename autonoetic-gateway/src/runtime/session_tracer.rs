@@ -720,7 +720,12 @@ impl SessionTracer {
                         .unwrap_or("Operator approval required");
                     guard.record_approval_pending(request_id, kind, summary, reason)
                 } else if let Some(apr_ref) = approval_ref {
-                    guard.record_approval_resolved(apr_ref, true, &formatted)
+                    let decision = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("decision").and_then(|d| d.as_str()))
+                        .unwrap_or("approved");
+                    let approved = decision != "denied" && decision != "rejected";
+                    guard.record_approval_resolved(apr_ref, approved, &formatted)
                 } else if ok {
                     guard.record_result(&formatted)
                 } else {
@@ -731,7 +736,7 @@ impl SessionTracer {
                 }
             }
         }
-        if tool_name != "digest.annotate" {
+        {
             if let Some(w) = &self.live_report {
                 if let Err(e) = w.lock().unwrap().record_tool_completed(
                     tool_name,
