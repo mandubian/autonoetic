@@ -3181,7 +3181,7 @@ async fn execute_script_in_sandbox(
     // and prepend the workspace dir to get the correct in-sandbox path.
     let entrypoint = match script_path.strip_prefix(agent_dir) {
         Ok(relative) => format!(
-            "{}{}",
+            "{}/{}",
             crate::sandbox::BWRAP_WORKSPACE_DIR,
             relative.to_string_lossy()
         ),
