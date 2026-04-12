@@ -146,13 +146,19 @@ capabilities: []
     let live = std::fs::read_to_string(session_dir.join("session_overview.md"))?;
     let final_md = std::fs::read_to_string(session_dir.join("session_report.md"))?;
     let final_json = std::fs::read_to_string(session_dir.join("session_report.json"))?;
+    let final_html = std::fs::read_to_string(session_dir.join("session_report.html"))?;
 
     assert!(live.contains("Session overview"));
     assert!(live.contains("report.tester"));
     assert!(live.contains("Structured reporting complete."));
     assert!(final_md.contains("Agent Summary"));
     assert!(final_md.contains("report.tester"));
+    assert!(final_md.contains("Sub-Agent Ledger"));
     assert!(final_json.contains("\"output_preview\": \"Structured reporting complete.\""));
+    assert!(final_html.contains("Session Report"));
+    assert!(final_html.contains("report.tester"));
+    assert!(final_html.contains("badge"));
+    assert!(final_html.contains("stat-grid"));
 
     Ok(())
 }
