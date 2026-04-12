@@ -19,6 +19,7 @@ pub mod memory;
 pub mod notification;
 pub mod promotion;
 pub mod runtime_lock;
+pub mod scheduled_job;
 pub mod schema_enforcement;
 pub mod task_board;
 pub mod tool_error;
