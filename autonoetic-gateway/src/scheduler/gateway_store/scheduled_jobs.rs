@@ -1,0 +1,254 @@
+use anyhow::Result;
+use autonoetic_types::scheduled_job::{ScheduledJob, ScheduledJobStatus};
+use rusqlite::{params, Connection};
+
+pub fn create_scheduled_job(conn: &Connection, job: &ScheduledJob) -> Result<()> {
+    conn.execute(
+        "INSERT INTO scheduled_jobs (
+            job_id, owner_agent_id, root_session_id, target_agent_id,
+            message, metadata_json, cron_expr, timezone, next_run_at,
+            last_run_at, status, created_at, updated_at, last_error, generation
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            job.job_id,
+            job.owner_agent_id,
+            job.root_session_id,
+            job.target_agent_id,
+            job.message,
+            job.metadata_json,
+            job.cron_expr,
+            job.timezone,
+            job.next_run_at,
+            job.last_run_at,
+            job.status.to_string(),
+            job.created_at,
+            job.updated_at,
+            job.last_error,
+            job.generation,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_scheduled_job(conn: &Connection, job_id: &str) -> Result<Option<ScheduledJob>> {
+    let mut stmt = conn.prepare(
+        "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
+                message, metadata_json, cron_expr, timezone, next_run_at,
+                last_run_at, status, created_at, updated_at, last_error, generation
+         FROM scheduled_jobs WHERE job_id = ?1",
+    )?;
+    let mut rows = stmt.query(params![job_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row_to_job(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn list_scheduled_jobs_for_owner(
+    conn: &Connection,
+    owner_agent_id: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<ScheduledJob>> {
+    let limit = limit.unwrap_or(100) as i64;
+    let offset = offset.unwrap_or(0) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
+                message, metadata_json, cron_expr, timezone, next_run_at,
+                last_run_at, status, created_at, updated_at, last_error, generation
+         FROM scheduled_jobs
+         WHERE owner_agent_id = ?1
+         ORDER BY created_at DESC
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let mut rows = stmt.query(params![owner_agent_id, limit, offset])?;
+    let mut jobs = Vec::new();
+    while let Some(row) = rows.next()? {
+        jobs.push(row_to_job(row)?);
+    }
+    Ok(jobs)
+}
+
+pub fn list_scheduled_jobs_for_root(
+    conn: &Connection,
+    root_session_id: &str,
+) -> Result<Vec<ScheduledJob>> {
+    let mut stmt = conn.prepare(
+        "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
+                message, metadata_json, cron_expr, timezone, next_run_at,
+                last_run_at, status, created_at, updated_at, last_error, generation
+         FROM scheduled_jobs
+         WHERE root_session_id = ?1
+         ORDER BY created_at DESC",
+    )?;
+    let mut rows = stmt.query(params![root_session_id])?;
+    let mut jobs = Vec::new();
+    while let Some(row) = rows.next()? {
+        jobs.push(row_to_job(row)?);
+    }
+    Ok(jobs)
+}
+
+pub fn claim_due_scheduled_job(
+    conn: &Connection,
+    job_id: &str,
+    now_rfc3339: &str,
+) -> Result<Option<ScheduledJob>> {
+    let updated = conn.execute(
+        "UPDATE scheduled_jobs
+         SET generation = generation + 1, updated_at = ?1
+         WHERE job_id = ?2 AND status = 'active' AND next_run_at <= ?1",
+        params![now_rfc3339, job_id],
+    )?;
+    if updated == 0 {
+        return Ok(None);
+    }
+    get_scheduled_job(conn, job_id)
+}
+
+pub fn claim_and_advance_due_job(
+    conn: &Connection,
+    job_id: &str,
+    now_rfc3339: &str,
+    new_next_run_at: &str,
+) -> Result<Option<ScheduledJob>> {
+    let current_gen: i64 = match conn.query_row(
+        "SELECT generation FROM scheduled_jobs WHERE job_id = ?1 AND status = 'active' AND next_run_at <= ?2",
+        params![job_id, now_rfc3339],
+        |row| row.get(0),
+    ) {
+        Ok(g) => g,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let updated = conn.execute(
+        "UPDATE scheduled_jobs
+         SET next_run_at = ?1, generation = generation + 1, updated_at = ?1
+         WHERE job_id = ?2 AND status = 'active' AND generation = ?3",
+        params![new_next_run_at, job_id, current_gen],
+    )?;
+    if updated == 0 {
+        return Ok(None);
+    }
+    get_scheduled_job(conn, job_id)
+}
+
+pub fn load_due_scheduled_jobs(
+    conn: &Connection,
+    now_rfc3339: &str,
+    limit: usize,
+) -> Result<Vec<ScheduledJob>> {
+    let limit = limit as i64;
+    let mut stmt = conn.prepare(
+        "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
+                message, metadata_json, cron_expr, timezone, next_run_at,
+                last_run_at, status, created_at, updated_at, last_error, generation
+         FROM scheduled_jobs
+         WHERE status = 'active' AND next_run_at <= ?1
+         ORDER BY next_run_at ASC
+         LIMIT ?2",
+    )?;
+    let mut rows = stmt.query(params![now_rfc3339, limit])?;
+    let mut jobs = Vec::new();
+    while let Some(row) = rows.next()? {
+        jobs.push(row_to_job(row)?);
+    }
+    Ok(jobs)
+}
+
+pub fn advance_next_run(
+    conn: &Connection,
+    job_id: &str,
+    next_run_at: &str,
+    last_run_at: Option<&str>,
+    last_error: Option<&str>,
+) -> Result<()> {
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+    if let Some(la) = last_run_at {
+        conn.execute(
+            "UPDATE scheduled_jobs
+             SET next_run_at = ?1, last_run_at = ?2, updated_at = ?3, last_error = ?4, generation = generation + 1
+             WHERE job_id = ?5",
+            params![next_run_at, la, now_rfc3339, last_error.unwrap_or(""), job_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE scheduled_jobs
+             SET next_run_at = ?1, updated_at = ?2, last_error = ?3, generation = generation + 1
+             WHERE job_id = ?4",
+            params![next_run_at, now_rfc3339, last_error.unwrap_or(""), job_id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn pause_scheduled_job(conn: &Connection, job_id: &str) -> Result<bool> {
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE scheduled_jobs
+         SET status = 'paused', updated_at = ?1, generation = generation + 1
+         WHERE job_id = ?2 AND status = 'active'",
+        params![now_rfc3339, job_id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn resume_scheduled_job(conn: &Connection, job_id: &str) -> Result<bool> {
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE scheduled_jobs
+         SET status = 'active', updated_at = ?1, generation = generation + 1
+         WHERE job_id = ?2 AND status = 'paused'",
+        params![now_rfc3339, job_id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn cancel_scheduled_job(conn: &Connection, job_id: &str) -> Result<bool> {
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE scheduled_jobs
+         SET status = 'cancelled', updated_at = ?1, generation = generation + 1
+         WHERE job_id = ?2 AND status != 'cancelled'",
+        params![now_rfc3339, job_id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn delete_scheduled_job(conn: &Connection, job_id: &str) -> Result<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM scheduled_jobs WHERE job_id = ?1",
+        params![job_id],
+    )?;
+    Ok(deleted > 0)
+}
+
+fn row_to_job(row: &rusqlite::Row<'_>) -> Result<ScheduledJob> {
+    let status_str: String = row.get(10)?;
+    let status = match status_str.as_str() {
+        "active" => ScheduledJobStatus::Active,
+        "paused" => ScheduledJobStatus::Paused,
+        "cancelled" => ScheduledJobStatus::Cancelled,
+        _ => ScheduledJobStatus::Active,
+    };
+    let last_error: Option<String> = row.get(13)?;
+    let last_error = last_error.filter(|s| !s.is_empty());
+    Ok(ScheduledJob {
+        job_id: row.get(0)?,
+        owner_agent_id: row.get(1)?,
+        root_session_id: row.get(2)?,
+        target_agent_id: row.get(3)?,
+        message: row.get(4)?,
+        metadata_json: row.get(5)?,
+        cron_expr: row.get(6)?,
+        timezone: row.get(7)?,
+        next_run_at: row.get(8)?,
+        last_run_at: row.get(9)?,
+        status,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        last_error,
+        generation: row.get(14)?,
+    })
+}
