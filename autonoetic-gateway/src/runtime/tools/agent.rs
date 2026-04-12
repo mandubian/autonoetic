@@ -412,6 +412,7 @@ impl NativeTool for AgentSpawnTool {
                 TaskRunStatus::Pending,
                 Some("queued".to_string()),
                 None,
+                None,
             );
 
             return serde_json::to_string(&serde_json::json!({
@@ -506,6 +507,7 @@ impl NativeTool for AgentSpawnTool {
                         TaskRunStatus::AwaitingApproval,
                         Some(summary),
                         approval_metadata,
+                        None,
                     ) {
                         tracing::warn!(
                             target: "workflow",
@@ -564,6 +566,7 @@ impl NativeTool for AgentSpawnTool {
                     TaskRunStatus::Succeeded,
                     summary,
                     None,
+                    None,
                 ) {
                     tracing::warn!(
                         target: "workflow",
@@ -597,6 +600,7 @@ impl NativeTool for AgentSpawnTool {
                     &task_id,
                     TaskRunStatus::Failed,
                     Some(e.to_string()),
+                    None,
                     None,
                 ) {
                     tracing::warn!(

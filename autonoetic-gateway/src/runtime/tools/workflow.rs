@@ -942,6 +942,7 @@ impl NativeTool for WorkflowCancelTaskTool {
                 .clone()
                 .or_else(|| Some("Cancelled by operator".to_string())),
             None,
+            None,
         )?;
 
         // Remove from queue if present.
@@ -1186,6 +1187,7 @@ impl NativeTool for WorkflowForceCompleteTool {
             task_id,
             target_status.clone(),
             Some(result_summary.clone()),
+            None,
             None,
         )?;
 

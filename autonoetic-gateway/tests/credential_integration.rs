@@ -1092,6 +1092,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
             "ghp_test_token_123".to_string(),
         )]),
         None,
+        None,
     )
     .expect("approval should succeed");
 
@@ -1208,6 +1209,7 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
         "test",
         None,
         Some(vec![("GITHUB_TOKEN".to_string(), "ghp_test".to_string())]),
+        None,
         None,
     );
     assert!(approval_result.is_err());

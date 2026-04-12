@@ -172,7 +172,7 @@ Never write files that match ANY of these patterns:
 ### CAN do directly:
 
 - High-level task decomposition (detailed breakdown goes to architect)
-- Knowledge lookups: `knowledge.recall`, `knowledge.search`, `knowledge.search_by_tags`; cross-session execution patterns via `execution.search`; post-session narrative via `digest.query` when relevant
+- Knowledge lookups: `knowledge.recall`, `knowledge.search`, `knowledge.search_by_tags`; cross-session execution patterns via `execution.search`; cross-session session discovery via `observability.search` + `observability.read`; post-session narrative via `digest.query` when relevant
   - Stored facts use **`visibility`** on `knowledge.store` (**`session`** by default so you and delegated agents in this workflow share them without a separate share step)
 - Pure prose content (documentation, analysis, summaries — **no code**)
 - Synthesizing specialist outputs — read `output.summary` from `workflow.wait`; it already contains the child's full result including execution output

@@ -261,6 +261,7 @@ async fn check_approval_timeouts(
                     autonoetic_types::workflow::TaskRunStatus::Failed,
                     Some(reason.clone()),
                     None,
+                    None,
                 );
                 let _ = workflow_store::checkpoint_task(
                     &config,
@@ -441,6 +442,7 @@ async fn check_stuck_running_tasks(
                 &task.task_id,
                 autonoetic_types::workflow::TaskRunStatus::Succeeded,
                 Some(result_summary),
+                None,
                 None,
             );
 
@@ -926,6 +928,7 @@ async fn spawn_task_execution(
                     autonoetic_types::workflow::TaskRunStatus::AwaitingApproval,
                     Some(summary),
                     approval_metadata,
+                    None,
                 ) {
                     tracing::warn!(
                         target: "workflow",
@@ -972,6 +975,7 @@ async fn spawn_task_execution(
                 autonoetic_types::workflow::TaskRunStatus::Succeeded,
                 summary,
                 None,
+                None,
             ) {
                 tracing::warn!(target: "workflow", error = %e, "Failed to persist async task completion");
             }
@@ -998,6 +1002,7 @@ async fn spawn_task_execution(
                 &t_id,
                 autonoetic_types::workflow::TaskRunStatus::Failed,
                 Some(e.to_string()),
+                None,
                 None,
             ) {
                 tracing::warn!(target: "workflow", error = %inner, "Failed to persist async task failure");

@@ -592,8 +592,8 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 - [x] Add `hooks` section to `GatewayConfig`
 - [x] Implement hook executor: match event → dispatch action (async/sync)
 - [x] Add `hook_deliveries` table for idempotency tracking
-- [ ] Migrate existing signal delivery to hook-based dispatch
-- [ ] Migrate report finalization to `publish_report` hook on `session.closed`
+- [x] Migrate existing signal delivery to hook-based dispatch
+- [x] Migrate report finalization to `publish_report` hook on `session.closed`
 
 ### Phase 1: Fix the Join
 
@@ -673,7 +673,7 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 **Files:** `runtime/tools/execution.rs`, `runtime/tools/mod.rs`
 
 - [ ] Remove `execution.search` tool entirely
-- [ ] Update agent SKILL.md docs to reference `observability.search`
+- [x] Update agent SKILL.md docs to reference `observability.search`
 
 ### Phase 4: Redaction (deferred, design TBD)
 

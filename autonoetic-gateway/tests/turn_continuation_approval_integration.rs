@@ -339,6 +339,7 @@ async fn test_approval_continuation_suspends_and_resumes() -> anyhow::Result<()>
         Some("approved for test".to_string()),
         None,
         None,
+        None,
     )?;
 
     // -----------------------------------------------------------------------
@@ -622,6 +623,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         TaskRunStatus::AwaitingApproval,
         Some("Awaiting operator approval".to_string()),
         None,
+        None,
     )?;
 
     // Task B completes while Task A is still awaiting approval.
@@ -632,6 +634,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         fast_task_id,
         TaskRunStatus::Succeeded,
         Some("Fast path completed".to_string()),
+        None,
         None,
     )?;
 
@@ -699,6 +702,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         Some("approved for parallel-join test".to_string()),
         None,
         None,
+        None,
     )?;
     let resumed_result = execution
         .spawn_agent_once(
@@ -726,6 +730,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         approval_task_id,
         TaskRunStatus::Succeeded,
         Some("Approved path completed".to_string()),
+        None,
         None,
     )?;
 
@@ -873,6 +878,7 @@ async fn test_approval_timeout_fails_task_and_satisfies_join() -> anyhow::Result
         TaskRunStatus::AwaitingApproval,
         Some("Awaiting operator approval".to_string()),
         None,
+        None,
     )?;
 
     // Force continuation to appear stale so timeout logic triggers immediately.
@@ -1018,6 +1024,7 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
         TaskRunStatus::AwaitingApproval,
         Some("Awaiting operator approval".to_string()),
         None,
+        None,
     )?;
     let cont_file = continuations_dir(&config).join(format!("{}.json", task_id));
     assert!(
@@ -1039,6 +1046,7 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
         &request_id,
         "test-operator",
         Some("approved after restart".to_string()),
+        None,
         None,
         None,
     )?;
@@ -1078,6 +1086,7 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
         task_id,
         TaskRunStatus::Succeeded,
         Some("Completed after restart".to_string()),
+        None,
         None,
     )?;
 
@@ -1226,6 +1235,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         TaskRunStatus::AwaitingApproval,
         Some("Awaiting approval A".to_string()),
         None,
+        None,
     )?;
     workflow_store::update_task_run_status(
         &config,
@@ -1234,6 +1244,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         task_b,
         TaskRunStatus::AwaitingApproval,
         Some("Awaiting approval B".to_string()),
+        None,
         None,
     )?;
 
@@ -1245,6 +1256,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         Some("approved A".to_string()),
         None,
         None,
+        None,
     )?;
     approve_request(
         &config,
@@ -1252,6 +1264,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         &suspended_b,
         "test-operator",
         Some("approved B".to_string()),
+        None,
         None,
         None,
     )?;
@@ -1279,6 +1292,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         task_a,
         TaskRunStatus::Succeeded,
         Some("Task A completed".to_string()),
+        None,
         None,
     )?;
 
@@ -1334,6 +1348,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         task_b,
         TaskRunStatus::Succeeded,
         Some("Task B completed".to_string()),
+        None,
         None,
     )?;
 
@@ -1481,6 +1496,7 @@ async fn test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join() -
         task_id,
         TaskRunStatus::AwaitingApproval,
         Some("Awaiting operator approval".to_string()),
+        None,
         None,
     )?;
 
