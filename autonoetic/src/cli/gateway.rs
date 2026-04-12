@@ -253,6 +253,7 @@ pub async fn handle_gateway_approvals(
                     Some(secrets.clone())
                 },
                 Some(&approval_level),
+                None,
             )?;
             println!(
                 "Approved {} for agent {} ({})",
@@ -275,6 +276,7 @@ pub async fn handle_gateway_approvals(
                 request_id,
                 "cli",
                 reason.clone(),
+                None,
             )?;
             println!(
                 "Rejected {} for agent {} ({})",
@@ -630,6 +632,7 @@ async fn run_interactive_approvals(
                                 None,
                                 secrets,
                                 Some(&approval_level.to_runtime()),
+                                None,
                             ) {
                                 Ok(decision) => {
                                     status_msg = format!(
@@ -661,6 +664,7 @@ async fn run_interactive_approvals(
                                 Some(gateway_store),
                                 &req.request_id,
                                 "cli-interactive",
+                                None,
                                 None,
                             ) {
                                 Ok(decision) => {

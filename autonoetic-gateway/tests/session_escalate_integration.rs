@@ -422,6 +422,7 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
         Some("Try using a debugger to step through the code".to_string()),
         None,
         None,
+        None,
     )?;
 
     // Verify the approval was recorded

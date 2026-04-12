@@ -1599,6 +1599,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             None,
                                             None,
                                             Some(&approver_level),
+                                            None,
                                         ) {
                                             Ok(_decision) => {
                                                 app.add_message(

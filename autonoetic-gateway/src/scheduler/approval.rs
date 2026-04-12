@@ -150,6 +150,7 @@ pub fn approve_request(
     reason: Option<String>,
     secrets: Option<Vec<(String, String)>>,
     approver_level: Option<&ApprovalLevel>,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<ApprovalDecision> {
     let store = gateway_store
         .ok_or_else(|| anyhow::anyhow!("GatewayStore is required to approve requests"))?;
@@ -280,7 +281,9 @@ pub fn approve_request(
 
     // Dumb Gate model: notify the waiting session, do not auto-execute.
     if should_resume_waiting_session(&decision) {
-        if let Err(e) = resume_session_after_approval(config, gateway_store, &decision) {
+        if let Err(e) =
+            resume_session_after_approval(config, gateway_store, &decision, hook_executor)
+        {
             tracing::warn!(
                 target: "approval",
                 request_id = %decision.request_id,
@@ -292,14 +295,10 @@ pub fn approve_request(
         tracing::info!(
             target: "approval",
             request_id = %decision.request_id,
-            workflow_id = ?decision.workflow_id,
-            task_id = ?decision.task_id,
-            "Skipping direct session resume; workflow-bound task will continue via durable re-queue"
+            action = ?decision.action,
+            "No waiting session to resume"
         );
     }
-
-    // Unblock the task in the workflow (if bound to one)
-    unblock_task_on_approval(config, gateway_store, &decision);
 
     Ok(decision)
 }
@@ -310,6 +309,7 @@ pub fn reject_request(
     request_id: &str,
     decided_by: &str,
     reason: Option<String>,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<ApprovalDecision> {
     let decision = decide_request(
         config,
@@ -323,7 +323,7 @@ pub fn reject_request(
     // Workflow-bound tasks surface rejection through task failure + workflow
     // resume. Non-workflow callers still need a direct notification.
     if should_resume_waiting_session(&decision) {
-        resume_session_after_approval(config, gateway_store, &decision)?;
+        resume_session_after_approval(config, gateway_store, &decision, hook_executor)?;
     } else {
         tracing::info!(
             target: "approval",
@@ -346,13 +346,14 @@ pub fn cancel_request(
     request_id: &str,
     cancelled_by: &str,
     reason: Option<String>,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<ApprovalDecision> {
     let decision =
         cancel_approval_request(config, gateway_store, request_id, cancelled_by, reason)?;
 
     // Notify waiting session of cancellation
     if should_resume_waiting_session(&decision) {
-        resume_session_after_approval(config, gateway_store, &decision)?;
+        resume_session_after_approval(config, gateway_store, &decision, hook_executor)?;
     }
 
     // Unblock workflow task if bound
@@ -474,6 +475,7 @@ fn resume_session_after_approval(
     _config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     decision: &ApprovalDecision,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<()> {
     // Resume for agent_install and sandbox_exec actions - both have a caller waiting
     let is_supported_action = matches!(
@@ -656,6 +658,26 @@ fn resume_session_after_approval(
         "Approval notification queued for gateway-owned delivery"
     );
 
+    if let Some(executor) = hook_executor {
+        let status_str = match decision.status {
+            autonoetic_types::background::ApprovalStatus::Approved => "approved",
+            autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
+            autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
+        };
+        let root_id = decision
+            .root_session_id
+            .as_deref()
+            .unwrap_or(&decision.session_id);
+        let ctx = autonoetic_types::hooks::HookContext::for_approval_resolved(
+            root_id,
+            &decision.session_id,
+            &decision.agent_id,
+            &decision.request_id,
+            status_str,
+        );
+        executor.dispatch_async(ctx);
+    }
+
     Ok(())
 }
 
@@ -727,6 +749,7 @@ fn unblock_task_on_approval(
         wf_id,
         t_id,
         new_status,
+        None,
         None,
         None,
     ) {
@@ -1369,6 +1392,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1415,7 +1439,7 @@ mod tests {
         };
 
         // SandboxExec is no longer auto-executed; agent retries with approval_ref.
-        super::resume_session_after_approval(&cfg, Some(store.as_ref()), &decision).unwrap();
+        super::resume_session_after_approval(&cfg, Some(store.as_ref()), &decision, None).unwrap();
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(!pending.is_empty(), "should have created a notification");
@@ -1485,6 +1509,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect_err("operator default should not satisfy admin-level request");
         assert!(denied.to_string().contains("Insufficient approval level"));
@@ -1499,6 +1524,7 @@ mod tests {
             None,
             None,
             Some(&admin),
+            None,
         )
         .expect("admin-level approval should succeed");
         assert_eq!(decision.status, ApprovalStatus::Approved);
@@ -1550,6 +1576,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(result.is_ok(), "first approve should succeed");
 
@@ -1559,6 +1586,7 @@ mod tests {
             Some(&store),
             "apr-double",
             "operator",
+            None,
             None,
             None,
             None,

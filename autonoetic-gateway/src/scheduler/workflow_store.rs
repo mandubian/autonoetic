@@ -528,6 +528,7 @@ pub fn update_task_run_status(
     status: TaskRunStatus,
     result_summary: Option<String>,
     approval_metadata: Option<ApprovalMetadata>,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<()> {
     let mut task = load_task_run(config, store, workflow_id, task_id)?
         .ok_or_else(|| anyhow::anyhow!("task '{}' not in workflow '{}'", task_id, workflow_id))?;
@@ -689,6 +690,15 @@ pub fn update_task_run_status(
                         error = %e,
                         "Failed to send workflow join satisfied signal"
                     );
+                }
+
+                if let Some(executor) = hook_executor {
+                    let ctx = autonoetic_types::hooks::HookContext::for_workflow_join_satisfied(
+                        &wf_mut.root_session_id,
+                        workflow_id,
+                        &wf_mut.join_task_ids,
+                    );
+                    executor.dispatch_async(ctx);
                 }
             }
         }
@@ -1852,6 +1862,7 @@ mod tests {
             TaskRunStatus::Succeeded,
             Some("ok".to_string()),
             None,
+            None,
         )
         .unwrap();
         let loaded = load_task_run(&cfg, None, &wf.workflow_id, &tid)
@@ -2138,6 +2149,7 @@ mod tests {
             TaskRunStatus::Succeeded,
             Some("done p1".to_string()),
             None,
+            None,
         )
         .unwrap();
 
@@ -2152,6 +2164,7 @@ mod tests {
             "task-p2",
             TaskRunStatus::Succeeded,
             Some("done p2".to_string()),
+            None,
             None,
         )
         .unwrap();
@@ -2205,6 +2218,7 @@ mod tests {
             &wf.workflow_id,
             "task-je1",
             TaskRunStatus::Succeeded,
+            None,
             None,
             None,
         )
@@ -2262,6 +2276,7 @@ mod tests {
             TaskRunStatus::Failed,
             Some("error".to_string()),
             None,
+            None,
         )
         .unwrap();
         assert!(!check_join_condition(&cfg, None, &wf.workflow_id).unwrap());
@@ -2273,6 +2288,7 @@ mod tests {
             &wf.workflow_id,
             "task-f2",
             TaskRunStatus::Succeeded,
+            None,
             None,
             None,
         )
@@ -2397,6 +2413,7 @@ mod tests {
             TaskRunStatus::Runnable,
             Some("approval_approved".to_string()),
             None,
+            None,
         )
         .unwrap();
 
@@ -2452,6 +2469,7 @@ mod tests {
             TaskRunStatus::AwaitingApproval,
             Some("awaiting_approval".to_string()),
             None,
+            None,
         )
         .unwrap();
 
@@ -2471,6 +2489,7 @@ mod tests {
             "task-resume",
             TaskRunStatus::Runnable,
             Some("approval_approved".to_string()),
+            None,
             None,
         )
         .unwrap();
@@ -2530,6 +2549,7 @@ mod tests {
             TaskRunStatus::Succeeded,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(check_join_condition(&cfg, None, &wf.workflow_id).unwrap());
@@ -2584,6 +2604,7 @@ mod tests {
             TaskRunStatus::Succeeded,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(!check_join_condition(&cfg, None, &wf.workflow_id).unwrap());
@@ -2595,6 +2616,7 @@ mod tests {
             &wf.workflow_id,
             "t-b",
             TaskRunStatus::Succeeded,
+            None,
             None,
             None,
         )
@@ -2635,6 +2657,7 @@ mod tests {
             "task-rej",
             TaskRunStatus::Failed,
             Some("approval_rejected".to_string()),
+            None,
             None,
         )
         .unwrap();
@@ -3047,6 +3070,7 @@ mod tests {
             "task-resume-vis",
             TaskRunStatus::Runnable,
             Some("approval_approved".to_string()),
+            None,
             None,
         )
         .unwrap();
