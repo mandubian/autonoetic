@@ -572,6 +572,14 @@ pub struct GatewayConfig {
     /// Approval level / escalation settings.
     #[serde(default)]
     pub approval_levels: ApprovalLevelConfig,
+
+    /// Timeout in seconds for signal delivery (approval resolution, workflow join).
+    /// This is the time the signal sender waits for the JSON-RPC response after
+    /// delivering an event.ingest to the planner. Planner turns include LLM
+    /// inference, so this must be long enough to cover a full turn.
+    /// Default: 60.
+    #[serde(default = "default_signal_delivery_timeout_secs")]
+    pub signal_delivery_timeout_secs: u64,
 }
 
 /// Chat TUI configuration.
@@ -902,6 +910,10 @@ fn default_max_session_turns() -> u32 {
     12
 }
 
+fn default_signal_delivery_timeout_secs() -> u64 {
+    60
+}
+
 fn default_evidence_mode() -> String {
     "full".to_string()
 }
@@ -1079,6 +1091,7 @@ impl Default for GatewayConfig {
             chat: ChatConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
+            signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
         }
     }
 }

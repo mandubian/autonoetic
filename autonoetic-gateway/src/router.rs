@@ -12,6 +12,31 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::sync::Arc;
 
+/// Tracks async event.ingest results for polling via `session.status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsyncIngestResult {
+    pub session_id: String,
+    pub status: AsyncIngestStatus,
+    pub assistant_reply: Option<String>,
+    pub artifacts: Vec<serde_json::Value>,
+    pub shared_knowledge: Vec<serde_json::Value>,
+    pub error: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AsyncIngestStatus {
+    Processing,
+    Completed,
+    SuspendedApproval,
+    SuspendedUserInput,
+    Failed,
+}
+
+type AsyncResultMap = Arc<tokio::sync::Mutex<std::collections::HashMap<String, AsyncIngestResult>>>;
+
 #[derive(Debug)]
 enum IngressType {
     Spawn {
@@ -86,6 +111,7 @@ impl JsonRpcResponse {
 pub struct JsonRpcRouter {
     config: Arc<GatewayConfig>,
     execution: Arc<GatewayExecutionService>,
+    async_results: AsyncResultMap,
 }
 
 impl JsonRpcRouter {
@@ -97,6 +123,7 @@ impl JsonRpcRouter {
         Self {
             config: Arc::new(config),
             execution,
+            async_results: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -439,71 +466,198 @@ impl JsonRpcRouter {
                     metadata: params.metadata.clone(),
                 };
 
-                match self
-                    .execute_agent_request(ingress, session_id.clone())
-                    .await
-                {
-                    Ok((result, _trace_session)) => {
-                        if let Some(source_agent_id) = params.source_agent_id.as_deref() {
-                            let _ = append_delegation_task_entry(
-                                self.config.as_ref(),
-                                source_agent_id,
-                                &target_agent_id,
-                                "event.ingest",
-                                TaskStatus::Completed,
-                                Some(serde_json::json!({
-                                    "session_id": result.session_id.clone(),
-                                    "assistant_reply": result.assistant_reply.clone(),
-                                    "artifacts": result.artifacts.clone(),
-                                    "shared_knowledge": result.shared_knowledge.clone(),
-                                    "event_type": event_type.clone(),
-                                })),
-                            );
-                        }
-                        JsonRpcResponse::success(
-                            req.id,
-                            serde_json::json!({
-                                "event_type": event_type,
-                                "target_agent_id": target_agent_id,
-                                "session_id": result.session_id,
-                                "assistant_reply": result.assistant_reply,
-                                "artifacts": result.artifacts,
-                                "shared_knowledge": result.shared_knowledge,
-                                "llm_usage": result.llm_usage,
-                            }),
-                        )
+                if params.async_mode {
+                    let async_results = self.async_results.clone();
+                    let router = self.clone();
+                    let session_id_clone = session_id.clone();
+                    let target_agent_id_clone = target_agent_id.clone();
+                    let event_type_clone = event_type.clone();
+                    let source_agent_id = params.source_agent_id.clone();
+                    let config = self.config.clone();
+
+                    {
+                        let mut map = async_results.lock().await;
+                        map.insert(
+                            session_id_clone.clone(),
+                            AsyncIngestResult {
+                                session_id: session_id_clone.clone(),
+                                status: AsyncIngestStatus::Processing,
+                                assistant_reply: None,
+                                artifacts: Vec::new(),
+                                shared_knowledge: Vec::new(),
+                                error: None,
+                                started_at: chrono::Utc::now().to_rfc3339(),
+                                completed_at: None,
+                            },
+                        );
                     }
-                    Err((e, maybe_trace_session)) => {
-                        if let Some(source_agent_id) = params.source_agent_id.as_deref() {
-                            let _ = append_delegation_task_entry(
-                                self.config.as_ref(),
-                                source_agent_id,
-                                &target_agent_id,
-                                "event.ingest",
-                                TaskStatus::Failed,
-                                Some(serde_json::json!({
-                                    "error": e.clone(),
-                                    "event_type": event_type.clone(),
-                                })),
-                            );
+
+                    tokio::spawn(async move {
+                        let result = router.execute_agent_request(ingress, session_id_clone.clone()).await;
+                        let mut map = async_results.lock().await;
+                        let now = chrono::Utc::now().to_rfc3339();
+                        if let Some(entry) = map.get_mut(&session_id_clone) {
+                            match result {
+                                Ok((spawn_result, _)) => {
+                                    if let Some(source) = source_agent_id {
+                                        let _ = append_delegation_task_entry(
+                                            config.as_ref(),
+                                            &source,
+                                            &target_agent_id_clone,
+                                            "event.ingest",
+                                            TaskStatus::Completed,
+                                            Some(serde_json::json!({
+                                                "session_id": spawn_result.session_id.clone(),
+                                                "assistant_reply": spawn_result.assistant_reply.clone(),
+                                                "artifacts": spawn_result.artifacts.clone(),
+                                                "shared_knowledge": spawn_result.shared_knowledge.clone(),
+                                                "event_type": event_type_clone,
+                                            })),
+                                        );
+                                    }
+                                    let status = if spawn_result.suspended_for_approval.is_some() {
+                                        AsyncIngestStatus::SuspendedApproval
+                                    } else {
+                                        AsyncIngestStatus::Completed
+                                    };
+                                    entry.status = status;
+                                    entry.assistant_reply = spawn_result.assistant_reply;
+                                    entry.artifacts = spawn_result.artifacts.into_iter().map(|a| serde_json::to_value(&a).unwrap_or_default()).collect();
+                                    entry.shared_knowledge = spawn_result.shared_knowledge.into_iter().map(|k| serde_json::to_value(&k).unwrap_or_default()).collect();
+                                    entry.completed_at = Some(now);
+                                }
+                                Err((e, _)) => {
+                                    if let Some(source) = source_agent_id {
+                                        let _ = append_delegation_task_entry(
+                                            config.as_ref(),
+                                            &source,
+                                            &target_agent_id_clone,
+                                            "event.ingest",
+                                            TaskStatus::Failed,
+                                            Some(serde_json::json!({
+                                                "error": e.clone(),
+                                                "event_type": event_type_clone,
+                                            })),
+                                        );
+                                    }
+                                    entry.status = AsyncIngestStatus::Failed;
+                                    entry.error = Some(e);
+                                    entry.completed_at = Some(now);
+                                }
+                            }
                         }
-                        if let Some(mut trace_session) = maybe_trace_session {
-                            let _ = trace_session.log_failed(
-                                "event.ingest",
-                                &e,
-                                Some(serde_json::json!({
-                                    "event_type": event_type.clone(),
-                                    "target_agent_id": target_agent_id.clone(),
-                                    "source_agent_id": params.source_agent_id.clone(),
-                                })),
-                            );
+                    });
+
+                    JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "event_type": event_type,
+                            "target_agent_id": target_agent_id,
+                            "session_id": session_id,
+                            "status": "processing",
+                            "message": "Request accepted. Poll session.status for result.",
+                        }),
+                    )
+                } else {
+                    match self
+                        .execute_agent_request(ingress, session_id.clone())
+                        .await
+                    {
+                        Ok((result, _trace_session)) => {
+                            if let Some(source_agent_id) = params.source_agent_id.as_deref() {
+                                let _ = append_delegation_task_entry(
+                                    self.config.as_ref(),
+                                    source_agent_id,
+                                    &target_agent_id,
+                                    "event.ingest",
+                                    TaskStatus::Completed,
+                                    Some(serde_json::json!({
+                                        "session_id": result.session_id.clone(),
+                                        "assistant_reply": result.assistant_reply.clone(),
+                                        "artifacts": result.artifacts.clone(),
+                                        "shared_knowledge": result.shared_knowledge.clone(),
+                                        "event_type": event_type.clone(),
+                                    })),
+                                );
+                            }
+                            JsonRpcResponse::success(
+                                req.id,
+                                serde_json::json!({
+                                    "event_type": event_type,
+                                    "target_agent_id": target_agent_id,
+                                    "session_id": result.session_id,
+                                    "assistant_reply": result.assistant_reply,
+                                    "artifacts": result.artifacts,
+                                    "shared_knowledge": result.shared_knowledge,
+                                    "llm_usage": result.llm_usage,
+                                }),
+                            )
                         }
-                        JsonRpcResponse::error(
-                            req.id,
-                            -32000,
-                            format!("event.ingest failed: {}", e),
-                        )
+                        Err((e, maybe_trace_session)) => {
+                            if let Some(source_agent_id) = params.source_agent_id.as_deref() {
+                                let _ = append_delegation_task_entry(
+                                    self.config.as_ref(),
+                                    source_agent_id,
+                                    &target_agent_id,
+                                    "event.ingest",
+                                    TaskStatus::Failed,
+                                    Some(serde_json::json!({
+                                        "error": e.clone(),
+                                        "event_type": event_type.clone(),
+                                    })),
+                                );
+                            }
+                            if let Some(mut trace_session) = maybe_trace_session {
+                                let _ = trace_session.log_failed(
+                                    "event.ingest",
+                                    &e,
+                                    Some(serde_json::json!({
+                                        "event_type": event_type.clone(),
+                                        "target_agent_id": target_agent_id.clone(),
+                                        "source_agent_id": params.source_agent_id.clone(),
+                                    })),
+                                );
+                            }
+                            JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("event.ingest failed: {}", e),
+                            )
+                        }
                     }
+                }
+            }
+
+            "session.status" => {
+                #[derive(Deserialize)]
+                struct SessionStatusParams {
+                    session_id: String,
+                }
+                let params: SessionStatusParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.status: {}", e),
+                        );
+                    }
+                };
+
+                let async_results = self.async_results.lock().await;
+                if let Some(result) = async_results.get(&params.session_id) {
+                    JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result).unwrap_or_else(|_| {
+                            serde_json::json!({ "session_id": params.session_id, "status": "unknown" })
+                        }),
+                    )
+                } else {
+                    JsonRpcResponse::error(
+                        req.id,
+                        -32001,
+                        format!("No async result found for session '{}'. The session may have been initiated with async_mode=false, or the session ID is incorrect.", params.session_id),
+                    )
                 }
             }
 
@@ -749,6 +903,11 @@ struct EventIngestParams {
     session_id: Option<String>,
     #[serde(default)]
     source_agent_id: Option<String>,
+    /// When true, return immediately with a session acknowledgment and process
+    /// the request in the background. The caller polls `session.status` for the
+    /// result. Default: false (blocking).
+    #[serde(default)]
+    async_mode: bool,
 }
 
 fn append_delegation_task_entry(

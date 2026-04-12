@@ -1141,6 +1141,7 @@ async fn process_pending_notifications(
     }
 
     let port = execution.config().port;
+    let timeout_secs = execution.config().signal_delivery_timeout_secs;
 
     for n in pending {
         // Map NotificationRecord payload to Signal.
@@ -1170,6 +1171,7 @@ async fn process_pending_notifications(
                 &pending_signal,
                 &n.target_session_id,
                 port,
+                timeout_secs,
             )
             .await
             {

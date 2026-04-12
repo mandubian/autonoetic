@@ -56,6 +56,7 @@ pub async fn deliver_signal(
     pending: &PendingSignal,
     session_id: &str,
     port: u16,
+    timeout_secs: u64,
 ) -> anyhow::Result<()> {
     let request_id = &pending.request_id;
 
@@ -86,7 +87,7 @@ pub async fn deliver_signal(
 
                 let mut response_line = String::new();
                 let read_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
+                    std::time::Duration::from_secs(timeout_secs.max(1)),
                     reader.read_line(&mut response_line),
                 )
                 .await
@@ -159,6 +160,8 @@ fn build_delivery_request(
         ),
     };
 
+    let is_async = matches!(signal, Signal::WorkflowJoinSatisfied { .. });
+
     crate::router::JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: format!("signal-deliver-{}", request_id),
@@ -168,6 +171,7 @@ fn build_delivery_request(
             "target_agent_id": target_agent_id,
             "message": message,
             "session_id": session_id,
+            "async_mode": is_async,
             "metadata": {
                 "sender_id": "gateway-signal-poller",
                 "channel_id": format!("signal-poller-{}", session_id),
@@ -248,6 +252,32 @@ mod tests {
             request.params.get("target_agent_id"),
             Some(&serde_json::Value::Null)
         );
+        assert_eq!(
+            request.params.get("async_mode"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn approval_resolved_signal_is_not_async() {
+        let pending = PendingSignal {
+            request_id: "apr-test".to_string(),
+            signal: Signal::ApprovalResolved {
+                request_id: "apr-test".to_string(),
+                agent_id: "coder.default".to_string(),
+                status: "approved".to_string(),
+                install_completed: false,
+                message: "approved".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            },
+            filename: "apr-test.json".to_string(),
+        };
+
+        let request = build_delivery_request(&pending, "demo-session");
+        match request.params.get("async_mode") {
+            None | Some(serde_json::Value::Bool(false)) => {}
+            other => panic!("expected async_mode=false or absent, got: {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -296,7 +326,7 @@ mod tests {
             filename: "wf-join-test.json".to_string(),
         };
 
-        let err = deliver_signal(&pending, "demo-session", port)
+        let err = deliver_signal(&pending, "demo-session", port, 2)
             .await
             .expect_err("delivery should fail on JSON-RPC error");
         assert!(err
