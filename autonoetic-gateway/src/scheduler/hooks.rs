@@ -222,13 +222,17 @@ impl HookExecutor {
             }
         }
         let search_text = search_parts.join(" ");
+        let search_text = crate::log_redaction::redact_text_for_logs(&search_text);
+        let title = crate::log_redaction::redact_text_for_logs(&title);
+
+        let sanitized_body = sanitize_report_for_publishing(&report_body);
 
         let report_handle = crate::runtime::content_store::ContentStore::compute_handle(
-            report_body.as_bytes(),
+            sanitized_body.as_bytes(),
         );
 
         if let Ok(content_store) = crate::runtime::content_store::ContentStore::new(&gateway_dir) {
-            if let Err(e) = content_store.write(report_body.as_bytes()) {
+            if let Err(e) = content_store.write(sanitized_body.as_bytes()) {
                 tracing::warn!(
                     target: "hooks",
                     error = %e,
@@ -385,4 +389,49 @@ impl HookExecutor {
 
         Ok(())
     }
+}
+
+fn sanitize_report_for_publishing(report_json: &str) -> String {
+    let mut parsed: serde_json::Value = match serde_json::from_str(report_json) {
+        Ok(v) => v,
+        Err(_) => return report_json.to_string(),
+    };
+
+    if let Some(agents) = parsed.get_mut("agents").and_then(|a| a.as_object_mut()) {
+        for agent_val in agents.values_mut() {
+            let agent = match agent_val.as_object_mut() {
+                Some(a) => a,
+                None => continue,
+            };
+            agent.remove("input_preview");
+            agent.remove("output_preview");
+
+            if let Some(errors) = agent.get_mut("errors").and_then(|e| e.as_array_mut()) {
+                for err in errors.iter_mut() {
+                    if let Some(obj) = err.as_object_mut() {
+                        obj.remove("summary");
+                    }
+                }
+            }
+            if let Some(approvals) = agent.get_mut("approvals").and_then(|a| a.as_array_mut()) {
+                for appr in approvals.iter_mut() {
+                    if let Some(obj) = appr.as_object_mut() {
+                        obj.remove("reason");
+                        obj.remove("resolution_summary");
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(timeline) = parsed.get_mut("timeline").and_then(|t| t.as_array_mut()) {
+        for event in timeline.iter_mut() {
+            if let Some(obj) = event.as_object_mut() {
+                obj.remove("details");
+                obj.remove("payload_ref");
+            }
+        }
+    }
+
+    serde_json::to_string(&parsed).unwrap_or_else(|_| report_json.to_string())
 }
