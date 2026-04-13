@@ -14,6 +14,7 @@ use autonoetic_types::runtime_lock::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -66,11 +67,33 @@ fn compute_revision_content_digest_hex(files: &BTreeMap<String, Vec<u8>>) -> Str
     format!("{:x}", hasher.finalize())
 }
 
+fn normalize_script_entry(entry: &str) -> String {
+    let first_word = entry.split_whitespace().next().unwrap_or(entry);
+    if first_word == "python3"
+        || first_word == "python"
+        || first_word == "python2"
+        || first_word == "node"
+        || first_word == "bash"
+        || first_word == "sh"
+        || first_word == "perl"
+        || first_word == "ruby"
+    {
+        entry
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or(first_word)
+            .to_string()
+    } else {
+        entry.to_string()
+    }
+}
+
 fn materialize_revision_directory(
     gateway_dir: &Path,
     agent_id: &str,
     revision_id: &str,
     files: &BTreeMap<String, Vec<u8>>,
+    script_entry: Option<&str>,
 ) -> anyhow::Result<std::path::PathBuf> {
     let revision_dir = gateway_dir
         .join("revisions")
@@ -79,6 +102,14 @@ fn materialize_revision_directory(
         .join(revision_id);
 
     if revision_dir.exists() {
+        if let Some(entry) = script_entry {
+            let existing = revision_dir.join(entry);
+            if existing.is_file() {
+                let mut perms = std::fs::metadata(&existing)?.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                std::fs::set_permissions(&existing, perms)?;
+            }
+        }
         return Ok(revision_dir);
     }
 
@@ -96,6 +127,15 @@ fn materialize_revision_directory(
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&output, bytes)?;
+    }
+
+    if let Some(entry) = script_entry {
+        let entry_path = tmp_dir.join(entry);
+        if entry_path.is_file() {
+            let mut perms = std::fs::metadata(&entry_path)?.permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            std::fs::set_permissions(&entry_path, perms)?;
+        }
     }
 
     if let Some(parent) = revision_dir.parent() {
@@ -419,6 +459,7 @@ fn create_revision_from_files(
     parsed_lock: RuntimeLock,
     skill_content: &[u8],
     health_report: Option<&crate::runtime::install_contract::BundleHealthReport>,
+    script_entry: Option<&str>,
 ) -> anyhow::Result<PersistedRevisionResult> {
     let expected_layers = expected_locked_layers(bundle);
     let normalized_lock = normalize_runtime_lock(parsed_lock);
@@ -432,6 +473,20 @@ fn create_revision_from_files(
     let canonical_lock_bytes = canonical_runtime_lock_bytes(normalized_lock.clone())?;
     file_map.insert(lock_rel_path.to_string(), canonical_lock_bytes.clone());
 
+    if let Some(entry) = script_entry {
+        let normalized_entry = normalize_script_entry(entry);
+        if let Some(bytes) = file_map.get(&normalized_entry) {
+            let starts_with_shebang = bytes.starts_with(b"#!");
+            let is_binary = bytes.starts_with(b"\x7fELF");
+            anyhow::ensure!(
+                starts_with_shebang || is_binary,
+                "script_entry '{}' must start with a shebang line (e.g. #!/usr/bin/env python3) \
+                 or be a native binary. This is required for the gateway to execute the script directly.",
+                entry
+            );
+        }
+    }
+
     let manifest_hash = format!("sha256:{}", sha256_hex(skill_content));
     let runtime_lock_hash = format!("sha256:{}", sha256_hex(&canonical_lock_bytes));
     let revision_digest_hex = compute_revision_content_digest_hex(file_map);
@@ -439,8 +494,13 @@ fn create_revision_from_files(
     let content_digest = format!("sha256:{}", revision_digest_hex);
 
     if let Some(existing_rev) = gateway_store.get_agent_revision(&revision_id)? {
-        let _ =
-            materialize_revision_directory(gateway_dir, &common.agent_id, &revision_id, file_map)?;
+        let _ = materialize_revision_directory(
+            gateway_dir,
+            &common.agent_id,
+            &revision_id,
+            file_map,
+            script_entry,
+        )?;
         return Ok(PersistedRevisionResult {
             response: serde_json::json!({
                 "ok": true,
@@ -456,8 +516,13 @@ fn create_revision_from_files(
         });
     }
 
-    let _revision_dir =
-        materialize_revision_directory(gateway_dir, &common.agent_id, &revision_id, file_map)?;
+    let _revision_dir = materialize_revision_directory(
+        gateway_dir,
+        &common.agent_id,
+        &revision_id,
+        file_map,
+        script_entry,
+    )?;
 
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -745,6 +810,7 @@ impl NativeTool for AgentRevisionCreateTool {
             parsed_lock,
             &skill_content,
             None,
+            bundle_manifest.script_entry.as_deref(),
         )?;
         Ok(persisted.response.to_string())
     }
@@ -897,7 +963,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 } else {
                     None
                 }
-            });
+            })
+            .map(|e| normalize_script_entry(&e));
 
         let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for (path, bytes) in artifact_store.resolve_files(&args.artifact_id)? {
@@ -934,7 +1001,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             middleware: args.middleware.clone(),
             response_contract: args.response_contract.clone(),
             execution_mode: resolved_mode,
-            script_entry: resolved_script_entry,
+            script_entry: resolved_script_entry.clone(),
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
@@ -977,6 +1044,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             parsed_lock,
             &skill_content,
             Some(&health_report),
+            resolved_script_entry.as_deref(),
         )?;
 
         let mut response = persisted.response;
