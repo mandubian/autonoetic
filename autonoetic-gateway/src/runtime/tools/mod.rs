@@ -591,15 +591,36 @@ pub(crate) fn dependency_plan_from_args_or_lock(
         return Ok(None);
     }
     let lock = crate::runtime_lock::resolve_runtime_lock(&lock_path)?;
+    dependency_plan_from_lock(&lock)
+}
+
+pub(crate) fn dependency_plan_from_lock(
+    lock: &autonoetic_types::runtime_lock::RuntimeLock,
+) -> anyhow::Result<Option<DependencyPlan>> {
     if lock.dependencies.is_empty() {
         return Ok(None);
     }
-    anyhow::ensure!(
-        lock.dependencies.len() == 1,
-        "runtime.lock currently supports exactly one dependency set"
-    );
-    let locked = &lock.dependencies[0];
-    parse_dependency_plan(locked.runtime.as_str(), locked.packages.clone()).map(Some)
+
+    // Merge all dependency sets into a single plan.
+    // All sets must target the same runtime; mixed runtimes require explicit
+    // inline dependencies (the packager builds layers instead).
+    let mut merged_packages: Vec<String> = Vec::new();
+    let mut merged_runtime: Option<String> = None;
+    for dep_set in &lock.dependencies {
+        if let Some(ref rt) = merged_runtime {
+            anyhow::ensure!(
+                rt == &dep_set.runtime,
+                "runtime.lock contains dependency sets with different runtimes ('{}' vs '{}'); use explicit dependencies or pre-built layers",
+                rt, dep_set.runtime
+            );
+        } else {
+            merged_runtime = Some(dep_set.runtime.clone());
+        }
+        merged_packages.extend(dep_set.packages.clone());
+    }
+
+    let runtime = merged_runtime.as_deref().unwrap_or("python");
+    parse_dependency_plan(runtime, merged_packages).map(Some)
 }
 
 pub mod agent;
@@ -841,5 +862,88 @@ mod tests {
             r#"{"command": "python3 /tmp/test.py", "dependencies": "not json at all"}"#,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dependency_plan_from_args_or_lock_explicit_deps_override() {
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "test".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            gateway_url: None,
+            gateway_token: None,
+            response_contract: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+        };
+        let temp_dir = tempfile::tempdir().unwrap();
+        let deps = Some(SandboxExecDependencies {
+            runtime: "python".to_string(),
+            packages: vec!["requests".to_string()],
+        });
+        let plan = dependency_plan_from_args_or_lock(&manifest, temp_dir.path(), deps).unwrap();
+        assert!(plan.is_some());
+        let plan = plan.unwrap();
+        assert_eq!(plan.runtime, DependencyRuntime::Python);
+        assert_eq!(plan.packages, vec!["requests"]);
+    }
+
+    #[test]
+    fn test_dependency_plan_from_args_or_lock_no_lock_file_returns_none() {
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "test".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            gateway_url: None,
+            gateway_token: None,
+            response_contract: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+        };
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plan = dependency_plan_from_args_or_lock(&manifest, temp_dir.path(), None).unwrap();
+        assert!(plan.is_none());
     }
 }

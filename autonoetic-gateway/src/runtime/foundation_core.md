@@ -40,5 +40,5 @@ Core runtime model:
 
 6. Sandboxed worker code can use the Autonoetic SDK.
 - Python sandbox code can import `autonoetic_sdk`.
-- The SDK exposes content and knowledge operations via gateway API.
+- The SDK exposes memory, state, and event operations via `sdk.memory.*`, `sdk.state.*`, and `sdk.events.*` — see SDK reference for details.
 - The SDK is the platform-native bridge to gateway-managed capabilities.

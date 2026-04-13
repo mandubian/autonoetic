@@ -612,6 +612,11 @@ impl ArtifactStore {
         Ok(result)
     }
 
+    /// Returns a reference to the underlying content store.
+    pub fn content_store(&self) -> &ContentStore {
+        &self.content_store
+    }
+
     /// Lists all artifact IDs.
     pub fn list(&self) -> anyhow::Result<Vec<String>> {
         let index = self.load_index()?;
