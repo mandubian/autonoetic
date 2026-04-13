@@ -376,7 +376,7 @@ fn setup_test(agent_id: &str, skill_md: &str) -> (TestSetup, String, String, Arc
     let builder_dir = agents_dir.join("specialized_builder.default");
     std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
 
-    let main_py = "import json\nprint(json.dumps({'status': 'ok'}))\n";
+    let main_py = "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'status': 'ok'}))\n";
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), skill_md, main_py);
 
     let config = GatewayConfig {

@@ -18,6 +18,7 @@ static SESSION_REPORT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()
 const MAX_EVENTS: usize = 400;
 const MAX_RECENT_EVENTS_PER_AGENT: usize = 12;
 const LARGE_PAYLOAD_THRESHOLD: usize = 500;
+const OUTPUT_PREVIEW_DISPLAY_CHARS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionReportState {
@@ -120,6 +121,7 @@ struct ReportEvent {
 pub struct SessionReportWriter {
     state_path: PathBuf,
     live_md_path: PathBuf,
+    live_html_path: PathBuf,
     final_md_path: PathBuf,
     final_json_path: PathBuf,
     final_html_path: PathBuf,
@@ -191,6 +193,7 @@ impl SessionReportWriter {
         Ok(Self {
             state_path: dir.join("session_report.live.json"),
             live_md_path: dir.join("session_overview.md"),
+            live_html_path: dir.join("session_overview.html"),
             final_md_path: dir.join("session_report.md"),
             final_json_path: dir.join("session_report.json"),
             final_html_path: dir.join("session_report.html"),
@@ -634,8 +637,10 @@ impl SessionReportWriter {
         f(&mut state);
         state.generated_at = chrono::Utc::now().to_rfc3339();
         let live_md = render_live_markdown(&state);
+        let live_html = render_live_html(&state);
         write_json_atomic(&self.state_path, &state)?;
         write_string_atomic(&self.live_md_path, &live_md)?;
+        write_string_atomic(&self.live_html_path, &live_html)?;
         Ok(())
     }
 
@@ -649,10 +654,12 @@ impl SessionReportWriter {
         state.generated_at = chrono::Utc::now().to_rfc3339();
         attach_links(&mut state);
         let live_md = render_live_markdown(&state);
+        let live_html = render_live_html(&state);
         let final_md = render_final_markdown(&state);
         let final_html = render_html_report(&state);
         write_json_atomic(&self.state_path, &state)?;
         write_string_atomic(&self.live_md_path, &live_md)?;
+        write_string_atomic(&self.live_html_path, &live_html)?;
         write_json_atomic(&self.final_json_path, &state)?;
         write_string_atomic(&self.final_md_path, &final_md)?;
         write_string_atomic(&self.final_html_path, &final_html)?;
@@ -1221,8 +1228,14 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                 .unwrap_or("—"),
             agent.status,
             format_timestamp(agent.started_at.as_deref()),
-            truncate_chars(agent.last_event_summary.as_deref().unwrap_or("—"), 100),
-            truncate_chars(agent.output_preview.as_deref().unwrap_or("—"), 80),
+            truncate_chars(
+                agent.last_event_summary.as_deref().unwrap_or("—"),
+                OUTPUT_PREVIEW_DISPLAY_CHARS
+            ),
+            truncate_chars(
+                agent.output_preview.as_deref().unwrap_or("—"),
+                OUTPUT_PREVIEW_DISPLAY_CHARS
+            ),
             agent.error_count
         );
     }
@@ -1241,7 +1254,7 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                 "| {} | `{}` | {} |",
                 format_timestamp(Some(&blocker.0)),
                 blocker.1,
-                truncate_chars(&blocker.3, 160)
+                truncate_chars(&blocker.3, OUTPUT_PREVIEW_DISPLAY_CHARS)
             );
         }
     }
@@ -1269,7 +1282,7 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                 a.agent_id,
                 a.request_id,
                 a.kind,
-                truncate_chars(&a.summary, 120),
+                truncate_chars(&a.summary, OUTPUT_PREVIEW_DISPLAY_CHARS),
                 a.reason.as_deref().unwrap_or("—"),
             );
         }
@@ -1289,7 +1302,7 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                 format_timestamp(Some(&event.created_at)),
                 event.agent_id,
                 event.kind,
-                truncate_chars(&event.summary, 120)
+                truncate_chars(&event.summary, OUTPUT_PREVIEW_DISPLAY_CHARS)
             );
         }
     }
@@ -1382,6 +1395,181 @@ fn render_live_markdown(state: &SessionReportState) -> String {
     out
 }
 
+fn render_live_html(state: &SessionReportState) -> String {
+    let mut out = String::new();
+    let open_blockers = collect_open_blockers(state, false);
+    let recent_events: Vec<&ReportEvent> = state
+        .timeline
+        .iter()
+        .filter(|e| e.important)
+        .rev()
+        .take(16)
+        .collect();
+
+    out.push_str("<!DOCTYPE html>\n<html><head>\n");
+    out.push_str("<meta charset=\"UTF-8\">\n");
+    out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
+    out.push_str(&format!(
+        "<title>Session Overview: {}</title>\n",
+        escape_html(&state.root_session_id)
+    ));
+    out.push_str(r#"<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29928; --orange: #db6d28;
+  --blue: #58a6ff; --purple: #bc8cff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.6;
+  padding: 2rem; max-width: 1400px; margin: 0 auto;
+}
+h1 { font-size: 1.5rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+h2 { font-size: 1.2rem; margin: 1.25rem 0 0.5rem; color: var(--accent); }
+table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.85rem; }
+th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; }
+th { background: var(--surface); font-weight: 600; white-space: nowrap; }
+tr:hover td { background: #1c2128; }
+code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85em; }
+.badge {
+  display: inline-block; padding: 0.1rem 0.5rem; border-radius: 99px;
+  font-size: 0.7rem; font-weight: 600;
+}
+.badge-running { background: #1f6feb33; color: var(--blue); }
+.badge-completed { background: #3fb95033; color: var(--green); }
+.badge-failed { background: #f8514933; color: var(--red); }
+.badge-suspended { background: #d2992833; color: var(--yellow); }
+.badge-awaiting_approval { background: #db6d2833; color: var(--orange); }
+.section-note { color: var(--text-dim); font-style: italic; font-size: 0.85rem; }
+</style>
+</head><body>\n"#);
+
+    out.push_str(&format!(
+        "<h1>Session Overview: <code>{}</code></h1>\n",
+        escape_html(&state.root_session_id)
+    ));
+    out.push_str("<p><em>Auto-updated structured view. Narrative log remains in <code>digest.md</code>.</em></p>\n");
+
+    out.push_str("<h2>Status</h2>\n");
+    out.push_str("<table><tbody>\n");
+    out.push_str(&format!(
+        "<tr><th>Status</th><td><code>{}</code></td></tr>\n",
+        state.status
+    ));
+    out.push_str(&format!(
+        "<tr><th>Started</th><td>{}</td></tr>\n",
+        state.started_at.as_deref().unwrap_or("—")
+    ));
+    out.push_str(&format!(
+        "<tr><th>Last updated</th><td>{}</td></tr>\n",
+        state.generated_at
+    ));
+    out.push_str("</tbody></table>\n");
+
+    out.push_str("<h2>Active Agents</h2>\n");
+    out.push_str("<table><thead><tr><th style=\"width:15%\">Agent</th><th style=\"width:12%\">Session</th><th style=\"width:10%\">Parent</th><th style=\"width:10%\">Status</th><th style=\"width:13%\">Started</th><th style=\"width:20%\">Last Event</th><th style=\"width:15%\">Output</th><th style=\"width:5%\">Errors</th></tr></thead><tbody>\n");
+    for (depth, agent) in agents_by_tree(state, None) {
+        let indent = "&nbsp;&nbsp;".repeat(depth);
+        out.push_str(&format!("<tr><td><code>{}{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+            indent, escape_html(&agent.agent_id),
+            escape_html(short_session_id(&agent.session_id)),
+            agent.parent_session_id.as_deref().map(|s| format!("<code>{}</code>", escape_html(short_session_id(s)))).unwrap_or_else(|| "—".to_string()),
+            status_to_badge_class(&agent.status), agent.status,
+            format_timestamp(agent.started_at.as_deref()),
+            truncate_html(agent.last_event_summary.as_deref().unwrap_or("—"), OUTPUT_PREVIEW_DISPLAY_CHARS),
+            truncate_html(agent.output_preview.as_deref().unwrap_or("—"), OUTPUT_PREVIEW_DISPLAY_CHARS),
+            agent.error_count,
+        ));
+    }
+    out.push_str("</tbody></table>\n");
+
+    let error_blockers: Vec<_> = open_blockers.iter().filter(|b| b.2 == "error").collect();
+    out.push_str("<h2>Open Errors</h2>\n");
+    if error_blockers.is_empty() {
+        out.push_str("<p class=\"section-note\">none</p>\n");
+    } else {
+        out.push_str("<table><thead><tr><th style=\"width:15%\">Time</th><th style=\"width:15%\">Agent</th><th>Summary</th></tr></thead><tbody>\n");
+        for blocker in &error_blockers {
+            out.push_str(&format!(
+                "<tr><td>{}</td><td><code>{}</code></td><td>{}</td></tr>\n",
+                format_timestamp(Some(&blocker.0)),
+                escape_html(&blocker.1),
+                truncate_html(&blocker.3, OUTPUT_PREVIEW_DISPLAY_CHARS),
+            ));
+        }
+        out.push_str("</tbody></table>\n");
+    }
+
+    let pending_approvals: Vec<_> = collect_all_approvals(state)
+        .into_iter()
+        .filter(|a| a.status == "pending")
+        .collect();
+    out.push_str("<h2>Open Approvals</h2>\n");
+    if pending_approvals.is_empty() {
+        out.push_str("<p class=\"section-note\">none</p>\n");
+    } else {
+        out.push_str("<table><thead><tr><th style=\"width:15%\">Time</th><th style=\"width:12%\">Agent</th><th style=\"width:12%\">Request ID</th><th style=\"width:8%\">Kind</th><th>Summary</th><th>Reason</th></tr></thead><tbody>\n");
+        for a in &pending_approvals {
+            out.push_str(&format!("<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                format_timestamp(Some(&a.created_at)),
+                escape_html(&a.agent_id),
+                escape_html(&a.request_id),
+                escape_html(&a.kind),
+                truncate_html(&a.summary, OUTPUT_PREVIEW_DISPLAY_CHARS),
+                a.reason.as_deref().unwrap_or("—"),
+            ));
+        }
+        out.push_str("</tbody></table>\n");
+    }
+
+    out.push_str("<h2>Recent Important Events</h2>\n");
+    if recent_events.is_empty() {
+        out.push_str("<p class=\"section-note\">none yet</p>\n");
+    } else {
+        out.push_str("<table><thead><tr><th style=\"width:15%\">Time</th><th style=\"width:12%\">Agent</th><th style=\"width:10%\">Kind</th><th>Summary</th></tr></thead><tbody>\n");
+        for event in recent_events.into_iter().rev() {
+            out.push_str(&format!(
+                "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>\n",
+                format_timestamp(Some(&event.created_at)),
+                escape_html(&event.agent_id),
+                escape_html(&event.kind),
+                truncate_html(&event.summary, OUTPUT_PREVIEW_DISPLAY_CHARS),
+            ));
+        }
+        out.push_str("</tbody></table>\n");
+    }
+
+    out.push_str("<h2>Agent Details</h2>\n");
+    for agent in sorted_agents(state) {
+        out.push_str(&format!(
+            "<h3><code>{}</code> <code>{}</code></h3>\n",
+            escape_html(&agent.agent_id),
+            escape_html(short_session_id(&agent.session_id))
+        ));
+        out.push_str("<table><tbody>\n");
+        out.push_str(&format!("<tr><th>Status</th><td><span class=\"badge badge-{}\">{}</span></td><th>Started</th><td>{}</td><th>Turns</th><td>{}</td></tr>\n",
+            status_to_badge_class(&agent.status), agent.status,
+            format_timestamp(agent.started_at.as_deref()), agent.turn_count));
+        out.push_str(&format!(
+            "<tr><th>Input</th><td colspan=\"5\">{}</td></tr>\n",
+            escape_html(agent.input_preview.as_deref().unwrap_or("—"))
+        ));
+        out.push_str(&format!(
+            "<tr><th>Output</th><td colspan=\"5\">{}</td></tr>\n",
+            escape_html(agent.output_preview.as_deref().unwrap_or("—"))
+        ));
+        out.push_str("</tbody></table>\n");
+        out.push_str("<br>\n");
+    }
+
+    out.push_str(&format!("<p style=\"color:var(--text-dim);font-size:0.75rem;margin-top:1.5rem;\">Generated at {} &bull; Live Overview</p>\n",
+        state.generated_at));
+    out.push_str("</body></html>");
+    out
+}
+
 fn render_final_markdown(state: &SessionReportState) -> String {
     let mut out = String::new();
     let agents = sorted_agents(state);
@@ -1438,8 +1626,14 @@ fn render_final_markdown(state: &SessionReportState) -> String {
             format_duration(agent.started_at.as_deref(), agent.ended_at.as_deref()),
             agent.turn_count,
             agent.status,
-            truncate_chars(agent.input_preview.as_deref().unwrap_or("—"), 120),
-            truncate_chars(agent.output_preview.as_deref().unwrap_or("—"), 120),
+            truncate_chars(
+                agent.input_preview.as_deref().unwrap_or("—"),
+                OUTPUT_PREVIEW_DISPLAY_CHARS
+            ),
+            truncate_chars(
+                agent.output_preview.as_deref().unwrap_or("—"),
+                OUTPUT_PREVIEW_DISPLAY_CHARS
+            ),
             agent.error_count
         );
     }
@@ -1477,9 +1671,9 @@ fn render_final_markdown(state: &SessionReportState) -> String {
                     escape_html(&agent.agent_id),
                     escape_html(&d.target_agent),
                     child_session,
-                    truncate_chars(&d.task_preview, 80),
+                    truncate_chars(&d.task_preview, OUTPUT_PREVIEW_DISPLAY_CHARS),
                     child_status,
-                    truncate_chars(child_output, 80),
+                    truncate_chars(child_output, OUTPUT_PREVIEW_DISPLAY_CHARS),
                 );
             }
         }
@@ -1529,7 +1723,7 @@ fn render_final_markdown(state: &SessionReportState) -> String {
                 a.kind,
                 a.status,
                 a.decision.as_deref().unwrap_or("—"),
-                truncate_chars(&a.summary, 120),
+                truncate_chars(&a.summary, OUTPUT_PREVIEW_DISPLAY_CHARS),
                 a.reason.as_deref().unwrap_or("—"),
                 a.resolved_at
                     .as_deref()
@@ -1563,7 +1757,7 @@ fn render_final_markdown(state: &SessionReportState) -> String {
                 agent.agent_id,
                 artifact.artifact_id,
                 artifact.tool_name,
-                truncate_chars(&artifact.summary, 120)
+                truncate_chars(&artifact.summary, OUTPUT_PREVIEW_DISPLAY_CHARS)
             );
         }
     }
@@ -1588,7 +1782,7 @@ fn render_final_markdown(state: &SessionReportState) -> String {
             format_timestamp(Some(&event.created_at)),
             event.agent_id,
             event.kind,
-            truncate_chars(&event.summary, 120)
+            truncate_chars(&event.summary, OUTPUT_PREVIEW_DISPLAY_CHARS)
         );
     }
     out

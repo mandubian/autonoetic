@@ -213,7 +213,7 @@ async fn test_promotion_record_full_pass_flow() {
     let builder_dir = agents_dir.join("specialized_builder.default");
     std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
 
-    let script_content = "import json\nprint(json.dumps({'temp': 22}))\n";
+    let script_content = "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'temp': 22}))\n";
     let (artifact_id, gateway_dir) = build_agent_bundle_artifact(temp.path(), script_content);
 
     let config = GatewayConfig {

@@ -593,7 +593,7 @@ pub struct GatewayConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledJobsConfig {
     /// Minimum allowed interval between job triggers in seconds.
-    /// Prevents abusive high-frequency schedules. Default: 60.
+    /// Prevents abusive high-frequency schedules. Default: 1.
     #[serde(default = "default_scheduled_jobs_min_interval_secs")]
     pub min_interval_secs: u64,
 
@@ -617,7 +617,7 @@ impl Default for ScheduledJobsConfig {
 }
 
 fn default_scheduled_jobs_min_interval_secs() -> u64 {
-    60
+    1
 }
 
 fn default_scheduled_jobs_max_per_root() -> usize {

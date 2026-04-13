@@ -446,6 +446,7 @@ impl GatewayExecutionService {
             "aborted_handles": 0u32,
             "workflow_tasks_aborted": 0u32,
             "queued_removed": 0u32,
+            "scheduled_jobs_cancelled": 0u32,
         });
 
         let killed_sandbox = self
@@ -496,6 +497,26 @@ impl GatewayExecutionService {
                 error = %e,
                 "Failed to delete session grants during emergency stop"
             );
+        }
+
+        match store.cancel_scheduled_jobs_for_root(root_session_id) {
+            Ok(count) => {
+                details["scheduled_jobs_cancelled"] = serde_json::json!(count);
+                tracing::info!(
+                    target: "emergency_stop",
+                    root_session_id = %root_session_id,
+                    jobs_cancelled = count,
+                    "Cancelled scheduled jobs during emergency stop"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "emergency_stop",
+                    root_session_id = %root_session_id,
+                    error = %e,
+                    "Failed to cancel scheduled jobs during emergency stop"
+                );
+            }
         }
 
         let wf_lead = workflow_id
