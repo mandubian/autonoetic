@@ -290,6 +290,8 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 | `knowledge.search_by_tags` | `(scope, tags, text?, limit?) → [facts]` | AND match on JSON tags |
 | `digest.query` | `(session_id?, narrative_handle?) → narrative` | Read post-session narrative / digest content |
 
+**Cross-agent memory sharing:** Facts stored with `session` visibility (the default for both `knowledge.store` and `sdk.memory.remember`) are readable by all agents participating in the same root session. This includes the planner reading memories written by sub-agents (e.g., a fibonacci calculator storing results via `sdk.memory.remember`). Use `private` visibility for data that should only be accessible to the writing agent, or Tier 1 `memory.write`/`memory.read` for scratch data.
+
 ### Agent Tools
 
 | Tool | Signature | Description |

@@ -5,13 +5,14 @@ use crate::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,
 };
 use crate::runtime::tools::{
-    build_approval_details, dependency_plan_from_args_or_lock, load_session_content_mounts,
-    NativeTool, NativeToolRegistry, SandboxExecArgs,
+    build_approval_details, dependency_plan_from_args_or_lock, dependency_plan_from_lock,
+    load_session_content_mounts, NativeTool, NativeToolRegistry, SandboxExecArgs,
 };
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{ApprovalDecision, ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
+use autonoetic_types::runtime_lock::LockedLayerMount;
 use autonoetic_types::tool_error::tagged;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -21,6 +22,62 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 }
 
 pub struct SandboxExecTool;
+
+struct LayerMount {
+    layer_id: String,
+    mount_path: String,
+}
+
+fn extract_and_mount_layers(
+    layers: &[LayerMount],
+    gw_dir: &Path,
+    source_label: &str,
+    mounts: &mut Vec<SandboxMount>,
+    python_paths: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
+    for layer in layers {
+        let layer_temp_base = std::env::temp_dir()
+            .join("autonoetic_layer")
+            .join(&layer.layer_id);
+        std::fs::create_dir_all(&layer_temp_base)?;
+
+        if let Err(e) = layer_store.extract_to(&layer.layer_id, &layer_temp_base) {
+            tracing::warn!(
+                target: "sandbox",
+                layer_id = %layer.layer_id,
+                source = source_label,
+                error = %e,
+                "Failed to extract layer for sandbox mounting"
+            );
+            continue;
+        }
+
+        tracing::info!(
+            target: "sandbox",
+            layer_id = %layer.layer_id,
+            mount_path = %layer.mount_path,
+            source = source_label,
+            "Mounting layer into sandbox"
+        );
+
+        mounts.push(SandboxMount {
+            source: layer_temp_base,
+            dest: layer.mount_path.clone(),
+            readonly: true,
+        });
+
+        let python_site_packages = std::path::Path::new(&layer.mount_path)
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages");
+        if python_site_packages.starts_with("/") {
+            python_paths.push(python_site_packages.to_string_lossy().to_string());
+        }
+        python_paths.push(layer.mount_path.clone());
+    }
+    Ok(())
+}
 
 /// True if `pattern` matches a package manager install command.
 /// Used to detect when a non-NetworkAccess agent is trying to install
@@ -1358,7 +1415,40 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
 
         let dep_packages: Option<Vec<String>> =
             args.dependencies.as_ref().map(|d| d.packages.clone());
-        let dep_plan = dependency_plan_from_args_or_lock(manifest, agent_dir, args.dependencies)?;
+        // Parse runtime.lock once — used for both dependency plan and layer mounting.
+        let parsed_lock: Option<autonoetic_types::runtime_lock::RuntimeLock> = {
+            if args.dependencies.is_none() {
+                let lock_path = agent_dir.join(&manifest.runtime.runtime_lock);
+                if lock_path.exists() {
+                    match crate::runtime_lock::resolve_runtime_lock(&lock_path) {
+                        Ok(lock) => Some(lock),
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "sandbox",
+                                path = %lock_path.display(),
+                                error = %e,
+                                "Failed to parse runtime.lock; skipping layer mounting"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let dep_plan = if args.dependencies.is_some() {
+            dependency_plan_from_args_or_lock(manifest, agent_dir, args.dependencies)?
+        } else if let Some(ref lock) = parsed_lock {
+            dependency_plan_from_lock(lock)?
+        } else {
+            None
+        };
+        let runtime_lock_layers: Vec<LockedLayerMount> =
+            parsed_lock.map(|lock| lock.layers).unwrap_or_default();
         let driver = SandboxDriverKind::parse(&manifest.runtime.sandbox)?;
         let agent_dir_str = agent_dir
             .to_str()
@@ -1401,45 +1491,21 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
 
             let bundle = artifact_store.inspect(artifact_id)?;
             if !bundle.layers.is_empty() {
-                let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
-                for layer in &bundle.layers {
-                    let layer_temp_base = std::env::temp_dir()
-                        .join("autonoetic_layer")
-                        .join(&layer.layer_id);
-                    std::fs::create_dir_all(&layer_temp_base)?;
-
-                    if let Err(e) = layer_store.extract_to(&layer.layer_id, &layer_temp_base) {
-                        tracing::warn!(
-                            target: "sandbox",
-                            layer_id = %layer.layer_id,
-                            error = %e,
-                            "Failed to extract layer for sandbox mounting"
-                        );
-                        continue;
-                    }
-
-                    tracing::info!(
-                        target: "sandbox",
-                        layer_id = %layer.layer_id,
-                        mount_path = %layer.mount_path,
-                        "Mounting artifact layer into sandbox"
-                    );
-
-                    mounts.push(SandboxMount {
-                        source: layer_temp_base,
-                        dest: layer.mount_path.clone(),
-                        readonly: true,
-                    });
-
-                    let python_site_packages = std::path::Path::new(&layer.mount_path)
-                        .join("lib")
-                        .join("python3.12")
-                        .join("site-packages");
-                    if python_site_packages.starts_with("/") {
-                        layer_python_paths.push(python_site_packages.to_string_lossy().to_string());
-                    }
-                    layer_python_paths.push(layer.mount_path.clone());
-                }
+                let artifact_layers: Vec<LayerMount> = bundle
+                    .layers
+                    .iter()
+                    .map(|l| LayerMount {
+                        layer_id: l.layer_id.clone(),
+                        mount_path: l.mount_path.clone(),
+                    })
+                    .collect();
+                extract_and_mount_layers(
+                    &artifact_layers,
+                    gw_dir,
+                    "artifact",
+                    &mut mounts,
+                    &mut layer_python_paths,
+                )?;
             }
 
             tracing::info!(
@@ -1455,6 +1521,39 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             load_session_content_mounts(gateway_dir, session_id.unwrap_or(&manifest.agent.id))?
         };
 
+        // Mount runtime.lock layers (pre-built dependency layers pinned in the agent's runtime closure).
+        // These are mounted read-only alongside artifact layers, with PYTHONPATH injection for Python deps.
+        let mut runtime_lock_mounts: Vec<SandboxMount> = Vec::new();
+        if !runtime_lock_layers.is_empty() {
+            if let Some(gw_dir) = gateway_dir {
+                let lock_layers: Vec<LayerMount> = runtime_lock_layers
+                    .iter()
+                    .map(|l| LayerMount {
+                        layer_id: l.layer_id.clone(),
+                        mount_path: l.mount_path.clone(),
+                    })
+                    .collect();
+                extract_and_mount_layers(
+                    &lock_layers,
+                    gw_dir,
+                    "runtime.lock",
+                    &mut runtime_lock_mounts,
+                    &mut layer_python_paths,
+                )?;
+
+                tracing::info!(
+                    target: "sandbox",
+                    runtime_lock_layer_count = runtime_lock_mounts.len(),
+                    "Mounted runtime.lock layers into sandbox"
+                );
+            } else {
+                tracing::warn!(
+                    target: "sandbox",
+                    "runtime.lock layers present but gateway_dir not configured; skipping mount"
+                );
+            }
+        }
+
         let mut overrides =
             crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
 
@@ -1469,7 +1568,15 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             vec![]
         };
 
-        let runner = if session_content_mounts.is_empty() {
+        let root_session_id = session_id.map(crate::runtime::content_store::root_session_id);
+
+        // Merge runtime.lock mounts into session content mounts
+        let mut all_mounts = session_content_mounts;
+        if !runtime_lock_mounts.is_empty() {
+            all_mounts.extend(runtime_lock_mounts);
+        }
+
+        let runner = if all_mounts.is_empty() {
             SandboxRunner::spawn_with_driver_and_dependencies_and_env(
                 driver,
                 agent_dir_str,
@@ -1477,11 +1584,12 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 dep_plan.as_ref(),
                 Some(&overrides),
                 &extra_env,
+                root_session_id,
             )?
         } else {
             tracing::info!(
                 target: "sandbox",
-                mount_count = session_content_mounts.len(),
+                mount_count = all_mounts.len(),
                 "Mounting session content files into sandbox"
             );
             SandboxRunner::spawn_with_session_content_and_env(
@@ -1489,9 +1597,10 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 agent_dir_str,
                 &effective_command,
                 dep_plan.as_ref(),
-                session_content_mounts,
+                all_mounts,
                 Some(&overrides),
                 &extra_env,
+                root_session_id,
             )?
         };
 
