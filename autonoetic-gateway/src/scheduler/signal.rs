@@ -215,6 +215,9 @@ pub fn send_workflow_join_satisfied(
     workflow_id: &str,
     join_task_ids: Vec<String>,
 ) -> anyhow::Result<()> {
+    if workflow_id.starts_with("sched-") {
+        return Ok(());
+    }
     let signal_id = format!("wf-join-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let signal = Signal::WorkflowJoinSatisfied {
         workflow_id: workflow_id.to_string(),

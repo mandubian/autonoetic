@@ -25,6 +25,9 @@ fn make_job(job_id: &str, owner: &str, next_run_at: &str) -> ScheduledJob {
         owner_agent_id: owner.to_string(),
         root_session_id: "root-1".to_string(),
         target_agent_id: "coder.default".to_string(),
+        target_revision_id:
+            "rev_sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
         message: "Do the thing".to_string(),
         metadata_json: None,
         cron_expr: "*/5 * * * *".to_string(),

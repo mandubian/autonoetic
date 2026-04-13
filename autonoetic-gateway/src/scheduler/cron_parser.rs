@@ -6,19 +6,18 @@
 //! - Next-occurrence calculation
 //!
 //! Supported natural-language patterns:
+//! - `every N seconds`
 //! - `every N minutes/hours`
 //! - `every day at HH:MM`
 //! - `every <weekday> at HH:MM`
-//!
-//! Note: Second-resolution scheduling is not supported; minimum interval is 1 minute.
 
-use anyhow::{bail, Result};
-use chrono::{Datelike, Duration, TimeZone, Timelike, Utc};
+use anyhow::Result;
+use chrono::{Datelike, Duration, Timelike};
 use regex::Regex;
-use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CronExpression {
+    pub interval_seconds: Option<u32>,
     pub minute: CronField,
     pub hour: CronField,
     pub day_of_month: CronField,
@@ -29,6 +28,9 @@ pub struct CronExpression {
 
 impl std::fmt::Display for CronExpression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(interval) = self.interval_seconds {
+            return write!(f, "every {} seconds", interval);
+        }
         write!(
             f,
             "{} {} {} {} {}",
@@ -130,6 +132,7 @@ fn parse_cron_expression(input: &str) -> Result<CronExpression, ScheduleParseErr
     let day_of_week = parse_cron_field(parts[4], 0, 6)?;
 
     Ok(CronExpression {
+        interval_seconds: None,
         minute,
         hour,
         day_of_month,
@@ -246,9 +249,15 @@ fn parse_natural_language(input: &str) -> Result<CronExpression, ScheduleParseEr
             ));
         }
         if unit.starts_with("second") {
-            return Err(ScheduleParseError::UnsupportedPhrase(
-                "Second-resolution scheduling is not supported. Use 'every N minutes' (minimum 1 minute interval).".to_string(),
-            ));
+            return Ok(CronExpression {
+                interval_seconds: Some(n),
+                minute: CronField::Any,
+                hour: CronField::Any,
+                day_of_month: CronField::Any,
+                month: CronField::Any,
+                day_of_week: CronField::Any,
+                original: input.to_string(),
+            });
         }
         if unit.starts_with("minute") {
             if n > 59 {
@@ -258,6 +267,7 @@ fn parse_natural_language(input: &str) -> Result<CronExpression, ScheduleParseEr
                 )));
             }
             return Ok(CronExpression {
+                interval_seconds: None,
                 minute: CronField::Step(0, n),
                 hour: CronField::Any,
                 day_of_month: CronField::Any,
@@ -274,6 +284,7 @@ fn parse_natural_language(input: &str) -> Result<CronExpression, ScheduleParseEr
                 )));
             }
             return Ok(CronExpression {
+                interval_seconds: None,
                 minute: CronField::Exact(0),
                 hour: CronField::Step(0, n),
                 day_of_month: CronField::Any,
@@ -313,6 +324,7 @@ fn parse_natural_language(input: &str) -> Result<CronExpression, ScheduleParseEr
         };
 
         return Ok(CronExpression {
+            interval_seconds: None,
             minute: CronField::Exact(minute),
             hour: CronField::Exact(hour),
             day_of_month: CronField::Any,
@@ -338,6 +350,7 @@ fn parse_natural_language(input: &str) -> Result<CronExpression, ScheduleParseEr
         }
 
         return Ok(CronExpression {
+            interval_seconds: None,
             minute: CronField::Exact(minute),
             hour: CronField::Exact(hour),
             day_of_month: CronField::Any,
@@ -363,6 +376,13 @@ pub fn next_occurrence(
     cron: &CronExpression,
     after: chrono::DateTime<chrono::Utc>,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Some(interval_secs) = cron.interval_seconds {
+        let candidate = after + Duration::seconds(interval_secs as i64);
+        return candidate
+            .with_nanosecond(0)
+            .or(Some(candidate));
+    }
+
     let mut candidate = after + Duration::minutes(1);
     candidate = candidate
         .with_second(0)
@@ -404,14 +424,12 @@ fn matches_cron(dt: chrono::DateTime<chrono::Utc>, cron: &CronExpression) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
 
     #[test]
-    fn test_seconds_rejected() {
-        let result = parse_schedule("every 5 seconds");
-        assert!(matches!(
-            result,
-            Err(ScheduleParseError::UnsupportedPhrase(msg)) if msg.contains("Second-resolution")
-        ));
+    fn test_seconds_supported() {
+        let cron = parse_schedule("every 5 seconds").unwrap();
+        assert_eq!(cron.interval_seconds, Some(5));
     }
 
     #[test]
@@ -485,6 +503,7 @@ mod tests {
     #[test]
     fn test_cron_expression_display() {
         let cron = CronExpression {
+            interval_seconds: None,
             minute: CronField::Step(0, 5),
             hour: CronField::Any,
             day_of_month: CronField::Any,
@@ -493,6 +512,14 @@ mod tests {
             original: "*/5 * * * *".to_string(),
         };
         assert_eq!(cron.to_string(), "0/5 * * * *");
+    }
+
+    #[test]
+    fn test_second_interval_occurrence() {
+        let cron = parse_schedule("every 10 seconds").unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 4, 12, 10, 7, 30).unwrap();
+        let next = next_occurrence(&cron, base).unwrap();
+        assert_eq!(next.second(), 40);
     }
 
     #[test]

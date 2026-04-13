@@ -574,6 +574,11 @@ pub fn update_task_run_status(
         } else {
             serde_json::json!({ "status": status })
         }
+    } else if matches!(status, TaskRunStatus::Succeeded) {
+        serde_json::json!({
+            "status": status,
+            "result_summary": result_summary,
+        })
     } else {
         serde_json::json!({ "status": status })
     };

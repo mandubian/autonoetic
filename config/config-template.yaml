@@ -31,9 +31,12 @@ max_background_due_per_tick: 32
 
 # ── Scheduled Jobs (Cron) ─────────────────────────────────────────────
 # scheduled_jobs:
-#   min_interval_secs: 60       # Minimum interval between job triggers
+#   min_interval_secs: 1        # Minimum interval between job triggers (seconds)
 #   max_per_root: 50            # Max scheduled jobs per root session
 #   max_due_per_tick: 16        # Max due jobs processed per scheduler tick
+#
+# Guardrail: sub-10s schedules are allowed only for script-mode target agents.
+# For tight schedules (<5s), reduce background_tick_secs to 1 for better precision.
 
 # ── Response Validation & Repair ──────────────────────────────────────
 # When enabled, the gateway validates agent outputs against declared constraints.

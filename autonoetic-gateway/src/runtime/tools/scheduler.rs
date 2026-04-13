@@ -1,10 +1,10 @@
+use crate::agent::repository::AgentRepository;
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use crate::scheduler::cron_parser;
-use autonoetic_types::agent::{AgentManifest, ToolTier};
-use autonoetic_types::capability::Capability;
+use autonoetic_types::agent::{AgentManifest, ExecutionMode};
 use autonoetic_types::scheduled_job::{ScheduledJob, ScheduledJobStatus};
 use serde::Deserialize;
 use std::path::Path;
@@ -35,7 +35,7 @@ impl NativeTool for SchedulerCronCreateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Create a new scheduled (cron) job that will trigger a workflow task at specified intervals. The job is always owned by the calling agent. All schedules are evaluated in UTC.".to_string(),
+            description: "Create a new scheduled (cron) job that will trigger a workflow task at specified intervals. The job is always owned by the calling agent. The target agent is resolved and pinned to a revision at creation time. All schedules are evaluated in UTC.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -45,11 +45,11 @@ impl NativeTool for SchedulerCronCreateTool {
                     },
                     "schedule_expr": {
                         "type": "string",
-                        "description": "Cron expression (5 fields) or natural-language schedule phrase (e.g., 'every 5 minutes', 'every day at 09:00', 'every monday at 14:30')"
+                        "description": "Cron expression (5 fields) or natural-language schedule phrase (e.g., 'every 10 seconds', 'every 5 minutes', 'every day at 09:00', 'every monday at 14:30')"
                     },
                     "target_agent_id": {
                         "type": "string",
-                        "description": "The agent ID to trigger when the job fires. Defaults to the calling agent_id if not specified"
+                        "description": "The agent ID to trigger when the job fires. Defaults to the calling agent_id if not specified. The agent is resolved and pinned to its current revision at creation time."
                     },
                     "metadata": {
                         "type": "object",
@@ -72,7 +72,7 @@ impl NativeTool for SchedulerCronCreateTool {
         manifest: &AgentManifest,
         policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -133,6 +133,56 @@ impl NativeTool for SchedulerCronCreateTool {
             .target_agent_id
             .clone()
             .unwrap_or_else(|| manifest.agent.id.clone());
+
+        // Resolve target to a pinned revision ref at creation time.
+        let agent_ref = match crate::runtime::tools::resolve_target_to_agent_ref(
+            &target,
+            store.as_ref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(serde_json::to_string(&serde_json::json!({
+                    "ok": false,
+                    "error": format!(
+                        "Could not resolve target_agent_id '{}': {}. Ensure the agent exists and is promoted.",
+                        target, e
+                    )
+                }))?);
+            }
+        };
+
+        // Guardrail: sub-10s schedules are only allowed for script-mode targets.
+        if interval_secs < 10 {
+            let target_is_script = if agent_ref.agent_id == manifest.agent.id {
+                matches!(manifest.execution_mode, ExecutionMode::Script)
+            } else {
+                let repo = AgentRepository::from_config(&cfg);
+                let gateway_dir = gateway_dir.map(|p| p.to_path_buf()).unwrap_or_default();
+                let loaded = repo
+                    .get_sync_from_store(&agent_ref.agent_id, &gateway_dir, Some(store.as_ref()))
+                    .or_else(|_| repo.get_sync(&agent_ref.agent_id));
+                match loaded {
+                    Ok(loaded) => matches!(loaded.manifest.execution_mode, ExecutionMode::Script),
+                    Err(_) => {
+                        return Ok(serde_json::to_string(&serde_json::json!({
+                            "ok": false,
+                            "error": format!(
+                                "Sub-10s schedules require an existing script-mode target agent. Could not resolve target_agent_id '{}'.",
+                                agent_ref.agent_id
+                            )
+                        }))?);
+                    }
+                }
+            };
+
+            if !target_is_script {
+                return Ok(serde_json::to_string(&serde_json::json!({
+                    "ok": false,
+                    "error": "Sub-10s schedules are only allowed for script-mode agents (execution_mode=script). Use >=10s for reasoning agents."
+                }))?);
+            }
+        }
+
         let now = chrono::Utc::now();
         let next_run = cron_parser::next_occurrence(&cron, now)
             .ok_or_else(|| anyhow::anyhow!("No future occurrence found for schedule"))?;
@@ -147,7 +197,8 @@ impl NativeTool for SchedulerCronCreateTool {
             job_id: format!("sj-{}", uuid::Uuid::new_v4()),
             owner_agent_id: manifest.agent.id.clone(),
             root_session_id: session_id.unwrap_or("default").to_string(),
-            target_agent_id: target,
+            target_agent_id: agent_ref.agent_id.clone(),
+            target_revision_id: agent_ref.revision_id.clone(),
             message: args.message.clone(),
             metadata_json,
             cron_expr: cron.to_string(),
@@ -175,7 +226,7 @@ impl NativeTool for SchedulerCronCreateTool {
         serde_json::to_string(&response).map_err(Into::into)
     }
 
-    fn extract_metadata(&self, arguments_json: &str) -> ToolMetadata {
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
         ToolMetadata::default()
     }
 }
