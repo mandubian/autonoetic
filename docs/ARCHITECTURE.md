@@ -1005,26 +1005,54 @@ Both explicit cron and constrained natural-language phrases are supported:
 
 | Pattern | Example | Normalized Cron |
 |---------|---------|-----------------|
+| Interval | `every 10 seconds` | `every 10 seconds` |
 | Interval | `every 5 minutes` | `0/5 * * * *` |
 | Interval | `every 2 hours` | `0 0/2 * * *` |
 | Daily | `every day at 09:00` | `0 9 * * *` |
 | Weekly | `every monday at 14:30` | `0 14 * * 1` |
 | Explicit | `*/15 * * * *` | `*/15 * * * *` |
 
-Second-resolution scheduling (`every N seconds`) is explicitly **not supported** — the minimum interval is 1 minute.
+Second-resolution scheduling (`every N seconds`) is supported.
 
 ### Security Model
 
 - **Ownership isolation**: agents can only list, pause, resume, or cancel jobs they own
 - **Capability gating**: `SchedulerAccess` capability required for all `scheduler.cron.*` operations
 - **Approval preservation**: scheduled task execution uses the same workflow paths, so sandbox approvals and remote-access checks still apply
-- **Guardrails**: `min_interval_secs` (default 60) prevents abusive high-frequency schedules; `max_per_root` (default 50) caps jobs per root session
+- **Guardrails**: `min_interval_secs` (default 1) prevents abusive high-frequency schedules; `max_per_root` (default 50) caps jobs per root session; sub-10s intervals require script-mode targets
+
+### Output Delivery
+
+Scheduled task output is delivered directly to all connected chat terminals — no LLM involvement:
+
+1. **Task execution**: The target agent runs (script or reasoning mode), stdout/reply is captured as `result_summary`
+2. **Event emission**: A `task.completed` workflow event is emitted with `result_summary` in the payload
+3. **CLI polling**: The terminal's `check_signals` loop (every 1s) discovers the new event
+4. **Display**: For `sched-*` workflows, the output is shown as a `🔔` Signal message: `🔔 [12:15:07] joke-ticker: Why don't scientists trust atoms?`
+
+The `WorkflowJoinSatisfied` signal is **not** sent to the planner for scheduled task completions. This avoids unnecessary LLM calls, token costs, and turn budget exhaustion — the planner has no meaningful role after setting up the schedule.
+
+### Session Lifecycle
+
+Scheduled jobs are **decoupled from session lifecycle** — they are gateway-level durable records that persist and fire independently of whether their root session is active, suspended, or closed.
+
+| Session Event | Effect on Scheduled Jobs |
+|---------------|-------------------------|
+| **Normal session close** | No effect. Jobs remain `active` and continue firing on schedule. |
+| **Session suspension** (e.g., pending approval) | No effect. Jobs fire independently. |
+| **Session resume** (checkpoint respawn or turn continuation) | Jobs continue unaffected. The workflow run for the root session is not re-created on resume; it is loaded on demand when the first `agent.spawn` delegation occurs. |
+| **Emergency stop** | All `active` jobs for the root session are cancelled via `cancel_scheduled_jobs_for_root()`. |
+
+This means:
+- Scheduled jobs **outlive individual session turns** — they are intended for long-running recurring work
+- If a user closes a session and resumes later, cron jobs created in that session will have continued firing in the background
+- Only `emergency_stop_root_session()` explicitly cancels jobs; normal `close_session()` does not
 
 ### Configuration
 
 ```yaml
 scheduled_jobs:
-  min_interval_secs: 60    # Minimum interval between triggers
+  min_interval_secs: 1     # Minimum interval between triggers
   max_per_root: 50         # Max jobs per root session
   max_due_per_tick: 16     # Max due jobs processed per tick
 ```

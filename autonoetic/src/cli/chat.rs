@@ -61,6 +61,8 @@ enum MessageRole {
     Assistant,
     System,
     Signal,
+    SignalLow,
+    AgentOutput,
 }
 
 #[derive(Debug, Clone)]
@@ -170,7 +172,7 @@ struct App {
     signal_resume_by_internal_id: HashMap<u64, SignalResumeRef>,
     signal_resume_inflight: HashSet<String>,
     seen_workflow_event_ids: HashSet<String>,
-    workflow_events_bootstrapped: bool,
+    bootstrapped_workflow_ids: HashSet<String>,
     current_workflow_id: Option<String>,
     session_overview: SessionOverview,
     /// `user.ask` cards we already showed for this TUI session (avoid duplicate polls).
@@ -205,7 +207,7 @@ impl App {
             signal_resume_by_internal_id: HashMap::new(),
             signal_resume_inflight: HashSet::new(),
             seen_workflow_event_ids: HashSet::new(),
-            workflow_events_bootstrapped: false,
+            bootstrapped_workflow_ids: HashSet::new(),
             current_workflow_id: None,
             session_overview: SessionOverview::default(),
             seen_user_interaction_prompts: HashSet::new(),
@@ -540,7 +542,7 @@ fn signal_resume_key(signal_session_id: &str, request_id: &str) -> String {
 
 fn format_workflow_event_card(
     event: &autonoetic_types::workflow::WorkflowEventRecord,
-) -> Option<String> {
+) -> Option<(String, MessageRole)> {
     let ts_short: String = event.occurred_at.chars().take(19).collect();
     let task = event.task_id.as_deref().unwrap_or("-");
     let status = event
@@ -565,25 +567,24 @@ fn format_workflow_event_card(
         format!(" → {}", agent_id)
     };
 
-    let text = match event.event_type.as_str() {
-        "workflow.started" => Some(format!("📋 [{}] Workflow started", ts_short)),
+    let result = match event.event_type.as_str() {
+        "workflow.started" => Some((format!("📋 [{}] Workflow started", ts_short), MessageRole::Signal)),
         "task.spawned" => {
             let target = event
                 .payload
                 .get("target_agent_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or(agent_id);
-            Some(format!(
-                "🚀 [{}] Task spawned: {} → {}",
-                ts_short, task, target
+            Some((
+                format!("🚀 [{}] Task spawned: {} → {}", ts_short, task, target),
+                MessageRole::Signal,
             ))
         }
-        "task.queued" => Some(format!(
-            "📥 [{}] Task queued: {}{}",
-            ts_short, task, agent_suffix
+        "task.queued" => Some((
+            format!("📥 [{}] Task queued: {}{}", ts_short, task, agent_suffix),
+            MessageRole::Signal,
         )),
         "task.awaiting_approval" => {
-            // Show what kind of approval is needed
             let kind = if approval.contains("sandbox") {
                 "sandbox.exec".to_string()
             } else if approval.contains("agent_install") {
@@ -614,16 +615,19 @@ fn format_workflow_event_card(
                     apr_id, reason_part
                 )
             };
-            Some(format!(
-                "⏸ [{}] Suspended for approval: {} ({}){}",
-                ts_short, task, kind, apr_suffix
+            Some((
+                format!("⏸ [{}] Suspended for approval: {} ({}){}", ts_short, task, kind, apr_suffix),
+                MessageRole::Signal,
             ))
         }
-        "task.approved" => Some(format!(
-            "✅ [{}] Approval granted — resuming: {}",
-            ts_short, task
+        "task.approved" => Some((
+            format!("✅ [{}] Approval granted — resuming: {}", ts_short, task),
+            MessageRole::Signal,
         )),
-        "task.rejected" => Some(format!("❌ [{}] Approval rejected: {}", ts_short, task)),
+        "task.rejected" => Some((
+            format!("❌ [{}] Approval rejected: {}", ts_short, task),
+            MessageRole::Signal,
+        )),
         "task.approval_timeout" => {
             let reason = event
                 .payload
@@ -635,9 +639,9 @@ fn format_workflow_event_card(
                 .get("timeout_secs")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            Some(format!(
-                "⏰ [{}] Approval timed out: {} (after {}s)",
-                ts_short, reason, timeout_secs
+            Some((
+                format!("⏰ [{}] Approval timed out: {} (after {}s)", ts_short, reason, timeout_secs),
+                MessageRole::Signal,
             ))
         }
         "workflow.failure_threshold_reached" => {
@@ -646,9 +650,9 @@ fn format_workflow_event_card(
                 .get("failed_task_count")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            Some(format!(
-                "🆘 [{}] Failure threshold reached: {} tasks failed",
-                ts_short, count
+            Some((
+                format!("🆘 [{}] Failure threshold reached: {} tasks failed", ts_short, count),
+                MessageRole::Signal,
             ))
         }
         "workflow.escalated" => {
@@ -682,49 +686,75 @@ fn format_workflow_event_card(
             if !context.is_empty() {
                 line.push_str(&format!("\n   Context: {}", context));
             }
-            Some(line)
+            Some((line, MessageRole::Signal))
         }
-        "task.started" => Some(format!(
-            "▶ [{}] Task started: {}{}",
-            ts_short, task, agent_suffix
+        "task.started" => Some((
+            format!("▶ [{}] Task started: {}{}", ts_short, task, agent_suffix),
+            MessageRole::Signal,
         )),
-        "task.completed" => Some(format!(
-            "✅ [{}] Task completed: {}{}",
-            ts_short, task, agent_suffix
+        "task.completed" => {
+            let result_summary = event
+                .payload
+                .get("result_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if event.workflow_id.starts_with("sched-") && !result_summary.is_empty() {
+                Some((
+                    format!("🔔 [{}] {}: {}", ts_short, agent_id, result_summary),
+                    MessageRole::AgentOutput,
+                ))
+            } else {
+                Some((
+                    format!("✅ [{}] Task completed: {}{}", ts_short, task, agent_suffix),
+                    MessageRole::Signal,
+                ))
+            }
+        }
+        "task.failed" => Some((
+            format!("❌ [{}] Task failed: {}{}", ts_short, task, agent_suffix),
+            MessageRole::Signal,
         )),
-        "task.failed" => Some(format!(
-            "❌ [{}] Task failed: {}{}",
-            ts_short, task, agent_suffix
+        "task.cancelled" => Some((
+            format!("🚫 [{}] Task cancelled: {}{}", ts_short, task, agent_suffix),
+            MessageRole::Signal,
         )),
-        "task.cancelled" => Some(format!(
-            "🚫 [{}] Task cancelled: {}{}",
-            ts_short, task, agent_suffix
+        "task.paused" => Some((
+            format!("⏸ [{}] Task paused: {}{}", ts_short, task, agent_suffix),
+            MessageRole::Signal,
         )),
-        "task.paused" => Some(format!(
-            "⏸ [{}] Task paused: {}{}",
-            ts_short, task, agent_suffix
+        "workflow.join.satisfied" => Some((
+            format!("✅ [{}] Workflow join satisfied", ts_short),
+            MessageRole::SignalLow,
         )),
-        "workflow.join.satisfied" => Some(format!("✅ [{}] Workflow join satisfied", ts_short)),
-        "workflow.checkpoint.saved" => Some(format!("💾 [{}] Workflow checkpoint saved", ts_short)),
-        "task.checkpoint.saved" => Some(format!(
-            "💾 [{}] Task checkpoint saved: {}{}",
-            ts_short, task, agent_suffix
+        "workflow.checkpoint.saved" => Some((
+            format!("💾 [{}] Workflow checkpoint saved", ts_short),
+            MessageRole::SignalLow,
         )),
-        "task.updated" if status == "runnable" => Some(format!(
-            "🔁 [{}] Resumed after approval: {}{}",
-            ts_short, task, agent_suffix
+        "task.checkpoint.saved" => Some((
+            format!("💾 [{}] Task checkpoint saved: {}{}", ts_short, task, agent_suffix),
+            MessageRole::SignalLow,
         )),
-        "task.updated" => Some(format!(
-            "🔄 [{}] Task updated: {}{} ({})",
-            ts_short, task, agent_suffix, status
+        "scheduled_job.triggered" => Some((
+            format!("⏱ [{}] Scheduled job triggered: {}", ts_short, agent_id),
+            MessageRole::AgentOutput,
+        )),
+        "task.updated" if status == "runnable" => Some((
+            format!("🔁 [{}] Resumed after approval: {}{}", ts_short, task, agent_suffix),
+            MessageRole::Signal,
+        )),
+        "task.updated" => Some((
+            format!("🔄 [{}] Task updated: {}{} ({})", ts_short, task, agent_suffix, status),
+            MessageRole::Signal,
         )),
         other => {
-            // Catch-all: show unknown event types instead of silently dropping them
-            Some(format!("⚡ [{}] {} (task: {})", ts_short, other, task))
+            Some((
+                format!("⚡ [{}] {} (task: {})", ts_short, other, task),
+                MessageRole::Signal,
+            ))
         }
     };
 
-    text
+    result
 }
 
 // ============================================================================
@@ -991,6 +1021,8 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
             MessageRole::Assistant => ("🤖 ", Style::default().fg(Color::Blue)),
             MessageRole::System => ("ℹ ", Style::default().fg(Color::Yellow)),
             MessageRole::Signal => ("🔔 ", Style::default().fg(Color::Cyan)),
+            MessageRole::SignalLow => ("  ", Style::default().fg(Color::DarkGray)),
+            MessageRole::AgentOutput => ("📝 ", Style::default().fg(Color::Magenta)),
         };
 
         for (i, text_line) in msg.content.lines().enumerate() {
@@ -1850,90 +1882,83 @@ async fn check_signals(
     }
 
     match snapshot.overview.workflow.workflow_id.clone() {
-        Some(workflow_id) => {
-            tracing::debug!(target: "chat", workflow_id = %workflow_id, "Resolved workflow ID");
+        Some(primary_workflow_id) => {
+            tracing::debug!(target: "chat", workflow_id = %primary_workflow_id, "Resolved workflow ID");
 
-            // Detect workflow ID change → force re-bootstrap
-            let workflow_changed = app.current_workflow_id.as_ref() != Some(&workflow_id);
+            let workflow_changed = app.current_workflow_id.as_ref() != Some(&primary_workflow_id);
             if workflow_changed {
                 tracing::debug!(
                     target: "chat",
                     old = ?app.current_workflow_id,
-                    new = %workflow_id,
+                    new = %primary_workflow_id,
                     "Workflow ID changed, resetting event tracking"
                 );
-                app.workflow_events_bootstrapped = false;
                 app.seen_workflow_event_ids.clear();
-                app.current_workflow_id = Some(workflow_id.clone());
+                app.bootstrapped_workflow_ids.clear();
+                app.current_workflow_id = Some(primary_workflow_id.clone());
             }
 
-            match autonoetic_gateway::scheduler::load_workflow_events(config, store, &workflow_id) {
-                Ok(events) => {
-                    tracing::debug!(target: "chat", event_count = events.len(), workflow_id = %workflow_id, "Loaded workflow events");
-                    if events.is_empty() {
-                        tracing::debug!(target: "chat", workflow_id = %workflow_id, "No workflow events found - may indicate store path mismatch");
+            let mut monitored_workflow_ids = vec![primary_workflow_id.clone()];
+            if let Some(store) = store {
+                if let Ok(jobs) = store.list_scheduled_jobs_for_root(&root_session_id) {
+                    for job in jobs {
+                        if matches!(
+                            job.status,
+                            autonoetic_types::scheduled_job::ScheduledJobStatus::Active
+                        ) {
+                            monitored_workflow_ids.push(format!("sched-{}", job.job_id));
+                        }
                     }
-                    let current_workflow_count = events.len();
-                    let previous_seen_count = app.seen_workflow_event_ids.len();
+                }
+            }
 
-                    let should_bootstrap = !app.workflow_events_bootstrapped
-                        || current_workflow_count < previous_seen_count
-                        || current_workflow_count > previous_seen_count + 50; // Large jump = new workflow
+            monitored_workflow_ids.sort();
+            monitored_workflow_ids.dedup();
 
-                    if should_bootstrap {
-                        let recap_count = events.len().min(20);
-                        if recap_count > 0 {
-                            let start_idx = events.len().saturating_sub(recap_count);
-                            for event in &events[start_idx..] {
-                                if let Some(card) = format_workflow_event_card(event) {
-                                    app.session_overview.latest_signal = Some(card.clone());
-                                    app.add_message(MessageRole::Signal, card);
+            for workflow_id in monitored_workflow_ids {
+                let is_primary = workflow_id == primary_workflow_id;
+                match autonoetic_gateway::scheduler::load_workflow_events(config, store, &workflow_id) {
+                    Ok(events) => {
+                        let was_bootstrapped = app.bootstrapped_workflow_ids.contains(&workflow_id);
+                        if !was_bootstrapped {
+                            // Primary workflow keeps a short recap; scheduled workflows baseline silently.
+                            if is_primary {
+                                let recap_count = events.len().min(20);
+                                if recap_count > 0 {
+                                    let start_idx = events.len().saturating_sub(recap_count);
+                                    for event in &events[start_idx..] {
+                                        if let Some((card, role)) = format_workflow_event_card(event) {
+                                            app.session_overview.latest_signal = Some(card.clone());
+                                            app.add_message(role, card);
+                                            processed_any = true;
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        // Mark ALL fetched events as seen, not just the recap window,
-                        // so events outside the recap don't re-appear as "new" on next poll.
-                        app.seen_workflow_event_ids.clear();
-                        for event in &events {
-                            app.seen_workflow_event_ids.insert(event.event_id.clone());
-                        }
-                        app.workflow_events_bootstrapped = true;
 
-                        tracing::debug!(
-                            target: "chat",
-                            workflow_id = %workflow_id,
-                            total_events = events.len(),
-                            recap_shown = recap_count,
-                            "workflow events bootstrapped"
-                        );
-                    } else {
+                            for event in &events {
+                                app.seen_workflow_event_ids.insert(event.event_id.clone());
+                            }
+                            app.bootstrapped_workflow_ids.insert(workflow_id);
+                            continue;
+                        }
+
                         let mut new_event_count = 0usize;
                         for event in events {
                             if app.seen_workflow_event_ids.insert(event.event_id.clone()) {
-                                // NEW event - process it (insert returns true if newly added)
-                                tracing::debug!(
-                                    target: "chat",
-                                    event_id = %event.event_id,
-                                    event_type = %event.event_type,
-                                    "New workflow event detected"
-                                );
-                                if let Some(card) = format_workflow_event_card(&event) {
-                                    tracing::debug!(
-                                        target: "chat",
-                                        card = %card,
-                                        "Formatted workflow event card"
-                                    );
-                                    if event.event_type.contains("approval") {
-                                        tracing::debug!(
-                                            target: "chat",
-                                            event_id = %event.event_id,
-                                            event_type = %event.event_type,
-                                            task_id = ?event.task_id,
-                                            "approval event detected"
-                                        );
+                                if let Some((card, role)) = format_workflow_event_card(&event) {
+                                    match role {
+                                        MessageRole::SignalLow => {
+                                            app.add_message(role, card.clone());
+                                        }
+                                        _ => {
+                                            if let Some(last_idx) = app.messages.iter().rposition(|m| matches!(m.role, MessageRole::SignalLow)) {
+                                                app.messages.remove(last_idx);
+                                            }
+                                            app.add_message(role, card.clone());
+                                        }
                                     }
                                     app.session_overview.latest_signal = Some(card.clone());
-                                    app.add_message(MessageRole::Signal, card);
 
                                     // Track pending approval IDs for inline approval (Ctrl+A)
                                     if app.inline_approvals_enabled {
@@ -1966,12 +1991,6 @@ async fn check_signals(
                                     }
 
                                     processed_any = true;
-                                } else {
-                                    tracing::warn!(
-                                        target: "chat",
-                                        event_type = %event.event_type,
-                                        "Failed to format workflow event card"
-                                    );
                                 }
                                 new_event_count += 1;
                             }
@@ -1979,20 +1998,21 @@ async fn check_signals(
                         if new_event_count > 0 {
                             tracing::debug!(
                                 target: "chat",
+                                workflow_id = %workflow_id,
                                 new_event_count,
                                 total_seen = app.seen_workflow_event_ids.len(),
                                 "check_signals: processed new workflow events"
                             );
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "chat",
-                        workflow_id = %workflow_id,
-                        error = %e,
-                        "Failed to load workflow events"
-                    );
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "chat",
+                            workflow_id = %workflow_id,
+                            error = %e,
+                            "Failed to load workflow events"
+                        );
+                    }
                 }
             }
         }
@@ -2204,7 +2224,7 @@ mod tests {
                 "approval_request_id": "apr-test123"
             }),
         );
-        let line = format_workflow_event_card(&event).expect("event should render");
+        let line = format_workflow_event_card(&event).map(|(s, _)| s).expect("event should render");
         assert!(line.contains("Suspended for approval: task-42"));
         assert!(line.contains("sandbox.exec"));
         assert!(line.contains("resumes automatically"));
@@ -2217,7 +2237,7 @@ mod tests {
             Some("task-42"),
             serde_json::json!({ "status": "runnable" }),
         );
-        let line = format_workflow_event_card(&event).expect("event should render");
+        let line = format_workflow_event_card(&event).map(|(s, _)| s).expect("event should render");
         assert!(line.contains("Approval granted"));
         assert!(line.contains("resuming: task-42"));
     }
@@ -2229,7 +2249,7 @@ mod tests {
             Some("task-42"),
             serde_json::json!({ "status": "failed" }),
         );
-        let line = format_workflow_event_card(&event).expect("event should render");
+        let line = format_workflow_event_card(&event).map(|(s, _)| s).expect("event should render");
         assert!(line.contains("Approval rejected: task-42"));
     }
 

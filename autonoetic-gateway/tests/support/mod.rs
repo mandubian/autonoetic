@@ -18,6 +18,7 @@ use serde::de::DeserializeOwned;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -271,6 +272,20 @@ pub async fn spawn_gateway_server_with_store(
     Ok((addr, store, handle))
 }
 
+fn extract_script_entry_from_skill(skill_text: &str) -> Option<String> {
+    let t = skill_text.trim_start();
+    if !t.starts_with("---") {
+        return None;
+    }
+    let rest = &t[3..];
+    let first_nl = rest.find(|c: char| c == '\n' || c == '\r')?;
+    let after_first = &rest[first_nl..];
+    let end = after_first.find("\n---")?;
+    let frontmatter = &skill_text[3 + first_nl..3 + first_nl + end];
+    let yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+    yaml.get("script_entry")?.as_str().map(|s| s.to_string())
+}
+
 pub fn seed_agent_revision(
     store: &GatewayStore,
     config: &GatewayConfig,
@@ -296,6 +311,19 @@ pub fn seed_agent_revision(
             let _ = copy_dir_all_test(&path, &rev_dir.join(file_name));
         } else {
             std::fs::copy(&path, rev_dir.join(file_name))?;
+        }
+    }
+
+    let skill_path = rev_dir.join("SKILL.md");
+    if skill_path.exists() {
+        let skill_text = std::fs::read_to_string(&skill_path)?;
+        if let Some(entry) = extract_script_entry_from_skill(&skill_text) {
+            let entry_path = rev_dir.join(&entry);
+            if entry_path.is_file() {
+                let mut perms = std::fs::metadata(&entry_path)?.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                std::fs::set_permissions(&entry_path, perms)?;
+            }
         }
     }
 

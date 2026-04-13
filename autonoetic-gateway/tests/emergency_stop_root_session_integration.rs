@@ -14,8 +14,9 @@ use autonoetic_types::background::{
     ApprovalLevel, ApprovalRequest, ScheduledAction, UserInteraction, UserInteractionKind,
     UserInteractionStatus,
 };
+use autonoetic_types::scheduled_job::{ScheduledJob, ScheduledJobStatus};
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use std::sync::Arc;
 use support::{seed_agent_revision, TestWorkspace};
 
@@ -768,6 +769,96 @@ async fn emergency_stop_authorization_matrix() -> anyhow::Result<()> {
         )
         .await;
     assert!(out_agent_missing.is_err(), "non-existent agent should fail");
+
+    Ok(())
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn emergency_stop_cancels_active_scheduled_jobs() -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    write_planner_agent(&workspace.agents_dir)?;
+
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
+
+    let root_session = "root-sj-emstop";
+    ensure_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_session,
+        Some("planner.default"),
+    )?;
+
+    let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+
+    let job_active = ScheduledJob {
+        job_id: "sj-emstop-1".to_string(),
+        owner_agent_id: "planner.default".to_string(),
+        root_session_id: root_session.to_string(),
+        target_agent_id: "coder.default".to_string(),
+        target_revision_id: "rev_sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        message: "active job".to_string(),
+        metadata_json: None,
+        cron_expr: "*/5 * * * *".to_string(),
+        timezone: "UTC".to_string(),
+        next_run_at: future.clone(),
+        last_run_at: None,
+        status: ScheduledJobStatus::Active,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+        last_error: None,
+        generation: 0,
+    };
+    store.create_scheduled_job(&job_active)?;
+
+    let mut job_active_2 = job_active.clone();
+    job_active_2.job_id = "sj-emstop-2".to_string();
+    store.create_scheduled_job(&job_active_2)?;
+
+    let mut job_paused = job_active.clone();
+    job_paused.job_id = "sj-emstop-3".to_string();
+    job_paused.status = ScheduledJobStatus::Paused;
+    store.create_scheduled_job(&job_paused)?;
+
+    let mut job_other_root = job_active.clone();
+    job_other_root.job_id = "sj-emstop-4".to_string();
+    job_other_root.root_session_id = "root-other".to_string();
+    store.create_scheduled_job(&job_other_root)?;
+
+    let out = execution
+        .emergency_stop_root_session(
+            root_session,
+            "cancel scheduled jobs test",
+            "user",
+            "tester",
+            "manual",
+            None,
+        )
+        .await?;
+
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["details"]["scheduled_jobs_cancelled"], 2);
+
+    let j1 = store.get_scheduled_job("sj-emstop-1")?.expect("job 1");
+    assert_eq!(j1.status, ScheduledJobStatus::Cancelled);
+
+    let j2 = store.get_scheduled_job("sj-emstop-2")?.expect("job 2");
+    assert_eq!(j2.status, ScheduledJobStatus::Cancelled);
+
+    let j3 = store.get_scheduled_job("sj-emstop-3")?.expect("job 3");
+    assert_eq!(j3.status, ScheduledJobStatus::Paused, "already-paused job should stay paused");
+
+    let j4 = store.get_scheduled_job("sj-emstop-4")?.expect("job 4");
+    assert_eq!(j4.status, ScheduledJobStatus::Active, "other-root job should be untouched");
 
     Ok(())
 }

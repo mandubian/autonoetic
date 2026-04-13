@@ -14,6 +14,7 @@ use autonoetic_types::config::{GatewayConfig, LlmPreset};
 use autonoetic_types::id_format::mint_hashed_prefixed_id;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// Bootstrap all agents from `config.agents_dir` into the gateway store.
@@ -123,6 +124,15 @@ pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<us
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&dest, bytes)?;
+            }
+
+            if let Some(ref entry) = parsed_manifest.script_entry {
+                let entry_path = revision_dir.join(entry);
+                if entry_path.is_file() {
+                    let mut perms = std::fs::metadata(&entry_path)?.permissions();
+                    perms.set_mode(perms.mode() | 0o111);
+                    std::fs::set_permissions(&entry_path, perms)?;
+                }
             }
         }
 
