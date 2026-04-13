@@ -34,13 +34,14 @@ const FOUNDATION_WORKFLOW: &str = include_str!("foundation_workflow.md");
 const FOUNDATION_ARTIFACT: &str = include_str!("foundation_artifact.md");
 const FOUNDATION_SCRIPT: &str = include_str!("foundation_script.md");
 const FOUNDATION_DIGEST: &str = include_str!("foundation_digest.md");
+const FOUNDATION_SDK: &str = include_str!("foundation_sdk.md");
 const LLM_OTHER_EMPTY_RETRY_ENV: &str = "AUTONOETIC_LLM_OTHER_EMPTY_RETRIES";
 const LLM_OTHER_EMPTY_RETRY_DEFAULT: usize = 1;
 
 /// Compose foundation instructions based on agent capabilities and execution mode.
 ///
-/// Always includes core instructions. Adds workflow, artifact, script, and digest
-/// layers based on what the agent can actually do.
+/// Always includes core instructions. Adds workflow, artifact, script, digest,
+/// and SDK layers based on what the agent can actually do.
 fn compose_foundation(manifest: &AgentManifest) -> String {
     let mut parts = Vec::new();
     parts.push(FOUNDATION_CORE.trim());
@@ -65,6 +66,9 @@ fn compose_foundation(manifest: &AgentManifest) -> String {
             false
         }
     });
+    let has_code_execution = manifest.capabilities.iter().any(|c| {
+        matches!(c, autonoetic_types::capability::Capability::CodeExecution { .. })
+    });
 
     if has_workflow_caps || !is_script_mode {
         parts.push(FOUNDATION_WORKFLOW.trim());
@@ -80,6 +84,10 @@ fn compose_foundation(manifest: &AgentManifest) -> String {
 
     if has_digest_cap {
         parts.push(FOUNDATION_DIGEST.trim());
+    }
+
+    if has_code_execution {
+        parts.push(FOUNDATION_SDK.trim());
     }
 
     parts.join("\n\n---\n\n")
