@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 7;
+const SCHEMA_VERSION_LATEST: i64 = 8;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -485,6 +485,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_user_profiles_v5(conn)?;
     apply_approvals_decision_reason_v6(conn)?;
     apply_published_reports_and_hooks_v7(conn)?;
+    apply_scheduled_jobs_v8(conn)?;
 
     Ok(())
 }
@@ -779,6 +780,47 @@ fn apply_published_reports_and_hooks_v7(conn: &mut Connection) -> Result<()> {
             "published_reports_and_hooks",
             chrono::Utc::now().to_rfc3339()
         ],
+    )?;
+    Ok(())
+}
+
+fn apply_scheduled_jobs_v8(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 8 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            job_id TEXT PRIMARY KEY,
+            owner_agent_id TEXT NOT NULL,
+            root_session_id TEXT NOT NULL,
+            target_agent_id TEXT NOT NULL,
+            message TEXT NOT NULL,
+            metadata_json TEXT,
+            cron_expr TEXT NOT NULL,
+            timezone TEXT NOT NULL DEFAULT 'UTC',
+            next_run_at TEXT NOT NULL,
+            last_run_at TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_error TEXT,
+            generation INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_status_next_run
+          ON scheduled_jobs(status, next_run_at);
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_root_session
+          ON scheduled_jobs(root_session_id);
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_owner
+          ON scheduled_jobs(owner_agent_id);",
+    )?;
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![8_i64, "scheduled_jobs", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

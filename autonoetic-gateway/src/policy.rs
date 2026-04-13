@@ -633,6 +633,21 @@ impl PolicyEngine {
         }
         false
     }
+
+    /// Check if the agent is allowed to perform a scheduler/cron operation.
+    pub fn can_schedule(&self, operation: &str) -> bool {
+        for cap in &self.manifest.capabilities {
+            if let Capability::SchedulerAccess { patterns } = cap {
+                for pattern in patterns {
+                    let prefix = pattern.trim_end_matches('*');
+                    if operation.starts_with(prefix) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -671,7 +686,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
-        compression: None,
+            compression: None,
         }
     }
 

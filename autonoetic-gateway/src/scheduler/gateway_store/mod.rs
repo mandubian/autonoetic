@@ -9,6 +9,7 @@ mod notifications;
 mod observability;
 mod row_decode;
 mod runtime_control;
+mod scheduled_jobs;
 mod user_interactions;
 mod user_profiles;
 mod util;
@@ -133,6 +134,99 @@ impl GatewayStore {
     pub fn migrate(&self) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         migrate::migrate(&mut conn)
+    }
+
+    pub fn create_scheduled_job(
+        &self,
+        job: &autonoetic_types::scheduled_job::ScheduledJob,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::create_scheduled_job(&conn, job)
+    }
+
+    pub fn get_scheduled_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<autonoetic_types::scheduled_job::ScheduledJob>> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::get_scheduled_job(&conn, job_id)
+    }
+
+    pub fn list_scheduled_jobs_for_owner(
+        &self,
+        owner_agent_id: &str,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<autonoetic_types::scheduled_job::ScheduledJob>> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::list_scheduled_jobs_for_owner(&conn, owner_agent_id, limit, offset)
+    }
+
+    pub fn list_scheduled_jobs_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::scheduled_job::ScheduledJob>> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::list_scheduled_jobs_for_root(&conn, root_session_id)
+    }
+
+    pub fn load_due_scheduled_jobs(
+        &self,
+        now_rfc3339: &str,
+        limit: usize,
+    ) -> Result<Vec<autonoetic_types::scheduled_job::ScheduledJob>> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::load_due_scheduled_jobs(&conn, now_rfc3339, limit)
+    }
+
+    pub fn claim_due_scheduled_job(
+        &self,
+        job_id: &str,
+        now_rfc3339: &str,
+    ) -> Result<Option<autonoetic_types::scheduled_job::ScheduledJob>> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::claim_due_scheduled_job(&conn, job_id, now_rfc3339)
+    }
+
+    pub fn claim_and_advance_due_job(
+        &self,
+        job_id: &str,
+        now_rfc3339: &str,
+        new_next_run_at: &str,
+    ) -> Result<Option<autonoetic_types::scheduled_job::ScheduledJob>> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::claim_and_advance_due_job(&conn, job_id, now_rfc3339, new_next_run_at)
+    }
+
+    pub fn advance_next_run(
+        &self,
+        job_id: &str,
+        next_run_at: &str,
+        last_run_at: Option<&str>,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::advance_next_run(&conn, job_id, next_run_at, last_run_at, last_error)
+    }
+
+    pub fn pause_scheduled_job(&self, job_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::pause_scheduled_job(&conn, job_id)
+    }
+
+    pub fn resume_scheduled_job(&self, job_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::resume_scheduled_job(&conn, job_id)
+    }
+
+    pub fn cancel_scheduled_job(&self, job_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::cancel_scheduled_job(&conn, job_id)
+    }
+
+    pub fn delete_scheduled_job(&self, job_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::delete_scheduled_job(&conn, job_id)
     }
 }
 
