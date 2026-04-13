@@ -160,13 +160,13 @@ impl NativeTool for ContentReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Read content from the session's content store. Prefer `name`, 8-char `alias`, or `cnt_<alias>` ref from content.write. Full `sha256:...` digest still works for backward compatibility.".to_string(),
+            description: "Read content from the session's content store. Prefer `name`, 8-char `alias`, or `cnt_<alias>` ref from content.write. Also supports `art_<id>:<filename>` or `art_<id>/<filename>` to read a specific file from an artifact. Full `sha256:...` digest still works for backward compatibility.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name_or_handle": {
                         "type": "string",
-                        "description": "Content name (e.g. 'main.py'), 8-hex alias, cnt_<alias> ref, or sha256 digest — not a sandbox path"
+                        "description": "Content name (e.g. 'main.py'), 8-hex alias, cnt_<alias> ref, art_<id>:<filename>, or sha256 digest — not a sandbox path"
                     }
                 },
                 "required": ["name_or_handle"],
@@ -207,34 +207,42 @@ impl NativeTool for ContentReadTool {
         let sid = _session_id.unwrap_or(&_manifest.agent.id);
         let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
 
-        let content_result = store.read_by_name_or_handle(sid, args.name_or_handle.trim());
+        let input = args.name_or_handle.trim();
 
-        let content = match content_result {
-            Ok(c) => c,
-            Err(e) => {
-                let looks_like_guessed_name = !args.name_or_handle.starts_with("sha256:");
-
-                if looks_like_guessed_name {
-                    let hints = find_available_artifacts(&store, sid, &args.name_or_handle);
-
-                    if !hints.is_empty() {
-                        return Ok(serde_json::json!({
-                            "ok": false,
-                            "error_type": "resource",
-                            "error": "content_not_found",
-                            "message": format!("Content '{}' not found in session '{}'", args.name_or_handle, sid),
-                            "hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
-                            "available_artifacts": hints
-                        }).to_string());
-                    }
+        let content = if input.starts_with("art_") {
+            match try_read_artifact_file(gw_dir, input) {
+                Ok(c) => c,
+                Err(e) => {
+                    anyhow::bail!(
+                        "Content '{}' not found: {}. Use `artifact.inspect` to verify the artifact ID and file list. Supported formats: `art_<id>:<filename>` or `art_<id>/<filename>`.",
+                        input,
+                        e
+                    );
                 }
+            }
+        } else {
+            match store.read_by_name_or_handle(sid, input) {
+                Ok(c) => c,
+                Err(e) => {
+                    let looks_like_guessed_name = !input.starts_with("sha256:");
 
-                anyhow::bail!(
-                    "Content '{}' not found in session '{}': {}",
-                    args.name_or_handle,
-                    sid,
-                    e
-                );
+                    if looks_like_guessed_name {
+                        let hints = find_available_artifacts(&store, sid, input);
+
+                        if !hints.is_empty() {
+                            return Ok(serde_json::json!({
+                                "ok": false,
+                                "error_type": "resource",
+                                "error": "content_not_found",
+                                "message": format!("Content '{}' not found in session '{}'", input, sid),
+                                "hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
+                                "available_artifacts": hints
+                            }).to_string());
+                        }
+                    }
+
+                    anyhow::bail!("Content '{}' not found in session '{}': {}", input, sid, e);
+                }
             }
         };
 
@@ -272,4 +280,53 @@ fn find_available_artifacts(
     }));
 
     hints
+}
+
+fn try_read_artifact_file(gw_dir: &Path, name_or_handle: &str) -> anyhow::Result<Vec<u8>> {
+    if !name_or_handle.starts_with("art_") {
+        anyhow::bail!("not an artifact ref");
+    }
+
+    let (artifact_id, filename) = if let Some(idx) = name_or_handle.rfind(':') {
+        (&name_or_handle[..idx], &name_or_handle[idx + 1..])
+    } else if let Some(idx) = name_or_handle.find('/') {
+        (&name_or_handle[..idx], &name_or_handle[idx + 1..])
+    } else {
+        anyhow::bail!(
+            "artifact ref must be in format `art_<id>:<filename>` or `art_<id>/<filename>`"
+        );
+    };
+
+    let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
+    let bundle = artifact_store
+        .inspect(artifact_id)
+        .map_err(|e| anyhow::anyhow!("artifact '{}' not found: {}", artifact_id, e))?;
+
+    let file_entry = bundle
+        .files
+        .iter()
+        .find(|f| f.name == filename)
+        .ok_or_else(|| {
+            let available: Vec<&str> = bundle.files.iter().map(|f| f.name.as_str()).collect();
+            anyhow::anyhow!(
+                "file '{}' not found in artifact '{}'. Available files: {:?}",
+                filename,
+                artifact_id,
+                available
+            )
+        })?;
+
+    let content = artifact_store
+        .content_store()
+        .read(&file_entry.handle)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read content for file '{}' in artifact '{}': {}",
+                filename,
+                artifact_id,
+                e
+            )
+        })?;
+
+    Ok(content)
 }

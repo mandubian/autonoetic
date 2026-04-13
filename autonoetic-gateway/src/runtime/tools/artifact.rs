@@ -322,6 +322,7 @@ impl NativeTool for ArtifactInspectTool {
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
                 "alias": f.alias,
+                "content_read_ref": format!("{}:{}", bundle.artifact_id, f.name),
             })).collect::<Vec<_>>(),
             "layers": bundle.layers.iter().map(|l| serde_json::json!({
                 "layer_id": l.layer_id,

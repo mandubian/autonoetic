@@ -24,6 +24,8 @@ metadata:
         allowed: ["knowledge.", "agent."]
       - type: "AgentSpawn"
         max_children: 10
+      - type: "SchedulerAccess"
+        patterns: ["*"]
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
@@ -161,12 +163,13 @@ Never write files that match ANY of these patterns:
 ```
 1. Is it executable code?                    → coder.default
 2. Is it a new persistent agent?             → architect.default (design) → coder.default (script) → packager.default (if deps) → evaluator.default + auditor.default (gate) → specialized_builder.default (install)
-3. Is it structural design / task breakdown? → architect.default
-4. Is it research / evidence gathering?      → researcher.default
-5. Is it debugging / root cause analysis?    → debugger.default
-6. Is it testing / validation?               → evaluator.default
-7. Is it security / governance review?       → auditor.default
-8. Is it pure prose, analysis, or non-executable documentation? → OK to do directly
+3. Is it recurring/periodic? (every X min/hrs, on schedule) → Follow "Recurring / Periodic Tasks" section below (build agent first, then scheduler.cron.create)
+4. Is it structural design / task breakdown? → architect.default
+5. Is it research / evidence gathering?      → researcher.default
+6. Is it debugging / root cause analysis?    → debugger.default
+7. Is it testing / validation?               → evaluator.default
+8. Is it security / governance review?       → auditor.default
+9. Is it pure prose, analysis, or non-executable documentation? → OK to do directly
 ```
 
 ### CAN do directly:
@@ -204,6 +207,69 @@ workflow.wait(task_ids=[...], timeout_secs=300)
 - **API integration is sequential:** researcher (find API) → coder (implement). Wait for research before coding.
 - **Design before code:** architect → coder. Wait for design before coding.
 - Simple single-delegation tasks (just use `agent.spawn(...)` without `async=true`)
+
+---
+
+## Recurring / Periodic Tasks
+
+When the user asks for something to happen "every X minutes/hours" or on a schedule (e.g., "tell me a joke every 30 minutes", "check emails every 2 hours"):
+
+### Recognition
+
+Look for phrases like:
+- "every N minutes" / "every N hours"
+- "every day at HH:MM"
+- "every <weekday> at HH:MM"
+- "on a schedule"
+- "periodically" / "recurring"
+
+### Routing
+
+**DO NOT build scripts with sleep loops.** Instead:
+
+1. **Build the agent first** (standard agent creation pipeline):
+   - Spawn `coder.default` to write the one-shot task (no loop, no sleep)
+   - Have coder return `artifact_id` and semantic install fields
+   - Follow the standard agent creation flow (packager if deps, evaluator/auditor if network/execution, specialized_builder to install)
+
+2. **After successful install**, call `scheduler.cron.create` to register the recurring execution:
+   ```json
+   {
+     "target_agent_id": "<newly_installed_agent_id>",
+     "schedule_expr": "every 30 minutes",
+     "message": "Run your task: ...",
+     "metadata": {
+       "created_for": "<original_user_intent>"
+     }
+   }
+   ```
+
+### Constraints
+
+- **Second-resolution is supported**: `every N seconds` is valid.
+- **Sub-10s guardrail**: schedules below 10 seconds are allowed only for script-mode agents (`execution_mode: script`). For reasoning agents, use `>= 10 seconds`.
+- **Cron syntax**: Use natural language ("every 5 minutes") for simplicity. For complex schedules, use explicit cron (e.g., `0 9 * * 1` for weekly Monday at 9:00 AM).
+- **Target agent must exist**: The `target_agent_id` must already be installed. Always complete the agent install before calling `scheduler.cron.create`.
+
+### Example Flow
+
+```
+user: "Create an agent that tells me a joke every 30 minutes"
+  ↓
+planner: Spawn coder to build joke-agent.py (one-shot, returns the joke)
+  ↓
+coder: Returns artifact_id with semantic fields
+  ↓
+planner: (if deps/network) Spawn packager, evaluator, auditor
+  ↓
+planner: Spawn specialized_builder to install as agent joke-ticker.default
+  ↓
+specialized_builder: Installs agent, returns agent_id = joke-ticker.default
+  ↓
+planner: Call scheduler.cron.create(target="joke-ticker.default", schedule_expr="every 30 minutes", message="Get a new joke")
+  ↓
+gateway: Registers cron job; scheduler ticks every 5 seconds, triggers joke-ticker.default every 30 minutes
+```
 
 ---
 

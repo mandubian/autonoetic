@@ -78,7 +78,7 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
     - `description`
     - `instructions` (free-form markdown body)
     - `execution_mode`: **Use `"script"` when the agent is a standalone script that accepts CLI args or stdin.** Use `"reasoning"` only when the agent needs an LLM to interpret free-form user input.
-    - `script_entry` (required for script mode — the main entry script filename)
+    - `script_entry` (required for script mode — the main entry script filename only, e.g. "main.py" or "scripts/joke_ticker.py". NEVER include the interpreter prefix like "python3 main.py")
     - `llm_config` (required for reasoning mode)
     - `capabilities`
     - optional `io` / `middleware` / `response_contract`
@@ -128,6 +128,18 @@ When using `content.write` and `content.read`:
 - Session content files (written via `content.write`) are automatically mounted into `/tmp/` in the sandbox
 - Files written with `content.write` named `script.py` are available at `/tmp/script.py` in sandbox
 - You can run them directly: `python3 /tmp/script.py`
+
+### Shebang Requirement for Script Agents
+
+When building agents with `execution_mode: "script"`, **every script file must start with a shebang line**:
+
+```python
+#!/usr/bin/env python3
+import sys
+...
+```
+
+The gateway executes script agents directly (no interpreter prefix), so the shebang is mandatory. Scripts without a shebang will be rejected at install time.
 
 ### Workflow for Writing and Running Scripts
 
