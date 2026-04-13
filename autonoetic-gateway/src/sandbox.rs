@@ -151,6 +151,7 @@ impl SandboxRunner {
             dependencies,
             overrides,
             &[],
+            None,
         )
     }
 
@@ -161,6 +162,7 @@ impl SandboxRunner {
         dependencies: Option<&DependencyPlan>,
         overrides: Option<&BwrapIsolationOverrides>,
         extra_env: &[(String, String)],
+        root_session_id: Option<&str>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
@@ -169,15 +171,37 @@ impl SandboxRunner {
         if dependencies.is_some() && driver == SandboxDriverKind::MicroVm {
             anyhow::bail!("MicroVM dependency bootstrap is not implemented yet");
         }
+
+        let mut sdk_bridge = None;
+        let mut socket_mounts: Vec<SandboxMount> = Vec::new();
+
+        // Start SDK bridge for bubblewrap and prepare socket mount so it's
+        // visible inside the sandbox (the agent_dir bind-mount at /tmp would
+        // otherwise shadow the socket file).
+        let mut socket_path_sandbox: Option<String> = None;
+        if driver == SandboxDriverKind::Bubblewrap {
+            let bridge = start_sdk_bridge(agent_dir, root_session_id.map(|s| s.to_string()))?;
+            socket_path_sandbox = Some(bridge.socket_path_sandbox.clone());
+            socket_mounts.push(SandboxMount {
+                source: bridge.guard.socket_path_host.clone(),
+                dest: bridge.socket_path_sandbox.clone(),
+                readonly: false,
+            });
+            sdk_bridge = Some(bridge.guard);
+        }
+
         let composed_entrypoint = compose_entrypoint(entrypoint, dependencies)?;
         let (program, args) = match driver {
             SandboxDriverKind::Bubblewrap => {
                 if dependencies.is_some() {
-                    bubblewrap_shell_command(agent_dir, &composed_entrypoint, &[], overrides)?
+                    bubblewrap_shell_command(
+                        agent_dir,
+                        &composed_entrypoint,
+                        &socket_mounts,
+                        overrides,
+                    )?
                 } else {
-                    // Always use shell command — user-provided entrypoints can contain
-                    // shell features (&&, ||, pipes, redirects, cd, etc.)
-                    bubblewrap_shell_command(agent_dir, entrypoint, &[], overrides)?
+                    bubblewrap_shell_command(agent_dir, entrypoint, &socket_mounts, overrides)?
                 }
             }
             SandboxDriverKind::Docker => docker_command(agent_dir, &composed_entrypoint)?,
@@ -191,17 +215,13 @@ impl SandboxRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut sdk_bridge = None;
-
-        // Expose local Python SDK to bubblewrap workers when available and provide
-        // a thin local JSON-RPC bridge for SDK memory/state/event calls.
         if driver == SandboxDriverKind::Bubblewrap {
             if let Some(sdk_path) = resolve_python_sdk_path() {
                 inject_pythonpath(&mut command, &sdk_path);
             }
-            let bridge = start_sdk_bridge(agent_dir)?;
-            command.env(CCOS_SOCKET_ENV, bridge.socket_path_sandbox);
-            sdk_bridge = Some(bridge.guard);
+            if let Some(ref path) = socket_path_sandbox {
+                command.env(CCOS_SOCKET_ENV, path);
+            }
         }
 
         for (key, value) in extra_env {
@@ -238,6 +258,7 @@ impl SandboxRunner {
             session_content_mounts,
             overrides,
             &[],
+            None,
         )
     }
 
@@ -249,6 +270,7 @@ impl SandboxRunner {
         session_content_mounts: Vec<SandboxMount>,
         overrides: Option<&BwrapIsolationOverrides>,
         extra_env: &[(String, String)],
+        root_session_id: Option<&str>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
@@ -257,14 +279,27 @@ impl SandboxRunner {
         if dependencies.is_some() && driver == SandboxDriverKind::MicroVm {
             anyhow::bail!("MicroVM dependency bootstrap is not implemented yet");
         }
+
+        let mut sdk_bridge = None;
+        let mut all_mounts = session_content_mounts;
+        let mut socket_path_sandbox: Option<String> = None;
+
+        if driver == SandboxDriverKind::Bubblewrap {
+            let bridge = start_sdk_bridge(agent_dir, root_session_id.map(|s| s.to_string()))?;
+            socket_path_sandbox = Some(bridge.socket_path_sandbox.clone());
+            all_mounts.push(SandboxMount {
+                source: bridge.guard.socket_path_host.clone(),
+                dest: bridge.socket_path_sandbox.clone(),
+                readonly: false,
+            });
+            sdk_bridge = Some(bridge.guard);
+        }
+
         let composed_entrypoint = compose_entrypoint(entrypoint, dependencies)?;
         let (program, args) = match driver {
-            SandboxDriverKind::Bubblewrap => bubblewrap_shell_command(
-                agent_dir,
-                &composed_entrypoint,
-                &session_content_mounts,
-                overrides,
-            )?,
+            SandboxDriverKind::Bubblewrap => {
+                bubblewrap_shell_command(agent_dir, &composed_entrypoint, &all_mounts, overrides)?
+            }
             SandboxDriverKind::Docker => docker_command(agent_dir, &composed_entrypoint)?,
             SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
         };
@@ -276,15 +311,13 @@ impl SandboxRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut sdk_bridge = None;
-
         if driver == SandboxDriverKind::Bubblewrap {
             if let Some(sdk_path) = resolve_python_sdk_path() {
                 inject_pythonpath(&mut command, &sdk_path);
             }
-            let bridge = start_sdk_bridge(agent_dir)?;
-            command.env(CCOS_SOCKET_ENV, bridge.socket_path_sandbox);
-            sdk_bridge = Some(bridge.guard);
+            if let Some(ref path) = socket_path_sandbox {
+                command.env(CCOS_SOCKET_ENV, path);
+            }
         }
 
         for (key, value) in extra_env {
@@ -309,7 +342,10 @@ struct StartedSdkBridge {
     guard: SdkBridgeGuard,
 }
 
-fn start_sdk_bridge(agent_dir: &str) -> anyhow::Result<StartedSdkBridge> {
+fn start_sdk_bridge(
+    agent_dir: &str,
+    root_session_id: Option<String>,
+) -> anyhow::Result<StartedSdkBridge> {
     // Use a short hash-based socket path in /tmp to avoid SUN_LEN (108 byte) limit.
     // The socket path must be <= 108 bytes on Linux, so we use:
     //   /tmp/autonoetic-{16_hex_chars}.sock  = 36 bytes (well under limit)
@@ -330,9 +366,16 @@ fn start_sdk_bridge(agent_dir: &str) -> anyhow::Result<StartedSdkBridge> {
     let stop_flag = Arc::clone(&stop);
     let agent_dir_buf = PathBuf::from(agent_dir);
     let gateway_dir_buf = gateway_dir_from_agent_dir(&agent_dir_buf)?;
+    let root_session_id_for_bridge = root_session_id;
 
     let handle = thread::spawn(move || {
-        run_sdk_bridge_loop(listener, &agent_dir_buf, &gateway_dir_buf, stop_flag);
+        run_sdk_bridge_loop(
+            listener,
+            &agent_dir_buf,
+            &gateway_dir_buf,
+            stop_flag,
+            root_session_id_for_bridge,
+        );
     });
 
     Ok(StartedSdkBridge {
@@ -350,11 +393,14 @@ fn run_sdk_bridge_loop(
     agent_dir: &std::path::Path,
     gateway_dir: &std::path::Path,
     stop: Arc<AtomicBool>,
+    root_session_id: Option<String>,
 ) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                if let Err(_e) = handle_sdk_client(stream, agent_dir, gateway_dir) {
+                if let Err(_e) =
+                    handle_sdk_client(stream, agent_dir, gateway_dir, root_session_id.as_deref())
+                {
                     // Ignore bridge client failures in thin compatibility mode.
                 }
             }
@@ -370,6 +416,7 @@ fn handle_sdk_client(
     mut stream: UnixStream,
     agent_dir: &std::path::Path,
     gateway_dir: &std::path::Path,
+    root_session_id: Option<&str>,
 ) -> anyhow::Result<()> {
     let mut line = String::new();
     {
@@ -391,24 +438,25 @@ fn handle_sdk_client(
         .cloned()
         .unwrap_or_default();
 
-    let response = match dispatch_sdk_method(method, &params, agent_dir, gateway_dir) {
-        Ok(result) => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result
-        }),
-        Err(err) => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": -32000,
-                "message": err.to_string(),
-                "data": {
-                    "error_type": "policy_violation"
+    let response =
+        match dispatch_sdk_method(method, &params, agent_dir, gateway_dir, root_session_id) {
+            Ok(result) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": result
+            }),
+            Err(err) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32000,
+                    "message": err.to_string(),
+                    "data": {
+                        "error_type": "policy_violation"
+                    }
                 }
-            }
-        }),
-    };
+            }),
+        };
 
     let payload = serde_json::to_string(&response)? + "\n";
     stream.write_all(payload.as_bytes())?;
@@ -514,6 +562,7 @@ fn dispatch_sdk_method(
     params: &serde_json::Map<String, serde_json::Value>,
     agent_dir: &std::path::Path,
     gateway_dir: &std::path::Path,
+    root_session_id: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     match method {
         "memory.read" => {
@@ -560,16 +609,30 @@ fn dispatch_sdk_method(
                 .and_then(|v| v.as_str())
                 .unwrap_or("sdk");
             let agent_id = agent_id_from_agent_dir(agent_dir)?;
-            let mem = crate::runtime::memory::Tier2Memory::open_sqlite(gateway_dir, &agent_id)?;
+            let mem = crate::runtime::memory::Tier2Memory::open_for_agent(
+                gateway_dir,
+                None,
+                &agent_id,
+                root_session_id,
+            )?;
             let source_ref = format!("sdk_bridge:{}", agent_id);
             let content = serde_json::to_string(&value)?;
-            let memory = crate::runtime::tools::block_on_memory(mem.remember(
-                key,
-                scope,
-                &agent_id,
-                &source_ref,
-                &content,
-            ))?;
+            let mut memory = autonoetic_types::memory::MemoryObject::new(
+                key.to_string(),
+                scope.to_string(),
+                agent_id.clone(),
+                agent_id,
+                source_ref,
+                content,
+            );
+            if let Some(sid) = root_session_id {
+                if !sid.trim().is_empty() {
+                    memory.visibility = autonoetic_types::memory::MemoryVisibility::Session {
+                        session_id: sid.to_string(),
+                    };
+                }
+            }
+            let memory = crate::runtime::tools::block_on_memory(mem.save_memory(&memory))?;
             let _ = log_sdk_memory_event(
                 agent_dir,
                 "remember",
@@ -592,7 +655,12 @@ fn dispatch_sdk_method(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("memory.recall requires key"))?;
             let agent_id = agent_id_from_agent_dir(agent_dir)?;
-            let mem = crate::runtime::memory::Tier2Memory::open_sqlite(gateway_dir, &agent_id)?;
+            let mem = crate::runtime::memory::Tier2Memory::open_for_agent(
+                gateway_dir,
+                None,
+                &agent_id,
+                root_session_id,
+            )?;
             match crate::runtime::tools::block_on_memory(mem.recall(key)) {
                 Ok(memory) => {
                     let parsed = serde_json::from_str::<serde_json::Value>(&memory.content)
@@ -626,7 +694,12 @@ fn dispatch_sdk_method(
                 .and_then(|v| v.as_str())
                 .unwrap_or("sdk");
             let agent_id = agent_id_from_agent_dir(agent_dir)?;
-            let mem = crate::runtime::memory::Tier2Memory::open_sqlite(gateway_dir, &agent_id)?;
+            let mem = crate::runtime::memory::Tier2Memory::open_for_agent(
+                gateway_dir,
+                None,
+                &agent_id,
+                root_session_id,
+            )?;
             let search_results = crate::runtime::tools::block_on_memory(mem.search(scope, None))?;
             let mut results = Vec::<String>::new();
             for memory in search_results {
@@ -1216,38 +1289,79 @@ mod tests {
     }
 
     #[test]
-    fn test_sdk_dispatch_memory_roundtrip() {
-        let temp = tempfile::tempdir().expect("tempdir should create");
-        let gateway_dir =
-            gateway_dir_from_agent_dir(temp.path()).expect("gateway dir should resolve");
-        let params = serde_json::Map::from_iter(vec![
-            ("key".to_string(), json!("skills.worker.latest")),
-            ("value".to_string(), json!({"n": 13})),
-        ]);
-        let remember = dispatch_sdk_method("memory.remember", &params, temp.path(), &gateway_dir)
-            .expect("remember should succeed");
-        assert_eq!(remember["ok"], json!(true));
+    fn test_sdk_dispatch_memory_session_visibility() {
+        use crate::runtime::memory::{SqliteMemoryStore, Tier2Memory};
+        use autonoetic_types::memory::MemoryVisibility;
+        use std::sync::Arc;
 
-        let recall_params =
-            serde_json::Map::from_iter(vec![("key".to_string(), json!("skills.worker.latest"))]);
-        let recall =
-            dispatch_sdk_method("memory.recall", &recall_params, temp.path(), &gateway_dir)
-                .expect("recall should succeed");
-        assert_eq!(recall["value"]["n"], json!(13));
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let agent_dir = temp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("create agent dir");
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("create gateway dir");
+
+        let gw_store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let mem_store: Arc<dyn crate::runtime::memory::MemoryStore> =
+            Arc::new(SqliteMemoryStore::new(gw_store));
+
+        let writer = Tier2Memory::with_store(
+            Arc::clone(&mem_store),
+            "writer-agent",
+            Some("root-session-1".into()),
+        );
+        let reader_same_session = Tier2Memory::with_store(
+            Arc::clone(&mem_store),
+            "reader-agent",
+            Some("root-session-1".into()),
+        );
+        let reader_diff_session =
+            Tier2Memory::with_store(mem_store, "reader-agent", Some("other-session".into()));
+
+        let mut m = autonoetic_types::memory::MemoryObject::new(
+            "session_fact".into(),
+            "test".into(),
+            "writer-agent".into(),
+            "writer-agent".into(),
+            "sdk_bridge:writer-agent".into(),
+            "secret_value".into(),
+        );
+        m.visibility = MemoryVisibility::Session {
+            session_id: "root-session-1".into(),
+        };
+        crate::runtime::tools::block_on_memory(writer.save_memory(&m)).unwrap();
+
+        let recalled =
+            crate::runtime::tools::block_on_memory(reader_same_session.recall("session_fact"));
+        assert!(
+            recalled.is_ok(),
+            "reader in same session should read the memory"
+        );
+        assert_eq!(recalled.unwrap().content, "secret_value");
+
+        let recalled_wrong =
+            crate::runtime::tools::block_on_memory(reader_diff_session.recall("session_fact"));
+        assert!(
+            recalled_wrong.is_err(),
+            "reader in different session should not read session-scoped memory"
+        );
     }
 
     #[test]
     fn test_sdk_dispatch_checkpoint_roundtrip() {
         let temp = tempfile::tempdir().expect("tempdir should create");
-        let gateway_dir =
-            gateway_dir_from_agent_dir(temp.path()).expect("gateway dir should resolve");
+        let agent_dir = temp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("create agent dir");
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("create gateway dir");
         let checkpoint_params =
             serde_json::Map::from_iter(vec![("data".to_string(), json!({"cursor": 42}))]);
         let written = dispatch_sdk_method(
             "state.checkpoint",
             &checkpoint_params,
-            temp.path(),
+            &agent_dir,
             &gateway_dir,
+            None,
         )
         .expect("checkpoint should succeed");
         assert_eq!(written["ok"], json!(true));
@@ -1255,8 +1369,9 @@ mod tests {
         let loaded = dispatch_sdk_method(
             "state.get_checkpoint",
             &serde_json::Map::new(),
-            temp.path(),
+            &agent_dir,
             &gateway_dir,
+            None,
         )
         .expect("load checkpoint should succeed");
         assert_eq!(loaded["data"]["cursor"], json!(42));
