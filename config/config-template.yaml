@@ -29,6 +29,12 @@ background_tick_secs: 5
 background_min_interval_secs: 60
 max_background_due_per_tick: 32
 
+# ── Scheduled Jobs (Cron) ─────────────────────────────────────────────
+# scheduled_jobs:
+#   min_interval_secs: 60       # Minimum interval between job triggers
+#   max_per_root: 50            # Max scheduled jobs per root session
+#   max_due_per_tick: 16        # Max due jobs processed per scheduler tick
+
 # ── Response Validation & Repair ──────────────────────────────────────
 # When enabled, the gateway validates agent outputs against declared constraints.
 # repair_enabled activates bounded retry loops when validation fails.

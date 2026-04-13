@@ -97,6 +97,14 @@ pub enum Capability {
     /// The `scopes` field controls which operations are allowed.
     /// Use ["read"] for read-only, ["read", "write"] for full access.
     UserProfileAccess { scopes: Vec<String> },
+
+    /// Access to scheduler/cron operations (create, list, pause, resume, cancel jobs).
+    /// The `patterns` field restricts which operations are allowed.
+    /// Use ["*"] for all operations, or specific patterns like "scheduler.cron.create".
+    SchedulerAccess {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 }
 
 fn default_patterns_all() -> Vec<String> {

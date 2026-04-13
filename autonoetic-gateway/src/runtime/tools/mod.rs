@@ -444,6 +444,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::SchedulerSignal { .. } => "SchedulerSignal".to_string(),
         Capability::CredentialAccess { .. } => "CredentialAccess".to_string(),
         Capability::UserProfileAccess { .. } => "UserProfileAccess".to_string(),
+        Capability::SchedulerAccess { .. } => "SchedulerAccess".to_string(),
     }
 }
 
@@ -613,6 +614,7 @@ pub mod knowledge;
 pub mod observability;
 pub mod promotion;
 pub mod sandbox;
+pub mod scheduler;
 pub mod session;
 pub mod user_interaction;
 pub mod user_profile;
@@ -648,6 +650,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::user_profile::register_tools(&mut registry);
     crate::runtime::tools::observability::register_tools(&mut registry);
     crate::runtime::tools::promotion::register_tools(&mut registry);
+    crate::runtime::tools::scheduler::register_tools(&mut registry);
     registry
 }
 
