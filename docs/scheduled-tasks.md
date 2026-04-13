@@ -23,6 +23,7 @@ Call `scheduler.cron.create` with:
 ### Supported Schedule Expressions
 
 **Natural-language phrases:**
+- `every N seconds` — e.g., `every 10 seconds`
 - `every N minutes` — e.g., `every 5 minutes`
 - `every N hours` — e.g., `every 2 hours`
 - `every day at HH:MM` — e.g., `every day at 09:00`
@@ -72,7 +73,8 @@ capabilities:
 
 | Guardrail | Default | Description |
 |-----------|---------|-------------|
-| `min_interval_secs` | 60 | Minimum interval between triggers |
+| `min_interval_secs` | 1 | Minimum interval between triggers |
+| Sub-10s target policy | enforced | Intervals below 10 seconds require `execution_mode: script` on target agent |
 | `max_per_root` | 50 | Maximum jobs per root session |
 | `max_due_per_tick` | 16 | Maximum due jobs processed per scheduler tick |
 
@@ -80,10 +82,12 @@ Configure in `config.yaml`:
 
 ```yaml
 scheduled_jobs:
-  min_interval_secs: 120
+  min_interval_secs: 10
   max_per_root: 25
   max_due_per_tick: 8
 ```
+
+For tighter cadence, set `background_tick_secs: 1` in gateway config to reduce trigger latency.
 
 ## How Triggering Works
 
@@ -109,11 +113,11 @@ Scheduled job execution uses the same workflow execution paths as `agent.spawn`.
 2. **Prefer explicit cron for complex schedules**: Natural-language parsing is constrained to common patterns. Use cron syntax for anything non-standard.
 3. **Monitor via `scheduler.cron.list`**: Periodically check job status and `last_error` fields.
 4. **Pause, don't cancel, for temporary stops**: Cancelled jobs are permanent. Use pause for temporary suspension.
-5. **Set reasonable intervals**: The minimum interval is 60 seconds by default. Very frequent schedules consume scheduler resources.
+5. **Set reasonable intervals**: The minimum interval is 1 second by default, but very frequent schedules consume scheduler resources.
+6. **Use script mode for high frequency**: If you need intervals below 10 seconds, target an agent with `execution_mode: script`.
 
 ## Limitations (v1)
 
 - **UTC only**: No timezone support beyond UTC
-- **No second-resolution**: Minimum granularity is 1 minute
 - **No cross-agent mutation**: You cannot modify another agent's jobs
 - **No natural-language ambiguity resolution**: Ambiguous phrases are rejected with guidance

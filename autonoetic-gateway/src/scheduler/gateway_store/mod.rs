@@ -224,6 +224,11 @@ impl GatewayStore {
         scheduled_jobs::cancel_scheduled_job(&conn, job_id)
     }
 
+    pub fn cancel_scheduled_jobs_for_root(&self, root_session_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::cancel_scheduled_jobs_for_root(&conn, root_session_id)
+    }
+
     pub fn delete_scheduled_job(&self, job_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         scheduled_jobs::delete_scheduled_job(&conn, job_id)

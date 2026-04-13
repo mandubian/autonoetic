@@ -26,6 +26,7 @@ pub struct ScheduledJob {
     pub owner_agent_id: String,
     pub root_session_id: String,
     pub target_agent_id: String,
+    pub target_revision_id: String,
     pub message: String,
     pub metadata_json: Option<String>,
     pub cron_expr: String,

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 8;
+const SCHEMA_VERSION_LATEST: i64 = 9;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -486,6 +486,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_approvals_decision_reason_v6(conn)?;
     apply_published_reports_and_hooks_v7(conn)?;
     apply_scheduled_jobs_v8(conn)?;
+    apply_scheduled_jobs_v9(conn)?;
 
     Ok(())
 }
@@ -799,6 +800,7 @@ fn apply_scheduled_jobs_v8(conn: &mut Connection) -> Result<()> {
             owner_agent_id TEXT NOT NULL,
             root_session_id TEXT NOT NULL,
             target_agent_id TEXT NOT NULL,
+            target_revision_id TEXT NOT NULL DEFAULT '',
             message TEXT NOT NULL,
             metadata_json TEXT,
             cron_expr TEXT NOT NULL,
@@ -821,6 +823,36 @@ fn apply_scheduled_jobs_v8(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![8_i64, "scheduled_jobs", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_scheduled_jobs_v9(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 9 {
+        return Ok(());
+    }
+    // Column may already exist if the table was created with v8 schema (fresh DB)
+    let has_col: bool = conn
+        .prepare("SELECT target_revision_id FROM scheduled_jobs LIMIT 0")
+        .is_ok();
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE scheduled_jobs ADD COLUMN target_revision_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            9_i64,
+            "scheduled_jobs_target_revision",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }

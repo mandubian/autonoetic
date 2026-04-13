@@ -1308,7 +1308,7 @@ async fn process_due_scheduled_jobs(
         let mut run = match workflow_store::load_workflow_run(&config, Some(store.as_ref()), &workflow_id) {
             Ok(Some(r)) => r,
             Ok(None) => {
-                autonoetic_types::workflow::WorkflowRun {
+                let new_run = autonoetic_types::workflow::WorkflowRun {
                     workflow_id: workflow_id.clone(),
                     root_session_id: claimed.root_session_id.clone(),
                     lead_agent_id: claimed.owner_agent_id.clone(),
@@ -1319,7 +1319,17 @@ async fn process_due_scheduled_jobs(
                     queued_task_ids: Vec::new(),
                     join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
                     join_task_ids: Vec::new(),
+                };
+                if let Err(e) = workflow_store::save_workflow_run(&config, Some(store.as_ref()), &new_run) {
+                    tracing::warn!(
+                        target: "scheduler",
+                        workflow_id = %workflow_id,
+                        error = %e,
+                        "Failed to persist new workflow run for scheduled job"
+                    );
+                    continue;
                 }
+                new_run
             }
             Err(e) => {
                 tracing::warn!(
@@ -1335,7 +1345,7 @@ async fn process_due_scheduled_jobs(
         let queued = autonoetic_types::workflow::QueuedTaskRun {
             task_id: task_id.clone(),
             workflow_id: workflow_id.clone(),
-            agent_id: claimed.target_agent_id.clone(),
+            agent_id: format!("{}@{}", claimed.target_agent_id, claimed.target_revision_id),
             message: claimed.message.clone(),
             child_session_id: format!("sched-child-{}", &claimed.job_id),
             parent_session_id: claimed.root_session_id.clone(),

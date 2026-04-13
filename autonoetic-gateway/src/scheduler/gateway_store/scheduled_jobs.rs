@@ -6,14 +6,15 @@ pub fn create_scheduled_job(conn: &Connection, job: &ScheduledJob) -> Result<()>
     conn.execute(
         "INSERT INTO scheduled_jobs (
             job_id, owner_agent_id, root_session_id, target_agent_id,
-            message, metadata_json, cron_expr, timezone, next_run_at,
+            target_revision_id, message, metadata_json, cron_expr, timezone, next_run_at,
             last_run_at, status, created_at, updated_at, last_error, generation
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             job.job_id,
             job.owner_agent_id,
             job.root_session_id,
             job.target_agent_id,
+            job.target_revision_id,
             job.message,
             job.metadata_json,
             job.cron_expr,
@@ -33,7 +34,7 @@ pub fn create_scheduled_job(conn: &Connection, job: &ScheduledJob) -> Result<()>
 pub fn get_scheduled_job(conn: &Connection, job_id: &str) -> Result<Option<ScheduledJob>> {
     let mut stmt = conn.prepare(
         "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
-                message, metadata_json, cron_expr, timezone, next_run_at,
+                target_revision_id, message, metadata_json, cron_expr, timezone, next_run_at,
                 last_run_at, status, created_at, updated_at, last_error, generation
          FROM scheduled_jobs WHERE job_id = ?1",
     )?;
@@ -55,7 +56,7 @@ pub fn list_scheduled_jobs_for_owner(
     let offset = offset.unwrap_or(0) as i64;
     let mut stmt = conn.prepare(
         "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
-                message, metadata_json, cron_expr, timezone, next_run_at,
+                target_revision_id, message, metadata_json, cron_expr, timezone, next_run_at,
                 last_run_at, status, created_at, updated_at, last_error, generation
          FROM scheduled_jobs
          WHERE owner_agent_id = ?1
@@ -76,7 +77,7 @@ pub fn list_scheduled_jobs_for_root(
 ) -> Result<Vec<ScheduledJob>> {
     let mut stmt = conn.prepare(
         "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
-                message, metadata_json, cron_expr, timezone, next_run_at,
+                target_revision_id, message, metadata_json, cron_expr, timezone, next_run_at,
                 last_run_at, status, created_at, updated_at, last_error, generation
          FROM scheduled_jobs
          WHERE root_session_id = ?1
@@ -142,7 +143,7 @@ pub fn load_due_scheduled_jobs(
     let limit = limit as i64;
     let mut stmt = conn.prepare(
         "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
-                message, metadata_json, cron_expr, timezone, next_run_at,
+                target_revision_id, message, metadata_json, cron_expr, timezone, next_run_at,
                 last_run_at, status, created_at, updated_at, last_error, generation
          FROM scheduled_jobs
          WHERE status = 'active' AND next_run_at <= ?1
@@ -216,6 +217,17 @@ pub fn cancel_scheduled_job(conn: &Connection, job_id: &str) -> Result<bool> {
     Ok(updated > 0)
 }
 
+pub fn cancel_scheduled_jobs_for_root(conn: &Connection, root_session_id: &str) -> Result<usize> {
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE scheduled_jobs
+         SET status = 'cancelled', updated_at = ?1, generation = generation + 1
+         WHERE root_session_id = ?2 AND status = 'active'",
+        params![now_rfc3339, root_session_id],
+    )?;
+    Ok(updated)
+}
+
 pub fn delete_scheduled_job(conn: &Connection, job_id: &str) -> Result<bool> {
     let deleted = conn.execute(
         "DELETE FROM scheduled_jobs WHERE job_id = ?1",
@@ -225,30 +237,31 @@ pub fn delete_scheduled_job(conn: &Connection, job_id: &str) -> Result<bool> {
 }
 
 fn row_to_job(row: &rusqlite::Row<'_>) -> Result<ScheduledJob> {
-    let status_str: String = row.get(10)?;
+    let status_str: String = row.get(11)?;
     let status = match status_str.as_str() {
         "active" => ScheduledJobStatus::Active,
         "paused" => ScheduledJobStatus::Paused,
         "cancelled" => ScheduledJobStatus::Cancelled,
         _ => ScheduledJobStatus::Active,
     };
-    let last_error: Option<String> = row.get(13)?;
+    let last_error: Option<String> = row.get(14)?;
     let last_error = last_error.filter(|s| !s.is_empty());
     Ok(ScheduledJob {
         job_id: row.get(0)?,
         owner_agent_id: row.get(1)?,
         root_session_id: row.get(2)?,
         target_agent_id: row.get(3)?,
-        message: row.get(4)?,
-        metadata_json: row.get(5)?,
-        cron_expr: row.get(6)?,
-        timezone: row.get(7)?,
-        next_run_at: row.get(8)?,
-        last_run_at: row.get(9)?,
+        target_revision_id: row.get(4)?,
+        message: row.get(5)?,
+        metadata_json: row.get(6)?,
+        cron_expr: row.get(7)?,
+        timezone: row.get(8)?,
+        next_run_at: row.get(9)?,
+        last_run_at: row.get(10)?,
         status,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
         last_error,
-        generation: row.get(14)?,
+        generation: row.get(15)?,
     })
 }

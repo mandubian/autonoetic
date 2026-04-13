@@ -1,7 +1,9 @@
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
+use autonoetic_types::config::GatewayConfig;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{
@@ -770,6 +772,73 @@ fn test_web_search_cache_hits_without_second_network_call() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
     handle.join().expect("server thread should join");
+}
+
+#[test]
+fn test_scheduler_cron_create_rejects_sub10s_for_reasoning_target() {
+    let temp = tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    let agents_dir = temp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+
+    let caller_dir = agents_dir.join("planner.default");
+    std::fs::create_dir_all(&caller_dir).expect("caller dir should create");
+
+    let target_dir = agents_dir.join("reasoner.default");
+    std::fs::create_dir_all(&target_dir).expect("target dir should create");
+    std::fs::write(
+        target_dir.join("SKILL.md"),
+        "---\nversion: \"1.0\"\nruntime:\n  engine: \"autonoetic\"\n  gateway_version: \"0.1.0\"\n  sdk_version: \"0.1.0\"\n  type: \"stateful\"\n  sandbox: \"bubblewrap\"\n  runtime_lock: \"runtime.lock\"\nagent:\n  id: \"reasoner.default\"\n  name: \"reasoner.default\"\n  description: \"Reasoning target\"\nexecution_mode: reasoning\nllm_config:\n  provider: \"openai\"\n  model: \"gpt-4o-mini\"\n---\n# Instructions\nReasoning test agent.\n",
+    )
+    .expect("target skill should write");
+
+    let manifest = test_manifest(vec![Capability::SchedulerAccess {
+        patterns: vec!["*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let gateway_store = std::sync::Arc::new(
+        GatewayStore::open(&gateway_dir).expect("gateway store should open"),
+    );
+
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+
+    let args = serde_json::json!({
+        "message": "tick",
+        "schedule_expr": "every 5 seconds",
+        "target_agent_id": "reasoner.default"
+    });
+
+    let result = registry
+        .execute(
+            "scheduler.cron.create",
+            &manifest,
+            &policy,
+            &caller_dir,
+            None,
+            &args.to_string(),
+            Some("root-test"),
+            None,
+            Some(&config),
+            Some(gateway_store),
+            None,
+        )
+        .expect("tool call should succeed with structured rejection");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("scheduler response should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(false)));
+    assert!(
+        parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("Sub-10s schedules are only allowed for script-mode agents")
+    );
 }
 
 #[test]
