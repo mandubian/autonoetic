@@ -64,7 +64,46 @@ If the artifact is malformed, missing files, or has wrong metadata, tell the pla
 
 Agent installation is a two-step workflow:
 
-### Step 1: create a revision
+### Reasoning-Only Agent Installation (no artifact)
+
+For agents that only use existing gateway tools (`credential.request`, `memory.*`,
+`web.fetch`, `scheduler.cron.*`, etc.) and contain **no custom code**:
+
+1. Call `agent.revision.create_from_intent` **without** `artifact_id`:
+   ```json
+   {
+     "agent_id": "moltbook-ops",
+     "description": "Operational Moltbook agent — posts to feed and monitors replies",
+     "instructions": "# Moltbook Operations\n\n...",
+     "execution_mode": "reasoning",
+     "llm_config": {
+       "provider": "openrouter",
+       "model": "google/gemini-3-flash-preview",
+       "temperature": 0.2
+     },
+     "capabilities": [
+       {"type": "CredentialAccess", "services": ["moltbook"]},
+       {"type": "NetworkAccess", "hosts": ["localhost"]},
+       {"type": "ReadAccess", "scopes": ["self.*"]},
+       {"type": "WriteAccess", "scopes": ["self.*"]},
+       {"type": "BackgroundReevaluation", "min_interval_secs": 300, "allow_reasoning": true}
+     ]
+   }
+   ```
+
+2. Call `agent.revision.promote` with the returned `revision_id`.
+
+**Rules for artifact-free agents:**
+- `execution_mode` must be `reasoning` (script agents always need artifacts)
+- `llm_config` is required
+- `CodeExecution` and `AgentSpawn` are forbidden (these require code review)
+- All other capabilities work: `CredentialAccess`, `NetworkAccess`, `ReadAccess`,
+  `WriteAccess`, `MemoryAccess`, `BackgroundReevaluation`, `SchedulerAccess`
+- No promotion gate: capability enforcement on every tool call is the security guarantee
+
+---
+
+### Standard Agent Installation (with artifact)
 
 Use `agent.revision.create_from_intent` as the canonical install path.
 
@@ -106,7 +145,7 @@ Activates the created revision.
 | Field | Description |
 |---|---|
 | `agent_id` | lowercase with hyphens |
-| `artifact_id` | REQUIRED: reviewed artifact to install from |
+| `artifact_id` | Required for script agents and agents with `CodeExecution`/`AgentSpawn`. Omit for pure reasoning agents. |
 | `summary` | optional note for the created revision |
 | `description` | required; gateway writes canonical metadata from this intent |
 | `instructions` | required; free-form markdown body provided by agent |
@@ -114,7 +153,7 @@ Activates the created revision.
 | `llm_config` | required when `execution_mode=reasoning` |
 
 ### Key Rules:
-1. **`artifact_id` is required** - install from the reviewed artifact, not from loose content handles
+1. **`artifact_id` is required for code agents** — script agents and any agent with `CodeExecution`/`AgentSpawn` must have an artifact. Pure reasoning agents that only call existing tools do not need one.
 2. **Do not require `SKILL.md` or `runtime.lock` inside the artifact** on this path.
 3. Gateway writes canonical SKILL metadata and canonical runtime lock deterministically from the intent payload.
 4. If required intent fields are missing, report the gap to planner (do NOT invent values).
