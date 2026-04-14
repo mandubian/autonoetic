@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 9;
+const SCHEMA_VERSION_LATEST: i64 = 10;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -487,6 +487,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_published_reports_and_hooks_v7(conn)?;
     apply_scheduled_jobs_v8(conn)?;
     apply_scheduled_jobs_v9(conn)?;
+    apply_credential_setup_state_v10(conn)?;
 
     Ok(())
 }
@@ -823,6 +824,34 @@ fn apply_scheduled_jobs_v8(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![8_i64, "scheduled_jobs", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_credential_setup_state_v10(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 10 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS credential_setup_state (
+            credential_id TEXT PRIMARY KEY,
+            state_json    TEXT NOT NULL,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );",
+    )?;
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            10_i64,
+            "credential_setup_state",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }

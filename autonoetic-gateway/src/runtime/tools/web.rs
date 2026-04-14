@@ -14,6 +14,7 @@ use std::time::{Duration as StdDuration, Instant};
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(WebSearchTool));
     registry.register(Box::new(WebFetchTool));
+    registry.register(Box::new(WebCallTool));
 }
 
 #[derive(Debug, Deserialize)]
@@ -921,6 +922,201 @@ impl NativeTool for WebFetchTool {
             "truncated": truncated,
             "total_chars": total_chars,
             "content": content
+        }))
+        .map_err(Into::into)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// web.call — arbitrary HTTP method with optional headers and JSON body
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct WebCallArgs {
+    url: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    body: Option<serde_json::Value>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    max_chars: Option<usize>,
+}
+
+pub struct WebCallTool;
+
+impl NativeTool for WebCallTool {
+    fn name(&self) -> &'static str {
+        "web.call"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::NetworkAccess { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Make an HTTP request (GET, POST, PUT, PATCH, DELETE) with optional \
+                headers and JSON body. Use this for service registration, REST API calls, and \
+                webhook endpoints. The response body is returned as-is (JSON-parsed when \
+                possible). Note: secrets returned in responses are visible in the LLM context — \
+                use credential.setup for flows that must keep secrets server-side."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full URL for the request"
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                        "description": "HTTP method (default: GET)"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Optional HTTP headers as key-value pairs (e.g. {\"Authorization\": \"Bearer sk_...\"})",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "body": {
+                        "type": "object",
+                        "description": "Optional JSON body for POST/PUT/PATCH requests"
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "minimum": 5,
+                        "maximum": 120
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 512,
+                        "maximum": 200000
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: WebCallArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
+        let host = extract_host(&args.url)?;
+        if !policy.can_connect_net(&host) {
+            return Err(anyhow::Error::from(tagged::Tagged::permission(
+                anyhow::anyhow!(
+                    "Permission Denied: NetworkAccess does not allow host '{}'",
+                    host
+                ),
+            )));
+        }
+
+        let method = args
+            .method
+            .as_deref()
+            .unwrap_or("GET")
+            .trim()
+            .to_uppercase();
+        let timeout_secs = args.timeout_secs.unwrap_or(20).clamp(5, 120);
+        let max_chars = args.max_chars.unwrap_or(20_000).clamp(512, 200_000);
+
+        let fetch_url = args.url.clone();
+        let method_bytes = method.clone();
+        let headers = args.headers.clone().unwrap_or_default();
+        let body = args.body.clone();
+
+        let (status_code, content_type, response_text) = block_on_http(async move {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| anyhow::anyhow!("web.call client build failed: {}", e))?;
+
+            let http_method =
+                reqwest::Method::from_bytes(method_bytes.as_bytes()).map_err(|e| {
+                    anyhow::Error::from(tagged::Tagged::validation(anyhow::anyhow!(
+                        "Invalid HTTP method '{}': {}",
+                        method_bytes,
+                        e
+                    )))
+                })?;
+
+            let mut req = client
+                .request(http_method, &fetch_url)
+                .timeout(StdDuration::from_secs(timeout_secs));
+
+            for (k, v) in &headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+
+            if let Some(ref b) = body {
+                req = req.json(b);
+            }
+
+            let response = req.send().await.map_err(|e| {
+                anyhow::Error::from(tagged::Tagged::resource(anyhow::anyhow!(
+                    "web.call request failed: {}",
+                    e
+                )))
+            })?;
+
+            let status = response.status().as_u16();
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.to_string());
+            let text = response.text().await.map_err(|e| {
+                anyhow::Error::from(tagged::Tagged::execution(anyhow::anyhow!(
+                    "web.call could not decode response: {}",
+                    e
+                )))
+            })?;
+            Ok((status, content_type, text))
+        })?;
+
+        let total_chars = response_text.chars().count();
+        let truncated = total_chars > max_chars;
+        let content = if truncated {
+            response_text.chars().take(max_chars).collect::<String>()
+        } else {
+            response_text
+        };
+
+        // Try to parse response as JSON for cleaner output; fall back to plain string.
+        let body_value: serde_json::Value =
+            serde_json::from_str(&content).unwrap_or(serde_json::Value::String(content));
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "url": args.url,
+            "method": method,
+            "status_code": status_code,
+            "content_type": content_type,
+            "truncated": truncated,
+            "body": body_value,
         }))
         .map_err(Into::into)
     }

@@ -917,7 +917,12 @@ async fn spawn_task_execution(
                             &cont.pending_tool_call.approval_response,
                         )
                         .ok()
-                        .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from));
+                        .and_then(|v| {
+                            v.get("approval")
+                                .and_then(|a| a.get("reason"))
+                                .and_then(|r| r.as_str())
+                                .map(String::from)
+                        });
 
                         Some(workflow_store::ApprovalMetadata {
                             request_id: cont.approval_request_id,
@@ -1305,42 +1310,45 @@ async fn process_due_scheduled_jobs(
             &uuid::Uuid::new_v4().to_string()[..8]
         );
 
-        let mut run = match workflow_store::load_workflow_run(&config, Some(store.as_ref()), &workflow_id) {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                let new_run = autonoetic_types::workflow::WorkflowRun {
-                    workflow_id: workflow_id.clone(),
-                    root_session_id: claimed.root_session_id.clone(),
-                    lead_agent_id: claimed.owner_agent_id.clone(),
-                    status: autonoetic_types::workflow::WorkflowRunStatus::Active,
-                    created_at: now_rfc.clone(),
-                    updated_at: now_rfc.clone(),
-                    active_task_ids: Vec::new(),
-                    queued_task_ids: Vec::new(),
-                    join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
-                    join_task_ids: Vec::new(),
-                };
-                if let Err(e) = workflow_store::save_workflow_run(&config, Some(store.as_ref()), &new_run) {
+        let mut run =
+            match workflow_store::load_workflow_run(&config, Some(store.as_ref()), &workflow_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    let new_run = autonoetic_types::workflow::WorkflowRun {
+                        workflow_id: workflow_id.clone(),
+                        root_session_id: claimed.root_session_id.clone(),
+                        lead_agent_id: claimed.owner_agent_id.clone(),
+                        status: autonoetic_types::workflow::WorkflowRunStatus::Active,
+                        created_at: now_rfc.clone(),
+                        updated_at: now_rfc.clone(),
+                        active_task_ids: Vec::new(),
+                        queued_task_ids: Vec::new(),
+                        join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
+                        join_task_ids: Vec::new(),
+                    };
+                    if let Err(e) =
+                        workflow_store::save_workflow_run(&config, Some(store.as_ref()), &new_run)
+                    {
+                        tracing::warn!(
+                            target: "scheduler",
+                            workflow_id = %workflow_id,
+                            error = %e,
+                            "Failed to persist new workflow run for scheduled job"
+                        );
+                        continue;
+                    }
+                    new_run
+                }
+                Err(e) => {
                     tracing::warn!(
                         target: "scheduler",
                         workflow_id = %workflow_id,
                         error = %e,
-                        "Failed to persist new workflow run for scheduled job"
+                        "Failed to load workflow run for scheduled job"
                     );
                     continue;
                 }
-                new_run
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "scheduler",
-                    workflow_id = %workflow_id,
-                    error = %e,
-                    "Failed to load workflow run for scheduled job"
-                );
-                continue;
-            }
-        };
+            };
 
         let queued = autonoetic_types::workflow::QueuedTaskRun {
             task_id: task_id.clone(),
@@ -1368,7 +1376,8 @@ async fn process_due_scheduled_jobs(
                 "Failed to enqueue scheduled job task; recording error for backoff"
             );
             let backoff_secs = 60;
-            let retry_at = (chrono::Utc::now() + chrono::Duration::seconds(backoff_secs)).to_rfc3339();
+            let retry_at =
+                (chrono::Utc::now() + chrono::Duration::seconds(backoff_secs)).to_rfc3339();
             let _ = store.advance_next_run(
                 &claimed.job_id,
                 &retry_at,
@@ -1393,7 +1402,8 @@ async fn process_due_scheduled_jobs(
             }),
             occurred_at: now_rfc.clone(),
         };
-        let _ = workflow_store::append_workflow_event(&config, Some(store.as_ref()), &trigger_event);
+        let _ =
+            workflow_store::append_workflow_event(&config, Some(store.as_ref()), &trigger_event);
     }
 
     Ok(())

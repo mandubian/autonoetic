@@ -489,7 +489,10 @@ impl NativeTool for AgentSpawnTool {
                             )
                             .ok()
                             .and_then(|v| {
-                                v.get("reason").and_then(|r| r.as_str()).map(String::from)
+                                v.get("approval")
+                                    .and_then(|a| a.get("reason"))
+                                    .and_then(|r| r.as_str())
+                                    .map(String::from)
                             });
 
                             Some(crate::scheduler::ApprovalMetadata {

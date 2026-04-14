@@ -134,6 +134,28 @@ impl NativeTool for SchedulerCronCreateTool {
             .clone()
             .unwrap_or_else(|| manifest.agent.id.clone());
 
+        // Fast-path guardrail before target resolution:
+        // if we can already determine the target is reasoning-mode, reject sub-10s
+        // schedules with a clear error even when alias resolution would fail later.
+        if interval_secs < 10 {
+            let target_is_script_hint = if target == manifest.agent.id {
+                Some(matches!(manifest.execution_mode, ExecutionMode::Script))
+            } else {
+                let repo = AgentRepository::from_config(&cfg);
+                let gateway_dir = gateway_dir.map(|p| p.to_path_buf()).unwrap_or_default();
+                repo.get_sync_from_store(&target, &gateway_dir, Some(store.as_ref()))
+                    .or_else(|_| repo.get_sync(&target))
+                    .ok()
+                    .map(|loaded| matches!(loaded.manifest.execution_mode, ExecutionMode::Script))
+            };
+            if target_is_script_hint == Some(false) {
+                return Ok(serde_json::to_string(&serde_json::json!({
+                    "ok": false,
+                    "error": "Sub-10s schedules are only allowed for script-mode agents (execution_mode=script). Use >=10s for reasoning agents."
+                }))?);
+            }
+        }
+
         // Resolve target to a pinned revision ref at creation time.
         let agent_ref = match crate::runtime::tools::resolve_target_to_agent_ref(
             &target,
