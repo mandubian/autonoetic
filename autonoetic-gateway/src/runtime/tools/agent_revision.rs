@@ -315,7 +315,8 @@ struct RevisionCreateArgs {
 #[derive(Debug, Deserialize)]
 struct RevisionCreateFromIntentArgs {
     agent_id: String,
-    artifact_id: String,
+    #[serde(default)]
+    artifact_id: Option<String>,
     instructions: String,
     description: String,
     #[serde(deserialize_with = "deserialize_capabilities_lenient")]
@@ -343,7 +344,7 @@ struct RevisionCreateFromIntentArgs {
 #[derive(Debug)]
 struct RevisionCreateCommonArgs {
     agent_id: String,
-    artifact_id: String,
+    artifact_id: Option<String>,
     base_revision_id: Option<String>,
     summary: Option<String>,
     metadata: Option<serde_json::Value>,
@@ -453,7 +454,7 @@ fn create_revision_from_files(
     created_by_id: &str,
     gateway_dir: &Path,
     gateway_store: &Arc<crate::scheduler::gateway_store::GatewayStore>,
-    bundle: &ArtifactBundle,
+    bundle: Option<&ArtifactBundle>,
     file_map: &mut BTreeMap<String, Vec<u8>>,
     lock_rel_path: &str,
     parsed_lock: RuntimeLock,
@@ -461,7 +462,9 @@ fn create_revision_from_files(
     health_report: Option<&crate::runtime::install_contract::BundleHealthReport>,
     script_entry: Option<&str>,
 ) -> anyhow::Result<PersistedRevisionResult> {
-    let expected_layers = expected_locked_layers(bundle);
+    let expected_layers = bundle
+        .map(expected_locked_layers)
+        .unwrap_or_default();
     let normalized_lock = normalize_runtime_lock(parsed_lock);
     anyhow::ensure!(
         normalized_lock.layers == expected_layers,
@@ -538,7 +541,7 @@ fn create_revision_from_files(
         revision_id: revision_id.clone(),
         agent_id: common.agent_id.clone(),
         base_revision_id,
-        artifact_id: Some(common.artifact_id.clone()),
+        artifact_id: common.artifact_id.clone(),
         content_digest,
         runtime_lock_hash,
         manifest_hash,
@@ -563,10 +566,12 @@ fn create_revision_from_files(
     let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
 
     // If promotion evidence was recorded before revision creation, bind or rotate that evidence
-    // to this canonical revision digest now.
-    let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
-    let _ = promo_store
-        .reconcile_content_digest_for_revision(&common.artifact_id, &rev.content_digest)?;
+    // to this canonical revision digest now. Skip for artifact-free reasoning agents.
+    if let Some(artifact_id) = &common.artifact_id {
+        let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+        let _ = promo_store
+            .reconcile_content_digest_for_revision(artifact_id, &rev.content_digest)?;
+    }
 
     let short_ref = format!("{}@rev_{}", common.agent_id, short_id);
 
@@ -791,7 +796,7 @@ impl NativeTool for AgentRevisionCreateTool {
 
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
-            artifact_id: args.artifact_id.clone(),
+            artifact_id: Some(args.artifact_id.clone()),
             base_revision_id: args.base_revision_id.clone(),
             summary: args.summary.clone(),
             metadata: args.metadata.clone(),
@@ -803,7 +808,7 @@ impl NativeTool for AgentRevisionCreateTool {
             &manifest.agent.id,
             gateway_dir,
             &gateway_store,
-            &bundle,
+            Some(&bundle),
             &mut file_map,
             &lock_rel_path,
             parsed_lock,
@@ -832,12 +837,12 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Create a new immutable agent revision from semantic intent and an artifact bundle, while canonicalizing SKILL.md and runtime.lock server-side.".to_string(),
+            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. For pure reasoning agents that only use existing gateway tools (no custom code), omit artifact_id — capability enforcement is the security gate. For script agents or agents with CodeExecution/AgentSpawn, artifact_id is required for code review and promotion gating.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string" },
-                    "artifact_id": { "type": "string" },
+                    "artifact_id": { "type": "string", "description": "Artifact ID containing agent source files. Required for script agents and reasoning agents with CodeExecution/AgentSpawn. Omit for pure reasoning agents that only use existing gateway tools." },
                     "instructions": { "type": "string", "description": "Markdown instruction body for SKILL.md" },
                     "description": { "type": "string", "description": "Agent description for metadata.agent.description" },
                     "execution_mode": { "type": "string", "enum": ["reasoning", "script"] },
@@ -853,7 +858,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "base_revision_id": { "type": "string" },
                     "summary": { "type": "string" }
                 },
-                "required": ["agent_id", "artifact_id", "instructions", "description", "capabilities"],
+                "required": ["agent_id", "instructions", "description", "capabilities"],
                 "additionalProperties": false
             }),
         }
@@ -876,10 +881,6 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
 
         crate::runtime::tools::validate_agent_id(&args.agent_id)?;
-        anyhow::ensure!(
-            !args.artifact_id.trim().is_empty(),
-            "artifact_id must not be empty"
-        );
         anyhow::ensure!(
             !args.instructions.trim().is_empty(),
             "instructions must not be empty"
@@ -907,89 +908,147 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             ));
         };
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
-        let artifact_store = crate::ArtifactStore::new(gateway_dir)?;
 
-        let bundle = artifact_store
-            .inspect(&args.artifact_id)
-            .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", args.artifact_id, e))?;
-        anyhow::ensure!(
-            bundle.kind == ArtifactKind::AgentBundle,
-            "Artifact '{}' has kind '{:?}'. agent.revision.create_from_intent requires kind 'agent_bundle'.",
-            args.artifact_id,
-            bundle.kind
-        );
-
-        let requested_mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
-        let execution_mode_explicit = args.execution_mode.is_some();
-        let resolved_mode = if !execution_mode_explicit
-            && requested_mode == ExecutionMode::Reasoning
-            && args.script_entry.is_none()
-            && args.llm_config.is_none()
-        {
-            if bundle.entrypoints.len() == 1 {
-                tracing::info!(
-                    target: "revision",
-                    artifact_id = %args.artifact_id,
-                    entrypoint = %bundle.entrypoints[0],
-                    "No execution_mode or llm_config specified, but artifact has a single entrypoint — defaulting to script mode"
+        // Two execution paths: with artifact (code agents) vs without (pure reasoning agents).
+        let (resolved_mode, resolved_script_entry, mut file_map, health_report, bundle_opt, source_kind, source_ref) =
+            if let Some(artifact_id) = &args.artifact_id {
+                anyhow::ensure!(
+                    !artifact_id.trim().is_empty(),
+                    "artifact_id must not be empty"
                 );
-                ExecutionMode::Script
-            } else {
-                ExecutionMode::Reasoning
-            }
-        } else {
-            requested_mode
-        };
-        match resolved_mode {
-            ExecutionMode::Script => {
-                let has_entry = args
+                let artifact_store = crate::ArtifactStore::new(gateway_dir)?;
+                let bundle = artifact_store
+                    .inspect(artifact_id)
+                    .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", artifact_id, e))?;
+                anyhow::ensure!(
+                    bundle.kind == ArtifactKind::AgentBundle,
+                    "Artifact '{}' has kind '{:?}'. agent.revision.create_from_intent requires kind 'agent_bundle'.",
+                    artifact_id,
+                    bundle.kind
+                );
+
+                let requested_mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
+                let execution_mode_explicit = args.execution_mode.is_some();
+                let resolved_mode = if !execution_mode_explicit
+                    && requested_mode == ExecutionMode::Reasoning
+                    && args.script_entry.is_none()
+                    && args.llm_config.is_none()
+                {
+                    if bundle.entrypoints.len() == 1 {
+                        tracing::info!(
+                            target: "revision",
+                            artifact_id = %artifact_id,
+                            entrypoint = %bundle.entrypoints[0],
+                            "No execution_mode or llm_config specified, but artifact has a single entrypoint — defaulting to script mode"
+                        );
+                        ExecutionMode::Script
+                    } else {
+                        ExecutionMode::Reasoning
+                    }
+                } else {
+                    requested_mode
+                };
+                match resolved_mode {
+                    ExecutionMode::Script => {
+                        let has_entry = args
+                            .script_entry
+                            .as_ref()
+                            .map(|v| !v.trim().is_empty())
+                            .unwrap_or(false)
+                            || !bundle.entrypoints.is_empty();
+                        anyhow::ensure!(
+                            has_entry,
+                            "script_entry is required when execution_mode is 'script'"
+                        );
+                    }
+                    ExecutionMode::Reasoning => anyhow::ensure!(
+                        args.llm_config.is_some(),
+                        "llm_config is required when execution_mode is 'reasoning'"
+                    ),
+                }
+
+                let resolved_script_entry = args
                     .script_entry
                     .as_ref()
-                    .map(|v| !v.trim().is_empty())
-                    .unwrap_or(false)
-                    || !bundle.entrypoints.is_empty();
-                anyhow::ensure!(
-                    has_entry,
-                    "script_entry is required when execution_mode is 'script'"
-                );
-            }
-            ExecutionMode::Reasoning => anyhow::ensure!(
-                args.llm_config.is_some(),
-                "llm_config is required when execution_mode is 'reasoning'"
-            ),
-        }
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| {
+                        if resolved_mode == ExecutionMode::Script {
+                            bundle.entrypoints.clone().into_iter().next()
+                        } else {
+                            None
+                        }
+                    })
+                    .map(|e| normalize_script_entry(&e));
 
-        let resolved_script_entry = args
-            .script_entry
-            .as_ref()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .or_else(|| {
-                if resolved_mode == ExecutionMode::Script {
-                    bundle.entrypoints.clone().into_iter().next()
-                } else {
-                    None
+                let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+                for (path, bytes) in artifact_store.resolve_files(artifact_id)? {
+                    validate_relative_agent_path(&path)?;
+                    anyhow::ensure!(
+                        file_map.insert(path.clone(), bytes).is_none(),
+                        "Artifact contains duplicate file path '{}'",
+                        path
+                    );
                 }
-            })
-            .map(|e| normalize_script_entry(&e));
 
-        let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        for (path, bytes) in artifact_store.resolve_files(&args.artifact_id)? {
-            validate_relative_agent_path(&path)?;
-            anyhow::ensure!(
-                file_map.insert(path.clone(), bytes).is_none(),
-                "Artifact contains duplicate file path '{}'",
-                path
-            );
-        }
+                let has_layers = !bundle.layers.is_empty();
+                let health_report = crate::runtime::install_contract::analyze_bundle_health(
+                    &file_map,
+                    &args.capabilities,
+                    has_layers,
+                    resolved_script_entry.as_deref(),
+                );
 
-        let has_layers = !bundle.layers.is_empty();
-        let health_report = crate::runtime::install_contract::analyze_bundle_health(
-            &file_map,
-            &args.capabilities,
-            has_layers,
-            resolved_script_entry.as_deref(),
-        );
+                (
+                    resolved_mode,
+                    resolved_script_entry,
+                    file_map,
+                    Some(health_report),
+                    Some(bundle),
+                    "intent_artifact".to_string(),
+                    Some(artifact_id.clone()),
+                )
+            } else {
+                // Pure reasoning agent — no artifact, no custom code.
+                // Validate that this path is safe: no script mode, no CodeExecution/AgentSpawn.
+                anyhow::ensure!(
+                    !matches!(args.execution_mode, Some(ExecutionMode::Script)),
+                    "execution_mode 'script' requires an artifact_id — script agents must have source files"
+                );
+                anyhow::ensure!(
+                    args.script_entry.is_none(),
+                    "script_entry requires an artifact_id — pure reasoning agents have no scripts"
+                );
+                anyhow::ensure!(
+                    args.llm_config.is_some(),
+                    "llm_config is required for pure reasoning agents (no artifact_id)"
+                );
+                let forbidden_cap = args.capabilities.iter().find(|cap| {
+                    crate::runtime::install_contract::requires_artifact_review(cap)
+                });
+                if let Some(cap) = forbidden_cap {
+                    anyhow::bail!(
+                        "Capability '{:?}' requires an artifact_id for code review and promotion gating. \
+                         Pure reasoning agents (no artifact_id) may not use CodeExecution or AgentSpawn.",
+                        cap
+                    );
+                }
+
+                (
+                    ExecutionMode::Reasoning,
+                    None,
+                    BTreeMap::new(),
+                    None,
+                    None,
+                    "intent_reasoning".to_string(),
+                    None,
+                )
+            };
+
+        let artifact_layers: Vec<autonoetic_types::layer::ArtifactLayer> = bundle_opt
+            .as_ref()
+            .map(|b| artifact_layers_from_bundle(b))
+            .unwrap_or_default();
 
         let target_manifest = AgentManifest {
             version: "1.0".to_string(),
@@ -1028,7 +1087,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         let parsed_lock = crate::runtime::install_contract::scaffold_runtime_lock(
             None,
             None,
-            &artifact_layers_from_bundle(&bundle),
+            &artifact_layers,
         )?;
 
         let common = RevisionCreateCommonArgs {
@@ -1037,20 +1096,20 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             base_revision_id: args.base_revision_id.clone(),
             summary: args.summary.clone(),
             metadata: args.metadata.clone(),
-            source_kind: "intent_artifact".to_string(),
-            source_ref: Some(args.artifact_id.clone()),
+            source_kind,
+            source_ref,
         };
         let persisted = create_revision_from_files(
             &common,
             &manifest.agent.id,
             gateway_dir,
             &gateway_store,
-            &bundle,
+            bundle_opt.as_ref().map(|b| b),
             &mut file_map,
             &lock_rel_path,
             parsed_lock,
             &skill_content,
-            Some(&health_report),
+            health_report.as_ref(),
             resolved_script_entry.as_deref(),
         )?;
 
@@ -1455,7 +1514,7 @@ impl NativeTool for AgentRevisionPromoteTool {
 
         // Deserialize capabilities from the frontmatter using the same lenient pipeline
         // used by create_from_intent, so shorthand strings and field normalization are handled.
-        let has_high_risk = {
+        let (needs_artifact_gate, has_high_risk) = {
             let frontmatter_json =
                 serde_json::to_value(&skill_frontmatter).unwrap_or(serde_json::Value::Null);
             let caps_json = frontmatter_json
@@ -1463,11 +1522,15 @@ impl NativeTool for AgentRevisionPromoteTool {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            let mut artifact_required = false;
             let mut high_risk = false;
             let mut parse_errors: Vec<String> = Vec::new();
             for v in caps_json {
                 match normalize_capability_from_llm(v.clone()) {
                     Ok(cap) => {
+                        if crate::runtime::install_contract::requires_artifact_review(&cap) {
+                            artifact_required = true;
+                        }
                         if crate::runtime::install_contract::is_high_risk_capability(&cap) {
                             high_risk = true;
                         }
@@ -1482,14 +1545,15 @@ impl NativeTool for AgentRevisionPromoteTool {
                     parse_errors.join("; ")
                 );
             }
-            high_risk
+            (artifact_required, high_risk)
         };
 
-        if has_high_risk {
+        if needs_artifact_gate {
+            // CodeExecution or AgentSpawn: must have artifact + full eval/audit gate.
             let artifact_id = rev.artifact_id.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Promotion gate: high-risk revision '{}' has no artifact_id — \
-                     cannot verify promotion records.",
+                    "Promotion gate: revision '{}' has CodeExecution/AgentSpawn but no artifact_id. \
+                     Agents with code execution or agent spawning require a reviewed artifact.",
                     args.revision_id
                 )
             })?;
@@ -1499,7 +1563,57 @@ impl NativeTool for AgentRevisionPromoteTool {
             let record = promo_store.get_promotion(artifact_id).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Promotion gate: no promotion.record found for artifact '{}'. \
-                     Agents with NetworkAccess/CodeExecution/AgentSpawn require both \
+                     Agents with CodeExecution/AgentSpawn require both \
+                     evaluator and auditor pass records before promotion.",
+                    artifact_id
+                )
+            })?;
+
+            let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
+            anyhow::ensure!(
+                record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
+                "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
+                 but revision requires '{}'. Re-run evaluator.default and auditor.default for this revision content.",
+                artifact_id,
+                record_content_digest,
+                rev.content_digest
+            );
+
+            anyhow::ensure!(
+                record.evaluator_pass,
+                "Promotion gate: evaluator did not pass for artifact '{}'. \
+                 Fix the evaluation findings and re-run evaluator.default.",
+                artifact_id
+            );
+            anyhow::ensure!(
+                record.auditor_pass,
+                "Promotion gate: auditor did not pass for artifact '{}'. \
+                 Fix the audit findings and re-run auditor.default.",
+                artifact_id
+            );
+
+            let has_unresolved = rev
+                .metadata_json
+                .get("has_unresolved_dependencies")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            anyhow::ensure!(
+                !has_unresolved,
+                "Promotion gate: revision has unresolved dependencies. \
+                 Run packager.default to install dependencies as layers, \
+                 then re-submit the revision.",
+            );
+        } else if has_high_risk && rev.artifact_id.is_some() {
+            // NetworkAccess without CodeExecution/AgentSpawn, but an artifact was provided.
+            // Still apply the full eval+audit gate since code exists to review.
+            let artifact_id = rev.artifact_id.as_deref().unwrap();
+
+            let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+            let _ = promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
+            let record = promo_store.get_promotion(artifact_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Promotion gate: no promotion.record found for artifact '{}'. \
+                     Agents with NetworkAccess and a code artifact require both \
                      evaluator and auditor pass records before promotion.",
                     artifact_id
                 )
@@ -1540,6 +1654,8 @@ impl NativeTool for AgentRevisionPromoteTool {
                  then re-submit the revision.",
             );
         }
+        // else: no artifact, no CodeExecution/AgentSpawn → direct promote.
+        // Capability enforcement on every tool call is the security gate.
 
         if let Some(eval_run_id) = &args.required_eval_run_id {
             let eval_run = gateway_store.get_eval_run(eval_run_id)?;

@@ -800,6 +800,13 @@ pub fn is_high_risk_capability(cap: &Capability) -> bool {
     )
 }
 
+/// Capabilities that require a reviewed artifact (code execution boundary).
+/// Used to gate artifact-free reasoning agents: if any capability requires artifact
+/// review, the agent MUST be created with an artifact_id for full eval + audit.
+pub fn requires_artifact_review(cap: &Capability) -> bool {
+    matches!(cap, Capability::CodeExecution { .. } | Capability::AgentSpawn { .. })
+}
+
 pub fn format_install_validation_error(
     skill_missing: &[String],
     lock_missing: Option<&[String]>,
