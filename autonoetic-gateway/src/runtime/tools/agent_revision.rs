@@ -667,7 +667,6 @@ impl NativeTool for AgentRevisionCreateTool {
             manifest.agent.id,
             args.agent_id
         );
-
         let Some(gateway_store) = gateway_store else {
             return Err(anyhow::anyhow!(
                 "GatewayStore is required for revision creation"
@@ -895,6 +894,12 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             manifest.agent.id,
             args.agent_id
         );
+        // Explicit reasoning mode must always declare llm_config, regardless of artifact shape.
+        if matches!(args.execution_mode, Some(ExecutionMode::Reasoning))
+            && args.llm_config.is_none()
+        {
+            anyhow::bail!("llm_config is required when execution_mode is 'reasoning'");
+        }
 
         let Some(gateway_store) = gateway_store else {
             return Err(anyhow::anyhow!(
@@ -914,8 +919,10 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             bundle.kind
         );
 
-        let mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
-        let resolved_mode = if mode == ExecutionMode::Reasoning
+        let requested_mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
+        let execution_mode_explicit = args.execution_mode.is_some();
+        let resolved_mode = if !execution_mode_explicit
+            && requested_mode == ExecutionMode::Reasoning
             && args.script_entry.is_none()
             && args.llm_config.is_none()
         {
@@ -931,7 +938,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 ExecutionMode::Reasoning
             }
         } else {
-            mode
+            requested_mode
         };
         match resolved_mode {
             ExecutionMode::Script => {

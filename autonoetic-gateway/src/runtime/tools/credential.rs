@@ -6,6 +6,9 @@
 //!
 //! Phase B (Automated Registration):
 //! - credential.setup: Multi-step server-side credential registration flow
+//!   Extended with `skill_url` to ingest a remote skill.md onboarding spec,
+//!   `user_input` step support (gateway returns early, agent calls user.ask),
+//!   and `resume_vars` to continue after user input is collected.
 
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
@@ -15,6 +18,7 @@ use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledActi
 use autonoetic_types::capability::Capability;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
@@ -312,23 +316,22 @@ impl NativeTool for CredentialRequestTool {
             }
         }
 
-        // Fetch secret from Vault
-        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH").ok().and_then(|p| {
-            let path = std::path::PathBuf::from(p);
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
-        });
+        // Vault auto-init + resolve path
+        crate::vault::ensure_default_key(_agent_dir)?;
+        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| crate::vault::default_vault_path(_agent_dir));
 
-        let secret_value: Option<String> = vault_path.as_ref().and_then(|vp| {
+        let secret_value: Option<String> = {
             use secrecy::ExposeSecret;
-            let vault = crate::vault::Vault::load_from_file(vp).ok()?;
-            vault
-                .get_secret(&cred.secret_name)
-                .map(|s| s.expose_secret().to_string())
-        });
+            crate::vault::Vault::load_from_file(&vault_path)
+                .ok()
+                .and_then(|v| {
+                    v.get_secret(&cred.secret_name)
+                        .map(|s| s.expose_secret().to_string())
+                })
+        };
 
         if secret_value.is_none() {
             return Ok(json!({
@@ -365,11 +368,9 @@ impl NativeTool for CredentialRequestTool {
                     let header_name = &inject["header:".len()..];
                     req = req.header(header_name, secret);
                 } else {
-                    // Default: Bearer token
                     req = req.header("Authorization", format!("Bearer {}", secret));
                 }
             } else {
-                // Default: Bearer token
                 req = req.header("Authorization", format!("Bearer {}", secret));
             }
         }
@@ -413,15 +414,25 @@ fn extract_host(url: &str) -> anyhow::Result<String> {
 // ---------------------------------------------------------------------------
 
 /// Multi-step server-side credential registration flow.
-/// Executes setup steps (API calls, user prompts, user actions) to register
-/// new credentials. Secrets extracted from API responses are stored in the
-/// vault and never returned to the LLM.
+///
+/// Supports two modes:
+/// 1. **Direct**: caller supplies `service` + `steps` explicitly.
+/// 2. **Skill URL**: caller supplies `skill_url` pointing to a remote skill.md whose
+///    `autonoetic.onboarding` section is parsed and executed by the gateway.
+///
+/// When a `user_input` step is reached the tool returns early with
+/// `suspended_for_user_input: true` and the question.  The agent should call
+/// `user.ask` with that question, collect the answer, and call `credential.setup`
+/// again with `credential_id` + `resume_vars: { var_name: answer }`.
 struct CredentialSetupTool;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CredentialSetupArgs {
-    service: String,
-    steps: Vec<CredentialSetupStep>,
+    /// Service name — may be omitted when `skill_url` is provided (extracted from skill.md).
+    service: Option<String>,
+    /// Explicit setup steps — may be omitted when `skill_url` is provided.
+    #[serde(default)]
+    steps: Option<Vec<CredentialSetupStep>>,
     /// Optional: credential ID to use. Generated if not provided.
     credential_id: Option<String>,
     /// Optional: expiry timestamp for the credential.
@@ -432,6 +443,130 @@ struct CredentialSetupArgs {
     allowed_hosts: Option<Vec<String>>,
     /// Optional: approval reference after operator provides secrets via approval channel.
     approval_ref: Option<String>,
+    /// NEW: URL to a skill.md whose `autonoetic.onboarding` section drives registration.
+    skill_url: Option<String>,
+    /// NEW: Answers from a prior `user_input` suspension, keyed by `var_name`.
+    /// Required when resuming with `credential_id`.
+    resume_vars: Option<HashMap<String, String>>,
+}
+
+/// Persisted state between `credential.setup` calls for multi-step onboarding.
+#[derive(Debug, Serialize, Deserialize)]
+struct CredentialSetupState {
+    /// Full step list (serialized so we can resume without re-fetching skill.md).
+    steps: Vec<CredentialSetupStep>,
+    /// Index of the `UserInput` step we paused at (resume starts at `current_step + 1`).
+    current_step: usize,
+    /// Accumulated user-supplied variable values.
+    vars: HashMap<String, String>,
+    /// Accumulated public-facing data extracted from API responses.
+    public_data: serde_json::Map<String, serde_json::Value>,
+    /// Resolved service name.
+    service: String,
+    /// How the secret is injected (e.g. "bearer").
+    inject_as: Option<String>,
+    /// Hosts bound to the credential.
+    allowed_hosts: Vec<String>,
+    /// Optional base URL for relative step URLs.
+    base_url: Option<String>,
+    /// Credential expiry.
+    expires_at: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// skill.md frontmatter types (local only — not exported)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct SkillMdFrontmatter {
+    #[serde(default)]
+    autonoetic: Option<SkillMdAutonoetic>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillMdAutonoetic {
+    base_url: Option<String>,
+    credential: Option<SkillCredentialSpec>,
+    onboarding: Option<SkillOnboarding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillCredentialSpec {
+    service: Option<String>,
+    inject_as: Option<String>,
+    allowed_hosts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillOnboarding {
+    steps: Vec<SkillStep>,
+}
+
+/// A step as declared in the skill.md YAML frontmatter.
+/// Uses `type` instead of `step_type` to match the spec format.
+#[derive(Debug, Deserialize)]
+struct SkillStep {
+    #[serde(rename = "type")]
+    step_type: String,
+    url: Option<String>,
+    method: Option<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    body: Option<serde_json::Value>,
+    #[serde(default)]
+    extract_secrets: HashMap<String, String>,
+    #[serde(default)]
+    extract_public: HashMap<String, String>,
+    question: Option<String>,
+    var: Option<String>,
+    message: Option<String>,
+    secret_fields: Option<Vec<autonoetic_types::agent::SecretFieldSpec>>,
+    instruction: Option<String>,
+    #[serde(default)]
+    data_refs: Vec<String>,
+}
+
+impl SkillStep {
+    fn into_credential_step(self, base_url: &str) -> anyhow::Result<CredentialSetupStep> {
+        match self.step_type.as_str() {
+            "api_call" => {
+                let url = self
+                    .url
+                    .ok_or_else(|| anyhow::anyhow!("api_call step missing 'url'"))?;
+                let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+                    url
+                } else {
+                    format!("{}{}", base_url.trim_end_matches('/'), url)
+                };
+                Ok(CredentialSetupStep::ApiCall {
+                    method: self.method,
+                    url: full_url,
+                    headers: self.headers,
+                    body: self.body,
+                    extract_secrets: self.extract_secrets,
+                    extract_public: self.extract_public,
+                })
+            }
+            "user_input" => {
+                let question = self
+                    .question
+                    .ok_or_else(|| anyhow::anyhow!("user_input step missing 'question'"))?;
+                let var_name = self
+                    .var
+                    .ok_or_else(|| anyhow::anyhow!("user_input step missing 'var'"))?;
+                Ok(CredentialSetupStep::UserInput { question, var_name })
+            }
+            "user_prompt" => Ok(CredentialSetupStep::UserPrompt {
+                message: self.message.unwrap_or_default(),
+                secret_fields: self.secret_fields.unwrap_or_default(),
+            }),
+            "user_action" => Ok(CredentialSetupStep::UserAction {
+                instruction: self.instruction.unwrap_or_default(),
+                data_refs: self.data_refs,
+            }),
+            t => anyhow::bail!("Unknown step type in skill.md onboarding: '{}'", t),
+        }
+    }
 }
 
 impl NativeTool for CredentialSetupTool {
@@ -442,13 +577,23 @@ impl NativeTool for CredentialSetupTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "credential.setup".to_string(),
-            description: "Register a new credential through a multi-step setup flow. The gateway executes steps server-side: making API calls, extracting secrets from responses, and storing them in the vault. Secrets never appear in the LLM context.".to_string(),
+            description: "Register a new credential through a multi-step setup flow. \
+                Provide `skill_url` to ingest a remote skill.md spec and let the gateway \
+                execute all onboarding steps server-side — secrets are never returned to the LLM. \
+                When a user_input step is reached the tool returns with `suspended_for_user_input: true` \
+                and a `question`. Call `user.ask` with that question, then call `credential.setup` \
+                again with `credential_id` + `resume_vars: { var_name: answer }` to continue. \
+                Alternatively supply `service` + `steps` directly for programmatic setup.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "skill_url": {
+                        "type": "string",
+                        "description": "URL to a skill.md whose autonoetic.onboarding section drives registration. When set, service/steps are extracted from the spec."
+                    },
                     "service": {
                         "type": "string",
-                        "description": "Service name (e.g. 'github', 'stripe', 'slack')"
+                        "description": "Service name (e.g. 'github', 'stripe'). Required when not using skill_url."
                     },
                     "steps": {
                         "type": "array",
@@ -457,7 +602,7 @@ impl NativeTool for CredentialSetupTool {
                             "properties": {
                                 "step_type": {
                                     "type": "string",
-                                    "enum": ["api_call", "user_prompt", "user_action"]
+                                    "enum": ["api_call", "user_prompt", "user_action", "user_input"]
                                 },
                                 "method": {"type": "string"},
                                 "url": {"type": "string"},
@@ -465,17 +610,23 @@ impl NativeTool for CredentialSetupTool {
                                 "body": {"type": "object"},
                                 "extract_secrets": {"type": "object"},
                                 "extract_public": {"type": "object"},
+                                "question": {"type": "string"},
+                                "var_name": {"type": "string"},
                                 "message": {"type": "string"},
                                 "secret_fields": {"type": "array"},
                                 "instruction": {"type": "string"},
                                 "data_refs": {"type": "array"}
                             }
                         },
-                        "description": "Ordered sequence of setup steps to execute"
+                        "description": "Ordered setup steps. Required when not using skill_url."
                     },
                     "credential_id": {
                         "type": "string",
-                        "description": "Optional credential ID (generated if not provided)"
+                        "description": "Credential ID — required when resuming after user_input suspension."
+                    },
+                    "resume_vars": {
+                        "type": "object",
+                        "description": "User-collected variable values. Required when resuming: { var_name: answer }."
                     },
                     "expires_at": {
                         "type": "string",
@@ -492,10 +643,9 @@ impl NativeTool for CredentialSetupTool {
                     },
                     "approval_ref": {
                         "type": "string",
-                        "description": "Approval request ID from a completed UserPrompt approval. Retry with this after operator provides secrets."
+                        "description": "Approval request ID from a completed UserPrompt approval."
                     }
-                },
-                "required": ["service", "steps"]
+                }
             }),
         }
     }
@@ -522,20 +672,6 @@ impl NativeTool for CredentialSetupTool {
     ) -> anyhow::Result<String> {
         let args: CredentialSetupArgs = serde_json::from_str(arguments_json)?;
 
-        // Check service-scoped authorization
-        let service_allowed = manifest.capabilities.iter().any(|c| {
-            matches!(c, Capability::CredentialAccess { services } if services.iter().any(|s| s == "*" || s == &args.service))
-        });
-        if !service_allowed {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("Credential setup denied for service: {}", args.service),
-                "approval_required": true,
-                "reason": format!("Setup for {} credentials requires approval", args.service),
-            })
-            .to_string());
-        }
-
         let Some(store) = gateway_store else {
             return Ok(json!({
                 "ok": false,
@@ -544,8 +680,9 @@ impl NativeTool for CredentialSetupTool {
             .to_string());
         };
 
-        // Handle resume after approval: if approval_ref is provided,
-        // look up the approval request to find the credential_id, then check if the record exists.
+        // ------------------------------------------------------------------
+        // Path 1: resume after approval (UserPrompt flow — unchanged)
+        // ------------------------------------------------------------------
         if let Some(ref approval_ref) = args.approval_ref {
             if let Some(approval) = store.get_approval(approval_ref)? {
                 if let autonoetic_types::background::ScheduledAction::CredentialPrompt {
@@ -579,8 +716,194 @@ impl NativeTool for CredentialSetupTool {
             .to_string());
         }
 
-        // Check network policy for all API call steps before executing any
-        for step in &args.steps {
+        // ------------------------------------------------------------------
+        // Path 2: resume after user_input suspension
+        // ------------------------------------------------------------------
+        if let (Some(ref cred_id), Some(ref resume_vars)) = (&args.credential_id, &args.resume_vars)
+        {
+            let Some(state_json) = store.load_credential_setup_state(cred_id)? else {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("No suspended setup state found for credential_id '{}'", cred_id),
+                })
+                .to_string());
+            };
+            let mut state: CredentialSetupState = serde_json::from_str(&state_json)?;
+
+            // Authorization check using the service from saved state.
+            let service_allowed = manifest.capabilities.iter().any(|c| {
+                matches!(c, Capability::CredentialAccess { services }
+                    if services.iter().any(|s| s == "*" || s == &state.service))
+            });
+            if !service_allowed {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("Credential setup denied for service: {}", state.service),
+                })
+                .to_string());
+            }
+
+            // Merge the user's answers and advance past the UserInput step.
+            for (k, v) in resume_vars {
+                state.vars.insert(k.clone(), v.clone());
+            }
+            let resume_from = state.current_step + 1;
+
+            // Vault auto-init + load.
+            crate::vault::ensure_default_key(_agent_dir)?;
+            let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+                .ok()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| crate::vault::default_vault_path(_agent_dir));
+            let mut vault = crate::vault::Vault::load_from_file(&vault_path)?;
+
+            return execute_steps(
+                &state.steps,
+                resume_from,
+                state.vars,
+                state.public_data,
+                &state.service,
+                state.inject_as.as_deref(),
+                &state.allowed_hosts,
+                state.base_url.as_deref(),
+                state.expires_at.as_deref(),
+                cred_id,
+                manifest,
+                policy,
+                &store,
+                &mut vault,
+                &vault_path,
+                _session_id,
+                _config,
+            );
+        }
+
+        // ------------------------------------------------------------------
+        // Path 3: fresh start — may use skill_url or explicit service/steps
+        // ------------------------------------------------------------------
+        let (service, steps, inject_as, allowed_hosts, base_url) = if let Some(ref url) =
+            args.skill_url
+        {
+            // Policy-check the skill_url host.
+            let url_host = extract_host(url)?;
+            if url_host.is_empty() || !policy.can_connect_net(&url_host) {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("Network access denied for skill_url host: {}", url_host),
+                    "approval_required": true,
+                    "reason": format!("Fetching skill.md from {} requires approval", url_host),
+                })
+                .to_string());
+            }
+
+            // Fetch and parse the skill.md.
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
+            let resp = client.get(url.as_str()).send()?;
+            if !resp.status().is_success() {
+                return Ok(json!({
+                        "ok": false,
+                        "error": format!("Failed to fetch skill.md from {}: HTTP {}", url, resp.status()),
+                    })
+                    .to_string());
+            }
+            let content = resp.text()?;
+
+            let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
+            let parsed = match matter.parse::<SkillMdFrontmatter>(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": format!("Failed to parse skill.md content: {}", e),
+                    })
+                    .to_string());
+                }
+            };
+            let fm = match parsed.data {
+                Some(d) => d,
+                None => {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": "No YAML frontmatter found in skill.md",
+                    })
+                    .to_string());
+                }
+            };
+
+            let autonoetic = fm.autonoetic.unwrap_or(SkillMdAutonoetic {
+                base_url: None,
+                credential: None,
+                onboarding: None,
+            });
+            let base_url = autonoetic.base_url.unwrap_or_else(|| extract_base_url(url));
+            let cred_spec = autonoetic.credential.unwrap_or(SkillCredentialSpec {
+                service: None,
+                inject_as: None,
+                allowed_hosts: None,
+            });
+            let service = cred_spec
+                .service
+                .or_else(|| args.service.clone())
+                .unwrap_or_else(|| url_host.clone());
+            let inject_as = cred_spec.inject_as.or_else(|| args.inject_as.clone());
+            let allowed_hosts = cred_spec
+                .allowed_hosts
+                .or_else(|| args.allowed_hosts.clone())
+                .unwrap_or_else(|| vec![url_host.clone()]);
+
+            let raw_steps = autonoetic.onboarding.map(|o| o.steps).unwrap_or_default();
+            let mut steps: Vec<CredentialSetupStep> = Vec::with_capacity(raw_steps.len());
+            for raw in raw_steps {
+                match raw.into_credential_step(&base_url) {
+                    Ok(s) => steps.push(s),
+                    Err(e) => {
+                        return Ok(json!({
+                            "ok": false,
+                            "error": format!("Invalid onboarding step in skill.md: {}", e),
+                        })
+                        .to_string());
+                    }
+                }
+            }
+
+            (service, steps, inject_as, allowed_hosts, Some(base_url))
+        } else {
+            // Explicit service + steps.
+            let service = match args.service {
+                Some(s) => s,
+                None => {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": "Either 'skill_url' or 'service' + 'steps' must be provided",
+                    })
+                    .to_string());
+                }
+            };
+            let steps = args.steps.unwrap_or_default();
+            let inject_as = args.inject_as.clone();
+            let allowed_hosts = args.allowed_hosts.clone().unwrap_or_default();
+            (service, steps, inject_as, allowed_hosts, None)
+        };
+
+        // Service-scoped authorization check.
+        let service_allowed = manifest.capabilities.iter().any(|c| {
+            matches!(c, Capability::CredentialAccess { services }
+                if services.iter().any(|s| s == "*" || s == &service))
+        });
+        if !service_allowed {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("Credential setup denied for service: {}", service),
+                "approval_required": true,
+                "reason": format!("Setup for {} credentials requires approval", service),
+            })
+            .to_string());
+        }
+
+        // Network policy pre-check for all ApiCall step URLs.
+        for step in &steps {
             if let CredentialSetupStep::ApiCall { url, .. } = step {
                 let host = extract_host(url)?;
                 if host.is_empty() || !policy.can_connect_net(&host) {
@@ -601,239 +924,439 @@ impl NativeTool for CredentialSetupTool {
             }
         }
 
-        // Load vault — fail-closed if not configured or can't be loaded
+        // Vault auto-init + load.
+        crate::vault::ensure_default_key(_agent_dir)?;
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
             .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("AUTONOETIC_VAULT_PATH must be set"))?;
-        let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",
-                vault_path.display(),
-                e
-            )
-        })?;
+            .unwrap_or_else(|| crate::vault::default_vault_path(_agent_dir));
+        let mut vault = crate::vault::Vault::load_from_file(&vault_path)?;
 
-        // Execute steps
         let credential_id = args.credential_id.clone().unwrap_or_else(|| {
             format!(
                 "cred_{}_{}",
-                args.service,
+                service,
                 uuid::Uuid::new_v4().to_string().replace('-', "")
             )
         });
-        let mut secret_names = Vec::new();
-        let mut public_data = serde_json::Map::new();
-        let mut step_results = Vec::new();
-        let mut suspended = false;
-        let mut suspended_at_step = None;
 
-        for (i, step) in args.steps.iter().enumerate() {
-            match step {
-                CredentialSetupStep::ApiCall {
-                    method,
-                    url,
-                    headers,
-                    body,
-                    extract_secrets,
-                    extract_public,
-                } => {
-                    // Make the HTTP request
-                    let http_method = method.as_deref().unwrap_or("POST");
-                    let client = reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(30))
-                        .build()?;
-
-                    let mut req =
-                        client.request(reqwest::Method::from_bytes(http_method.as_bytes())?, url);
-
-                    for (k, v) in headers {
-                        req = req.header(k, v);
-                    }
-
-                    if let Some(b) = body {
-                        req = req.json(b);
-                    }
-
-                    let resp = req.send()?;
-                    let status = resp.status().as_u16();
-                    let resp_body = resp.text()?;
-
-                    // Parse response
-                    let resp_value: serde_json::Value =
-                        serde_json::from_str(&resp_body).unwrap_or(json!(resp_body));
-
-                    // Extract secrets
-                    for (secret_name, json_path) in extract_secrets {
-                        if let Some(val) = extract_json_path(&resp_value, json_path) {
-                            vault.set_secret(secret_name, val.clone());
-                            secret_names.push(secret_name.clone());
-                        }
-                    }
-
-                    // Extract public data — but block paths that overlap with secrets
-                    // to prevent exfiltration of sensitive values via extract_public.
-                    // Normalize paths by stripping $ prefix for comparison.
-                    let secret_paths: std::collections::HashSet<String> = extract_secrets
-                        .values()
-                        .map(|s| {
-                            s.trim_start_matches('$')
-                                .trim_start_matches('.')
-                                .to_string()
-                        })
-                        .collect();
-                    for (field_name, json_path) in extract_public {
-                        let normalized = json_path
-                            .trim_start_matches('$')
-                            .trim_start_matches('.')
-                            .to_string();
-                        if secret_paths.contains(&normalized) {
-                            continue;
-                        }
-                        if let Some(val) = extract_json_path(&resp_value, json_path) {
-                            public_data.insert(field_name.clone(), json!(val));
-                        }
-                    }
-
-                    step_results.push(json!({
-                        "step": i,
-                        "step_type": "api_call",
-                        "status": status,
-                        "url": url,
-                    }));
-                }
-                CredentialSetupStep::UserPrompt {
-                    message,
-                    secret_fields,
-                } => {
-                    // Create an approval request for the UserPrompt step
-                    let request_id = format!(
-                        "cred_setup_{}_{}",
-                        credential_id,
-                        uuid::Uuid::new_v4().to_string().replace('-', "")
-                    );
-                    let approval_action = ScheduledAction::CredentialPrompt {
-                        service: args.service.clone(),
-                        credential_id: credential_id.clone(),
-                        message: message.clone(),
-                        secret_fields: secret_fields.clone(),
-                        payload: Some(json!({
-                            "inject_as": args.inject_as,
-                            "allowed_hosts": args.allowed_hosts,
-                            "expires_at": args.expires_at,
-                        })),
-                    };
-                    let approval_req = ApprovalRequest {
-                        request_id: request_id.clone(),
-                        agent_id: manifest.agent.id.clone(),
-                        session_id: _session_id.unwrap_or("").to_string(),
-                        action: approval_action.clone(),
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        reason: Some(format!(
-                            "Credential setup for '{}' requires human input for secret fields",
-                            args.service
-                        )),
-                        evidence_ref: None,
-                        root_session_id: None,
-                        workflow_id: None,
-                        task_id: None,
-                        status: None,
-                        decided_at: None,
-                        decided_by: None,
-                        decision_reason: None,
-                        approval_level: _config
-                            .map(|c| {
-                                crate::scheduler::approval::resolve_approval_level(
-                                    c,
-                                    &approval_action,
-                                )
-                            })
-                            .unwrap_or(ApprovalLevel::Operator),
-                    };
-                    store.create_approval(&approval_req)?;
-
-                    step_results.push(json!({
-                        "step": i,
-                        "step_type": "user_prompt",
-                        "message": message,
-                        "secret_fields": secret_fields,
-                        "status": "awaiting_human_input",
-                        "approval_request_id": request_id.clone(),
-                    }));
-                    suspended = true;
-                    suspended_at_step = Some(i);
-                    break;
-                }
-                CredentialSetupStep::UserAction {
-                    instruction,
-                    data_refs,
-                } => {
-                    step_results.push(json!({
-                        "step": i,
-                        "step_type": "user_action",
-                        "instruction": instruction,
-                        "data_refs": data_refs,
-                        "status": "completed",
-                    }));
-                }
-            }
-        }
-
-        // Persist vault (only secrets extracted before any suspension)
-        vault.persist_to_file(&vault_path)?;
-
-        // If suspended on UserPrompt, return immediately with approval_required flag
-        if suspended {
-            let approval_request_id = step_results
-                .iter()
-                .filter_map(|s| {
-                    s.get("approval_request_id")
-                        .and_then(|v| v.as_str().map(String::from))
-                })
-                .next();
-            return Ok(json!({
-                "ok": false,
-                "suspended": true,
-                "approval_required": true,
-                "request_id": approval_request_id,
-                "credential_id": credential_id,
-                "service": args.service,
-                "steps": step_results,
-                "suspended_at_step": suspended_at_step,
-                "reason": "UserPrompt step requires human input for secret fields"
-            })
-            .to_string());
-        }
-
-        // Create credential record if we extracted at least one secret
-        if !secret_names.is_empty() {
-            let cred = CredentialRecord {
-                credential_id: credential_id.clone(),
-                service: args.service.clone(),
-                secret_name: secret_names[0].clone(),
-                inject_as: args.inject_as.clone(),
-                created_by_agent: Some(manifest.agent.id.clone()),
-                expires_at: args.expires_at.clone(),
-                shared_with: vec![],
-                allowed_hosts: args.allowed_hosts.clone().unwrap_or_default(),
-            };
-            store.upsert_credential(&cred)?;
-        }
-
-        Ok(json!({
-            "ok": true,
-            "credential_id": credential_id,
-            "service": args.service,
-            "secrets_stored": secret_names.len(),
-            "public_data": public_data,
-            "steps": step_results,
-        })
-        .to_string())
+        execute_steps(
+            &steps,
+            0,
+            HashMap::new(),
+            serde_json::Map::new(),
+            &service,
+            inject_as.as_deref(),
+            &allowed_hosts,
+            base_url.as_deref(),
+            args.expires_at.as_deref(),
+            &credential_id,
+            manifest,
+            policy,
+            &store,
+            &mut vault,
+            &vault_path,
+            _session_id,
+            _config,
+        )
     }
 }
 
+// ---------------------------------------------------------------------------
+// Core execution loop (shared between fresh start and resume)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn execute_steps(
+    steps: &[CredentialSetupStep],
+    start_from: usize,
+    vars: HashMap<String, String>,
+    mut public_data: serde_json::Map<String, serde_json::Value>,
+    service: &str,
+    inject_as: Option<&str>,
+    allowed_hosts: &[String],
+    base_url: Option<&str>,
+    expires_at: Option<&str>,
+    credential_id: &str,
+    manifest: &AgentManifest,
+    _policy: &PolicyEngine,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    vault: &mut crate::vault::Vault,
+    vault_path: &Path,
+    session_id: Option<&str>,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+) -> anyhow::Result<String> {
+    let mut secret_names: Vec<String> = Vec::new();
+    let mut step_results: Vec<serde_json::Value> = Vec::new();
+
+    for (i, step) in steps.iter().enumerate() {
+        if i < start_from {
+            // Re-scan already-completed steps to collect previously extracted secrets
+            // into `secret_names` so the credential record is created correctly.
+            if let CredentialSetupStep::ApiCall {
+                extract_secrets, ..
+            } = step
+            {
+                for name in extract_secrets.keys() {
+                    if vault.get_secret(name).is_some() {
+                        if !secret_names.contains(name) {
+                            secret_names.push(name.clone());
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        match step {
+            CredentialSetupStep::ApiCall {
+                method,
+                url,
+                headers,
+                body,
+                extract_secrets,
+                extract_public,
+            } => {
+                // Template substitution — secrets resolved server-side, never to LLM.
+                let resolved_url = resolve_template_str(url, &vars, &public_data, manifest, vault);
+                let resolved_headers: HashMap<String, String> = headers
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            resolve_template_str(v, &vars, &public_data, manifest, vault),
+                        )
+                    })
+                    .collect();
+                let resolved_body: Option<serde_json::Value> = body
+                    .as_ref()
+                    .map(|b| resolve_template_value(b, &vars, &public_data, manifest, vault));
+
+                let http_method = method.as_deref().unwrap_or("POST");
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()?;
+
+                let mut req = client.request(
+                    reqwest::Method::from_bytes(http_method.as_bytes())?,
+                    &resolved_url,
+                );
+                for (k, v) in &resolved_headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                if let Some(b) = &resolved_body {
+                    req = req.json(b);
+                }
+
+                let resp = req.send()?;
+                let status = resp.status().as_u16();
+                let resp_body = resp.text()?;
+                let resp_value: serde_json::Value =
+                    serde_json::from_str(&resp_body).unwrap_or(json!(resp_body));
+
+                // Extract secrets into vault (server-side only).
+                for (name, path) in extract_secrets {
+                    if let Some(val) = extract_json_path(&resp_value, path) {
+                        vault.set_secret(name, val.clone());
+                        if !secret_names.contains(name) {
+                            secret_names.push(name.clone());
+                        }
+                    }
+                }
+
+                // Extract public data — block paths that overlap with secrets.
+                let secret_paths: std::collections::HashSet<String> = extract_secrets
+                    .values()
+                    .map(|s| {
+                        s.trim_start_matches('$')
+                            .trim_start_matches('.')
+                            .to_string()
+                    })
+                    .collect();
+                for (field_name, path) in extract_public {
+                    let normalized = path
+                        .trim_start_matches('$')
+                        .trim_start_matches('.')
+                        .to_string();
+                    if secret_paths.contains(&normalized) {
+                        continue;
+                    }
+                    if let Some(val) = extract_json_path(&resp_value, path) {
+                        public_data.insert(field_name.clone(), json!(val));
+                    }
+                }
+
+                step_results.push(json!({
+                    "step": i,
+                    "step_type": "api_call",
+                    "status": status,
+                    "url": resolved_url,
+                }));
+            }
+
+            CredentialSetupStep::UserInput { question, var_name } => {
+                // Resolve templates in the question (e.g. {{public.tweet_text}}).
+                let resolved_question =
+                    resolve_template_str(question, &vars, &public_data, manifest, vault);
+
+                // Persist execution state so the agent can resume.
+                let state = CredentialSetupState {
+                    steps: steps.to_vec(),
+                    current_step: i,
+                    vars: vars.clone(),
+                    public_data: public_data.clone(),
+                    service: service.to_string(),
+                    inject_as: inject_as.map(str::to_string),
+                    allowed_hosts: allowed_hosts.to_vec(),
+                    base_url: base_url.map(str::to_string),
+                    expires_at: expires_at.map(str::to_string),
+                };
+                let state_json = serde_json::to_string(&state)?;
+                store.save_credential_setup_state(credential_id, &state_json)?;
+
+                // Persist any secrets extracted so far.
+                vault.persist_to_file(vault_path)?;
+
+                return Ok(json!({
+                    "ok": false,
+                    "suspended_for_user_input": true,
+                    "credential_id": credential_id,
+                    "question": resolved_question,
+                    "var_name": var_name,
+                    "public_data": public_data,
+                    "reason": "user_input step — call user.ask with the question, then resume with credential_id + resume_vars"
+                })
+                .to_string());
+            }
+
+            CredentialSetupStep::UserPrompt {
+                message,
+                secret_fields,
+            } => {
+                // Create an approval request (existing behavior unchanged).
+                let request_id = format!(
+                    "cred_setup_{}_{}",
+                    credential_id,
+                    uuid::Uuid::new_v4().to_string().replace('-', "")
+                );
+                let approval_action = ScheduledAction::CredentialPrompt {
+                    service: service.to_string(),
+                    credential_id: credential_id.to_string(),
+                    message: message.clone(),
+                    secret_fields: secret_fields.clone(),
+                    payload: Some(json!({
+                        "inject_as": inject_as,
+                        "allowed_hosts": allowed_hosts,
+                        "expires_at": expires_at,
+                    })),
+                };
+                let approval_req = ApprovalRequest {
+                    request_id: request_id.clone(),
+                    agent_id: manifest.agent.id.clone(),
+                    session_id: session_id.unwrap_or("").to_string(),
+                    action: approval_action.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    reason: Some(format!(
+                        "Credential setup for '{}' requires human input for secret fields",
+                        service
+                    )),
+                    evidence_ref: None,
+                    root_session_id: None,
+                    workflow_id: None,
+                    task_id: None,
+                    status: None,
+                    decided_at: None,
+                    decided_by: None,
+                    decision_reason: None,
+                    approval_level: config
+                        .map(|c| {
+                            crate::scheduler::approval::resolve_approval_level(c, &approval_action)
+                        })
+                        .unwrap_or(ApprovalLevel::Operator),
+                };
+                store.create_approval(&approval_req)?;
+
+                step_results.push(json!({
+                    "step": i,
+                    "step_type": "user_prompt",
+                    "message": message,
+                    "secret_fields": secret_fields,
+                    "status": "awaiting_human_input",
+                    "approval_request_id": request_id.clone(),
+                }));
+
+                vault.persist_to_file(vault_path)?;
+
+                let approval_request_id = step_results
+                    .iter()
+                    .filter_map(|s| {
+                        s.get("approval_request_id")
+                            .and_then(|v| v.as_str().map(String::from))
+                    })
+                    .next();
+                return Ok(json!({
+                    "ok": false,
+                    "suspended": true,
+                    "approval_required": true,
+                    "request_id": approval_request_id,
+                    "credential_id": credential_id,
+                    "service": service,
+                    "steps": step_results,
+                    "reason": "UserPrompt step requires human input for secret fields"
+                })
+                .to_string());
+            }
+
+            CredentialSetupStep::UserAction {
+                instruction,
+                data_refs,
+            } => {
+                step_results.push(json!({
+                    "step": i,
+                    "step_type": "user_action",
+                    "instruction": instruction,
+                    "data_refs": data_refs,
+                    "status": "completed",
+                }));
+            }
+        }
+    }
+
+    // All steps complete — persist vault and create credential record.
+    vault.persist_to_file(vault_path)?;
+    let _ = store.delete_credential_setup_state(credential_id);
+
+    if !secret_names.is_empty() {
+        let cred = CredentialRecord {
+            credential_id: credential_id.to_string(),
+            service: service.to_string(),
+            secret_name: secret_names[0].clone(),
+            inject_as: inject_as.map(str::to_string),
+            created_by_agent: Some(manifest.agent.id.clone()),
+            expires_at: expires_at.map(str::to_string),
+            shared_with: vec![],
+            allowed_hosts: allowed_hosts.to_vec(),
+        };
+        store.upsert_credential(&cred)?;
+    }
+
+    Ok(json!({
+        "ok": true,
+        "credential_id": credential_id,
+        "service": service,
+        "secrets_stored": secret_names.len(),
+        "public_data": public_data,
+        "steps": step_results,
+    })
+    .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Template substitution helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve `{{vars.x}}`, `{{public.x}}`, `{{agent.id}}`, `{{agent.model}}`,
+/// and `{{secrets.x}}` (server-side only — never emitted to LLM) in a string.
+pub(crate) fn resolve_template_str(
+    s: &str,
+    vars: &HashMap<String, String>,
+    public_data: &serde_json::Map<String, serde_json::Value>,
+    manifest: &AgentManifest,
+    vault: &crate::vault::Vault,
+) -> String {
+    use secrecy::ExposeSecret;
+
+    let mut result = s.to_string();
+
+    for (k, v) in vars {
+        result = result.replace(&format!("{{{{vars.{}}}}}", k), v);
+    }
+    for (k, v) in public_data {
+        if let serde_json::Value::String(sv) = v {
+            result = result.replace(&format!("{{{{public.{}}}}}", k), sv);
+        }
+    }
+    result = result.replace("{{agent.id}}", &manifest.agent.id);
+    if let Some(llm) = &manifest.llm_config {
+        result = result.replace("{{agent.model}}", &llm.model);
+    }
+
+    // Handle {{secrets.KEY}} — server-side substitution.
+    let mut output = String::with_capacity(result.len());
+    let prefix = "{{secrets.";
+    let suffix = "}}";
+    let mut search_from = 0usize;
+    loop {
+        match result[search_from..].find(prefix) {
+            None => {
+                output.push_str(&result[search_from..]);
+                break;
+            }
+            Some(rel) => {
+                let abs_start = search_from + rel;
+                output.push_str(&result[search_from..abs_start]);
+                let key_start = abs_start + prefix.len();
+                match result[key_start..].find(suffix) {
+                    None => {
+                        output.push_str(&result[abs_start..]);
+                        break;
+                    }
+                    Some(key_len) => {
+                        let key = &result[key_start..key_start + key_len];
+                        match vault.get_secret(key) {
+                            Some(s) => output.push_str(s.expose_secret()),
+                            None => {
+                                // Leave unresolved.
+                                output.push_str(prefix);
+                                output.push_str(key);
+                                output.push_str(suffix);
+                            }
+                        }
+                        search_from = key_start + key_len + suffix.len();
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
+fn resolve_template_value(
+    value: &serde_json::Value,
+    vars: &HashMap<String, String>,
+    public_data: &serde_json::Map<String, serde_json::Value>,
+    manifest: &AgentManifest,
+    vault: &crate::vault::Vault,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(resolve_template_str(s, vars, public_data, manifest, vault))
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        resolve_template_value(v, vars, public_data, manifest, vault),
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(|v| resolve_template_value(v, vars, public_data, manifest, vault))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON path extraction
+// ---------------------------------------------------------------------------
+
 /// Extract a value from JSON at a dot-separated or $-prefixed path.
-fn extract_json_path(value: &serde_json::Value, path: &str) -> Option<String> {
+pub(crate) fn extract_json_path(value: &serde_json::Value, path: &str) -> Option<String> {
     let path = path.trim_start_matches('$').trim_start_matches('.');
     if path.is_empty() {
         return None;
@@ -848,5 +1371,26 @@ fn extract_json_path(value: &serde_json::Value, path: &str) -> Option<String> {
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Misc helpers
+// ---------------------------------------------------------------------------
+
+/// Extract `https://host` base URL from a full URL.
+fn extract_base_url(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let mut base = parsed.scheme().to_string() + "://";
+        if let Some(host) = parsed.host_str() {
+            base.push_str(host);
+        }
+        if let Some(port) = parsed.port() {
+            base.push(':');
+            base.push_str(&port.to_string());
+        }
+        base
+    } else {
+        url.to_string()
     }
 }

@@ -13,7 +13,7 @@ use rand::RngCore;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const VAULT_KEY_ENV: &str = "AUTONOETIC_VAULT_KEY";
 const VAULT_KEY_PATH_ENV: &str = "AUTONOETIC_VAULT_KEY_PATH";
@@ -185,6 +185,37 @@ impl Default for Vault {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Auto-generate and persist a vault encryption key if none is configured.
+///
+/// Writes a random 32-byte hex key to `{agents_dir}/.gateway/vault.key` and sets
+/// `AUTONOETIC_VAULT_KEY_PATH` in the process environment so subsequent vault
+/// operations pick it up without further configuration.
+///
+/// Returns immediately (no-op) if `AUTONOETIC_VAULT_KEY` or
+/// `AUTONOETIC_VAULT_KEY_PATH` is already set.
+pub fn ensure_default_key(agents_dir: &Path) -> anyhow::Result<()> {
+    if std::env::var(VAULT_KEY_ENV).is_ok() || std::env::var(VAULT_KEY_PATH_ENV).is_ok() {
+        return Ok(());
+    }
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let key_path = gateway_dir.join("vault.key");
+    if !key_path.exists() {
+        let mut key_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key_bytes);
+        let key_hex = hex::encode(key_bytes);
+        std::fs::write(&key_path, &key_hex)?;
+    }
+    // Make the path available to the rest of the process.
+    std::env::set_var(VAULT_KEY_PATH_ENV, &key_path);
+    Ok(())
+}
+
+/// Return the default vault file path: `{agents_dir}/.gateway/vault.enc.json`.
+pub fn default_vault_path(agents_dir: &Path) -> PathBuf {
+    agents_dir.join(".gateway").join("vault.enc.json")
 }
 
 #[cfg(test)]

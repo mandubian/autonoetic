@@ -270,6 +270,13 @@ pub enum CredentialSetupStep {
         #[serde(default)]
         data_refs: Vec<String>,
     },
+    /// Tells `credential.setup` to pause and ask the agent to collect user input.
+    ///
+    /// When the gateway encounters this step it returns early with
+    /// `suspended_for_user_input: true` and the question.  The agent should call
+    /// `user.ask` with the question, collect the human's answer, then call
+    /// `credential.setup` again with `credential_id` + `resume_vars: { var_name: answer }`.
+    UserInput { question: String, var_name: String },
 }
 
 /// Specification for a secret field in a UserPrompt step.

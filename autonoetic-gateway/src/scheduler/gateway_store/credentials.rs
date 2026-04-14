@@ -118,8 +118,59 @@ impl GatewayStore {
     /// Delete a credential by ID.
     pub fn delete_credential(&self, credential_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let n = conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute(
             "DELETE FROM credentials WHERE credential_id = ?1",
+            params![credential_id],
+        )?;
+        // Best-effort cleanup for any in-progress onboarding state tied to this credential.
+        let _ = tx.execute(
+            "DELETE FROM credential_setup_state WHERE credential_id = ?1",
+            params![credential_id],
+        );
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // credential_setup_state — persists multi-step onboarding resume state
+    // -----------------------------------------------------------------------
+
+    /// Persist (insert or replace) the in-progress setup state for a credential.
+    pub fn save_credential_setup_state(&self, credential_id: &str, state_json: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO credential_setup_state (credential_id, state_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(credential_id) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at",
+            params![credential_id, state_json, now, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load the in-progress setup state for a credential, if any.
+    pub fn load_credential_setup_state(&self, credential_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT state_json FROM credential_setup_state WHERE credential_id = ?1",
+            params![credential_id],
+            |row| row.get::<_, String>(0),
+        );
+        match row {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Delete the setup state when onboarding is complete or the credential is deleted.
+    pub fn delete_credential_setup_state(&self, credential_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM credential_setup_state WHERE credential_id = ?1",
             params![credential_id],
         )?;
         Ok(n > 0)

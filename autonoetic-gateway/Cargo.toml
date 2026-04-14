@@ -38,6 +38,10 @@ zstd = "0.13"
 aes-gcm = "0.10.3"
 rand = "0.8"
 
+[[bin]]
+name = "mock-moltbook"
+path = "src/bin/mock_moltbook.rs"
+
 [dev-dependencies]
 tempfile = "3.26.0"
 serial_test = "3.0"
