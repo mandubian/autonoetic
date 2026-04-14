@@ -1104,7 +1104,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             &manifest.agent.id,
             gateway_dir,
             &gateway_store,
-            bundle_opt.as_ref().map(|b| b),
+            bundle_opt.as_ref(),
             &mut file_map,
             &lock_rel_path,
             parsed_lock,
@@ -1548,6 +1548,52 @@ impl NativeTool for AgentRevisionPromoteTool {
             (artifact_required, high_risk)
         };
 
+        let enforce_promotion_gate =
+            |artifact_id: &str, missing_record_message: &str| -> anyhow::Result<()> {
+                let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+                let _ =
+                    promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
+                let record = promo_store
+                    .get_promotion(artifact_id)
+                    .ok_or_else(|| anyhow::anyhow!("{}", missing_record_message))?;
+
+                let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
+                anyhow::ensure!(
+                    record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
+                    "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
+                     but revision requires '{}'. Re-run evaluator.default and auditor.default for this revision content.",
+                    artifact_id,
+                    record_content_digest,
+                    rev.content_digest
+                );
+
+                anyhow::ensure!(
+                    record.evaluator_pass,
+                    "Promotion gate: evaluator did not pass for artifact '{}'. \
+                     Fix the evaluation findings and re-run evaluator.default.",
+                    artifact_id
+                );
+                anyhow::ensure!(
+                    record.auditor_pass,
+                    "Promotion gate: auditor did not pass for artifact '{}'. \
+                     Fix the audit findings and re-run auditor.default.",
+                    artifact_id
+                );
+
+                let has_unresolved = rev
+                    .metadata_json
+                    .get("has_unresolved_dependencies")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                anyhow::ensure!(
+                    !has_unresolved,
+                    "Promotion gate: revision has unresolved dependencies. \
+                     Run packager.default to install dependencies as layers, \
+                     then re-submit the revision.",
+                );
+                Ok(())
+            };
+
         if needs_artifact_gate {
             // CodeExecution or AgentSpawn: must have artifact + full eval/audit gate.
             let artifact_id = rev.artifact_id.as_deref().ok_or_else(|| {
@@ -1557,102 +1603,28 @@ impl NativeTool for AgentRevisionPromoteTool {
                     args.revision_id
                 )
             })?;
-
-            let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
-            let _ = promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
-            let record = promo_store.get_promotion(artifact_id).ok_or_else(|| {
-                anyhow::anyhow!(
+            enforce_promotion_gate(
+                artifact_id,
+                &format!(
                     "Promotion gate: no promotion.record found for artifact '{}'. \
                      Agents with CodeExecution/AgentSpawn require both \
                      evaluator and auditor pass records before promotion.",
                     artifact_id
-                )
-            })?;
-
-            let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
-            anyhow::ensure!(
-                record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
-                "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
-                 but revision requires '{}'. Re-run evaluator.default and auditor.default for this revision content.",
-                artifact_id,
-                record_content_digest,
-                rev.content_digest
-            );
-
-            anyhow::ensure!(
-                record.evaluator_pass,
-                "Promotion gate: evaluator did not pass for artifact '{}'. \
-                 Fix the evaluation findings and re-run evaluator.default.",
-                artifact_id
-            );
-            anyhow::ensure!(
-                record.auditor_pass,
-                "Promotion gate: auditor did not pass for artifact '{}'. \
-                 Fix the audit findings and re-run auditor.default.",
-                artifact_id
-            );
-
-            let has_unresolved = rev
-                .metadata_json
-                .get("has_unresolved_dependencies")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            anyhow::ensure!(
-                !has_unresolved,
-                "Promotion gate: revision has unresolved dependencies. \
-                 Run packager.default to install dependencies as layers, \
-                 then re-submit the revision.",
-            );
+                ),
+            )?;
         } else if has_high_risk && rev.artifact_id.is_some() {
             // NetworkAccess without CodeExecution/AgentSpawn, but an artifact was provided.
             // Still apply the full eval+audit gate since code exists to review.
             let artifact_id = rev.artifact_id.as_deref().unwrap();
-
-            let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
-            let _ = promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
-            let record = promo_store.get_promotion(artifact_id).ok_or_else(|| {
-                anyhow::anyhow!(
+            enforce_promotion_gate(
+                artifact_id,
+                &format!(
                     "Promotion gate: no promotion.record found for artifact '{}'. \
                      Agents with NetworkAccess and a code artifact require both \
                      evaluator and auditor pass records before promotion.",
                     artifact_id
-                )
-            })?;
-
-            let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
-            anyhow::ensure!(
-                record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
-                "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
-                 but revision requires '{}'. Re-run evaluator.default and auditor.default for this revision content.",
-                artifact_id,
-                record_content_digest,
-                rev.content_digest
-            );
-
-            anyhow::ensure!(
-                record.evaluator_pass,
-                "Promotion gate: evaluator did not pass for artifact '{}'. \
-                 Fix the evaluation findings and re-run evaluator.default.",
-                artifact_id
-            );
-            anyhow::ensure!(
-                record.auditor_pass,
-                "Promotion gate: auditor did not pass for artifact '{}'. \
-                 Fix the audit findings and re-run auditor.default.",
-                artifact_id
-            );
-
-            let has_unresolved = rev
-                .metadata_json
-                .get("has_unresolved_dependencies")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            anyhow::ensure!(
-                !has_unresolved,
-                "Promotion gate: revision has unresolved dependencies. \
-                 Run packager.default to install dependencies as layers, \
-                 then re-submit the revision.",
-            );
+                ),
+            )?;
         }
         // else: no artifact, no CodeExecution/AgentSpawn → direct promote.
         // Capability enforcement on every tool call is the security gate.
