@@ -14,6 +14,7 @@
 - [Script vs Reasoning Agents](#script-vs-reasoning-agents)
 - [Extended Thinking](#extended-thinking)
 - [Building New Agents](#building-new-agents)
+  - [Installing a Remote Skill](#installing-a-remote-skill)
 
 ---
 
@@ -52,7 +53,7 @@ When a message arrives at the gateway:
 
 | Role | Agent ID | Purpose |
 |------|----------|---------|
-| **Lead** | `planner.default` | Decomposes goals, routes to specialists |
+| **Lead** | `planner.default` | Decomposes goals, routes to specialists via principles |
 | **Researcher** | `researcher.default` | Gathers evidence, cites sources |
 | **Architect** | `architect.default` | Defines structure, interfaces, trade-offs |
 | **Packager** | `packager.default` | Resolves and packages build-time dependencies into artifact layers |
@@ -60,23 +61,25 @@ When a message arrives at the gateway:
 | **Debugger** | `debugger.default` | Isolates root causes, proposes fixes |
 | **Evaluator** | `evaluator.default` | Validates behavior with tests/metrics |
 | **Auditor** | `auditor.default` | Checks security, governance, reproducibility |
+| **Registrar** | `registration.default` | Onboards services via `credential.setup(skill_url)` — keeps secrets vault-side |
+| **Discovery** | `discovery.default` | Finds installed non-foundational agents that match a task intent |
 
 ### Evolution Roles
 
 | Role | Agent ID | Purpose |
 |------|----------|---------|
-| **Packager** | `packager.default` | Resolves and packages build-time dependencies into artifact layers |
-| **Installer** | `specialized_builder.default` | Installs new durable agents |
+| **Installer** | `specialized_builder.default` | Installs new durable agents (revision create + promote) |
+| **Factory** | `agent-factory.default` | Owns full agent creation pipeline end-to-end |
 | **Adapter** | `agent-adapter.default` | Generates wrapper agents for I/O gaps |
 | **Curator** | `memory-curator.default` | Distills durable learnings |
 | **Steward** | `evolution-steward.default` | Decides skill promotion |
 
 ### Delegation Ladder (for Planner)
 
-1. **Reuse first**: `agent.discover` → spawn existing match
-2. **Adapt**: `agent-adapter.default` → wrapper for I/O gaps
-3. **Build**: `specialized_builder.default` → creates new agent via artifact → revision → promote
-4. **Delegate**: `agent.spawn` → one-shot specialist execution
+1. **Foundational match**: route directly to the appropriate foundational agent (researcher, coder, debugger, registration, …)
+2. **Unknown intent**: `discovery.default` → semantic match among installed agents → spawn best candidate
+3. **No candidate**: `agent-factory.default` → builds new agent end-to-end (design → code → package → gate → install)
+4. **Recurring task**: `agent-factory.default` → install agent → `scheduler.cron.create`
 
 ### Delegation Contract
 
@@ -208,6 +211,7 @@ Capabilities fall into three categories:
 | `AgentMessage` | `patterns: [string]` | Send messages to other agents |
 | `BackgroundReevaluation` | `min_interval_secs: number, allow_reasoning: boolean` | Periodic wake-ups for background processing |
 | `SchedulerAccess` | `patterns: [string]` | Create, list, pause, resume, cancel scheduled cron jobs (e.g., `scheduler.cron.*`) |
+| `SkillInstall` | `allowed_sources: [string]` | Fetch a remote SKILL.md and install it as a new local agent via `skill.install`. Use `["*"]` for any source, or specific hosts like `["agentskills.io"]`. |
 
 ### Capability Semantics
 
@@ -299,6 +303,45 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 | `agent.spawn` | `(agent_id: string, message: any, ...) → result` | Spawn child agent |
 | `agent.exists` | `(agent_id: string) → bool` | Check if agent exists |
 | `agent.discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
+
+### Skill Install Tool
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `skill.install` | `(url: string, agent_id: string, trust_mode?: string) → result` | Fetch a remote SKILL.md, write it to `agents_dir`, and immediately bootstrap + promote it as a new local agent. Requires `SkillInstall` capability. |
+
+**Parameters:**
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `url` | Yes | Full URL to a SKILL.md file, e.g. `https://agentskills.io/skills/web-researcher/SKILL.md` |
+| `agent_id` | Yes | ID for the new agent. May only contain ASCII letters, digits, `.`, `-`, `_`. |
+| `trust_mode` | No | How to treat imported capabilities: `generous` (keep as-is), `strict` (add approval gate, **default**), `audit` (drop to read-only + approval). |
+
+**Trust mode behavior:**
+
+| Mode | Capabilities applied | When to use |
+|------|----------------------|-------------|
+| `generous` | Use capabilities declared in remote SKILL.md (minimal defaults if none declared) | Trusted internal sources |
+| `strict` | Preserve declared capabilities + add `ApprovalQueue` for all actions | Default for third-party skills |
+| `audit` | `ReadAccess(self.*)` + `ApprovalQueue` only — declared capabilities ignored | Untrusted or high-risk skills |
+
+**Return value:**
+```json
+{
+  "ok": true,
+  "agent_id": "web-researcher.default",
+  "trust_mode": "strict",
+  "activated": true,
+  "message": "Skill installed and promoted as agent 'web-researcher.default'"
+}
+```
+
+**Security model:**
+- The installing agent must declare `SkillInstall` in its capabilities with `allowed_sources` matching the URL host.
+- The gateway policy engine enforces this before any HTTP request is made.
+- No remote code is executed during install — the SKILL.md is parsed and written to disk, then bootstrapped like any local agent.
+- `strict` mode (the default) ensures the new agent cannot take any privileged action without an approval gate, limiting blast radius from untrusted skills.
 
 ### Revision Tools
 
@@ -601,6 +644,49 @@ llm_config:
     artifacts: []
     layers: []
     ```
+
+### Installing a Remote Skill
+
+An agent with `SkillInstall` capability can pull a SKILL.md from a URL and register it as a live local agent in a single step — no CLI intervention required.
+
+**SKILL.md capability declaration:**
+```yaml
+capabilities:
+  - type: SkillInstall
+    allowed_sources: ["agentskills.io"]   # or ["*"] for any host
+```
+
+**Tool call:**
+```json
+{
+  "tool": "skill.install",
+  "url": "https://agentskills.io/skills/web-researcher/SKILL.md",
+  "agent_id": "web-researcher.default",
+  "trust_mode": "strict"
+}
+```
+
+**What happens under the hood:**
+1. Gateway verifies the URL host against `allowed_sources` in the `SkillInstall` capability.
+2. Fetches the remote SKILL.md over HTTPS (15 s timeout).
+3. Parses frontmatter with `SkillParser`; applies the requested `trust_mode` to the capability set.
+4. Writes `SKILL.md` + a fresh `runtime.lock` into `agents_dir/web-researcher-default/`.
+5. Calls `bootstrap_single_agent()` — computes the content digest, creates a revision, auto-promotes to Active.
+6. Returns `{ ok, agent_id, trust_mode, activated }`.
+
+The installed agent is immediately available for `agent.spawn` calls. No separate `autonoetic agent bootstrap` step is needed.
+
+**Compared to `credential.setup(skill_url)`:**
+
+| | `credential.setup(skill_url)` | `skill.install` |
+|---|---|---|
+| **Purpose** | Onboard API credentials from a service's SKILL.md | Install the skill itself as a runnable agent |
+| **Output** | `credential_id` stored in vault | New agent directory + active revision |
+| **Secrets** | Extracted and vault-stored | Not applicable |
+| **User interaction** | May pause for API keys | None |
+| **Capability required** | `CredentialAccess` + `NetworkAccess` | `SkillInstall` |
+
+Both can be used together: `registration.default` handles `credential.setup` to onboard the API key, while `skill.install` installs the agent that will use it.
 
 ### Activating Agents
 
