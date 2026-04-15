@@ -804,7 +804,10 @@ pub fn is_high_risk_capability(cap: &Capability) -> bool {
 /// Used to gate artifact-free reasoning agents: if any capability requires artifact
 /// review, the agent MUST be created with an artifact_id for full eval + audit.
 pub fn requires_artifact_review(cap: &Capability) -> bool {
-    matches!(cap, Capability::CodeExecution { .. } | Capability::AgentSpawn { .. })
+    matches!(
+        cap,
+        Capability::CodeExecution { .. } | Capability::AgentSpawn { .. }
+    )
 }
 
 pub fn format_install_validation_error(
@@ -1170,6 +1173,7 @@ artifacts: "not_a_sequence"
             response_contract: None,
             execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
             script_entry: None,
+            script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
@@ -1342,6 +1346,7 @@ artifacts: "not_a_sequence"
             response_contract: None,
             execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
             script_entry: None,
+            script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
