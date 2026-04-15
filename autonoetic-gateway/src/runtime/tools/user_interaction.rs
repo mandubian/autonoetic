@@ -122,6 +122,11 @@ impl NativeTool for UserAskTool {
                 )
                 .unwrap_or_default();
                 let has_active_children = task_runs.iter().any(|t| {
+                    if let Some(sid) = session_id {
+                        if t.session_id == sid {
+                            return false;
+                        }
+                    }
                     matches!(
                         t.status,
                         autonoetic_types::workflow::TaskRunStatus::Pending

@@ -52,12 +52,19 @@ The planner's spawn message must include:
 
 3. Repeat step 2 until `credential.setup` returns `ok: true`.
 
-4. Return to the planner:
+4. If `credential.setup` returns `ok: false` with `skill_body` (no YAML frontmatter):
+   - Analyze the `skill_body` markdown to understand the service's API.
+   - Identify the registration/onboarding steps from the API reference (endpoints, methods, request/response shapes).
+   - Extract the `service` name from the skill content or URL host.
+   - Call `credential.setup` again with explicit `service` and `steps` constructed from your analysis.
+   - Each step should be an `api_call` with `step_type`, `method`, `url`, optional `headers`/`body`, and `extract_secrets`/`extract_public` mappings.
+
+5. Return to the planner:
    - `credential_id` (the handle for all future `credential.request` calls to this service)
    - Any `public_data` returned (e.g. `agent_id`, human-facing confirmation text)
 
 ## Rules
 
 - Never ask the user for secrets directly. If the service requires an operator secret, `credential.setup` uses the `UserPrompt` approval channel — not you.
-- If `credential.setup` returns `ok: false` without `suspended_for_user_input`, stop and report the exact error to the planner.
+- If `credential.setup` returns `ok: false` without `suspended_for_user_input` and without `skill_body`, stop and report the exact error to the planner.
 - Do not store, log, or repeat any value that looks like an API key, token, or password.
