@@ -300,6 +300,8 @@ pub fn approve_request(
         );
     }
 
+    unblock_task_on_approval(config, gateway_store, &decision);
+
     Ok(decision)
 }
 
