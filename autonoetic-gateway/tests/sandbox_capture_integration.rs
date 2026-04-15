@@ -54,6 +54,7 @@ fn test_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         execution_mode: ExecutionMode::Reasoning,
         script_entry: None,
+        script_input_mode: Default::default(),
         gateway_url: None,
         gateway_token: None,
         agentskills_import: None,

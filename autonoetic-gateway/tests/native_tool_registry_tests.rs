@@ -42,6 +42,7 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
         middleware: None,
         execution_mode: Default::default(),
         script_entry: None,
+        script_input_mode: Default::default(),
         gateway_url: None,
         gateway_token: None,
         response_contract: None,
@@ -798,9 +799,8 @@ fn test_scheduler_cron_create_rejects_sub10s_for_reasoning_target() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
-    let gateway_store = std::sync::Arc::new(
-        GatewayStore::open(&gateway_dir).expect("gateway store should open"),
-    );
+    let gateway_store =
+        std::sync::Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
@@ -832,13 +832,11 @@ fn test_scheduler_cron_create_rejects_sub10s_for_reasoning_target() {
     let parsed: serde_json::Value =
         serde_json::from_str(&result).expect("scheduler response should decode");
     assert_eq!(parsed.get("ok"), Some(&serde_json::json!(false)));
-    assert!(
-        parsed
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .contains("Sub-10s schedules are only allowed for script-mode agents")
-    );
+    assert!(parsed
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .contains("Sub-10s schedules are only allowed for script-mode agents"));
 }
 
 #[test]

@@ -363,3 +363,116 @@ async fn test_script_agent_execution_time_under_100ms() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+fn install_args_mode_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(agent_dir.join("scripts"))?;
+
+    std::fs::write(
+        agent_dir.join("scripts/args_echo.py"),
+        r#"#!/usr/bin/env python3
+import sys
+import json
+input_data = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    parsed = json.loads(input_data)
+    method = parsed.get("method", "unknown")
+    print(f"method={method} payload={input_data}")
+except Exception:
+    print(f"raw={input_data}")
+"#,
+    )?;
+
+    let skill_md = format!(
+        r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "{agent_id}"
+  name: "{agent_id}"
+  description: "Script agent with args input mode"
+execution_mode: script
+script_entry: scripts/args_echo.py
+script_input_mode: args
+io:
+  accepts:
+    type: object
+    required: [method]
+    properties:
+      method:
+        type: string
+      params:
+        type: object
+  returns:
+    type: object
+    required: [result]
+    properties:
+      result:
+        type: string
+capabilities: []
+---
+# Args-mode Script Agent
+"#,
+    );
+    std::fs::write(agent_dir.join("SKILL.md"), skill_md)?;
+    std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_script_agent_args_mode_receives_payload_as_argv1() -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    let agent_id = "script-args-agent";
+    install_args_mode_agent(&workspace.agents_dir.join(agent_id), agent_id)?;
+    let store = setup_store_for_script(&config, &workspace.agents_dir, agent_id)?;
+
+    let execution = GatewayExecutionService::new(config, store);
+    let session_id = "session-script-args";
+
+    let payload = r#"{"method":"ping","params":{}}"#;
+
+    let result = execution
+        .spawn_agent_once(
+            agent_id,
+            payload,
+            session_id,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    match result {
+        Ok(spawn_result) => {
+            let reply = spawn_result.assistant_reply.expect("should have reply");
+            assert!(
+                reply.contains("method=ping"),
+                "reply should contain parsed method, got: {reply}"
+            );
+            assert!(
+                reply.contains("params"),
+                "reply should contain payload, got: {reply}"
+            );
+            tracing::info!(reply = %reply, "Args-mode script agent executed successfully");
+        }
+        Err(e) => {
+            if e.to_string().contains("bwrap") || e.to_string().contains("bubblewrap") {
+                tracing::warn!("bubblewrap not available, skipping test");
+                return Ok(());
+            }
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}

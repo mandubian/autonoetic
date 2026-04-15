@@ -157,8 +157,8 @@ impl NativeTool for SkillInstallTool {
         }
 
         // ── 5. Parse the SKILL.md ─────────────────────────────────────────────
-        let (parsed_manifest, body) =
-            crate::runtime::parser::SkillParser::parse(&skill_content).map_err(|e| {
+        let (parsed_manifest, body) = crate::runtime::parser::SkillParser::parse(&skill_content)
+            .map_err(|e| {
                 anyhow::anyhow!("Failed to parse remote SKILL.md from {}: {}", args.url, e)
             })?;
 
@@ -174,8 +174,14 @@ impl NativeTool for SkillInstallTool {
                 .get("default")
                 .and_then(|name| config.llm_presets.get(name.as_str()))
                 .map(|preset| LlmConfig {
-                    provider: preset.provider.clone().unwrap_or_else(|| "anthropic".to_string()),
-                    model: preset.model.clone().unwrap_or_else(|| "claude-sonnet-4-6".to_string()),
+                    provider: preset
+                        .provider
+                        .clone()
+                        .unwrap_or_else(|| "anthropic".to_string()),
+                    model: preset
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "claude-sonnet-4-6".to_string()),
                     temperature: preset.temperature.unwrap_or(0.2),
                     fallback_provider: None,
                     fallback_model: None,
@@ -205,6 +211,7 @@ impl NativeTool for SkillInstallTool {
             middleware: parsed_manifest.middleware.clone(),
             execution_mode: parsed_manifest.execution_mode,
             script_entry: parsed_manifest.script_entry.clone(),
+            script_input_mode: parsed_manifest.script_input_mode,
             gateway_url: None,
             gateway_token: None,
             response_contract: parsed_manifest.response_contract.clone(),
@@ -216,10 +223,8 @@ impl NativeTool for SkillInstallTool {
         // ── 8. Write agent directory: SKILL.md + runtime.lock ─────────────────
         std::fs::create_dir_all(&target_dir)?;
 
-        let skill_doc = crate::runtime::install_contract::render_skill_document(
-            &target_manifest,
-            &body,
-        )?;
+        let skill_doc =
+            crate::runtime::install_contract::render_skill_document(&target_manifest, &body)?;
         std::fs::write(target_dir.join("SKILL.md"), &skill_doc)?;
 
         let lock_doc = crate::runtime::install_contract::render_runtime_lock_example();
@@ -234,11 +239,7 @@ impl NativeTool for SkillInstallTool {
         );
 
         // ── 9. Bootstrap and auto-promote the new agent ───────────────────────
-        let activated = crate::bootstrap::bootstrap_single_agent(
-            config,
-            gateway_dir,
-            &dir_name,
-        )?;
+        let activated = crate::bootstrap::bootstrap_single_agent(config, gateway_dir, &dir_name)?;
 
         let message = if activated {
             format!("Skill installed and promoted as agent '{}'", args.agent_id)
@@ -268,10 +269,7 @@ impl NativeTool for SkillInstallTool {
 }
 
 /// Map a trust_mode string to the correct capability set.
-fn apply_trust_mode(
-    trust_mode: &str,
-    parsed: &AgentManifest,
-) -> anyhow::Result<Vec<Capability>> {
+fn apply_trust_mode(trust_mode: &str, parsed: &AgentManifest) -> anyhow::Result<Vec<Capability>> {
     match trust_mode {
         "generous" => {
             // Use capabilities declared in the remote SKILL.md as-is.

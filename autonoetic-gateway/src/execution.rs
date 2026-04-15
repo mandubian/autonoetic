@@ -806,6 +806,7 @@ impl GatewayExecutionService {
                     self.config.as_ref(),
                     script_kill_scope,
                     &loaded.manifest.capabilities,
+                    loaded.manifest.script_input_mode,
                 )
                 .await;
 
@@ -3084,6 +3085,7 @@ mod tests {
             middleware: None,
             execution_mode: Default::default(),
             script_entry: None,
+            script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
             response_contract: None,
@@ -3231,6 +3233,7 @@ async fn execute_script_in_sandbox(
         String,
     )>,
     capabilities: &[autonoetic_types::capability::Capability],
+    input_mode: autonoetic_types::agent::ScriptInputMode,
 ) -> anyhow::Result<String> {
     use std::io::Write;
 
@@ -3238,15 +3241,13 @@ async fn execute_script_in_sandbox(
         agent_dir = %agent_dir.display(),
         script = %script_path.display(),
         sandbox = %sandbox_type,
+        input_mode = ?input_mode,
         "Executing script agent"
     );
 
     let driver = crate::sandbox::SandboxDriverKind::parse(sandbox_type)?;
     let overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
-    // The sandbox mounts agent_dir at BWRAP_WORKSPACE_DIR ("/tmp") and sets cwd there.
-    // script_path = agent_dir/script_entry, so strip the agent_dir prefix
-    // and prepend the workspace dir to get the correct in-sandbox path.
-    let entrypoint = match script_path.strip_prefix(agent_dir) {
+    let entrypoint_relative = match script_path.strip_prefix(agent_dir) {
         Ok(relative) => format!(
             "{}/{}",
             crate::sandbox::BWRAP_WORKSPACE_DIR,
@@ -3255,10 +3256,21 @@ async fn execute_script_in_sandbox(
         Err(_) => script_path.to_string_lossy().to_string(),
     };
 
+    let shell_command = match input_mode {
+        autonoetic_types::agent::ScriptInputMode::Args => {
+            format!(
+                "{} {}",
+                entrypoint_relative,
+                shell_words_quote(input_payload)
+            )
+        }
+        autonoetic_types::agent::ScriptInputMode::Stdin => entrypoint_relative,
+    };
+
     let mut runner = crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies(
         driver,
         &agent_dir.to_string_lossy(),
-        &entrypoint,
+        &shell_command,
         None,
         Some(&overrides),
     )?;
@@ -3268,10 +3280,12 @@ async fn execute_script_in_sandbox(
         (pid > 0).then(|| reg.register_sandbox_child_pid(root, pid))
     });
 
-    if let Some(mut stdin) = runner.process.stdin.take() {
-        stdin
-            .write_all(input_payload.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to write to script stdin: {}", e))?;
+    if input_mode == autonoetic_types::agent::ScriptInputMode::Stdin {
+        if let Some(mut stdin) = runner.process.stdin.take() {
+            stdin
+                .write_all(input_payload.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Failed to write to script stdin: {}", e))?;
+        }
     }
 
     let output = tokio::task::spawn_blocking(move || runner.process.wait_with_output())
@@ -3295,6 +3309,13 @@ async fn execute_script_in_sandbox(
     tracing::info!(stdout_len = stdout.len(), "Script execution completed");
 
     Ok(stdout)
+}
+
+/// Quote a string for safe inclusion in a shell command (POSIX sh -c).
+/// Uses single-quote wrapping with embedded single-quote escaping.
+fn shell_words_quote(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('\'', "'\\''");
+    format!("'{}'", escaped)
 }
 
 #[cfg(test)]

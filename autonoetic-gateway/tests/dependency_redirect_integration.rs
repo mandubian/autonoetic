@@ -38,6 +38,7 @@ fn make_manifest(has_network: bool) -> AgentManifest {
         middleware: None,
         execution_mode: ExecutionMode::Reasoning,
         script_entry: None,
+        script_input_mode: Default::default(),
         gateway_url: None,
         gateway_token: None,
         agentskills_import: None,
