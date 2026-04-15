@@ -648,6 +648,20 @@ impl PolicyEngine {
         }
         false
     }
+
+    /// Check if the agent is allowed to install a skill from a given URL host.
+    pub fn can_install_skill(&self, url_host: &str) -> bool {
+        for cap in &self.manifest.capabilities {
+            if let Capability::SkillInstall { allowed_sources } = cap {
+                for source in allowed_sources {
+                    if source == "*" || source == url_host {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
