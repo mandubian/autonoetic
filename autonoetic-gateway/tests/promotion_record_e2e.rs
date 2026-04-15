@@ -121,6 +121,7 @@ fn builder_manifest() -> AgentManifest {
         middleware: None,
         execution_mode: Default::default(),
         script_entry: None,
+        script_input_mode: Default::default(),
         gateway_url: None,
         gateway_token: None,
 
@@ -158,6 +159,7 @@ fn evaluator_manifest() -> AgentManifest {
         middleware: None,
         execution_mode: Default::default(),
         script_entry: None,
+        script_input_mode: Default::default(),
         gateway_url: None,
         gateway_token: None,
 
@@ -195,6 +197,7 @@ fn auditor_manifest() -> AgentManifest {
         middleware: None,
         execution_mode: Default::default(),
         script_entry: None,
+        script_input_mode: Default::default(),
         gateway_url: None,
         gateway_token: None,
 
