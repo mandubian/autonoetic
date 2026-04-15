@@ -462,9 +462,7 @@ fn create_revision_from_files(
     health_report: Option<&crate::runtime::install_contract::BundleHealthReport>,
     script_entry: Option<&str>,
 ) -> anyhow::Result<PersistedRevisionResult> {
-    let expected_layers = bundle
-        .map(expected_locked_layers)
-        .unwrap_or_default();
+    let expected_layers = bundle.map(expected_locked_layers).unwrap_or_default();
     let normalized_lock = normalize_runtime_lock(parsed_lock);
     anyhow::ensure!(
         normalized_lock.layers == expected_layers,
@@ -569,8 +567,8 @@ fn create_revision_from_files(
     // to this canonical revision digest now. Skip for artifact-free reasoning agents.
     if let Some(artifact_id) = &common.artifact_id {
         let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
-        let _ = promo_store
-            .reconcile_content_digest_for_revision(artifact_id, &rev.content_digest)?;
+        let _ =
+            promo_store.reconcile_content_digest_for_revision(artifact_id, &rev.content_digest)?;
     }
 
     let short_ref = format!("{}@rev_{}", common.agent_id, short_id);
@@ -910,140 +908,152 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
 
         // Two execution paths: with artifact (code agents) vs without (pure reasoning agents).
-        let (resolved_mode, resolved_script_entry, mut file_map, health_report, bundle_opt, source_kind, source_ref) =
-            if let Some(artifact_id) = &args.artifact_id {
-                anyhow::ensure!(
-                    !artifact_id.trim().is_empty(),
-                    "artifact_id must not be empty"
-                );
-                let artifact_store = crate::ArtifactStore::new(gateway_dir)?;
-                let bundle = artifact_store
-                    .inspect(artifact_id)
-                    .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", artifact_id, e))?;
-                anyhow::ensure!(
+        let (
+            resolved_mode,
+            resolved_script_entry,
+            mut file_map,
+            health_report,
+            bundle_opt,
+            source_kind,
+            source_ref,
+        ) = if let Some(artifact_id) = &args.artifact_id {
+            anyhow::ensure!(
+                !artifact_id.trim().is_empty(),
+                "artifact_id must not be empty"
+            );
+            let artifact_store = crate::ArtifactStore::new(gateway_dir)?;
+            let bundle = artifact_store
+                .inspect(artifact_id)
+                .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", artifact_id, e))?;
+            anyhow::ensure!(
                     bundle.kind == ArtifactKind::AgentBundle,
                     "Artifact '{}' has kind '{:?}'. agent.revision.create_from_intent requires kind 'agent_bundle'.",
                     artifact_id,
                     bundle.kind
                 );
 
-                let requested_mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
-                let execution_mode_explicit = args.execution_mode.is_some();
-                let resolved_mode = if !execution_mode_explicit
-                    && requested_mode == ExecutionMode::Reasoning
-                    && args.script_entry.is_none()
-                    && args.llm_config.is_none()
-                {
-                    if bundle.entrypoints.len() == 1 {
-                        tracing::info!(
-                            target: "revision",
-                            artifact_id = %artifact_id,
-                            entrypoint = %bundle.entrypoints[0],
-                            "No execution_mode or llm_config specified, but artifact has a single entrypoint — defaulting to script mode"
-                        );
-                        ExecutionMode::Script
-                    } else {
-                        ExecutionMode::Reasoning
-                    }
+            let requested_mode = args.execution_mode.unwrap_or(ExecutionMode::Reasoning);
+            let execution_mode_explicit = args.execution_mode.is_some();
+            let resolved_mode = if !execution_mode_explicit
+                && requested_mode == ExecutionMode::Reasoning
+                && args.script_entry.is_none()
+                && args.llm_config.is_none()
+            {
+                if bundle.entrypoints.len() == 1 {
+                    tracing::info!(
+                        target: "revision",
+                        artifact_id = %artifact_id,
+                        entrypoint = %bundle.entrypoints[0],
+                        "No execution_mode or llm_config specified, but artifact has a single entrypoint — defaulting to script mode"
+                    );
+                    ExecutionMode::Script
                 } else {
-                    requested_mode
-                };
-                match resolved_mode {
-                    ExecutionMode::Script => {
-                        let has_entry = args
-                            .script_entry
-                            .as_ref()
-                            .map(|v| !v.trim().is_empty())
-                            .unwrap_or(false)
-                            || !bundle.entrypoints.is_empty();
-                        anyhow::ensure!(
-                            has_entry,
-                            "script_entry is required when execution_mode is 'script'"
-                        );
-                    }
-                    ExecutionMode::Reasoning => anyhow::ensure!(
-                        args.llm_config.is_some(),
-                        "llm_config is required when execution_mode is 'reasoning'"
-                    ),
+                    ExecutionMode::Reasoning
                 }
-
-                let resolved_script_entry = args
-                    .script_entry
-                    .as_ref()
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty())
-                    .or_else(|| {
-                        if resolved_mode == ExecutionMode::Script {
-                            bundle.entrypoints.clone().into_iter().next()
-                        } else {
-                            None
-                        }
-                    })
-                    .map(|e| normalize_script_entry(&e));
-
-                let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-                for (path, bytes) in artifact_store.resolve_files(artifact_id)? {
-                    validate_relative_agent_path(&path)?;
+            } else {
+                requested_mode
+            };
+            match resolved_mode {
+                ExecutionMode::Script => {
+                    let has_entry = args
+                        .script_entry
+                        .as_ref()
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false)
+                        || !bundle.entrypoints.is_empty();
                     anyhow::ensure!(
-                        file_map.insert(path.clone(), bytes).is_none(),
-                        "Artifact contains duplicate file path '{}'",
-                        path
+                        has_entry,
+                        "script_entry is required when execution_mode is 'script'"
                     );
                 }
+                ExecutionMode::Reasoning => anyhow::ensure!(
+                    args.llm_config.is_some(),
+                    "llm_config is required when execution_mode is 'reasoning'"
+                ),
+            }
 
-                let has_layers = !bundle.layers.is_empty();
-                let health_report = crate::runtime::install_contract::analyze_bundle_health(
-                    &file_map,
-                    &args.capabilities,
-                    has_layers,
-                    resolved_script_entry.as_deref(),
-                );
+            let resolved_script_entry = args
+                .script_entry
+                .as_ref()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    if resolved_mode == ExecutionMode::Script {
+                        bundle.entrypoints.clone().into_iter().next()
+                    } else {
+                        None
+                    }
+                })
+                .map(|e| normalize_script_entry(&e));
 
-                (
-                    resolved_mode,
-                    resolved_script_entry,
-                    file_map,
-                    Some(health_report),
-                    Some(bundle),
-                    "intent_artifact".to_string(),
-                    Some(artifact_id.clone()),
-                )
-            } else {
-                // Pure reasoning agent — no artifact, no custom code.
-                // Validate that this path is safe: no script mode, no CodeExecution/AgentSpawn.
+            let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            let strip_prefix = format!("{}/", args.agent_id);
+            for (path, bytes) in artifact_store.resolve_files(artifact_id)? {
+                validate_relative_agent_path(&path)?;
+                let normalized_path = path.strip_prefix(&strip_prefix).unwrap_or(&path);
                 anyhow::ensure!(
+                    file_map
+                        .insert(normalized_path.to_string(), bytes)
+                        .is_none(),
+                    "Artifact contains duplicate file path '{}'",
+                    normalized_path
+                );
+            }
+
+            let has_layers = !bundle.layers.is_empty();
+            let health_report = crate::runtime::install_contract::analyze_bundle_health(
+                &file_map,
+                &args.capabilities,
+                has_layers,
+                resolved_script_entry.as_deref(),
+            );
+
+            (
+                resolved_mode,
+                resolved_script_entry,
+                file_map,
+                Some(health_report),
+                Some(bundle),
+                "intent_artifact".to_string(),
+                Some(artifact_id.clone()),
+            )
+        } else {
+            // Pure reasoning agent — no artifact, no custom code.
+            // Validate that this path is safe: no script mode, no CodeExecution/AgentSpawn.
+            anyhow::ensure!(
                     !matches!(args.execution_mode, Some(ExecutionMode::Script)),
                     "execution_mode 'script' requires an artifact_id — script agents must have source files"
                 );
-                anyhow::ensure!(
-                    args.script_entry.is_none(),
-                    "script_entry requires an artifact_id — pure reasoning agents have no scripts"
-                );
-                anyhow::ensure!(
-                    args.llm_config.is_some(),
-                    "llm_config is required for pure reasoning agents (no artifact_id)"
-                );
-                let forbidden_cap = args.capabilities.iter().find(|cap| {
-                    crate::runtime::install_contract::requires_artifact_review(cap)
-                });
-                if let Some(cap) = forbidden_cap {
-                    anyhow::bail!(
+            anyhow::ensure!(
+                args.script_entry.is_none(),
+                "script_entry requires an artifact_id — pure reasoning agents have no scripts"
+            );
+            anyhow::ensure!(
+                args.llm_config.is_some(),
+                "llm_config is required for pure reasoning agents (no artifact_id)"
+            );
+            let forbidden_cap = args
+                .capabilities
+                .iter()
+                .find(|cap| crate::runtime::install_contract::requires_artifact_review(cap));
+            if let Some(cap) = forbidden_cap {
+                anyhow::bail!(
                         "Capability '{:?}' requires an artifact_id for code review and promotion gating. \
                          Pure reasoning agents (no artifact_id) may not use CodeExecution or AgentSpawn.",
                         cap
                     );
-                }
+            }
 
-                (
-                    ExecutionMode::Reasoning,
-                    None,
-                    BTreeMap::new(),
-                    None,
-                    None,
-                    "intent_reasoning".to_string(),
-                    None,
-                )
-            };
+            (
+                ExecutionMode::Reasoning,
+                None,
+                BTreeMap::new(),
+                None,
+                None,
+                "intent_reasoning".to_string(),
+                None,
+            )
+        };
 
         let artifact_layers: Vec<autonoetic_types::layer::ArtifactLayer> = bundle_opt
             .as_ref()
@@ -1084,11 +1094,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
 
         let lock_rel_path = target_manifest.runtime.runtime_lock.clone();
         validate_relative_agent_path(&lock_rel_path)?;
-        let parsed_lock = crate::runtime::install_contract::scaffold_runtime_lock(
-            None,
-            None,
-            &artifact_layers,
-        )?;
+        let parsed_lock =
+            crate::runtime::install_contract::scaffold_runtime_lock(None, None, &artifact_layers)?;
 
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
@@ -1548,17 +1555,17 @@ impl NativeTool for AgentRevisionPromoteTool {
             (artifact_required, high_risk)
         };
 
-        let enforce_promotion_gate =
-            |artifact_id: &str, missing_record_message: &str| -> anyhow::Result<()> {
-                let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
-                let _ =
-                    promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
-                let record = promo_store
-                    .get_promotion(artifact_id)
-                    .ok_or_else(|| anyhow::anyhow!("{}", missing_record_message))?;
+        let enforce_promotion_gate = |artifact_id: &str,
+                                      missing_record_message: &str|
+         -> anyhow::Result<()> {
+            let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+            let _ = promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
+            let record = promo_store
+                .get_promotion(artifact_id)
+                .ok_or_else(|| anyhow::anyhow!("{}", missing_record_message))?;
 
-                let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
-                anyhow::ensure!(
+            let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
+            anyhow::ensure!(
                     record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
                     "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
                      but revision requires '{}'. Re-run evaluator.default and auditor.default for this revision content.",
@@ -1567,32 +1574,32 @@ impl NativeTool for AgentRevisionPromoteTool {
                     rev.content_digest
                 );
 
-                anyhow::ensure!(
-                    record.evaluator_pass,
-                    "Promotion gate: evaluator did not pass for artifact '{}'. \
+            anyhow::ensure!(
+                record.evaluator_pass,
+                "Promotion gate: evaluator did not pass for artifact '{}'. \
                      Fix the evaluation findings and re-run evaluator.default.",
-                    artifact_id
-                );
-                anyhow::ensure!(
-                    record.auditor_pass,
-                    "Promotion gate: auditor did not pass for artifact '{}'. \
+                artifact_id
+            );
+            anyhow::ensure!(
+                record.auditor_pass,
+                "Promotion gate: auditor did not pass for artifact '{}'. \
                      Fix the audit findings and re-run auditor.default.",
-                    artifact_id
-                );
+                artifact_id
+            );
 
-                let has_unresolved = rev
-                    .metadata_json
-                    .get("has_unresolved_dependencies")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                anyhow::ensure!(
-                    !has_unresolved,
-                    "Promotion gate: revision has unresolved dependencies. \
+            let has_unresolved = rev
+                .metadata_json
+                .get("has_unresolved_dependencies")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            anyhow::ensure!(
+                !has_unresolved,
+                "Promotion gate: revision has unresolved dependencies. \
                      Run packager.default to install dependencies as layers, \
                      then re-submit the revision.",
-                );
-                Ok(())
-            };
+            );
+            Ok(())
+        };
 
         if needs_artifact_gate {
             // CodeExecution or AgentSpawn: must have artifact + full eval/audit gate.

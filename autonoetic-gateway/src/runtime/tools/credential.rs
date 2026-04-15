@@ -21,6 +21,26 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Execute a blocking HTTP request inside `block_in_place` to avoid deadlocking
+/// the tokio runtime. `reqwest::blocking::Client` creates its own internal runtime,
+/// which can deadlock when called directly from an async context.
+fn blocking_http_request<F, R>(f: F) -> anyhow::Result<R>
+where
+    F: FnOnce() -> anyhow::Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                tokio::task::spawn_blocking(f).await
+            })
+        })
+        .map_err(|_| anyhow::anyhow!("blocking HTTP request panicked"))?
+    } else {
+        f()
+    }
+}
+
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(CredentialCheckTool));
     registry.register(Box::new(CredentialRequestTool));
@@ -341,48 +361,49 @@ impl NativeTool for CredentialRequestTool {
             .to_string());
         }
 
-        // Build the HTTP request
-        let method = args.method.as_deref().unwrap_or("GET");
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        let method = args.method.as_deref().unwrap_or("GET").to_string();
+        let url = args.url.clone();
+        let headers = args.headers.clone();
+        let body = args.body.clone();
+        let secret_value_clone = secret_value.clone();
+        let effective_inject = cred.inject_as.clone().or(args.inject_secret_as.clone());
 
-        let mut req = client.request(reqwest::Method::from_bytes(method.as_bytes())?, &args.url);
+        let (status, body) = blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
 
-        // Add custom headers
-        if let Some(headers) = &args.headers {
-            for (k, v) in headers {
-                req = req.header(k, v);
+            let mut req = client.request(reqwest::Method::from_bytes(method.as_bytes())?, &url);
+
+            if let Some(headers) = &headers {
+                for (k, v) in headers {
+                    req = req.header(k, v);
+                }
             }
-        }
 
-        // Inject secret based on credential's stored inject_as metadata.
-        // Runtime args can only override if the credential has no inject_as configured.
-        if let Some(ref secret) = secret_value {
-            let effective_inject = cred.inject_as.as_ref().or(args.inject_secret_as.as_ref());
-
-            if let Some(inject) = effective_inject {
+            if let Some(ref secret) = secret_value_clone {
+                let inject = effective_inject
+                    .as_ref()
+                    .map(String::as_str)
+                    .unwrap_or("bearer");
                 if inject == "bearer" || inject == "Authorization" {
                     req = req.header("Authorization", format!("Bearer {}", secret));
                 } else if inject.starts_with("header:") {
-                    let header_name = &inject["header:".len()..];
-                    req = req.header(header_name, secret);
+                    req = req.header(&inject["header:".len()..], secret);
                 } else {
                     req = req.header("Authorization", format!("Bearer {}", secret));
                 }
-            } else {
-                req = req.header("Authorization", format!("Bearer {}", secret));
             }
-        }
 
-        // Add body for POST/PUT/PATCH
-        if let Some(body) = &args.body {
-            req = req.json(body);
-        }
+            if let Some(ref b) = body {
+                req = req.json(b);
+            }
 
-        let resp = req.send()?;
-        let status = resp.status().as_u16();
-        let body = resp.text()?;
+            let resp = req.send()?;
+            let status = resp.status().as_u16();
+            let body = resp.text()?;
+            Ok((status, body))
+        })?;
 
         // Sanitize response: redact secret value to prevent leakage into LLM context
         let sanitized_body = if let Some(ref secret) = secret_value {
@@ -781,111 +802,122 @@ impl NativeTool for CredentialSetupTool {
         // ------------------------------------------------------------------
         // Path 3: fresh start — may use skill_url or explicit service/steps
         // ------------------------------------------------------------------
-        let (service, steps, inject_as, allowed_hosts, base_url) = if let Some(ref url) =
-            args.skill_url
-        {
-            // Policy-check the skill_url host.
-            let url_host = extract_host(url)?;
-            if url_host.is_empty() || !policy.can_connect_net(&url_host) {
-                return Ok(json!({
+        let (service, steps, inject_as, allowed_hosts, base_url) =
+            if let Some(ref url) = args.skill_url {
+                // Policy-check the skill_url host.
+                let url_host = extract_host(url)?;
+                if url_host.is_empty() || !policy.can_connect_net(&url_host) {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": format!("Network access denied for skill_url host: {}", url_host),
+                        "approval_required": true,
+                        "reason": format!("Fetching skill.md from {} requires approval", url_host),
+                    })
+                    .to_string());
+                }
+
+                // Fetch and parse the skill.md.
+                let url_clone = url.clone();
+                let (http_status, content) =
+                    blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+                        let client = reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(15))
+                            .build()?;
+                        let resp = client.get(url_clone.as_str()).send()?;
+                        let status = resp.status().as_u16();
+                        if !resp.status().is_success() {
+                            let _ = resp.text()?;
+                            return Ok((status, String::new()));
+                        }
+                        let content = resp.text()?;
+                        Ok((status, content))
+                    })?;
+
+                if !(200..300).contains(&(http_status as i32)) {
+                    return Ok(json!({
                     "ok": false,
-                    "error": format!("Network access denied for skill_url host: {}", url_host),
-                    "approval_required": true,
-                    "reason": format!("Fetching skill.md from {} requires approval", url_host),
+                    "error": format!("Failed to fetch skill.md from {}: HTTP {}", url, http_status),
                 })
                 .to_string());
-            }
-
-            // Fetch and parse the skill.md.
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()?;
-            let resp = client.get(url.as_str()).send()?;
-            if !resp.status().is_success() {
-                return Ok(json!({
-                        "ok": false,
-                        "error": format!("Failed to fetch skill.md from {}: HTTP {}", url, resp.status()),
-                    })
-                    .to_string());
-            }
-            let content = resp.text()?;
-
-            let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
-            let parsed = match matter.parse::<SkillMdFrontmatter>(&content) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Ok(json!({
-                        "ok": false,
-                        "error": format!("Failed to parse skill.md content: {}", e),
-                    })
-                    .to_string());
                 }
-            };
-            let fm = match parsed.data {
-                Some(d) => d,
-                None => {
-                    return Ok(json!({
-                        "ok": false,
-                        "error": "No YAML frontmatter found in skill.md",
-                    })
-                    .to_string());
-                }
-            };
 
-            let autonoetic = fm.autonoetic.unwrap_or(SkillMdAutonoetic {
-                base_url: None,
-                credential: None,
-                onboarding: None,
-            });
-            let base_url = autonoetic.base_url.unwrap_or_else(|| extract_base_url(url));
-            let cred_spec = autonoetic.credential.unwrap_or(SkillCredentialSpec {
-                service: None,
-                inject_as: None,
-                allowed_hosts: None,
-            });
-            let service = cred_spec
-                .service
-                .or_else(|| args.service.clone())
-                .unwrap_or_else(|| url_host.clone());
-            let inject_as = cred_spec.inject_as.or_else(|| args.inject_as.clone());
-            let allowed_hosts = cred_spec
-                .allowed_hosts
-                .or_else(|| args.allowed_hosts.clone())
-                .unwrap_or_else(|| vec![url_host.clone()]);
-
-            let raw_steps = autonoetic.onboarding.map(|o| o.steps).unwrap_or_default();
-            let mut steps: Vec<CredentialSetupStep> = Vec::with_capacity(raw_steps.len());
-            for raw in raw_steps {
-                match raw.into_credential_step(&base_url) {
-                    Ok(s) => steps.push(s),
+                let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
+                let parsed = match matter.parse::<SkillMdFrontmatter>(&content) {
+                    Ok(v) => v,
                     Err(e) => {
                         return Ok(json!({
                             "ok": false,
-                            "error": format!("Invalid onboarding step in skill.md: {}", e),
+                            "error": format!("Failed to parse skill.md content: {}", e),
                         })
                         .to_string());
                     }
-                }
-            }
+                };
+                let fm = match parsed.data {
+                    Some(d) => d,
+                    None => {
+                        return Ok(json!({
+                            "ok": false,
+                            "error": "No YAML frontmatter found in skill.md",
+                            "skill_body": content,
+                        })
+                        .to_string());
+                    }
+                };
 
-            (service, steps, inject_as, allowed_hosts, Some(base_url))
-        } else {
-            // Explicit service + steps.
-            let service = match args.service {
-                Some(s) => s,
-                None => {
-                    return Ok(json!({
-                        "ok": false,
-                        "error": "Either 'skill_url' or 'service' + 'steps' must be provided",
-                    })
-                    .to_string());
+                let autonoetic = fm.autonoetic.unwrap_or(SkillMdAutonoetic {
+                    base_url: None,
+                    credential: None,
+                    onboarding: None,
+                });
+                let base_url = autonoetic.base_url.unwrap_or_else(|| extract_base_url(url));
+                let cred_spec = autonoetic.credential.unwrap_or(SkillCredentialSpec {
+                    service: None,
+                    inject_as: None,
+                    allowed_hosts: None,
+                });
+                let service = cred_spec
+                    .service
+                    .or_else(|| args.service.clone())
+                    .unwrap_or_else(|| url_host.clone());
+                let inject_as = cred_spec.inject_as.or_else(|| args.inject_as.clone());
+                let allowed_hosts = cred_spec
+                    .allowed_hosts
+                    .or_else(|| args.allowed_hosts.clone())
+                    .unwrap_or_else(|| vec![url_host.clone()]);
+
+                let raw_steps = autonoetic.onboarding.map(|o| o.steps).unwrap_or_default();
+                let mut steps: Vec<CredentialSetupStep> = Vec::with_capacity(raw_steps.len());
+                for raw in raw_steps {
+                    match raw.into_credential_step(&base_url) {
+                        Ok(s) => steps.push(s),
+                        Err(e) => {
+                            return Ok(json!({
+                                "ok": false,
+                                "error": format!("Invalid onboarding step in skill.md: {}", e),
+                            })
+                            .to_string());
+                        }
+                    }
                 }
+
+                (service, steps, inject_as, allowed_hosts, Some(base_url))
+            } else {
+                // Explicit service + steps.
+                let service = match args.service {
+                    Some(s) => s,
+                    None => {
+                        return Ok(json!({
+                            "ok": false,
+                            "error": "Either 'skill_url' or 'service' + 'steps' must be provided",
+                        })
+                        .to_string());
+                    }
+                };
+                let steps = args.steps.unwrap_or_default();
+                let inject_as = args.inject_as.clone();
+                let allowed_hosts = args.allowed_hosts.clone().unwrap_or_default();
+                (service, steps, inject_as, allowed_hosts, None)
             };
-            let steps = args.steps.unwrap_or_default();
-            let inject_as = args.inject_as.clone();
-            let allowed_hosts = args.allowed_hosts.clone().unwrap_or_default();
-            (service, steps, inject_as, allowed_hosts, None)
-        };
 
         // Service-scoped authorization check.
         let service_allowed = manifest.capabilities.iter().any(|c| {
@@ -1032,25 +1064,33 @@ fn execute_steps(
                     .as_ref()
                     .map(|b| resolve_template_value(b, &vars, &public_data, manifest, vault));
 
-                let http_method = method.as_deref().unwrap_or("POST");
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()?;
+                let http_method = method.as_deref().unwrap_or("POST").to_string();
+                let resolved_url_clone = resolved_url.clone();
+                let resolved_headers_clone = resolved_headers.clone();
+                let resolved_body_clone = resolved_body.clone();
 
-                let mut req = client.request(
-                    reqwest::Method::from_bytes(http_method.as_bytes())?,
-                    &resolved_url,
-                );
-                for (k, v) in &resolved_headers {
-                    req = req.header(k.as_str(), v.as_str());
-                }
-                if let Some(b) = &resolved_body {
-                    req = req.json(b);
-                }
+                let (status, resp_body) =
+                    blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+                        let client = reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(30))
+                            .build()?;
 
-                let resp = req.send()?;
-                let status = resp.status().as_u16();
-                let resp_body = resp.text()?;
+                        let mut req = client.request(
+                            reqwest::Method::from_bytes(http_method.as_bytes())?,
+                            &resolved_url_clone,
+                        );
+                        for (k, v) in &resolved_headers_clone {
+                            req = req.header(k.as_str(), v.as_str());
+                        }
+                        if let Some(ref b) = resolved_body_clone {
+                            req = req.json(b);
+                        }
+
+                        let resp = req.send()?;
+                        let status = resp.status().as_u16();
+                        let resp_body = resp.text()?;
+                        Ok((status, resp_body))
+                    })?;
                 let resp_value: serde_json::Value =
                     serde_json::from_str(&resp_body).unwrap_or(json!(resp_body));
 

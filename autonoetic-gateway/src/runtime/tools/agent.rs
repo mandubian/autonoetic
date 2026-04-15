@@ -1,7 +1,6 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
-use crate::runtime::continuation;
 use crate::runtime::tools::{
     capability_type_name, validate_agent_id, NativeTool, NativeToolRegistry,
 };
@@ -386,237 +385,48 @@ impl NativeTool for AgentSpawnTool {
             }
         }
 
-        // --- Async branch: enqueue and return immediately ---
-        if args.r#async {
-            let queued = autonoetic_types::workflow::QueuedTaskRun {
-                task_id: task_id.clone(),
-                workflow_id: workflow_id.clone(),
-                agent_id: target_agent_id.clone(),
-                message: kickoff_message,
-                child_session_id: child_delegation_path.clone(),
-                parent_session_id: resolved_session_id.clone(),
-                source_agent_id: source_agent_id.clone(),
-                metadata: args.metadata.clone(),
-                join_group: args.join_group,
-                blocks_planner: true,
-                enqueued_at: Utc::now().to_rfc3339(),
-            };
-            crate::scheduler::enqueue_task(gw_config, gateway_store.as_deref(), &queued)?;
-
-            // Update task status from Running → Pending (it's queued, not yet executing)
-            let _ = crate::scheduler::update_task_run_status(
-                gw_config,
-                gateway_store.as_deref(),
-                &workflow_id,
-                &task_id,
-                TaskRunStatus::Pending,
-                Some("queued".to_string()),
-                None,
-                None,
-            );
-
-            return serde_json::to_string(&serde_json::json!({
-                "ok": true,
-                "accepted": true,
-                "status": "queued",
-                "workflow_id": workflow_id,
-                "task_id": task_id,
-                "agent_id": target_agent_id,
-                "session_id": child_delegation_path,
-                "message": "Task queued for async execution. Use workflow.wait with task_ids to check completion status."
-            }))
-            .map_err(Into::into);
-        }
-
-        // --- Synchronous branch (existing behavior) ---
-        let wf_id_clone = workflow_id.clone();
-        let tid_clone = task_id.clone();
-        let artifact_id_clone = args.artifact_id.clone();
-        let spawn_future = async move {
-            execution
-                .spawn_agent_once(
-                    &target_agent_id,
-                    &kickoff_message,
-                    &child_delegation_path, // Use delegation path as session_id for content namespace
-                    Some(&source_agent_id),
-                    false,
-                    None,
-                    args.metadata.as_ref(),
-                    Some(&wf_id_clone),
-                    Some(&tid_clone),
-                    artifact_id_clone.as_deref(),
-                )
-                .await
+        // --- Always queue the task (async execution by the scheduler) ---
+        // The sync `block_in_place` path was removed because it deadlocks the
+        // tokio runtime when called from within an already-running agent context.
+        // The scheduler's `process_queued_workflow_tasks` picks up queued tasks
+        // and runs them on dedicated tokio tasks.
+        let queued = autonoetic_types::workflow::QueuedTaskRun {
+            task_id: task_id.clone(),
+            workflow_id: workflow_id.clone(),
+            agent_id: target_agent_id.clone(),
+            message: kickoff_message,
+            child_session_id: child_delegation_path.clone(),
+            parent_session_id: resolved_session_id.clone(),
+            source_agent_id: source_agent_id.clone(),
+            metadata: args.metadata.clone(),
+            join_group: args.join_group,
+            blocks_planner: true,
+            enqueued_at: Utc::now().to_rfc3339(),
         };
+        crate::scheduler::enqueue_task(gw_config, gateway_store.as_deref(), &queued)?;
 
-        let spawn_result = {
-            let _heartbeat = SyncTaskHeartbeat::start(
-                gw_config.clone(),
-                gateway_store.clone(),
-                workflow_id.clone(),
-                task_id.clone(),
-                crate::scheduler::workflow_task_heartbeat_interval_secs(gw_config),
-            );
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                tokio::task::block_in_place(|| handle.block_on(spawn_future))
-            } else {
-                tokio::runtime::Runtime::new()?.block_on(spawn_future)
-            }
-        };
+        let _ = crate::scheduler::update_task_run_status(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+            &task_id,
+            TaskRunStatus::Pending,
+            Some("queued".to_string()),
+            None,
+            None,
+        );
 
-        match spawn_result {
-            Ok(result) => {
-                if let Some(request_id) = &result.suspended_for_approval {
-                    let summary = format!("awaiting approval {}", request_id);
-
-                    // Load continuation to get approval details (tool name, etc.)
-                    let approval_metadata = continuation::load_continuation(gw_config, &task_id)
-                        .ok()
-                        .flatten()
-                        .and_then(|cont| {
-                            let tool_name = cont.pending_tool_call.tool_name.clone();
-                            // Derive approval kind from tool name
-                            let kind = if tool_name.contains("sandbox") {
-                                "sandbox".to_string()
-                            } else if tool_name.contains("install") {
-                                "agent_install".to_string()
-                            } else {
-                                "tool_execution".to_string()
-                            };
-                            // Try to extract reason from approval_response
-                            let reason = serde_json::from_str::<serde_json::Value>(
-                                &cont.pending_tool_call.approval_response,
-                            )
-                            .ok()
-                            .and_then(|v| {
-                                v.get("approval")
-                                    .and_then(|a| a.get("reason"))
-                                    .and_then(|r| r.as_str())
-                                    .map(String::from)
-                            });
-
-                            Some(crate::scheduler::ApprovalMetadata {
-                                request_id: cont.approval_request_id,
-                                kind,
-                                reason,
-                            })
-                        });
-
-                    if let Err(e) = crate::scheduler::update_task_run_status(
-                        gw_config,
-                        gateway_store.as_deref(),
-                        &workflow_id,
-                        &task_id,
-                        TaskRunStatus::AwaitingApproval,
-                        Some(summary),
-                        approval_metadata,
-                        None,
-                    ) {
-                        tracing::warn!(
-                            target: "workflow",
-                            error = %e,
-                            workflow_id = %workflow_id,
-                            task_id = %task_id,
-                            "Failed to persist task awaiting approval status"
-                        );
-                    }
-
-                    let _ = crate::scheduler::checkpoint_task(
-                        gw_config,
-                        gateway_store.as_deref(),
-                        &workflow_id,
-                        &task_id,
-                        "awaiting_approval".to_string(),
-                        serde_json::json!({
-                            "status": "awaiting_approval",
-                            "approval_request_id": request_id,
-                        }),
-                    );
-
-                    // Return success — the task is queued and will resume after approval.
-                    // The planner should call workflow.wait to get the result.
-                    // Do NOT expose awaiting_approval status — the planner doesn't need to know.
-                    let summary = format!(
-                        "Task queued: {} will execute after approval ({}). Call workflow.wait to get the result.",
-                        result.agent_id, request_id
-                    );
-                    return Ok(serde_json::json!({
-                        "ok": true,
-                        "status": "queued",
-                        "workflow_id": workflow_id,
-                        "task_id": task_id,
-                        "agent_id": result.agent_id,
-                        "session_id": result.session_id,
-                        "result_summary": summary,
-                        "files": result.files,
-                    })
-                    .to_string());
-                }
-
-                let summary = result.assistant_reply.as_ref().map(|s| {
-                    const MAX: usize = 512;
-                    if s.len() <= MAX {
-                        s.clone()
-                    } else {
-                        format!("{}…", &s[..MAX])
-                    }
-                });
-                if let Err(e) = crate::scheduler::update_task_run_status(
-                    gw_config,
-                    gateway_store.as_deref(),
-                    &workflow_id,
-                    &task_id,
-                    TaskRunStatus::Succeeded,
-                    summary,
-                    None,
-                    None,
-                ) {
-                    tracing::warn!(
-                        target: "workflow",
-                        error = %e,
-                        workflow_id = %workflow_id,
-                        task_id = %task_id,
-                        "Failed to persist task completion status"
-                    );
-                }
-                Ok(serde_json::json!({
-                    "ok": true,
-                    "status": "agent_spawned",
-                    "workflow_id": workflow_id,
-                    "task_id": task_id,
-                    "agent_id": result.agent_id,
-                    "session_id": result.session_id,
-                    "assistant_reply": result.assistant_reply,
-                    "artifacts": result.artifacts,
-                    // All named content written by the child — use name/handle/alias with content.read
-                    "files": result.files,
-                    "shared_knowledge": result.shared_knowledge,
-                    "llm_usage": result.llm_usage,
-                })
-                .to_string())
-            }
-            Err(e) => {
-                if let Err(inner) = crate::scheduler::update_task_run_status(
-                    gw_config,
-                    gateway_store.as_deref(),
-                    &workflow_id,
-                    &task_id,
-                    TaskRunStatus::Failed,
-                    Some(e.to_string()),
-                    None,
-                    None,
-                ) {
-                    tracing::warn!(
-                        target: "workflow",
-                        error = %inner,
-                        workflow_id = %workflow_id,
-                        task_id = %task_id,
-                        "Failed to persist task failure status"
-                    );
-                }
-                Err(e)
-            }
-        }
+        return serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "accepted": true,
+            "status": "queued",
+            "workflow_id": workflow_id,
+            "task_id": task_id,
+            "agent_id": target_agent_id,
+            "session_id": child_delegation_path,
+            "message": "Task queued for async execution. Use workflow.wait with task_ids to check completion status."
+        }))
+        .map_err(Into::into);
     }
 }
 
@@ -928,8 +738,139 @@ impl NativeTool for AgentDiscoverTool {
     }
 }
 
+pub struct AgentListTool;
+
+impl NativeTool for AgentListTool {
+    fn name(&self) -> &'static str {
+        "agent.list"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::SandboxFunctions { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Enumerate installed agents with their metadata. Returns a plain directory of agents — no semantic scoring. Use this to discover what agents are available before deciding which to spawn or what needs to be built.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filter_prefix": {
+                        "type": "string",
+                        "description": "Only return agents whose agent_id starts with this prefix (e.g. 'specialists/' or 'evolution/')."
+                    },
+                    "requires_capability": {
+                        "type": "string",
+                        "description": "Only return agents that declare this capability type (e.g. 'NetworkAccess', 'CodeExecution', 'CredentialAccess')."
+                    },
+                    "execution_mode": {
+                        "type": "string",
+                        "enum": ["reasoning", "script"],
+                        "description": "Only return agents with this execution mode."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
+        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default)]
+            filter_prefix: Option<String>,
+            #[serde(default)]
+            requires_capability: Option<String>,
+            #[serde(default)]
+            execution_mode: Option<String>,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let agents_dir = config
+            .map(|c| &c.agents_dir)
+            .ok_or_else(|| anyhow::anyhow!("config is required for agent.list"))?;
+
+        let repo = crate::agent::AgentRepository::new(agents_dir.clone());
+        let loaded_agents = repo.list_loaded_sync()?;
+
+        let agents: Vec<serde_json::Value> = loaded_agents
+            .into_iter()
+            .filter(|agent| {
+                if let Some(prefix) = &args.filter_prefix {
+                    if !agent.id().starts_with(prefix.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(req_cap) = &args.requires_capability {
+                    let has_cap = agent
+                        .manifest
+                        .capabilities
+                        .iter()
+                        .any(|c| capability_type_name(c).eq_ignore_ascii_case(req_cap));
+                    if !has_cap {
+                        return false;
+                    }
+                }
+                if let Some(mode) = &args.execution_mode {
+                    let agent_mode = match &agent.manifest.execution_mode {
+                        autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
+                        autonoetic_types::agent::ExecutionMode::Script => "script",
+                    };
+                    if !agent_mode.eq_ignore_ascii_case(mode) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|agent| {
+                let cap_types: Vec<String> = agent
+                    .manifest
+                    .capabilities
+                    .iter()
+                    .map(|c| capability_type_name(c))
+                    .collect();
+                let mode = match &agent.manifest.execution_mode {
+                    autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
+                    autonoetic_types::agent::ExecutionMode::Script => "script",
+                };
+                serde_json::json!({
+                    "agent_id": agent.id(),
+                    "description": agent.manifest.agent.description,
+                    "capabilities": cap_types,
+                    "execution_mode": mode,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "agents": agents,
+            "count": agents.len(),
+        })
+        .to_string())
+    }
+}
+
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(AgentSpawnTool));
     registry.register(Box::new(AgentExistsTool));
     registry.register(Box::new(AgentDiscoverTool));
+    registry.register(Box::new(AgentListTool));
 }
