@@ -3,7 +3,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{validate_relative_agent_path, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{
-    AgentIO, AgentIdentity, AgentManifest, ExecutionMode, LlmConfig, Middleware,
+    AgentIO, AgentIdentity, AgentManifest, ExecutionMode, LlmConfig, Middleware, ScriptInputMode,
 };
 use autonoetic_types::artifact::{ArtifactBundle, ArtifactKind};
 use autonoetic_types::capability::Capability;
@@ -325,6 +325,8 @@ struct RevisionCreateFromIntentArgs {
     execution_mode: Option<ExecutionMode>,
     #[serde(default)]
     script_entry: Option<String>,
+    #[serde(default)]
+    script_input_mode: Option<ScriptInputMode>,
     #[serde(default)]
     llm_config: Option<LlmConfig>,
     #[serde(default)]
@@ -845,6 +847,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "description": { "type": "string", "description": "Agent description for metadata.agent.description" },
                     "execution_mode": { "type": "string", "enum": ["reasoning", "script"] },
                     "script_entry": { "type": "string" },
+                    "script_input_mode": { "type": "string", "enum": ["stdin", "args"], "description": "How input is delivered to script agents: 'stdin' (default) writes payload to stdin; 'args' passes the full JSON payload as the first positional CLI argument ($1)." },
                     "llm_config": { "type": "object" },
                     "capabilities": {
                         "type": "array",
@@ -1078,6 +1081,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             response_contract: args.response_contract.clone(),
             execution_mode: resolved_mode,
             script_entry: resolved_script_entry.clone(),
+            script_input_mode: args.script_input_mode.unwrap_or_default(),
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],

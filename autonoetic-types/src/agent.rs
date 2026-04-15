@@ -10,6 +10,10 @@ fn default_version() -> String {
     "1.0".to_string()
 }
 
+fn is_default_script_input_mode(mode: &ScriptInputMode) -> bool {
+    matches!(mode, ScriptInputMode::Stdin)
+}
+
 /// Runtime declaration block from the SKILL.md frontmatter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeDeclaration {
@@ -147,6 +151,9 @@ pub struct AgentManifest {
     /// Entry script for Script mode. Relative path from agent directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_entry: Option<String>,
+    /// How input is delivered to script agents: stdin (default) or args ($1).
+    #[serde(default, skip_serializing_if = "is_default_script_input_mode")]
+    pub script_input_mode: ScriptInputMode,
     /// Remote gateway URL for distributed agents. When set, SDK uses HTTP mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_url: Option<String>,
@@ -202,6 +209,17 @@ pub enum ExecutionMode {
     /// Default: full LLM-driven reasoning loop.
     #[default]
     Reasoning,
+}
+
+/// How the gateway delivers input to a script-mode agent.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptInputMode {
+    /// Write the raw message to the script's stdin (default).
+    #[default]
+    Stdin,
+    /// Pass the full JSON message as the first positional CLI argument ($1).
+    Args,
 }
 
 /// Tool tier for progressive disclosure.

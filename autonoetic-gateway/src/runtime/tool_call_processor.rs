@@ -547,8 +547,9 @@ mod tests {
             io: None,
             middleware: None,
             execution_mode: Default::default(),
-            script_entry: None,
-            gateway_url: None,
+                script_entry: None,
+                script_input_mode: Default::default(),
+                gateway_url: None,
             gateway_token: None,
 
             response_contract: None,

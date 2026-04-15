@@ -2,7 +2,7 @@
 
 use autonoetic_types::agent::{
     AgentIO, AgentIdentity, AgentManifest, AgentSkillsImportMetadata, CompressionConfig,
-    ExecutionMode, LlmConfig, Middleware, ResourceLimits, RuntimeDeclaration,
+    ExecutionMode, LlmConfig, Middleware, ResourceLimits, RuntimeDeclaration, ScriptInputMode,
 };
 use autonoetic_types::background::BackgroundPolicy;
 use autonoetic_types::capability::Capability;
@@ -49,6 +49,8 @@ struct AutonoeticMetadata {
     execution_mode: Option<ExecutionMode>,
     #[serde(default)]
     script_entry: Option<String>,
+    #[serde(default)]
+    script_input_mode: Option<ScriptInputMode>,
     #[serde(default)]
     gateway_url: Option<String>,
     #[serde(default)]
@@ -151,6 +153,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         middleware: meta.middleware,
         execution_mode: meta.execution_mode.unwrap_or_default(),
         script_entry: meta.script_entry,
+        script_input_mode: meta.script_input_mode.unwrap_or_default(),
         gateway_url: meta.gateway_url,
         gateway_token: meta.gateway_token,
         response_contract: meta.response_contract,
