@@ -1181,10 +1181,13 @@ fn poll_result_is_important(tool_name: &str, parsed: Option<&Value>) -> bool {
 fn render_live_markdown(state: &SessionReportState) -> String {
     let mut out = String::new();
     let open_blockers = collect_open_blockers(state, false);
-    let recent_events: Vec<&ReportEvent> = state
+    let turn_nums = timeline_turn_numbers(state);
+    let recent_events: Vec<(u32, &ReportEvent)> = state
         .timeline
         .iter()
-        .filter(|e| e.important)
+        .enumerate()
+        .filter(|(_, e)| e.important)
+        .map(|(i, e)| (turn_nums[i], e))
         .rev()
         .take(16)
         .collect();
@@ -1198,26 +1201,54 @@ fn render_live_markdown(state: &SessionReportState) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "| Field | Value |");
     let _ = writeln!(out, "|---|---|");
+    let total_turns: u32 = state.agents.values().map(|a| a.turn_count).sum();
     let _ = writeln!(out, "| Status | `{}` |", state.status);
     let _ = writeln!(
         out,
         "| Started | {} |",
         state.started_at.as_deref().unwrap_or("—")
     );
+    let _ = writeln!(out, "| Total turns | {} |", total_turns);
+    let _ = writeln!(out, "| Duration | {} |", format_duration(state.started_at.as_deref(), Some(&state.generated_at)));
     let _ = writeln!(out, "| Last updated | {} |", state.generated_at);
+    let _ = writeln!(out);
+    {
+        let agents_with_errors = state.agents.values().filter(|a| a.error_count > 0).count();
+        let awaiting = state.agents.values().filter(|a| a.status == "awaiting_approval").count();
+        let failed = state.agents.values().filter(|a| a.status == "failed").count();
+        let abnormal_exits = state.agents.values()
+            .filter(|a| a.close_reason.as_deref().map_or(false, is_abnormal_close))
+            .count();
+        let health_line = if failed > 0 || agents_with_errors > 0 || abnormal_exits > 0 {
+            format!(
+                "> **[ISSUES]** {} agent(s) with errors | {} failed | {} awaiting approval | {} abnormal exit(s)",
+                agents_with_errors, failed, awaiting, abnormal_exits
+            )
+        } else if awaiting > 0 {
+            format!("> **[WAITING]** {} agent(s) awaiting approval", awaiting)
+        } else {
+            "> **[OK]** No issues detected".to_string()
+        };
+        let _ = writeln!(out, "{}", health_line);
+    }
     let _ = writeln!(out);
     let _ = writeln!(out, "## Active Agents");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "| Agent | Session | Parent | Status | Started | Last Event | Output | Errors |"
+        "| Agent | Session | Parent | Status | Turns | Err% | Started | Last Event | Output | Errors |"
     );
-    let _ = writeln!(out, "|---|---|---|---|---|---|---|---:|");
+    let _ = writeln!(out, "|---|---|---|---|---:|---:|---|---|---|---:|");
     for (depth, agent) in agents_by_tree(state, None) {
         let indent = "  ".repeat(depth);
+        let err_pct = if agent.tool_count == 0 {
+            "—".to_string()
+        } else {
+            format!("{}%", agent.error_count * 100 / agent.tool_count)
+        };
         let _ = writeln!(
             out,
-            "| `{}{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} |",
+            "| `{}{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} |",
             indent,
             agent.agent_id,
             short_session_id(&agent.session_id),
@@ -1227,6 +1258,8 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                 .map(short_session_id)
                 .unwrap_or("—"),
             agent.status,
+            agent.turn_count,
+            err_pct,
             format_timestamp(agent.started_at.as_deref()),
             truncate_chars(
                 agent.last_event_summary.as_deref().unwrap_or("—"),
@@ -1288,18 +1321,44 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         }
     }
     let _ = writeln!(out);
+    {
+        let abnormal: Vec<_> = state.agents.values()
+            .filter(|a| a.close_reason.as_deref().map_or(false, is_abnormal_close))
+            .collect();
+        let _ = writeln!(out, "## Abnormal Exits");
+        let _ = writeln!(out);
+        if abnormal.is_empty() {
+            let _ = writeln!(out, "_(none)_");
+        } else {
+            let _ = writeln!(out, "| Agent | Session | Status | Close Reason |");
+            let _ = writeln!(out, "|---|---|---|---|");
+            for agent in &abnormal {
+                let _ = writeln!(
+                    out,
+                    "| `{}` | `{}` | `{}` | {} |",
+                    agent.agent_id,
+                    short_session_id(&agent.session_id),
+                    agent.status,
+                    truncate_chars(agent.close_reason.as_deref().unwrap_or("—"), 200)
+                );
+            }
+        }
+    }
+    let _ = writeln!(out);
     let _ = writeln!(out, "## Recent Important Events");
     let _ = writeln!(out);
     if recent_events.is_empty() {
         let _ = writeln!(out, "_(none yet)_");
     } else {
-        let _ = writeln!(out, "| Time | Agent | Kind | Summary |");
-        let _ = writeln!(out, "|---|---|---|---|");
-        for event in recent_events.into_iter().rev() {
+        let _ = writeln!(out, "| Time | T# | Session | Agent | Kind | Summary |");
+        let _ = writeln!(out, "|---|---|---|---|---|---|");
+        for (turn_num, event) in recent_events.into_iter().rev() {
             let _ = writeln!(
                 out,
-                "| {} | `{}` | {} | {} |",
+                "| {} | T{} | `{}` | `{}` | {} | {} |",
                 format_timestamp(Some(&event.created_at)),
+                turn_num,
+                short_session_id(&event.session_id),
                 event.agent_id,
                 event.kind,
                 truncate_chars(&event.summary, OUTPUT_PREVIEW_DISPLAY_CHARS)
@@ -1309,24 +1368,44 @@ fn render_live_markdown(state: &SessionReportState) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "## Agent Details");
     let _ = writeln!(out);
-    for agent in sorted_agents(state) {
+    for (_depth, agent) in agents_by_tree(state, None) {
+        let turn_range_str = match agent_turn_range(state, &agent.session_id, &turn_nums) {
+            Some((f, l)) if f == l => format!(" (T{})", f),
+            Some((f, l)) => format!(" (T{}–T{})", f, l),
+            None => String::new(),
+        };
         let _ = writeln!(
             out,
-            "### {} `{}`",
+            "### {} `{}`{}",
             agent.agent_id,
-            short_session_id(&agent.session_id)
+            short_session_id(&agent.session_id),
+            turn_range_str
         );
         let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "- Status: `{}` | Started: {} | Ended: {} | Turns: {} | Tools: {} | Errors: {}",
-            agent.status,
-            agent.started_at.as_deref().unwrap_or("—"),
-            agent.ended_at.as_deref().unwrap_or("—"),
-            agent.turn_count,
-            agent.tool_count,
-            agent.error_count
-        );
+        {
+            let streak = consecutive_error_streak(state, &agent.session_id);
+            let avg_turn = avg_turn_secs(state, &agent.session_id)
+                .map(|s| format!("{}s", s))
+                .unwrap_or_else(|| "—".to_string());
+            let err_rate = if agent.tool_count == 0 {
+                "—".to_string()
+            } else {
+                format!("{}%", agent.error_count * 100 / agent.tool_count)
+            };
+            let _ = writeln!(
+                out,
+                "- Status: `{}` | Started: {} | Ended: {} | Turns: {} | Tools: {} | Errors: {} ({}){} | Avg turn: {}",
+                agent.status,
+                agent.started_at.as_deref().unwrap_or("—"),
+                agent.ended_at.as_deref().unwrap_or("—"),
+                agent.turn_count,
+                agent.tool_count,
+                agent.error_count,
+                err_rate,
+                if streak > 1 { format!(" ⚠ streak:{}", streak) } else { String::new() },
+                avg_turn
+            );
+        }
         let _ = writeln!(
             out,
             "- Input: {}",
@@ -1340,6 +1419,28 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         if let Some(reason) = &agent.close_reason {
             let _ = writeln!(out, "- Close reason: {}", truncate_chars(reason, 180));
         }
+        if !agent.errors.is_empty() {
+            let _ = writeln!(out, "- Errors:");
+            for error in &agent.errors {
+                let _ = writeln!(
+                    out,
+                    "  - [{}] `{}` {}",
+                    format_timestamp(Some(&error.created_at)),
+                    error.tool_name.as_deref().unwrap_or("—"),
+                    truncate_chars(&error.summary, 180)
+                );
+                // Pre-error context: last 2 events before this error
+                for ctx in events_before(state, &agent.session_id, &error.created_at, 2) {
+                    let _ = writeln!(
+                        out,
+                        "    - _before:_ [{}] {} {}",
+                        format_timestamp(Some(&ctx.created_at)),
+                        ctx.kind,
+                        truncate_chars(&ctx.summary, 120)
+                    );
+                }
+            }
+        }
         if !agent.approvals.is_empty() {
             let _ = writeln!(out, "- Approvals:");
             for approval in &agent.approvals {
@@ -1351,11 +1452,19 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                         approval.decision.as_deref().unwrap_or("unknown")
                     ),
                 };
+                let wait = if approval.status == "pending" {
+                    format!(" (waiting {})", format_duration(Some(&approval.created_at), Some(&state.generated_at)))
+                } else if let Some(ref resolved) = approval.resolved_at {
+                    format!(" (waited {})", format_duration(Some(&approval.created_at), Some(resolved)))
+                } else {
+                    String::new()
+                };
                 let _ = writeln!(
                     out,
-                    "  - `{}` {} — {}",
+                    "  - `{}` {}{} — {}",
                     approval.request_id,
                     status_str,
+                    wait,
                     truncate_chars(&approval.summary, 200)
                 );
             }
@@ -1368,6 +1477,30 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                     "  - `{}` {}",
                     artifact.artifact_id,
                     truncate_chars(&artifact.summary, 200)
+                );
+            }
+        }
+        if !agent.delegations.is_empty() {
+            let _ = writeln!(out, "- Delegations:");
+            let mut per_target: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for d in &agent.delegations {
+                let idx = *per_target.entry(d.target_agent.as_str()).and_modify(|c| *c += 1).or_insert(0);
+                let child = find_child_agent(state, &agent.session_id, &d.target_agent, idx);
+                let child_status = child.map(|a| a.status.as_str()).unwrap_or("unknown");
+                let child_errors = child.map(|a| a.error_count).unwrap_or(0);
+                let child_close = child.and_then(|a| a.close_reason.as_deref()).unwrap_or("—");
+                let child_output = child.and_then(|a| a.output_preview.as_deref())
+                    .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
+                let abnormal = child.and_then(|a| a.close_reason.as_deref())
+                    .map_or(false, is_abnormal_close);
+                let _ = writeln!(
+                    out,
+                    "  - `{}` `{}` errs:{}{} → {}",
+                    d.target_agent,
+                    child_status,
+                    child_errors,
+                    if abnormal { format!(" ⚠ {}", truncate_chars(child_close, 60)) } else { String::new() },
+                    truncate_chars(child_output, 120)
                 );
             }
         }
@@ -1398,10 +1531,13 @@ fn render_live_markdown(state: &SessionReportState) -> String {
 fn render_live_html(state: &SessionReportState) -> String {
     let mut out = String::new();
     let open_blockers = collect_open_blockers(state, false);
-    let recent_events: Vec<&ReportEvent> = state
+    let turn_nums = timeline_turn_numbers(state);
+    let recent_events: Vec<(u32, &ReportEvent)> = state
         .timeline
         .iter()
-        .filter(|e| e.important)
+        .enumerate()
+        .filter(|(_, e)| e.important)
+        .map(|(i, e)| (turn_nums[i], e))
         .rev()
         .take(16)
         .collect();
@@ -1443,6 +1579,10 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
 .badge-suspended { background: #d2992833; color: var(--yellow); }
 .badge-awaiting_approval { background: #db6d2833; color: var(--orange); }
 .section-note { color: var(--text-dim); font-style: italic; font-size: 0.85rem; }
+.health-banner { padding: 0.5rem 1rem; border-radius: 4px; margin: 0.75rem 0; font-weight: 600; font-size: 0.9rem; }
+.health-ok { background: #3fb95022; color: var(--green); border-left: 3px solid var(--green); }
+.health-warn { background: #d2992822; color: var(--yellow); border-left: 3px solid var(--yellow); }
+.health-error { background: #f8514922; color: var(--red); border-left: 3px solid var(--red); }
 </style>
 </head><body>\n"#);
 
@@ -1452,6 +1592,7 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
     ));
     out.push_str("<p><em>Auto-updated structured view. Narrative log remains in <code>digest.md</code>.</em></p>\n");
 
+    let total_turns: u32 = state.agents.values().map(|a| a.turn_count).sum();
     out.push_str("<h2>Status</h2>\n");
     out.push_str("<table><tbody>\n");
     out.push_str(&format!(
@@ -1463,20 +1604,54 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
         state.started_at.as_deref().unwrap_or("—")
     ));
     out.push_str(&format!(
+        "<tr><th>Total turns</th><td>{}</td></tr>\n",
+        total_turns
+    ));
+    out.push_str(&format!(
+        "<tr><th>Duration</th><td>{}</td></tr>\n",
+        format_duration(state.started_at.as_deref(), Some(&state.generated_at))
+    ));
+    out.push_str(&format!(
         "<tr><th>Last updated</th><td>{}</td></tr>\n",
         state.generated_at
     ));
     out.push_str("</tbody></table>\n");
+    {
+        let agents_with_errors = state.agents.values().filter(|a| a.error_count > 0).count();
+        let awaiting = state.agents.values().filter(|a| a.status == "awaiting_approval").count();
+        let failed = state.agents.values().filter(|a| a.status == "failed").count();
+        let abnormal_exits = state.agents.values()
+            .filter(|a| a.close_reason.as_deref().map_or(false, is_abnormal_close))
+            .count();
+        let (class, msg) = if failed > 0 || agents_with_errors > 0 || abnormal_exits > 0 {
+            ("health-error", format!(
+                "[ISSUES] {} agent(s) with errors | {} failed | {} awaiting approval | {} abnormal exit(s)",
+                agents_with_errors, failed, awaiting, abnormal_exits
+            ))
+        } else if awaiting > 0 {
+            ("health-warn", format!("[WAITING] {} agent(s) awaiting approval", awaiting))
+        } else {
+            ("health-ok", "[OK] No issues detected".to_string())
+        };
+        out.push_str(&format!("<div class=\"health-banner {}\">{}</div>\n", class, escape_html(&msg)));
+    }
 
     out.push_str("<h2>Active Agents</h2>\n");
-    out.push_str("<table><thead><tr><th style=\"width:15%\">Agent</th><th style=\"width:12%\">Session</th><th style=\"width:10%\">Parent</th><th style=\"width:10%\">Status</th><th style=\"width:13%\">Started</th><th style=\"width:20%\">Last Event</th><th style=\"width:15%\">Output</th><th style=\"width:5%\">Errors</th></tr></thead><tbody>\n");
+    out.push_str("<table><thead><tr><th style=\"width:14%\">Agent</th><th style=\"width:10%\">Session</th><th style=\"width:8%\">Parent</th><th style=\"width:8%\">Status</th><th style=\"width:5%\">Turns</th><th style=\"width:5%\">Err%</th><th style=\"width:10%\">Started</th><th style=\"width:18%\">Last Event</th><th style=\"width:14%\">Output</th><th style=\"width:4%\">Errors</th></tr></thead><tbody>\n");
     for (depth, agent) in agents_by_tree(state, None) {
         let indent = "&nbsp;&nbsp;".repeat(depth);
-        out.push_str(&format!("<tr><td><code>{}{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+        let err_pct = if agent.tool_count == 0 {
+            "—".to_string()
+        } else {
+            format!("{}%", agent.error_count * 100 / agent.tool_count)
+        };
+        out.push_str(&format!("<tr><td><code>{}{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
             indent, escape_html(&agent.agent_id),
             escape_html(short_session_id(&agent.session_id)),
             agent.parent_session_id.as_deref().map(|s| format!("<code>{}</code>", escape_html(short_session_id(s)))).unwrap_or_else(|| "—".to_string()),
             status_to_badge_class(&agent.status), agent.status,
+            agent.turn_count,
+            escape_html(&err_pct),
             format_timestamp(agent.started_at.as_deref()),
             truncate_html(agent.last_event_summary.as_deref().unwrap_or("—"), OUTPUT_PREVIEW_DISPLAY_CHARS),
             truncate_html(agent.output_preview.as_deref().unwrap_or("—"), OUTPUT_PREVIEW_DISPLAY_CHARS),
@@ -1524,15 +1699,38 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
         out.push_str("</tbody></table>\n");
     }
 
+    {
+        let abnormal: Vec<_> = state.agents.values()
+            .filter(|a| a.close_reason.as_deref().map_or(false, is_abnormal_close))
+            .collect();
+        out.push_str("<h2>Abnormal Exits</h2>\n");
+        if abnormal.is_empty() {
+            out.push_str("<p class=\"section-note\">none</p>\n");
+        } else {
+            out.push_str("<table><thead><tr><th>Agent</th><th>Session</th><th>Status</th><th>Close Reason</th></tr></thead><tbody>\n");
+            for agent in &abnormal {
+                out.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td></tr>\n",
+                    escape_html(&agent.agent_id),
+                    escape_html(short_session_id(&agent.session_id)),
+                    status_to_badge_class(&agent.status), agent.status,
+                    truncate_html(agent.close_reason.as_deref().unwrap_or("—"), 200),
+                ));
+            }
+            out.push_str("</tbody></table>\n");
+        }
+    }
+
     out.push_str("<h2>Recent Important Events</h2>\n");
     if recent_events.is_empty() {
         out.push_str("<p class=\"section-note\">none yet</p>\n");
     } else {
-        out.push_str("<table><thead><tr><th style=\"width:15%\">Time</th><th style=\"width:12%\">Agent</th><th style=\"width:10%\">Kind</th><th>Summary</th></tr></thead><tbody>\n");
-        for event in recent_events.into_iter().rev() {
+        out.push_str("<table><thead><tr><th style=\"width:13%\">Time</th><th style=\"width:5%\">T#</th><th style=\"width:10%\">Session</th><th style=\"width:12%\">Agent</th><th style=\"width:10%\">Kind</th><th>Summary</th></tr></thead><tbody>\n");
+        for (turn_num, event) in recent_events.into_iter().rev() {
             out.push_str(&format!(
-                "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>\n",
+                "<tr><td>{}</td><td>T{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>\n",
                 format_timestamp(Some(&event.created_at)),
+                turn_num,
+                escape_html(short_session_id(&event.session_id)),
                 escape_html(&event.agent_id),
                 escape_html(&event.kind),
                 truncate_html(&event.summary, OUTPUT_PREVIEW_DISPLAY_CHARS),
@@ -1542,25 +1740,156 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
     }
 
     out.push_str("<h2>Agent Details</h2>\n");
-    for agent in sorted_agents(state) {
+    for (_depth, agent) in agents_by_tree(state, None) {
+        let turn_range_str = match agent_turn_range(state, &agent.session_id, &turn_nums) {
+            Some((f, l)) if f == l => format!(" (T{})", f),
+            Some((f, l)) => format!(" (T{}–T{})", f, l),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "<h3><code>{}</code> <code>{}</code></h3>\n",
+            "<h3><code>{}</code> <code>{}</code>{}</h3>\n",
             escape_html(&agent.agent_id),
-            escape_html(short_session_id(&agent.session_id))
+            escape_html(short_session_id(&agent.session_id)),
+            turn_range_str
         ));
-        out.push_str("<table><tbody>\n");
-        out.push_str(&format!("<tr><th>Status</th><td><span class=\"badge badge-{}\">{}</span></td><th>Started</th><td>{}</td><th>Turns</th><td>{}</td></tr>\n",
-            status_to_badge_class(&agent.status), agent.status,
-            format_timestamp(agent.started_at.as_deref()), agent.turn_count));
-        out.push_str(&format!(
-            "<tr><th>Input</th><td colspan=\"5\">{}</td></tr>\n",
-            escape_html(agent.input_preview.as_deref().unwrap_or("—"))
-        ));
-        out.push_str(&format!(
-            "<tr><th>Output</th><td colspan=\"5\">{}</td></tr>\n",
-            escape_html(agent.output_preview.as_deref().unwrap_or("—"))
-        ));
-        out.push_str("</tbody></table>\n");
+        {
+            let streak = consecutive_error_streak(state, &agent.session_id);
+            let avg_turn = avg_turn_secs(state, &agent.session_id)
+                .map(|s| format!("{}s", s))
+                .unwrap_or_else(|| "—".to_string());
+            let err_rate = if agent.tool_count == 0 {
+                "—".to_string()
+            } else {
+                format!("{}%", agent.error_count * 100 / agent.tool_count)
+            };
+            out.push_str("<table><tbody>\n");
+            out.push_str(&format!("<tr><th>Status</th><td><span class=\"badge badge-{}\">{}</span></td><th>Started</th><td>{}</td><th>Turns</th><td>{}</td></tr>\n",
+                status_to_badge_class(&agent.status), agent.status,
+                format_timestamp(agent.started_at.as_deref()), agent.turn_count));
+            out.push_str(&format!(
+                "<tr><th>Tools</th><td>{}</td><th>Errors</th><td>{} ({}){}</td><th>Avg turn</th><td>{}</td></tr>\n",
+                agent.tool_count,
+                agent.error_count,
+                escape_html(&err_rate),
+                if streak > 1 { format!(" <strong style=\"color:var(--red)\">⚠ streak:{}</strong>", streak) } else { String::new() },
+                avg_turn
+            ));
+            out.push_str(&format!(
+                "<tr><th>Input</th><td colspan=\"5\">{}</td></tr>\n",
+                escape_html(agent.input_preview.as_deref().unwrap_or("—"))
+            ));
+            out.push_str(&format!(
+                "<tr><th>Output</th><td colspan=\"5\">{}</td></tr>\n",
+                escape_html(agent.output_preview.as_deref().unwrap_or("—"))
+            ));
+            out.push_str("</tbody></table>\n");
+        }
+        if !agent.errors.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Errors with context ({})</summary>",
+                agent.errors.len()
+            );
+            out.push_str("<table><thead><tr><th>Time</th><th>Tool</th><th>Summary</th><th>Context before</th></tr></thead><tbody>\n");
+            for e in &agent.errors {
+                let ctx_items: Vec<String> = events_before(state, &agent.session_id, &e.created_at, 2)
+                    .iter()
+                    .map(|ctx| format!("[{}] {} {}",
+                        format_timestamp(Some(&ctx.created_at)),
+                        escape_html(&ctx.kind),
+                        truncate_html(&ctx.summary, 80)))
+                    .collect();
+                out.push_str(&format!(
+                    "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td style=\"font-size:0.8rem;color:var(--text-dim)\">{}</td></tr>\n",
+                    format_timestamp(Some(&e.created_at)),
+                    escape_html(e.tool_name.as_deref().unwrap_or("—")),
+                    truncate_html(&e.summary, 120),
+                    ctx_items.join("<br>"),
+                ));
+            }
+            out.push_str("</tbody></table></details>\n");
+        }
+        if !agent.approvals.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Approvals ({})</summary>",
+                agent.approvals.len()
+            );
+            out.push_str("<table><thead><tr><th>Request ID</th><th>Kind</th><th>Status</th><th>Wait</th><th>Summary</th></tr></thead><tbody>\n");
+            for a in &agent.approvals {
+                let status_cls = if a.status == "pending" {
+                    "badge-awaiting_approval"
+                } else {
+                    "badge-completed"
+                };
+                let wait = if a.status == "pending" {
+                    format_duration(Some(&a.created_at), Some(&state.generated_at))
+                } else if let Some(ref resolved) = a.resolved_at {
+                    format!("waited {}", format_duration(Some(&a.created_at), Some(resolved)))
+                } else {
+                    "—".to_string()
+                };
+                out.push_str(&format!("<tr><td><code>{}</code></td><td>{}</td><td><span class=\"badge {}\">{}</span></td><td>{}</td><td>{}</td></tr>\n",
+                    escape_html(&a.request_id), escape_html(&a.kind),
+                    status_cls, a.status,
+                    escape_html(&wait),
+                    truncate_html(&a.summary, 80),
+                ));
+            }
+            out.push_str("</tbody></table></details>\n");
+        }
+        if !agent.delegations.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Delegations ({})</summary>",
+                agent.delegations.len()
+            );
+            out.push_str("<table><thead><tr><th>Target</th><th>Status</th><th>Errors</th><th>Close</th><th>Output</th></tr></thead><tbody>\n");
+            let mut per_target: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for d in &agent.delegations {
+                let idx = *per_target.entry(d.target_agent.as_str()).and_modify(|c| *c += 1).or_insert(0);
+                let child = find_child_agent(state, &agent.session_id, &d.target_agent, idx);
+                let child_status = child.map(|a| a.status.as_str()).unwrap_or("unknown");
+                let child_errors = child.map(|a| a.error_count).unwrap_or(0);
+                let child_close = child.and_then(|a| a.close_reason.as_deref()).unwrap_or("—");
+                let child_output = child.and_then(|a| a.output_preview.as_deref())
+                    .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
+                let abnormal = child.and_then(|a| a.close_reason.as_deref())
+                    .map_or(false, is_abnormal_close);
+                out.push_str(&format!("<tr><td><code>{}</code></td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td style=\"color:{}\">{}</td><td>{}</td></tr>\n",
+                    escape_html(&d.target_agent),
+                    status_to_badge_class(child_status), child_status,
+                    child_errors,
+                    if abnormal { "var(--red)" } else { "inherit" },
+                    truncate_html(child_close, 80),
+                    truncate_html(child_output, 80),
+                ));
+            }
+            out.push_str("</tbody></table></details>\n");
+        }
+        let recent: Vec<_> = state
+            .timeline
+            .iter()
+            .filter(|e| e.session_id == agent.session_id)
+            .rev()
+            .take(MAX_RECENT_EVENTS_PER_AGENT)
+            .collect();
+        if !recent.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Recent Events ({})</summary>",
+                recent.len()
+            );
+            for event in recent.into_iter().rev() {
+                out.push_str(&format!("<div class=\"timeline-item\"><span class=\"timeline-time\">{}</span><span class=\"timeline-kind kind-{}\">{}</span><span class=\"timeline-summary\">{}</span></div>\n",
+                    format_timestamp(Some(&event.created_at)),
+                    event.kind.to_lowercase(),
+                    event.kind,
+                    truncate_html(&event.summary, 120),
+                ));
+            }
+            out.push_str("</details>\n");
+        }
         out.push_str("<br>\n");
     }
 
@@ -1644,9 +1973,9 @@ fn render_final_markdown(state: &SessionReportState) -> String {
     if has_delegations {
         let _ = writeln!(
             out,
-            "| Parent Agent | Target Agent | Session | Task | Status | Output |"
+            "| Parent Agent | Target Agent | Session | Task | Status | Errors | Close | Output |"
         );
-        let _ = writeln!(out, "|---|---|---|---|---|---|");
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|---|");
         for agent in &agents {
             let mut per_target_counter: std::collections::HashMap<&str, usize> =
                 std::collections::HashMap::new();
@@ -1665,14 +1994,20 @@ fn render_final_markdown(state: &SessionReportState) -> String {
                 let child_output = child
                     .and_then(|a| a.output_preview.as_deref())
                     .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
+                let child_errors = child.map(|a| a.error_count.to_string()).unwrap_or_else(|| "—".to_string());
+                let child_close = child.and_then(|a| a.close_reason.as_deref())
+                    .map(|r| truncate_chars(r, 80))
+                    .unwrap_or_else(|| "—".to_string());
                 let _ = writeln!(
                     out,
-                    "| `{}` | `{}` | `{}` | {} | `{}` | {} |",
+                    "| `{}` | `{}` | `{}` | {} | `{}` | {} | {} | {} |",
                     escape_html(&agent.agent_id),
                     escape_html(&d.target_agent),
                     child_session,
                     truncate_chars(&d.task_preview, OUTPUT_PREVIEW_DISPLAY_CHARS),
                     child_status,
+                    child_errors,
+                    child_close,
                     truncate_chars(child_output, OUTPUT_PREVIEW_DISPLAY_CHARS),
                 );
             }
@@ -1764,12 +2099,15 @@ fn render_final_markdown(state: &SessionReportState) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "## Recent Important Events");
     let _ = writeln!(out);
-    let _ = writeln!(out, "| Time | Agent | Kind | Summary |");
-    let _ = writeln!(out, "|---|---|---|---|");
-    for event in state
+    let turn_nums_final = timeline_turn_numbers(state);
+    let _ = writeln!(out, "| Time | T# | Session | Agent | Kind | Summary |");
+    let _ = writeln!(out, "|---|---|---|---|---|---|");
+    for (turn_num, event) in state
         .timeline
         .iter()
-        .filter(|event| event.important)
+        .enumerate()
+        .filter(|(_, e)| e.important)
+        .map(|(i, e)| (turn_nums_final[i], e))
         .rev()
         .take(24)
         .collect::<Vec<_>>()
@@ -1778,8 +2116,10 @@ fn render_final_markdown(state: &SessionReportState) -> String {
     {
         let _ = writeln!(
             out,
-            "| {} | `{}` | {} | {} |",
+            "| {} | T{} | `{}` | `{}` | {} | {} |",
             format_timestamp(Some(&event.created_at)),
+            turn_num,
+            short_session_id(&event.session_id),
             event.agent_id,
             event.kind,
             truncate_chars(&event.summary, OUTPUT_PREVIEW_DISPLAY_CHARS)
@@ -1902,7 +2242,7 @@ pre { background: var(--surface); border: 1px solid var(--border); border-radius
     out.push_str("<h2>Sub-Agent Ledger</h2>\n");
     let has_delegations = state.agents.values().any(|a| !a.delegations.is_empty());
     if has_delegations {
-        out.push_str("<table><thead><tr><th>Parent Agent</th><th>Target Agent</th><th>Session</th><th>Task</th><th>Status</th><th>Output</th></tr></thead><tbody>\n");
+        out.push_str("<table><thead><tr><th>Parent Agent</th><th>Target Agent</th><th>Session</th><th>Task</th><th>Status</th><th>Errors</th><th>Close</th><th>Output</th></tr></thead><tbody>\n");
         for agent in &agents {
             let mut per_target_counter: std::collections::HashMap<&str, usize> =
                 std::collections::HashMap::new();
@@ -1921,13 +2261,17 @@ pre { background: var(--surface); border: 1px solid var(--border); border-radius
                 let child_output = child
                     .and_then(|a| a.output_preview.as_deref())
                     .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
-                out.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td></tr>\n",
+                let child_errors = child.map(|a| a.error_count.to_string()).unwrap_or_else(|| "—".to_string());
+                let child_close = child.and_then(|a| a.close_reason.as_deref()).unwrap_or("—");
+                out.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
                     escape_html(&agent.agent_id),
                     escape_html(&d.target_agent),
                     escape_html(child_session),
                     truncate_html(&d.task_preview, 60),
                     status_to_badge_class(child_status),
                     child_status,
+                    escape_html(&child_errors),
+                    truncate_html(child_close, 80),
                     truncate_html(child_output, 60),
                 ));
             }
@@ -2320,6 +2664,124 @@ fn agents_by_tree<'a>(
     result
 }
 
+/// Returns a parallel vec mapping each timeline entry to a global turn number (1-based).
+/// The counter increments on every TURN event so all subsequent events carry the same turn number.
+fn timeline_turn_numbers(state: &SessionReportState) -> Vec<u32> {
+    let mut result = Vec::with_capacity(state.timeline.len());
+    let mut n = 0u32;
+    for e in &state.timeline {
+        if e.kind == "TURN" {
+            n += 1;
+        }
+        result.push(n);
+    }
+    result
+}
+
+/// Returns the (first_global_turn, last_global_turn) range for an agent, or None.
+fn agent_turn_range(
+    state: &SessionReportState,
+    session_id: &str,
+    turn_nums: &[u32],
+) -> Option<(u32, u32)> {
+    let mut first = None;
+    let mut last = None;
+    for (i, e) in state.timeline.iter().enumerate() {
+        if e.kind == "TURN" && e.session_id == session_id {
+            let t = turn_nums[i];
+            if first.is_none() {
+                first = Some(t);
+            }
+            last = Some(t);
+        }
+    }
+    match (first, last) {
+        (Some(f), Some(l)) => Some((f, l)),
+        _ => None,
+    }
+}
+
+/// Is a close reason not a clean finish?
+fn is_abnormal_close(reason: &str) -> bool {
+    let r = reason.to_lowercase();
+    !r.contains("task_completed")
+        && !r.contains("completed")
+        && !r.contains("budget_reached")
+        && !r.contains("max_turns")
+}
+
+/// Maximum run of consecutive ERROR events without an intervening successful RESULT.
+fn consecutive_error_streak(state: &SessionReportState, session_id: &str) -> u32 {
+    let mut max_streak = 0u32;
+    let mut cur = 0u32;
+    for e in &state.timeline {
+        if e.session_id != session_id {
+            continue;
+        }
+        match e.kind.as_str() {
+            "ERROR" => {
+                cur += 1;
+                max_streak = max_streak.max(cur);
+            }
+            "RESULT" => {
+                cur = 0;
+            }
+            _ => {}
+        }
+    }
+    max_streak
+}
+
+/// Last `n` timeline events for an agent that occurred strictly before `before_ts`.
+fn events_before<'a>(
+    state: &'a SessionReportState,
+    session_id: &str,
+    before_ts: &str,
+    n: usize,
+) -> Vec<&'a ReportEvent> {
+    state
+        .timeline
+        .iter()
+        .filter(|e| e.session_id == session_id && e.created_at.as_str() < before_ts)
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+/// Average inter-turn gap in seconds for an agent (None if fewer than 2 turns).
+fn avg_turn_secs(state: &SessionReportState, session_id: &str) -> Option<u64> {
+    let turns: Vec<&ReportEvent> = state
+        .timeline
+        .iter()
+        .filter(|e| e.session_id == session_id && e.kind == "TURN")
+        .collect();
+    if turns.len() < 2 {
+        return None;
+    }
+    let mut total = 0i64;
+    let mut count = 0u32;
+    for pair in turns.windows(2) {
+        if let (Ok(t0), Ok(t1)) = (
+            chrono::DateTime::parse_from_rfc3339(&pair[0].created_at),
+            chrono::DateTime::parse_from_rfc3339(&pair[1].created_at),
+        ) {
+            let diff = (t1 - t0).num_seconds();
+            if diff >= 0 {
+                total += diff;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        None
+    } else {
+        Some((total / count as i64) as u64)
+    }
+}
+
 fn status_rank(status: &str) -> u8 {
     match status {
         "awaiting_approval" => 0,
@@ -2518,8 +2980,10 @@ fn format_duration(started_at: Option<&str>, ended_at: Option<&str>) -> String {
     let secs = (end - start).num_seconds().max(0);
     if secs < 60 {
         format!("{}s", secs)
-    } else {
+    } else if secs < 3600 {
         format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m{:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
     }
 }
 

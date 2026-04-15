@@ -105,6 +105,14 @@ pub enum Capability {
         #[serde(default = "default_patterns_all")]
         patterns: Vec<String>,
     },
+
+    /// Install a remote SKILL.md as a new local agent via `skill.install`.
+    /// The `allowed_sources` field restricts which URL hosts are permitted.
+    /// Use ["*"] to allow any source, or specific hosts like ["agentskills.io"].
+    SkillInstall {
+        #[serde(default = "default_sources_all")]
+        allowed_sources: Vec<String>,
+    },
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -112,5 +120,9 @@ fn default_patterns_all() -> Vec<String> {
 }
 
 fn default_services_all() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+fn default_sources_all() -> Vec<String> {
     vec!["*".to_string()]
 }

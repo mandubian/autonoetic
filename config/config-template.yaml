@@ -280,6 +280,9 @@ llm_preset_mapping:
   architect: coding            # fixed
   specialized_builder: agentic
   packager: agentic
+  registration: agentic        # credential onboarding flow
+  agent-factory: agentic       # agent creation pipeline orchestration
+  discovery: research          # semantic reasoning over agent descriptions
   default: fallback
 
 # ── Context Compression ──────────────────────────────────────────────

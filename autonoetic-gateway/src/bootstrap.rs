@@ -8,7 +8,6 @@
 
 use crate::scheduler::gateway_store::GatewayStore;
 use anyhow::Result;
-use autonoetic_types::agent::ThinkingConfig;
 use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus};
 use autonoetic_types::config::{GatewayConfig, LlmPreset};
 use autonoetic_types::id_format::mint_hashed_prefixed_id;
@@ -39,145 +38,178 @@ pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<us
             .ok_or_else(|| anyhow::anyhow!("Invalid agent dir name: {}", agent_dir.display()))?
             .to_string();
 
-        // Skip if the agent already has revisions
-        let existing = store.list_agent_revisions(&agent_id)?;
-        if !existing.is_empty() {
-            continue;
+        if bootstrap_agent_inner(config, gateway_dir, &store, &agent_id)? {
+            activated += 1;
         }
-
-        let skill_content = std::fs::read(&skill_path)?;
-        let skill_text = String::from_utf8_lossy(&skill_content);
-        let (parsed_manifest, _instructions) =
-            crate::runtime::parser::SkillParser::parse(&skill_text).map_err(|e| {
-                anyhow::anyhow!("Failed to parse SKILL.md for '{}': {}", agent_id, e)
-            })?;
-
-        let lock_rel_path = &parsed_manifest.runtime.runtime_lock;
-        let lock_path = agent_dir.join(lock_rel_path);
-        let lock_content = std::fs::read(&lock_path).map_err(|e| {
-            anyhow::anyhow!(
-                "Missing runtime.lock '{}' for agent '{}': {}",
-                lock_rel_path,
-                agent_id,
-                e
-            )
-        })?;
-
-        let manifest_hash = format!("sha256:{:x}", Sha256::digest(&skill_content));
-        let runtime_lock_hash = format!("sha256:{:x}", Sha256::digest(&lock_content));
-
-        let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        collect_files(&agent_dir, &agent_dir, &mut file_map)?;
-        file_map.insert(lock_rel_path.clone(), lock_content.clone());
-
-        // Merge preset-level `thinking` into the agent's llm_config if the agent
-        // doesn't already specify thinking. This ensures bootstrapped revisions
-        // carry the preset's thinking config as part of their stored manifest.
-        let presets = &config.llm_presets;
-        let base_name = agent_id.rsplit_once('.').map(|(base, _)| base.to_string());
-        let preset_name = config
-            .llm_preset_mapping
-            .get(&agent_id)
-            .or_else(|| {
-                base_name
-                    .as_ref()
-                    .and_then(|b| config.llm_preset_mapping.get(b))
-            })
-            .or_else(|| config.llm_preset_mapping.get("default"));
-
-        if let Some(name) = preset_name {
-            if let Some(preset) = presets.get(name.as_str()) {
-                if let Some(modified) = merge_preset_into_skill(&skill_text, preset) {
-                    let modified_bytes = modified.into_bytes();
-                    file_map.insert("SKILL.md".to_string(), modified_bytes.clone());
-                    std::fs::write(&skill_path, &modified_bytes)?;
-                }
-            }
-        }
-
-        let mut hasher = Sha256::new();
-        for (path, bytes) in &file_map {
-            hasher.update(path.as_bytes());
-            hasher.update([0_u8]);
-            hasher.update(bytes);
-            hasher.update([0_u8]);
-        }
-        let revision_digest_hex = format!("{:x}", hasher.finalize());
-        let revision_id = format!("rev_sha256:{}", revision_digest_hex);
-        let content_digest = format!("sha256:{}", revision_digest_hex);
-
-        // Skip if this exact revision already exists
-        if store.get_agent_revision(&revision_id)?.is_some() {
-            continue;
-        }
-
-        let revision_dir = gateway_dir
-            .join("revisions")
-            .join("agents")
-            .join(&agent_id)
-            .join(&revision_id);
-
-        if !revision_dir.exists() {
-            for (rel_path, bytes) in &file_map {
-                let dest = revision_dir.join(rel_path);
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&dest, bytes)?;
-            }
-
-            if let Some(ref entry) = parsed_manifest.script_entry {
-                let entry_path = revision_dir.join(entry);
-                if entry_path.is_file() {
-                    let mut perms = std::fs::metadata(&entry_path)?.permissions();
-                    perms.set_mode(perms.mode() | 0o111);
-                    std::fs::set_permissions(&entry_path, perms)?;
-                }
-            }
-        }
-
-        let now = chrono::Utc::now().to_rfc3339();
-        let rev = AgentRevisionRecord {
-            revision_id: revision_id.clone(),
-            agent_id: agent_id.clone(),
-            base_revision_id: None,
-            artifact_id: None,
-            content_digest,
-            runtime_lock_hash,
-            manifest_hash,
-            created_at: now.clone(),
-            created_by_type: "bootstrap".to_string(),
-            created_by_id: "cli".to_string(),
-            source_kind: "bootstrap".to_string(),
-            source_ref: None,
-            origin_node_id: config.node_id.clone(),
-            trust_domain: "local".to_string(),
-            status: AgentRevisionStatus::Candidate,
-            metadata_json: serde_json::json!({
-                "summary": "Bootstrapped from reference agent bundle",
-            }),
-            short_id: String::new(),
-        };
-
-        store.insert_agent_revision_transactional(&rev)?;
-
-        let promotion_id =
-            mint_hashed_prefixed_id("prom-", &format!("{}-{}-{}", agent_id, revision_id, now));
-
-        store.atomic_promote(
-            &agent_id,
-            &revision_id,
-            &promotion_id,
-            "bootstrap",
-            "cli",
-            Some("Auto-promoted during agent bootstrap"),
-            None,
-        )?;
-
-        activated += 1;
     }
 
     Ok(activated)
+}
+
+/// Bootstrap a single named agent from `config.agents_dir` into the gateway store.
+/// Returns `true` if a new revision was activated, `false` if skipped (already exists).
+pub fn bootstrap_single_agent(
+    config: &GatewayConfig,
+    gateway_dir: &Path,
+    agent_id: &str,
+) -> Result<bool> {
+    let store = GatewayStore::open(gateway_dir)?;
+    bootstrap_agent_inner(config, gateway_dir, &store, agent_id)
+}
+
+/// Inner bootstrap logic shared by `bootstrap_agents` and `bootstrap_single_agent`.
+fn bootstrap_agent_inner(
+    config: &GatewayConfig,
+    gateway_dir: &Path,
+    store: &GatewayStore,
+    agent_id: &str,
+) -> Result<bool> {
+    let agent_dir = config.agents_dir.join(agent_id);
+    let skill_path = agent_dir.join("SKILL.md");
+
+    anyhow::ensure!(
+        skill_path.exists(),
+        "SKILL.md not found for agent '{}' at {}",
+        agent_id,
+        skill_path.display()
+    );
+
+    // Skip if the agent already has revisions
+    let existing = store.list_agent_revisions(agent_id)?;
+    if !existing.is_empty() {
+        return Ok(false);
+    }
+
+    let skill_content = std::fs::read(&skill_path)?;
+    let skill_text = String::from_utf8_lossy(&skill_content);
+    let (parsed_manifest, _instructions) =
+        crate::runtime::parser::SkillParser::parse(&skill_text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse SKILL.md for '{}': {}", agent_id, e)
+        })?;
+
+    let lock_rel_path = &parsed_manifest.runtime.runtime_lock;
+    let lock_path = agent_dir.join(lock_rel_path);
+    let lock_content = std::fs::read(&lock_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Missing runtime.lock '{}' for agent '{}': {}",
+            lock_rel_path,
+            agent_id,
+            e
+        )
+    })?;
+
+    let manifest_hash = format!("sha256:{:x}", Sha256::digest(&skill_content));
+    let runtime_lock_hash = format!("sha256:{:x}", Sha256::digest(&lock_content));
+
+    let mut file_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    collect_files(&agent_dir, &agent_dir, &mut file_map)?;
+    file_map.insert(lock_rel_path.clone(), lock_content.clone());
+
+    // Merge preset-level `thinking` into the agent's llm_config if the agent
+    // doesn't already specify thinking. This ensures bootstrapped revisions
+    // carry the preset's thinking config as part of their stored manifest.
+    let presets = &config.llm_presets;
+    let base_name = agent_id.rsplit_once('.').map(|(base, _)| base.to_string());
+    let preset_name = config
+        .llm_preset_mapping
+        .get(agent_id)
+        .or_else(|| {
+            base_name
+                .as_ref()
+                .and_then(|b| config.llm_preset_mapping.get(b))
+        })
+        .or_else(|| config.llm_preset_mapping.get("default"));
+
+    if let Some(name) = preset_name {
+        if let Some(preset) = presets.get(name.as_str()) {
+            if let Some(modified) = merge_preset_into_skill(&skill_text, preset) {
+                let modified_bytes = modified.into_bytes();
+                file_map.insert("SKILL.md".to_string(), modified_bytes.clone());
+                std::fs::write(&skill_path, &modified_bytes)?;
+            }
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    for (path, bytes) in &file_map {
+        hasher.update(path.as_bytes());
+        hasher.update([0_u8]);
+        hasher.update(bytes);
+        hasher.update([0_u8]);
+    }
+    let revision_digest_hex = format!("{:x}", hasher.finalize());
+    let revision_id = format!("rev_sha256:{}", revision_digest_hex);
+    let content_digest = format!("sha256:{}", revision_digest_hex);
+
+    // Skip if this exact revision already exists
+    if store.get_agent_revision(&revision_id)?.is_some() {
+        return Ok(false);
+    }
+
+    let revision_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(agent_id)
+        .join(&revision_id);
+
+    if !revision_dir.exists() {
+        for (rel_path, bytes) in &file_map {
+            let dest = revision_dir.join(rel_path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dest, bytes)?;
+        }
+
+        if let Some(ref entry) = parsed_manifest.script_entry {
+            let entry_path = revision_dir.join(entry);
+            if entry_path.is_file() {
+                let mut perms = std::fs::metadata(&entry_path)?.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                std::fs::set_permissions(&entry_path, perms)?;
+            }
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let rev = AgentRevisionRecord {
+        revision_id: revision_id.clone(),
+        agent_id: agent_id.to_string(),
+        base_revision_id: None,
+        artifact_id: None,
+        content_digest,
+        runtime_lock_hash,
+        manifest_hash,
+        created_at: now.clone(),
+        created_by_type: "bootstrap".to_string(),
+        created_by_id: "cli".to_string(),
+        source_kind: "bootstrap".to_string(),
+        source_ref: None,
+        origin_node_id: config.node_id.clone(),
+        trust_domain: "local".to_string(),
+        status: AgentRevisionStatus::Candidate,
+        metadata_json: serde_json::json!({
+            "summary": "Bootstrapped from reference agent bundle",
+        }),
+        short_id: String::new(),
+    };
+
+    store.insert_agent_revision_transactional(&rev)?;
+
+    let promotion_id =
+        mint_hashed_prefixed_id("prom-", &format!("{}-{}-{}", agent_id, revision_id, now));
+
+    store.atomic_promote(
+        agent_id,
+        &revision_id,
+        &promotion_id,
+        "bootstrap",
+        "cli",
+        Some("Auto-promoted during agent bootstrap"),
+        None,
+    )?;
+
+    Ok(true)
 }
 
 fn collect_files(base: &Path, current: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
