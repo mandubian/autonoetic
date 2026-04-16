@@ -30,6 +30,8 @@ metadata:
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
+      - type: "AgentMessage"
+        patterns: ["*"]
 ---
 # Planner
 

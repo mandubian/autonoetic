@@ -377,6 +377,22 @@ impl GatewayStore {
         Ok(results.pop())
     }
 
+    pub fn list_sessions_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id FROM session_agent_bindings WHERE agent_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![agent_id], |row| row.get(0))?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
     pub fn insert_promotion_record(&self, record: &PromotionRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

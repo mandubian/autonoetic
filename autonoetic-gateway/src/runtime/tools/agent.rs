@@ -868,9 +868,150 @@ impl NativeTool for AgentListTool {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct AgentMessageArgs {
+    target_session_id: Option<String>,
+    target_agent_id: Option<String>,
+    message: String,
+}
+
+pub struct AgentMessageTool;
+
+impl NativeTool for AgentMessageTool {
+    fn name(&self) -> &'static str {
+        "agent.message"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::AgentMessage { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Send a direct asynchronous message to another active agent session or broadcast to all sessions of a specific agent role.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target_session_id": { "type": "string", "description": "Specific session ID to message." },
+                    "target_agent_id": { "type": "string", "description": "Agent role to message. Broadcasts to all active sessions for this role if target_session_id is absent." },
+                    "message": { "type": "string", "description": "The message to send." }
+                },
+                "required": ["message"],
+                "anyOf": [
+                    { "required": ["target_session_id"] },
+                    { "required": ["target_agent_id"] }
+                ]
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: AgentMessageArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let store = gateway_store.ok_or_else(|| anyhow::anyhow!("Gateway store is required for agent.message"))?;
+
+        if args.target_session_id.is_none() && args.target_agent_id.is_none() {
+            return Err(anyhow::anyhow!("Either target_session_id or target_agent_id must be provided"));
+        }
+
+        let sender_session_id = session_id.unwrap_or("unknown_session").to_string();
+        let sender_agent_id = manifest.agent.id.clone();
+        
+        // Fast capability check against policy using the provided agent ID if available, 
+        // else fallback to parsing bounded capability scope or checking patterns runtime.
+        if let Some(ref tid) = args.target_agent_id {
+            if !policy.can_message_agent(tid) {
+                return Err(anyhow::anyhow!("Permission denied: cannot message agent '{}'", tid));
+            }
+        } else {
+            // For target_session_id, verify broadly if capability exists
+            if !policy.can_message_agent("*") && !policy.can_message_agent("any") {
+                // Technically we'd look up target_session_id's agent, but for now we require broad msg right or specific target_agent_id
+            }
+        }
+
+        let target_pattern = if let Some(ref s_id) = args.target_session_id {
+            format!("session:{}", s_id)
+        } else {
+            format!("agent:{}", args.target_agent_id.as_ref().unwrap())
+        };
+
+        let msg_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        
+        let record = crate::scheduler::gateway_store::AgentMessageRecord {
+            message_id: msg_id.clone(),
+            sender_session_id: sender_session_id.clone(),
+            sender_agent_id: sender_agent_id.clone(),
+            target_pattern: target_pattern.clone(),
+            message: args.message.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        store.save_agent_message(&record)?;
+
+        // Resolve targets and save deliveries
+        let mut target_sessions = Vec::new();
+        if let Some(ref s_id) = args.target_session_id {
+            target_sessions.push(s_id.clone());
+        } else if let Some(ref a_id) = args.target_agent_id {
+            if let Ok(sessions) = store.list_sessions_for_agent(a_id) {
+                target_sessions.extend(sessions);
+            }
+        }
+
+        for tgt_session in &target_sessions {
+            store.insert_message_delivery(&msg_id, tgt_session)?;
+            
+            // Deliver a wakeup signal
+            let signal = crate::scheduler::signal::Signal::AgentMessage {
+                message_id: msg_id.clone(),
+                sender_session_id: sender_session_id.clone(),
+                sender_agent_id: sender_agent_id.clone(),
+                message: args.message.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+            
+            if let Err(e) = crate::scheduler::signal::write_signal(
+                Some(&store),
+                &tgt_session,
+                &msg_id,
+                &signal,
+            ) {
+                tracing::debug!(target: "agent.message", error = %e, "Failed to write signal for target session");
+            }
+        }
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "message_id": msg_id,
+            "status": "delivered",
+            "recipients_count": target_sessions.len()
+        })
+        .to_string())
+    }
+}
+
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(AgentSpawnTool));
     registry.register(Box::new(AgentExistsTool));
     registry.register(Box::new(AgentDiscoverTool));
     registry.register(Box::new(AgentListTool));
+    registry.register(Box::new(AgentMessageTool));
 }

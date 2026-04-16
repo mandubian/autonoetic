@@ -387,6 +387,7 @@ mod agentskills_bridging_tests {
             middleware: None,
             execution_mode: Default::default(),
             script_entry: None,
+            script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
             response_contract: None,
@@ -1131,6 +1132,31 @@ impl AgentExecutor {
             if self.runtime_lock_hash.is_none() {
                 self.runtime_lock_hash =
                     crate::runtime::checkpoint::compute_runtime_lock_hash(&self.agent_dir);
+            }
+        }
+        // --- Auto-inject Agent Messages ---
+        if let Some(store) = self.gateway_store.as_ref() {
+            if let Ok(msgs) = store.fetch_undelivered_messages(&session_id) {
+                for msg in msgs {
+                    let text = format!(
+                        "[Direct Message from Agent '{}' (Session: {})]\n{}",
+                        msg.sender_agent_id, msg.sender_session_id, msg.message
+                    );
+                    history.push(Message::user(text.clone()));
+                    
+                    let _ = tracer.log_event(
+                        "agent.message",
+                        "received",
+                        autonoetic_types::causal_chain::EntryStatus::Success,
+                        Some(serde_json::json!({
+                            "message_id": msg.message_id,
+                            "sender_agent_id": msg.sender_agent_id,
+                            "sender_session_id": msg.sender_session_id,
+                        })),
+                    );
+                    
+                    let _ = store.mark_message_delivered(&msg.message_id, &session_id);
+                }
             }
         }
 
@@ -2643,6 +2669,7 @@ mod tests {
             middleware: None,
             execution_mode: Default::default(),
             script_entry: None,
+            script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
 

@@ -36,6 +36,14 @@ pub enum Signal {
         message: String,
         timestamp: String,
     },
+    /// A direct asynchronous message from another agent session.
+    AgentMessage {
+        message_id: String,
+        sender_session_id: String,
+        sender_agent_id: String,
+        message: String,
+        timestamp: String,
+    },
 }
 
 /// No-op: the scheduler now handles notification polling.
@@ -158,9 +166,30 @@ fn build_delivery_request(
             None,
             "completed".to_string(),
         ),
+        Signal::AgentMessage {
+            message_id,
+            sender_session_id,
+            sender_agent_id,
+            message,
+            ..
+        } => (
+            serde_json::json!({
+                "type": "agent_message",
+                "message_id": message_id,
+                "sender_session_id": sender_session_id,
+                "sender_agent_id": sender_agent_id,
+                "message": message,
+            })
+            .to_string(),
+            None,
+            "agent_message".to_string(),
+        ),
     };
 
-    let is_async = matches!(signal, Signal::WorkflowJoinSatisfied { .. });
+    let is_async = matches!(
+        signal,
+        Signal::WorkflowJoinSatisfied { .. } | Signal::AgentMessage { .. }
+    );
 
     crate::router::JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -197,6 +226,7 @@ pub fn write_signal(
     let n_type = match signal {
         Signal::ApprovalResolved { .. } => NotificationType::ApprovalResolved,
         Signal::WorkflowJoinSatisfied { .. } => NotificationType::WorkflowJoinSatisfied,
+        Signal::AgentMessage { .. } => NotificationType::AgentMessage,
     };
 
     let n = NotificationRecord::new(
