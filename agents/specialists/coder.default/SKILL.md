@@ -28,6 +28,8 @@ metadata:
         scopes: ["self.*", "skills/*", "scripts/*"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*", "scripts/*"]
+      - type: "AgentMessage"
+        patterns: ["*"]
     validation: "soft"
     response_contract:
       max_reply_length_chars: 2000

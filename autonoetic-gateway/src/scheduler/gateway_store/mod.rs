@@ -4,6 +4,7 @@ mod artifacts;
 mod credentials;
 mod evaluations;
 mod memory;
+mod messages;
 mod migrate;
 mod notifications;
 mod observability;
@@ -22,6 +23,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 pub(crate) use row_decode::memory_object_from_row;
+pub use messages::AgentMessageRecord;
 pub(crate) use util::escape_sqlite_like_fragment;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -232,6 +234,30 @@ impl GatewayStore {
     pub fn delete_scheduled_job(&self, job_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         scheduled_jobs::delete_scheduled_job(&conn, job_id)
+    }
+
+    // -------------------------------------------------------------------------
+    // Agent Messages
+    // -------------------------------------------------------------------------
+
+    pub fn save_agent_message(&self, record: &AgentMessageRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        messages::save_agent_message(&conn, record)
+    }
+
+    pub fn insert_message_delivery(&self, message_id: &str, target_session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        messages::insert_message_delivery(&conn, message_id, target_session_id)
+    }
+
+    pub fn fetch_undelivered_messages(&self, session_id: &str) -> Result<Vec<AgentMessageRecord>> {
+        let conn = self.conn.lock().unwrap();
+        messages::fetch_undelivered_messages(&conn, session_id)
+    }
+
+    pub fn mark_message_delivered(&self, message_id: &str, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        messages::mark_message_delivered(&conn, message_id, session_id)
     }
 }
 

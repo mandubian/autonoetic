@@ -558,6 +558,20 @@ pub async fn process_queued_workflow_tasks(
                         "Task marked Running; claim freshness decides recovery"
                     );
                 }
+                autonoetic_types::workflow::TaskRunStatus::Paused => {
+                    tracing::info!(
+                        target: "workflow",
+                        task_id = %queued_task.task_id,
+                        "Skipping queued launch for paused task"
+                    );
+                    let _ = workflow_store::dequeue_task(
+                        &config,
+                        store,
+                        &queued_task.workflow_id,
+                        &queued_task.task_id,
+                    );
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -970,6 +984,100 @@ async fn spawn_task_execution(
                 return;
             }
 
+            // A child can also suspend on user input or human escalation.
+            // Keep the task non-terminal so workflow join does not fire early.
+            if spawn_result.suspended_for_user_input {
+                let pending_for_session =
+                    crate::scheduler::approval::pending_approval_requests_for_session(
+                        &cfg, store, &session_id,
+                    )
+                    .unwrap_or_default();
+
+                if let Some(request) = pending_for_session.first() {
+                    let summary = format!("awaiting approval {}", request.request_id);
+                    let approval_metadata = Some(workflow_store::ApprovalMetadata {
+                        request_id: request.request_id.clone(),
+                        kind: request.action.kind().to_string(),
+                        reason: request.reason.clone(),
+                    });
+                    if let Err(e) = workflow_store::update_task_run_status(
+                        &cfg,
+                        store,
+                        &wf_id,
+                        &t_id,
+                        autonoetic_types::workflow::TaskRunStatus::AwaitingApproval,
+                        Some(summary),
+                        approval_metadata,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            target: "workflow",
+                            error = %e,
+                            task_id = %t_id,
+                            "Failed to persist async task awaiting approval status"
+                        );
+                    }
+                    let _ = workflow_store::checkpoint_task(
+                        &cfg,
+                        store,
+                        &wf_id,
+                        &t_id,
+                        "awaiting_approval".to_string(),
+                        serde_json::json!({
+                            "status": "awaiting_approval",
+                            "approval_request_id": request.request_id,
+                        }),
+                    );
+                    let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
+                    tracing::info!(
+                        target: "workflow",
+                        task_id = %t_id,
+                        approval_request_id = %request.request_id,
+                        "Task suspended with pending approval after non-terminal yield"
+                    );
+                    finish_active_row("stopped");
+                    return;
+                }
+
+                let summary = Some("paused: awaiting user input".to_string());
+                if let Err(e) = workflow_store::update_task_run_status(
+                    &cfg,
+                    store,
+                    &wf_id,
+                    &t_id,
+                    autonoetic_types::workflow::TaskRunStatus::Paused,
+                    summary,
+                    None,
+                    None,
+                ) {
+                    tracing::warn!(
+                        target: "workflow",
+                        error = %e,
+                        task_id = %t_id,
+                        "Failed to persist paused workflow task status"
+                    );
+                }
+                let _ = workflow_store::checkpoint_task(
+                    &cfg,
+                    store,
+                    &wf_id,
+                    &t_id,
+                    "paused".to_string(),
+                    serde_json::json!({
+                        "status": "paused",
+                        "reason": "awaiting_user_input_or_operator_guidance",
+                    }),
+                );
+                let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
+                tracing::info!(
+                    target: "workflow",
+                    task_id = %t_id,
+                    "Task paused after non-terminal yield"
+                );
+                finish_active_row("stopped");
+                return;
+            }
+
             let summary = spawn_result.assistant_reply.as_ref().map(|s| {
                 const MAX: usize = 512;
                 if s.len() <= MAX {
@@ -1168,6 +1276,9 @@ async fn process_pending_notifications(
                 serde_json::from_value::<crate::scheduler::signal::Signal>(n.payload.clone()).ok()
             }
             autonoetic_types::notification::NotificationType::WorkflowJoinSatisfied => {
+                serde_json::from_value::<crate::scheduler::signal::Signal>(n.payload.clone()).ok()
+            }
+            autonoetic_types::notification::NotificationType::AgentMessage => {
                 serde_json::from_value::<crate::scheduler::signal::Signal>(n.payload.clone()).ok()
             }
         };

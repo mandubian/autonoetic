@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 10;
+const SCHEMA_VERSION_LATEST: i64 = 11;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -488,6 +488,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_scheduled_jobs_v8(conn)?;
     apply_scheduled_jobs_v9(conn)?;
     apply_credential_setup_state_v10(conn)?;
+    apply_agent_messages_v11(conn)?;
 
     Ok(())
 }
@@ -882,6 +883,42 @@ fn apply_scheduled_jobs_v9(conn: &mut Connection) -> Result<()> {
             "scheduled_jobs_target_revision",
             chrono::Utc::now().to_rfc3339()
         ],
+    )?;
+    Ok(())
+}
+
+fn apply_agent_messages_v11(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 11 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_messages (
+            message_id TEXT PRIMARY KEY,
+            sender_session_id TEXT NOT NULL,
+            sender_agent_id TEXT NOT NULL,
+            target_pattern TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_message_deliveries (
+            message_id TEXT NOT NULL,
+            target_session_id TEXT NOT NULL,
+            delivered_at TEXT,
+            PRIMARY KEY (message_id, target_session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_msg_deliveries_target ON agent_message_deliveries(target_session_id, delivered_at);"
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![11_i64, "agent_messages", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
