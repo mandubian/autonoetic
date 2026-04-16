@@ -680,6 +680,7 @@ mod tests {
             shared_knowledge: vec![],
             llm_usage: vec![],
             suspended_for_approval: None,
+            suspended_for_user_input: false,
         }
     }
 
