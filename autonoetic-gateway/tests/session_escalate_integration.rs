@@ -374,7 +374,7 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
     let task_id = "escalation-resume-task";
 
     // First spawn — agent should escalate to human
-    let _first_result = execution
+    let first_result = execution
         .spawn_agent_once(
             "escalation-test-agent",
             "I need help with this problem. session.escalate(target='human', reason='stuck', context='tried everything')",
@@ -388,6 +388,10 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
             None,
         )
         .await?;
+    assert!(
+        first_result.suspended_for_user_input,
+        "first run should suspend for escalation/user input"
+    );
 
     // The session should have a checkpoint with HumanEscalation
     let checkpoint = load_latest_checkpoint(&config, session_id)?;
@@ -466,6 +470,11 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
         second_result.suspended_for_approval.is_none(),
         "resumed session should not suspend for approval"
     );
+    assert!(
+        !second_result.suspended_for_user_input,
+        "resumed session should complete without suspension"
+    );
 
     Ok(())
 }
+

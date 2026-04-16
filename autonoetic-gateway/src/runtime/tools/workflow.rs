@@ -747,7 +747,8 @@ impl NativeTool for WorkflowStateTool {
                 }
                 autonoetic_types::workflow::TaskRunStatus::Running
                 | autonoetic_types::workflow::TaskRunStatus::Runnable
-                | autonoetic_types::workflow::TaskRunStatus::Pending => {
+                | autonoetic_types::workflow::TaskRunStatus::Pending
+                | autonoetic_types::workflow::TaskRunStatus::Paused => {
                     active_tasks.push(entry);
                 }
                 autonoetic_types::workflow::TaskRunStatus::Failed

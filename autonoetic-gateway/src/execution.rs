@@ -326,6 +326,9 @@ pub struct SpawnResult {
     /// The continuation has been saved to disk; callers should transition the task to
     /// `AwaitingApproval` using this request ID and release the tokio claim.
     pub suspended_for_approval: Option<String>,
+    /// Set when the turn ended suspended for user input or human escalation.
+    /// Callers should treat this as non-terminal and avoid completion-only post-processing.
+    pub suspended_for_user_input: bool,
 }
 
 #[derive(Clone)]
@@ -873,6 +876,7 @@ impl GatewayExecutionService {
                     shared_knowledge,
                     llm_usage: Vec::new(),
                     suspended_for_approval: None,
+                    suspended_for_user_input: false,
                 });
             }
 
@@ -1686,6 +1690,7 @@ impl GatewayExecutionService {
                 shared_knowledge,
                 llm_usage,
                 suspended_for_approval,
+                suspended_for_user_input,
             })
         })
         .await?;
@@ -1705,7 +1710,10 @@ impl GatewayExecutionService {
         // Fallback: when the caller supplies no metadata contract, use the contract declared
         // in the agent's own SKILL.md frontmatter (loaded via AgentRepository).
         // Validation is skipped for suspended sessions (they haven't finished producing output).
-        if self.config.response_validation.enabled && result.suspended_for_approval.is_none() {
+        if self.config.response_validation.enabled
+            && result.suspended_for_approval.is_none()
+            && !result.suspended_for_user_input
+        {
             // Resolve effective contract: caller-supplied metadata first, then manifest default.
             let manifest_contract: Option<serde_json::Value> =
                 if metadata.and_then(|m| m.get("response_contract")).is_none() {
@@ -1751,7 +1759,7 @@ impl GatewayExecutionService {
         // Two failure modes:
         //   1. promotion_record_missing — agent forgot to call promotion.record → repairable
         //   2. promotion_record_failed  — evaluator/auditor passed=false → terminal
-        if result.suspended_for_approval.is_none() {
+        if result.suspended_for_approval.is_none() && !result.suspended_for_user_input {
             let require_promotion = metadata
                 .and_then(|m| m.get("require_promotion_record"))
                 .and_then(|v| v.as_bool())
@@ -1831,7 +1839,9 @@ impl GatewayExecutionService {
                                 }
                             };
 
-                            if repaired.suspended_for_approval.is_some() {
+                            if repaired.suspended_for_approval.is_some()
+                                || repaired.suspended_for_user_input
+                            {
                                 break;
                             }
 
@@ -2029,14 +2039,14 @@ impl GatewayExecutionService {
 
             // If the agent suspended for approval during repair we cannot continue the
             // repair loop — abort and surface the original violations.
-            if repaired.suspended_for_approval.is_some() {
+            if repaired.suspended_for_approval.is_some() || repaired.suspended_for_user_input {
                 tracing::warn!(
                     target: "response_validation",
                     agent_id = %agent_id,
-                    "response.repair.aborted: session suspended for approval during repair"
+                    "response.repair.aborted: session suspended during repair"
                 );
                 return Err(anyhow::anyhow!(
-                    "repair aborted: agent suspended for approval during repair; session: {}",
+                    "repair aborted: agent suspended during repair; session: {}",
                     result.session_id
                 ));
             }
@@ -2417,6 +2427,7 @@ impl GatewayExecutionService {
             shared_knowledge,
             llm_usage,
             suspended_for_approval,
+            suspended_for_user_input,
         })
     }
 

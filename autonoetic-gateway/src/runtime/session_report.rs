@@ -937,7 +937,11 @@ fn summarize_workflow_wait(parsed: Option<&Value>) -> String {
         .iter()
         .filter_map(|task| {
             let status = task.get("status").and_then(|x| x.as_str()).unwrap_or("");
-            if status == "AwaitingApproval" || status == "Running" || status == "Runnable" {
+            if status == "AwaitingApproval"
+                || status == "Running"
+                || status == "Runnable"
+                || status == "Paused"
+            {
                 let agent = task
                     .get("agent_id")
                     .and_then(|x| x.as_str())
