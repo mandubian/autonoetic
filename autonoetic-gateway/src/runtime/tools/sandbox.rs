@@ -1123,50 +1123,47 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         (config, &gateway_store, session_id)
                     {
                         let root_sid = crate::runtime::content_store::root_session_id(sid);
-                        if let Ok(approved) = gw_store.get_approved_approvals_for_root(root_sid) {
-                            for req in &approved {
-                                if let ScheduledAction::SandboxExec { command, .. } = &req.action {
-                                    if command == &effective_command {
-                                        tracing::info!(
-                                            target: "sandbox.exec",
-                                            request_id = %req.request_id,
-                                            "Found matching approved request in store, skipping new approval"
-                                        );
-                                        approval_validated_for_command = true;
-
-                                        // Also cache this so future checks hit the fast path
-                                        let dep_packages: Option<Vec<String>> =
-                                            args.dependencies.as_ref().map(|d| d.packages.clone());
-                                        let remote_analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
-                                        &code_to_analyze,
-                                        dep_packages.as_deref(),
+                        if !normalized_targets.is_empty() {
+                            if let Ok(approved) = gw_store.get_approved_approvals_for_root(root_sid)
+                            {
+                                if approved_requests_cover_targets(
+                                    &approved,
+                                    &normalized_targets,
+                                    agent_dir,
+                                    gateway_dir,
+                                ) {
+                                    tracing::info!(
+                                        target: "sandbox.exec",
+                                        targets = ?normalized_targets,
+                                        "Approved request covers targets, skipping new approval"
                                     );
-                                        let normalized_targets =
-                                            normalize_targets(&remote_analysis.detected_patterns);
-                                        let fingerprint = compute_fingerprint(
-                                            &manifest.agent.id,
-                                            &normalized_targets,
-                                            &code_to_analyze,
-                                        );
-                                        if let Some(gw_dir) = gateway_dir {
-                                            if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                                                if cache.find(&fingerprint).is_none() {
-                                                    let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                                    approval_validated_for_command = true;
+
+                                    // Backfill exec cache so future checks hit the fast path
+                                    let fingerprint = compute_fingerprint(
+                                        &manifest.agent.id,
+                                        &normalized_targets,
+                                        &code_to_analyze,
+                                    );
+                                    if let Some(gw_dir) = gateway_dir {
+                                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                                            if cache.find(&fingerprint).is_none() {
+                                                let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
                                                     fingerprint: fingerprint.clone(),
                                                     agent_id: manifest.agent.id.clone(),
-                                                    remote_targets: normalized_targets,
+                                                    remote_targets: normalized_targets.clone(),
                                                     code_content: code_to_analyze.clone(),
-                                                    approval_request_id: req.request_id.clone(),
+                                                    approval_request_id: approved.iter()
+                                                        .find(|r| matches!(r.action, ScheduledAction::SandboxExec { .. }))
+                                                        .map(|r| r.request_id.clone())
+                                                        .unwrap_or_default(),
                                                     approved_at: chrono::Utc::now().to_rfc3339(),
                                                     approved_by: "operator".to_string(),
                                                     last_used_at: chrono::Utc::now().to_rfc3339(),
                                                 };
-                                                    let _ = cache.record(entry);
-                                                }
+                                                let _ = cache.record(entry);
                                             }
                                         }
-
-                                        break;
                                     }
                                 }
                             }
