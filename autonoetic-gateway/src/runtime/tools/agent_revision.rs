@@ -928,9 +928,16 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             let bundle = artifact_store
                 .inspect(artifact_id)
                 .map_err(|e| anyhow::anyhow!("Artifact '{}' not found: {}", artifact_id, e))?;
+            let has_entrypoint = !bundle.entrypoints.is_empty()
+                || args
+                    .script_entry
+                    .as_ref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
             anyhow::ensure!(
-                    bundle.kind == ArtifactKind::AgentBundle,
-                    "Artifact '{}' has kind '{:?}'. agent.revision.create_from_intent requires kind 'agent_bundle'.",
+                    bundle.kind == ArtifactKind::AgentBundle
+                        || (bundle.kind == ArtifactKind::Binary && has_entrypoint),
+                    "Artifact '{}' has kind '{:?}'. agent.revision.create_from_intent requires kind 'agent_bundle', or 'binary' with an entrypoint.",
                     artifact_id,
                     bundle.kind
                 );
