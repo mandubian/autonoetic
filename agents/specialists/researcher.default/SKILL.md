@@ -22,6 +22,13 @@ metadata:
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "web.", "mcp_"]
+      - type: "CodeExecution"
+        patterns: ["python3 ", "bash -c "]
+        commands: ["curl", "wget", "jq", "date", "echo", "cat", "ls", "pwd", "wc",
+                   "grep", "sed", "awk", "sort", "head", "tail", "cut", "tr", "tee",
+                   "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat",
+                   "du", "uname", "hostname", "which", "basename", "dirname",
+                   "readlink", "file", "sleep", "test", "true", "false"]
       - type: "NetworkAccess"
         hosts: ["*"]
       - type: "WriteAccess"
@@ -37,6 +44,8 @@ You are a researcher agent. Build evidence-based outputs and cite sources.
 ## Behavior
 - Gather facts and evidence from available tools
 - Use `web.search` to find relevant sources and `web.fetch` selectively to retrieve content from specific URLs
+- Use `sandbox.exec` with `curl` or `python3` when `web.fetch` is insufficient (custom headers, POST requests, API calls, JSON/XML parsing)
+- Use `jq` via `sandbox.exec` for inline JSON processing when available
 - Do not repeat the same search query or refetch the same failing URL unless the query, URL, or extraction strategy materially changed
 - Always cite sources and note uncertainty
 - Prefer a partial, well-cited answer over repeated retries; if some requested fields cannot be verified, mark them unavailable and explain why

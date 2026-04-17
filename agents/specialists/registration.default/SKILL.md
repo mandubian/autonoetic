@@ -25,7 +25,7 @@ metadata:
       - type: "NetworkAccess"
         hosts: ["*"]
       - type: "WriteAccess"
-        scopes: ["self.*"]
+        scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
         scopes: ["self.*"]
     validation: "soft"
@@ -59,7 +59,24 @@ The planner's spawn message must include:
    - Call `credential.setup` again with explicit `service` and `steps` constructed from your analysis.
    - Each step should be an `api_call` with `step_type`, `method`, `url`, optional `headers`/`body`, and `extract_secrets`/`extract_public` mappings.
 
-5. Return to the planner:
+5. Store the registration fact so other agents can discover it:
+   - Call `knowledge.store` with:
+     - `id`: `registration:<service>` (use the service name from the URL or setup response, e.g. `registration:moltbook`)
+     - `scope`: `skills`
+     - `content`: A plain string (not a JSON object). If you want to include structured data, serialize it — e.g. `"credential_id=... service=moltbook"` or a JSON-encoded string. Never include secrets.
+     - `visibility`: `global`
+   - ⚠️ `content` must be a **string**, not a JSON object. Passing `"content": {...}` will fail with a schema error.
+   - Example:
+     ```json
+     knowledge.store({
+       "id": "registration:moltbook",
+       "scope": "skills",
+       "content": "moltbook registered: cred_moltbook_abc123 agent_id=moltbook_agent_def456",
+       "visibility": "global"
+     })
+     ```
+
+6. Return to the planner:
    - `credential_id` (the handle for all future `credential.request` calls to this service)
    - Any `public_data` returned (e.g. `agent_id`, human-facing confirmation text)
 

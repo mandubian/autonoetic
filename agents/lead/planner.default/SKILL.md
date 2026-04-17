@@ -66,7 +66,8 @@ These agents are the system's vocabulary. Know them by name.
 | Agent | Use when | Core capability |
 |---|---|---|
 | `researcher.default` | Web/evidence gathering, fetching URLs, comparing sources | NetworkAccess |
-| `coder.default` | Executable code, scripts, data processing | CodeExecution |
+| `executor.default` | Quick deterministic bash/script execution without dependencies or artifact handoff | CodeExecution |
+| `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | CodeExecution |
 | `architect.default` | Multi-file design, structural task breakdown | — (design-only) |
 | `evaluator.default` | Behavioral validation, test execution | CodeExecution |
 | `auditor.default` | Security review, static analysis | — (analysis-only) |
@@ -119,22 +120,25 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 3. Research / evidence / URL fetch
    → researcher.default
 
-4. Executable code (one-shot)
+4. Quick deterministic execution (bash, simple scripts, parsing, local transforms; no deps, no durable artifact)
+   → executor.default
+
+5. Durable implementation work (code that should be reviewed, reused, handed off, or installed)
    → coder.default
 
-5. Debugging / root cause
+6. Debugging / root cause
    → debugger.default
 
-6. Recurring task (every N min/hrs)
+7. Recurring task (every N min/hrs)
    → agent-factory.default to build, then scheduler.cron.create after install
 
-7. Pure prose, analysis, knowledge lookup
+8. Pure prose, analysis, knowledge lookup
    → handle directly (knowledge.recall, knowledge.search, synthesis)
 
-8. Structural design / task breakdown
+9. Structural design / task breakdown
    → architect.default
 
-9. Unknown intent — no foundational agent clearly fits
+10. Unknown intent — no foundational agent clearly fits
    → discovery.default (spawn with task_description + required_capabilities)
      If discovery returns needs_new_agent: true → agent-factory.default
 ```
@@ -175,6 +179,9 @@ Call `workflow.wait(task_ids=[...], timeout_secs=300)`. Do not re-spawn. The gat
 **`workflow.wait` returns `checkpoint_state.status == "awaiting_approval"`:**
 Do NOT call `user.ask`. Tell the user in plain text that approval is pending and show the `approval_request_id` and the command: `autonoetic gateway approvals approve apr-xxx`. Then call `workflow.wait(timeout_secs=300)`.
 
+**`workflow.wait` times out with `checkpoint_state.status == "paused"` and `reason == "awaiting_user_input_or_operator_guidance"`:**
+The child agent is suspended waiting for a `user.ask` answer. Do NOT close your session. Tell the user that the child is waiting for their input (in the approval channel / terminal), then call `workflow.wait(timeout_secs=300)` again. Keep looping until the child resumes. Never give up because of a timeout alone when the child is user-input-paused.
+
 **Approval resolved (`ApprovalResolved` signal):**
 Call `workflow.state` or `workflow.wait` to check updated task status. Do not restart — the child resumes from its checkpoint.
 
@@ -188,6 +195,8 @@ Inform user. If they want to continue, respawn (creates a new approval). One ret
 ---
 
 ## Failure Handling
+
+**`agent.message` result validation:** Always check `ok`, `status`, and `recipients_count`. Report success only when `ok == true`, `status == "delivered"`, and `recipients_count > 0`. Otherwise report delivery failure (e.g., `no_live_recipients`, `target_agent_not_found`, `target_agent_unavailable`) and include `status` plus `message_id` if present.
 
 When `workflow.wait` returns `any_failed: true`:
 
