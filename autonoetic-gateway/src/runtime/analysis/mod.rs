@@ -154,6 +154,7 @@ fn type_to_capability(cap_type: &str) -> Option<Capability> {
         }),
         "CodeExecution" => Some(Capability::CodeExecution {
             patterns: vec!["*".to_string()],
+            commands: vec![],
         }),
         "AgentSpawn" => Some(Capability::AgentSpawn { max_children: 1 }),
         "AgentMessage" => Some(Capability::AgentMessage {

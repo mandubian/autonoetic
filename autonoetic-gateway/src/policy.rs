@@ -107,6 +107,19 @@ impl SecurityAnalyzer {
         }
     }
 
+    /// True when a command *segment* starts with the Windows disk-formatter (`format C:`),
+    /// not CLI flags like `--format json` (substring `"format "` matched those).
+    fn segment_starts_with_disk_format_command(segment: &str) -> bool {
+        let first = segment
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        first == "format"
+            || first.ends_with("/format.com")
+            || first.ends_with("\\format.com")
+    }
+
     /// Check for destructive commands that can destroy data.
     fn is_destructive(cmd: &str) -> bool {
         let cmd_lower = cmd.to_lowercase();
@@ -120,11 +133,17 @@ impl SecurityAnalyzer {
             return true;
         }
 
+        for segment in cmd.split(|c| c == '|' || c == '&' || c == ';') {
+            let trimmed = segment.trim();
+            if !trimmed.is_empty() && Self::segment_starts_with_disk_format_command(trimmed) {
+                return true;
+            }
+        }
+
         let destructive_patterns = &[
             "dd if=",
             "dd of=/dev/",
             "mkfs",
-            "format ",
             ":(){ :|:& };:",
             "> /dev/",
             "shred ",
@@ -246,7 +265,7 @@ impl SecurityAnalyzer {
         exhaustion_patterns.iter().any(|p| cmd.contains(p))
     }
 
-    fn contains_shell_word(cmd: &str, word: &str) -> bool {
+    pub(crate) fn contains_shell_word(cmd: &str, word: &str) -> bool {
         let mut offset = 0usize;
         while let Some(found) = cmd[offset..].find(word) {
             let start = offset + found;
@@ -393,7 +412,7 @@ impl PolicyEngine {
 
         // Then check against capability patterns
         for cap in &self.manifest.capabilities {
-            if let Capability::CodeExecution { patterns } = cap {
+            if let Capability::CodeExecution { patterns, .. } = cap {
                 let command_segments: Vec<&str> = command
                     .split(|c| c == '|' || c == '&' || c == ';')
                     .collect();
@@ -408,6 +427,29 @@ impl PolicyEngine {
                         }
                         if trimmed.starts_with(prefix) {
                             return (true, None);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check capability commands list (word-boundary matching on first word)
+        for cap in &self.manifest.capabilities {
+            if let Capability::CodeExecution { commands, .. } = cap {
+                if !commands.is_empty() {
+                    let command_segments: Vec<&str> = command
+                        .split(|c| c == '|' || c == '&' || c == ';')
+                        .collect();
+
+                    for segment in &command_segments {
+                        let trimmed = segment.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        for cmd in commands {
+                            if SecurityAnalyzer::contains_shell_word(trimmed, cmd) {
+                                return (true, None);
+                            }
                         }
                     }
                 }
@@ -762,6 +804,22 @@ mod tests {
     }
 
     #[test]
+    fn test_security_analyzer_format_flag_not_destructive() {
+        // Regression: substring "format " falsely matched --format (e.g. argparse).
+        let analysis = SecurityAnalyzer::analyze_command(
+            "python3 weather.py --location London --date 2025-01-15 --format json",
+        );
+        assert!(analysis.is_safe, "{:?}", analysis.threats);
+    }
+
+    #[test]
+    fn test_security_analyzer_windows_format_command_destructive() {
+        let analysis = SecurityAnalyzer::analyze_command("format C:");
+        assert!(!analysis.is_safe);
+        assert!(analysis.threats.contains(&SecurityThreat::Destructive));
+    }
+
+    #[test]
     fn test_security_analyzer_privilege_escalation() {
         let analysis = SecurityAnalyzer::analyze_command("sudo rm /etc/passwd");
         assert!(!analysis.is_safe);
@@ -825,6 +883,7 @@ mod tests {
     fn test_policy_allows_safe_bash_when_pattern_matches() {
         let manifest = manifest_with_caps(vec![Capability::CodeExecution {
             patterns: vec!["bash -c ".to_string()],
+            commands: vec![],
         }]);
         let policy = PolicyEngine::new(manifest);
 
@@ -837,6 +896,7 @@ mod tests {
     fn test_policy_denies_bash_rm_even_when_pattern_matches() {
         let manifest = manifest_with_caps(vec![Capability::CodeExecution {
             patterns: vec!["bash -c ".to_string()],
+            commands: vec![],
         }]);
         let policy = PolicyEngine::new(manifest);
 
@@ -850,6 +910,7 @@ mod tests {
     fn test_policy_denies_bash_printenv_even_when_pattern_matches() {
         let manifest = manifest_with_caps(vec![Capability::CodeExecution {
             patterns: vec!["bash -c ".to_string()],
+            commands: vec![],
         }]);
         let policy = PolicyEngine::new(manifest);
 
@@ -859,5 +920,63 @@ mod tests {
         assert!(analysis
             .threats
             .contains(&SecurityThreat::EnvironmentDisclosure));
+    }
+
+    #[test]
+    fn test_policy_allows_command_when_in_commands_list() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec!["date".to_string(), "ls".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+
+        let (allowed, analysis) = policy.can_exec_shell_detailed("date");
+        assert!(allowed);
+        assert!(analysis.is_none());
+
+        let (allowed, analysis) = policy.can_exec_shell_detailed("ls -la /tmp");
+        assert!(allowed);
+        assert!(analysis.is_none());
+    }
+
+    #[test]
+    fn test_policy_denies_command_not_in_commands_list() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec!["date".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+
+        let (allowed, _analysis) = policy.can_exec_shell_detailed("whoami");
+        assert!(!allowed);
+    }
+
+    #[test]
+    fn test_policy_commands_word_boundary_matching() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec![],
+            commands: vec!["ls".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+
+        let (allowed, _) = policy.can_exec_shell_detailed("ls -la");
+        assert!(allowed);
+
+        let (allowed, _) = policy.can_exec_shell_detailed("lsof");
+        assert!(!allowed);
+    }
+
+    #[test]
+    fn test_policy_commands_security_blocks_first() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec![],
+            commands: vec!["rm".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+
+        let (allowed, analysis) = policy.can_exec_shell_detailed("rm /tmp/a");
+        assert!(!allowed);
+        let analysis = analysis.expect("security analysis should be present");
+        assert!(analysis.threats.contains(&SecurityThreat::Destructive));
     }
 }

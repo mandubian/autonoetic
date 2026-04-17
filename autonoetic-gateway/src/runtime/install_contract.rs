@@ -46,7 +46,7 @@ pub fn default_gateway_artifact() -> String {
     "marketplace://gateway/autonoetic-gateway".to_string()
 }
 
-fn running_binary_sha256() -> anyhow::Result<String> {
+pub fn running_binary_sha256() -> anyhow::Result<String> {
     let exe_path = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Failed to resolve current gateway executable path: {}", e))?;
 
@@ -1261,6 +1261,7 @@ artifacts: "not_a_sequence"
             },
             Capability::CodeExecution {
                 patterns: vec!["python*".to_string()],
+                commands: vec![],
             },
         ];
         let report = analyze_bundle_health(&file_map, &caps, false, None);
@@ -1274,7 +1275,8 @@ artifacts: "not_a_sequence"
             hosts: vec!["*".to_string()]
         }));
         assert!(is_high_risk_capability(&Capability::CodeExecution {
-            patterns: vec!["*".to_string()]
+            patterns: vec!["*".to_string()],
+            commands: vec![],
         }));
         assert!(is_high_risk_capability(&Capability::AgentSpawn {
             max_children: 10

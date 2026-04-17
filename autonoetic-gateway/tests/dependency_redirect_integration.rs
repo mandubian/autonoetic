@@ -9,6 +9,7 @@ fn make_manifest(has_network: bool) -> AgentManifest {
     let mut caps = vec![
         Capability::CodeExecution {
             patterns: vec!["python3 ".to_string(), "pip ".to_string(), "bash -c ".to_string()],
+            commands: vec![],
         },
     ];
     if has_network {

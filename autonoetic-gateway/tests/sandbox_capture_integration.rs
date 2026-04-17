@@ -45,6 +45,7 @@ fn test_manifest() -> AgentManifest {
         limits: None,
         capabilities: vec![Capability::CodeExecution {
             patterns: vec!["*".to_string()],
+            commands: vec![],
         }],
         background: None,
         disclosure: None,

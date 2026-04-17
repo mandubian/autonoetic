@@ -122,13 +122,17 @@ fn test_native_tool_registry_availability() {
     );
     let manifest_shell = test_manifest(vec![Capability::CodeExecution {
         patterns: vec!["*".into()],
+        commands: vec![],
     }]);
     let defs = registry.available_definitions(&manifest_shell);
     assert!(defs.len() >= 10);
     assert!(defs.iter().any(|d| d.name == "sandbox.exec"));
 
     let manifest_all = test_manifest(vec![
-        Capability::CodeExecution { patterns: vec![] },
+        Capability::CodeExecution {
+            patterns: vec![],
+            commands: vec![],
+        },
         Capability::ReadAccess { scopes: vec![] },
         Capability::WriteAccess { scopes: vec![] },
     ]);
