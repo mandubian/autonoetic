@@ -482,6 +482,7 @@ Values can reference either fixed presets or routing presets.
 llm_preset_mapping:
   planner: smart             # routing preset
   coder: smart               # routing preset
+  executor: smart            # routing preset
   researcher: sonnet         # fixed preset
   debugger: haiku            # fixed preset
   evaluator: budget          # routing preset

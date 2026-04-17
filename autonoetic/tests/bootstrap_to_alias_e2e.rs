@@ -133,6 +133,11 @@ fn test_bootstrap_creates_agents_and_aliases() {
         "coder.default alias should exist: {}",
         stdout
     );
+    assert!(
+        stdout.contains("executor.default"),
+        "executor.default alias should exist: {}",
+        stdout
+    );
 
     let _ = fs::remove_dir_all(&tmp);
 }
