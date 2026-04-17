@@ -268,22 +268,48 @@ llm_presets:
     model: "gpt-4o"
     temperature: 0.2
 
+  gemma4_31b:
+    provider: "lmstudio"
+    model: "gemma-4-31B-it-Q5_K_M"
+    temperature: 1.0
+    base_url: "http://192.168.1.20:8080/v1/chat/completions"
+    thinking:
+      effort: medium
+
+
+llm_preset_mapping:
+  planner: gemma4_31b             # routed
+  coder: gemma4_31b               # routed
+  executor: gemma4_31b            # routed
+  researcher: gemma4_31b         # fixed
+  debugger: gemma4_31b            # fixed
+  evaluator: gemma4_31b          # routed
+  architect: gemma4_31b            # fixed
+  specialized_builder: gemma4_31b
+  packager: gemma4_31b
+  registration: gemma4_31b        # credential onboarding flow
+  agent-factory: gemma4_31b       # agent creation pipeline orchestration
+  discovery: gemma4_31b          # semantic reasoning over agent descriptions
+  default: gemma4_31b
+
+
 # ── Template → Preset Mapping ────────────────────────────────────────
 # Used during 'agent bootstrap' and 'agent init --template <name>'.
 # Values can be fixed preset names or routing preset names.
-llm_preset_mapping:
-  planner: agentic             # routed
-  coder: coding               # routed
-  researcher: research         # fixed
-  debugger: coding            # fixed
-  evaluator: coding          # routed
-  architect: coding            # fixed
-  specialized_builder: agentic
-  packager: agentic
-  registration: agentic        # credential onboarding flow
-  agent-factory: agentic       # agent creation pipeline orchestration
-  discovery: research          # semantic reasoning over agent descriptions
-  default: fallback
+# llm_preset_mapping:
+#   planner: agentic             # routed
+#   coder: coding               # routed
+#   executor: coding            # routed
+#   researcher: research         # fixed
+#   debugger: coding            # fixed
+#   evaluator: coding          # routed
+#   architect: coding            # fixed
+#   specialized_builder: agentic
+#   packager: agentic
+#   registration: agentic        # credential onboarding flow
+#   agent-factory: agentic       # agent creation pipeline orchestration
+#   discovery: research          # semantic reasoning over agent descriptions
+#   default: fallback
 
 # ── Context Compression ──────────────────────────────────────────────
 # Summarizes old conversation turns when approaching context limits.
