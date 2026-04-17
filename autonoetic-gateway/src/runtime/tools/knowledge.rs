@@ -77,12 +77,12 @@ impl NativeTool for KnowledgeStoreTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Store a durable fact in the knowledge base with provenance. Default visibility is session: any agent in the same session can read it; use private to restrict to yourself, or global for all agents. Use retention for TTL: stable (default), ephemeral (~1 hour), 1d, or 30d. To widen visibility later, call knowledge.store again with the same id.".to_string(),
+            description: "Store a durable fact in the knowledge base with provenance. Default visibility is session: any agent in the same session can read it; use private to restrict to yourself, or global for all agents. Use retention for TTL: stable (default), ephemeral (~1 hour), 1d, or 30d. To widen visibility later, call knowledge.store again with the same id. IMPORTANT: 'content' must be a plain string — never a JSON object. If you want to store structured data, serialize it to a JSON string first (e.g., JSON.stringify or serde_json::to_string).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "Unique identifier for this knowledge" },
-                    "content": { "type": "string", "description": "The fact or information to store" },
+                    "content": { "type": "string", "description": "The fact or information to store. Must be a plain string — not a JSON object. If storing structured data, serialize it to a JSON string first." },
                     "scope": { "type": "string", "description": "Category/namespace for organizing knowledge (e.g., 'api-keys', 'user-preferences')", "default": "general" },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags for searchability" },
                     "confidence": { "type": "number", "description": "Confidence level (0.0 to 1.0)", "default": 1.0 },

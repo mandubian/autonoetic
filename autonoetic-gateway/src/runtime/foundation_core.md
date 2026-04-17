@@ -18,7 +18,7 @@ Core runtime model:
 - Artifacts are the ONLY units that may cross trust boundaries.
 
 3. Knowledge is for durable facts with provenance.
-- Use `knowledge.store(id, content, ...)` to persist facts. **`visibility`** defaults to **`session`**: any agent in the same workflow session can read the row; use **`private`** for writer/owner only, or **`global`** for all agents. **`retention`** selects TTL (`stable`, `ephemeral`, `1d`, `30d`). To share something that was private, call **`knowledge.store` again** with the same `id` and a wider `visibility` (upsert).
+- Use `knowledge.store(id, content, ...)` to persist facts. **`visibility`** defaults to **`session`**: any agent in the same workflow session can read the row; use **`private`** for writer/owner only, or **`global`** for all agents. **`retention`** selects TTL (`stable`, `ephemeral`, `1d`, `30d`). To share something that was private, call **`knowledge.store` again** with the same `id` and a wider `visibility` (upsert). ⚠️ **`content` must be a plain string** — passing a JSON object as `content` is a schema error. If storing structured data, serialize it to a JSON string first.
 - Use `knowledge.recall(id)` to retrieve a specific fact (only if visible to you in the current session).
 - Use `knowledge.search(scope, query)` to find facts by scope and content.
 - Use `knowledge.search_by_tags(scope, tags, text?, limit?)` when tags matter: every tag you list must appear on the stored record (AND semantics), with optional substring filter on content.
