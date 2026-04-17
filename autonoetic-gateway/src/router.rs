@@ -312,6 +312,53 @@ impl JsonRpcRouter {
 
         match req.method.as_str() {
             "ping" => JsonRpcResponse::success(req.id, serde_json::json!("pong")),
+            "interaction.answer" => {
+                let params: crate::interaction_answer::InteractionAnswerParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for interaction.answer: {}", e),
+                            );
+                        }
+                    };
+                let execution = self.execution.clone();
+                match crate::interaction_answer::answer_and_orchestrate_resume(&execution, params)
+                    .await
+                {
+                    Ok(out) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(out).unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(req.id, -32000, e.to_string()),
+                }
+            }
+            "interaction.resolve_and_answer" => {
+                let params: crate::interaction_answer::InteractionResolveAndAnswerParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!(
+                                    "Invalid params for interaction.resolve_and_answer: {}",
+                                    e
+                                ),
+                            );
+                        }
+                    };
+                let execution = self.execution.clone();
+                match crate::interaction_answer::resolve_and_answer(&execution, params).await {
+                    Ok(out) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(out).unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(req.id, -32000, e.to_string()),
+                }
+            }
             "agent.spawn" => {
                 let params: AgentSpawnParams = match serde_json::from_value(req.params) {
                     Ok(v) => v,

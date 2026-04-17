@@ -4,7 +4,7 @@ use crate::agent::AgentRepository;
 use crate::causal_chain::CausalLogger;
 use crate::llm::{build_driver, Message};
 use crate::runtime::active_execution_registry::ActiveExecutionRegistry;
-use crate::runtime::lifecycle::AgentExecutor;
+use crate::runtime::lifecycle::{AgentExecutor, TurnOutcome};
 use crate::runtime::live_digest::{
     append_repair_attempt_best_effort, append_repair_passed_best_effort, base_session_id,
 };
@@ -24,6 +24,20 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
+
+/// Ensures `close_session` runs when `execute_with_history` fails so session report / digest finalize.
+async fn execute_with_history_close_on_error(
+    runtime: &mut AgentExecutor,
+    history: &mut Vec<Message>,
+) -> anyhow::Result<TurnOutcome> {
+    match runtime.execute_with_history(history).await {
+        Ok(o) => Ok(o),
+        Err(e) => {
+            let _ = runtime.close_session("spawn_execute_error");
+            Err(e)
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactMetadata {
@@ -1068,7 +1082,7 @@ impl GatewayExecutionService {
                     // Delete the continuation file — we are now live.
                     let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
 
-                    let outcome = runtime.execute_with_history(&mut history).await?;
+                    let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                     (outcome, initial_msg, None)
                 } else {
                     // No continuation on disk — optionally resume from latest checkpoint.
@@ -1141,7 +1155,7 @@ impl GatewayExecutionService {
                                         .find(|m| matches!(m.role, crate::llm::Role::User))
                                         .map(|m| m.content.clone())
                                         .unwrap_or_default();
-                                    let outcome = runtime.execute_with_history(&mut history).await?;
+                                    let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                                     (outcome, initial_msg, Some(checkpoint.turn_id))
                                 }
                             }
@@ -1257,7 +1271,7 @@ impl GatewayExecutionService {
                                         .find(|m| matches!(m.role, crate::llm::Role::User))
                                         .map(|m| m.content.clone())
                                         .unwrap_or_default();
-                                    let outcome = runtime.execute_with_history(&mut history).await?;
+                                    let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                                     (outcome, initial_msg, Some(checkpoint.turn_id))
                                 }
                             }
@@ -1290,7 +1304,7 @@ impl GatewayExecutionService {
                                 .map(|m| m.content.clone())
                                 .unwrap_or_default();
 
-                            let outcome = runtime.execute_with_history(&mut history).await?;
+                            let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                             (outcome, initial_msg, Some(checkpoint.turn_id))
                         } else {
                             tracing::debug!(
@@ -1306,7 +1320,7 @@ impl GatewayExecutionService {
                                 session_id,
                                 &runtime.manifest,
                             );
-                            let outcome = runtime.execute_with_history(&mut history).await?;
+                            let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                             (outcome, runtime.initial_user_message.clone(), None)
                         }
                     } else {
@@ -1317,7 +1331,7 @@ impl GatewayExecutionService {
                             session_id,
                             &runtime.manifest,
                         );
-                        let outcome = runtime.execute_with_history(&mut history).await?;
+                        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                         (outcome, runtime.initial_user_message.clone(), None)
                     }
                 }
@@ -1389,7 +1403,7 @@ impl GatewayExecutionService {
                                     .find(|m| matches!(m.role, crate::llm::Role::User))
                                     .map(|m| m.content.clone())
                                     .unwrap_or_default();
-                                let outcome = runtime.execute_with_history(&mut history).await?;
+                                let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                                 (outcome, initial_msg, Some(checkpoint.turn_id))
                             }
                         }
@@ -1505,7 +1519,7 @@ impl GatewayExecutionService {
                                     .find(|m| matches!(m.role, crate::llm::Role::User))
                                     .map(|m| m.content.clone())
                                     .unwrap_or_default();
-                                let outcome = runtime.execute_with_history(&mut history).await?;
+                                let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                                 (outcome, initial_msg, Some(checkpoint.turn_id))
                             }
                         }
@@ -1537,7 +1551,7 @@ impl GatewayExecutionService {
                             .map(|m| m.content.clone())
                             .unwrap_or_default();
 
-                        let outcome = runtime.execute_with_history(&mut history).await?;
+                        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                         (outcome, initial_msg, Some(checkpoint.turn_id))
                     } else {
                         tracing::debug!(
@@ -1553,7 +1567,7 @@ impl GatewayExecutionService {
                             session_id,
                             &runtime.manifest,
                         );
-                        let outcome = runtime.execute_with_history(&mut history).await?;
+                        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                         (outcome, runtime.initial_user_message.clone(), None)
                     }
                 } else {
@@ -1564,7 +1578,7 @@ impl GatewayExecutionService {
                         session_id,
                         &runtime.manifest,
                     );
-                    let outcome = runtime.execute_with_history(&mut history).await?;
+                    let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                     (outcome, runtime.initial_user_message.clone(), None)
                 }
             };
@@ -2312,7 +2326,7 @@ impl GatewayExecutionService {
             history.push(Message::user(msg));
         }
 
-        let outcome = runtime.execute_with_history(&mut history).await?;
+        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
 
         let resolved_session_id = runtime
             .session_id
@@ -2921,7 +2935,7 @@ async fn resume_answered_user_interaction_from_loaded_checkpoint(
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
-    let outcome = runtime.execute_with_history(&mut history).await?;
+    let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
 }
 

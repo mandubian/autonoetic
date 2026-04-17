@@ -795,7 +795,9 @@ pub fn handle_gateway_interactions(
             text,
             option,
         } => {
-            use autonoetic_types::background::UserInteractionAnswer;
+            use autonoetic_gateway::interaction_answer::{
+                answer_and_orchestrate_resume, InteractionAnswerParams,
+            };
 
             if text.is_none() && option.is_none() {
                 anyhow::bail!("Must provide either --text or --option to answer an interaction");
@@ -804,14 +806,25 @@ pub fn handle_gateway_interactions(
                 anyhow::bail!("Provide exactly one of --text or --option");
             }
 
-            let answer = UserInteractionAnswer {
-                interaction_id: interaction_id.clone(),
-                answer_option_id: option.clone(),
-                answer_text: text.clone(),
-                answered_by: "cli".to_string(),
-            };
+            let store = std::sync::Arc::new(gateway_store);
+            let execution = std::sync::Arc::new(
+                autonoetic_gateway::execution::GatewayExecutionService::new(
+                    config.clone(),
+                    Some(store.clone()),
+                ),
+            );
 
-            gateway_store.answer_user_interaction(&answer)?;
+            let rt = tokio::runtime::Runtime::new()?;
+            let out = rt.block_on(answer_and_orchestrate_resume(
+                &execution,
+                InteractionAnswerParams {
+                    interaction_id: interaction_id.clone(),
+                    answer_text: text.clone(),
+                    answer_option_id: option.clone(),
+                    answered_by: Some("cli".to_string()),
+                    follow_up_message: None,
+                },
+            ))?;
 
             println!("Answered interaction {}", interaction_id);
             if let Some(opt) = option {
@@ -821,13 +834,7 @@ pub fn handle_gateway_interactions(
                 println!("  Answer text: {}", txt);
             }
             println!();
-            println!(
-                "The interaction has been answered. Resume the agent session with a spawn for"
-            );
-            println!(
-                "that session (e.g. chat/JSON-RPC `agent.spawn`), or call \
-                 `GatewayExecutionService::resume_from_user_interaction` with this id."
-            );
+            println!("Gateway orchestration: resumed={} workflow_unblocked={}", out.resumed, out.workflow_task_unblocked);
         }
         super::common::GatewayInteractionCommands::Cancel {
             interaction_id,

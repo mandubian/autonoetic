@@ -12,7 +12,7 @@ Autonoetic has three distinct mechanisms for human/agent interaction during work
 | **Triggered by** | Tool (sandbox.exec, agent.install) | Agent explicitly calls tool | Child agent return value |
 | **Who resolves** | Operator (CLI) | Human (chat/CLI) | Parent agent |
 | **Session state** | `YieldReason::ApprovalRequired` | `YieldReason::UserInputRequired` | Normal tool result |
-| **Resume mechanism** | Auto-resume by Gateway | Explicit `resume_from_user_interaction` | Parent re-spawns child |
+| **Resume mechanism** | Auto-resume by Gateway | Gateway-owned `interaction.answer` / checkpoint resume (`resume_from_user_interaction`) | Parent re-spawns child |
 | **Outcome type** | `TurnOutcome::Suspended` | `TurnOutcome::SuspendedUserInput` | `TurnOutcome::Completed` |
 | **Close reason** | `jsonrpc_spawn_suspended_approval` | `jsonrpc_spawn_suspended_user_input` | `jsonrpc_spawn_complete` |
 | **Available during orchestration** | ✅ Yes (primary mechanism) | ❌ Blocked | ✅ Yes (structured result) |
@@ -106,15 +106,17 @@ Agent → user.ask({"question": "What format do you want?"})
      → Returns TurnOutcome::SuspendedUserInput
      → Session suspends (checkpoint saved)
 
-Human → Answers via chat/CLI
+Human → Answers via chat/CLI or messenger adapter
 
-Caller → Must explicitly call resume_from_user_interaction
-       → Session resumes from checkpoint with answer injected
-```
+Gateway → `interaction.answer` / `interaction.resolve_and_answer` (or in-process orchestration)
+        → Persists answer + resumes: workflow tasks `Paused`→`Runnable` + queue, or
+          `resume_from_user_interaction` for non-workflow sessions
+
+See [`plan-channel-agnostic-interaction-answering.md`](./plan-channel-agnostic-interaction-answering.md).
 
 ### Key Properties
 
-- **Explicit resume required**: Unlike approval, the session does NOT auto-resume
+- **Gateway-orchestrated resume**: Use JSON-RPC `interaction.answer` (or shared orchestrator); avoid raw store writes without resume
 - **Blocked during orchestration**: Runtime guard prevents `user.ask` when workflow has active children or pending approvals
 - **Clear suspension state**: When accepted, `user.ask` suspends as `jsonrpc_spawn_suspended_user_input` (not a normal completion)
 

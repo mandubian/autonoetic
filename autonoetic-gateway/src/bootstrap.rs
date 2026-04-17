@@ -19,6 +19,8 @@ use std::path::Path;
 /// Bootstrap all agents from `config.agents_dir` into the gateway store.
 /// Returns the number of agents activated.
 pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<usize> {
+    write_gateway_identity(gateway_dir)?;
+
     let store = GatewayStore::open(gateway_dir)?;
     let mut activated = 0usize;
 
@@ -82,14 +84,12 @@ fn bootstrap_agent_inner(
 
     let skill_content = std::fs::read(&skill_path)?;
     let skill_text = String::from_utf8_lossy(&skill_content);
-    let (parsed_manifest, _instructions) =
-        crate::runtime::parser::SkillParser::parse(&skill_text).map_err(|e| {
-            anyhow::anyhow!("Failed to parse SKILL.md for '{}': {}", agent_id, e)
-        })?;
+    let (parsed_manifest, _instructions) = crate::runtime::parser::SkillParser::parse(&skill_text)
+        .map_err(|e| anyhow::anyhow!("Failed to parse SKILL.md for '{}': {}", agent_id, e))?;
 
     let lock_rel_path = &parsed_manifest.runtime.runtime_lock;
     let lock_path = agent_dir.join(lock_rel_path);
-    let lock_content = std::fs::read(&lock_path).map_err(|e| {
+    let mut lock_content = std::fs::read(&lock_path).map_err(|e| {
         anyhow::anyhow!(
             "Missing runtime.lock '{}' for agent '{}': {}",
             lock_rel_path,
@@ -97,6 +97,15 @@ fn bootstrap_agent_inner(
             e
         )
     })?;
+
+    let lock_text = String::from_utf8_lossy(&lock_content);
+    if lock_text.contains(crate::runtime::install_contract::PLACEHOLDER_SHA) {
+        let replaced = lock_text.replace(
+            crate::runtime::install_contract::PLACEHOLDER_SHA,
+            crate::runtime::install_contract::GATEWAY_BUILD_SHA256,
+        );
+        lock_content = replaced.into_bytes();
+    }
 
     let manifest_hash = format!("sha256:{:x}", Sha256::digest(&skill_content));
     let runtime_lock_hash = format!("sha256:{:x}", Sha256::digest(&lock_content));
@@ -336,4 +345,29 @@ fn merge_preset_into_skill(skill_text: &str, preset: &LlmPreset) -> Option<Strin
     let new_frontmatter = serde_yaml::to_string(&yaml).ok()?;
     let body = &skill_text[fm_end + 4..];
     Some(format!("---\n{}---{}\n", new_frontmatter, body))
+}
+
+fn write_gateway_identity(gateway_dir: &Path) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct GatewayIdentity {
+        version: String,
+        sha256: String,
+        binary_sha256: Option<String>,
+        build_tag: Option<String>,
+    }
+
+    let binary_sha = crate::runtime::install_contract::running_binary_sha256().ok();
+
+    std::fs::create_dir_all(gateway_dir)?;
+
+    let identity = GatewayIdentity {
+        version: crate::runtime::install_contract::gateway_version(),
+        sha256: crate::runtime::install_contract::GATEWAY_BUILD_SHA256.to_string(),
+        binary_sha256: binary_sha,
+        build_tag: Some(crate::runtime::install_contract::GATEWAY_BUILD_TAG.to_string()),
+    };
+
+    let json = serde_json::to_string_pretty(&identity)?;
+    std::fs::write(gateway_dir.join("gateway.json"), json)?;
+    Ok(())
 }

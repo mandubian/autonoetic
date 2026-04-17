@@ -306,6 +306,52 @@ impl SessionReportWriter {
         })
     }
 
+    /// Records a failure that is not tied to a tool result JSON (e.g. LLM transport/API error).
+    pub fn record_execution_failure(
+        &mut self,
+        component: &str,
+        summary: &str,
+        turn_id: Option<&str>,
+        details: Option<Value>,
+        event_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let session_id = self.session_id.clone();
+        let agent_id = self.agent_id.clone();
+        let depth = self.depth;
+        let event_id_owned = event_id.map(String::from);
+        self.update_state(|state| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let redacted = redact_text_for_logs(summary);
+            let short = truncate_chars(&redacted, 400);
+            let agent = ensure_agent(state, &session_id, &agent_id, depth);
+            agent.error_count = agent.error_count.saturating_add(1);
+            agent.errors.push(ErrorItem {
+                event_id: event_id_owned.clone(),
+                created_at: now.clone(),
+                tool_name: Some(component.to_string()),
+                summary: short.clone(),
+                links: None,
+            });
+            touch_agent(agent, "ERROR", &short, &now);
+            push_event(
+                state,
+                ReportEvent {
+                    event_id: event_id_owned,
+                    created_at: now,
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.clone(),
+                    turn_id: turn_id.map(String::from),
+                    kind: "ERROR".to_string(),
+                    summary: short,
+                    important: true,
+                    details,
+                    payload_ref: None,
+                    links: None,
+                },
+            );
+        })
+    }
+
     pub fn record_tool_requested(
         &mut self,
         tool_name: &str,
@@ -364,10 +410,19 @@ impl SessionReportWriter {
                 .as_ref()
                 .and_then(|v| v.get("approval_required").and_then(|x| x.as_bool()))
                 == Some(true);
-            let ok = parsed
+            let mut ok = parsed
                 .as_ref()
                 .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
                 != Some(false);
+            if tool_name == "workflow.wait" {
+                if parsed
+                    .as_ref()
+                    .and_then(|v| v.get("any_failed").and_then(|x| x.as_bool()))
+                    == Some(true)
+                {
+                    ok = false;
+                }
+            }
 
             let (kind, important, summary, details, payload_ref) = if is_approval {
                 (
@@ -632,7 +687,9 @@ impl SessionReportWriter {
     where
         F: FnOnce(&mut SessionReportState),
     {
-        let _guard = SESSION_REPORT_LOCK.lock().unwrap();
+        let _guard = SESSION_REPORT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut state = self.load_state()?;
         f(&mut state);
         state.generated_at = chrono::Utc::now().to_rfc3339();
@@ -648,7 +705,9 @@ impl SessionReportWriter {
     where
         F: FnOnce(&mut SessionReportState),
     {
-        let _guard = SESSION_REPORT_LOCK.lock().unwrap();
+        let _guard = SESSION_REPORT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut state = self.load_state()?;
         f(&mut state);
         state.generated_at = chrono::Utc::now().to_rfc3339();
@@ -993,6 +1052,9 @@ fn summarize_workflow_state(parsed: Option<&Value>) -> String {
 }
 
 fn summarize_tool_error(tool_name: &str, parsed: Option<&Value>, raw: &str) -> String {
+    if tool_name == "workflow.wait" {
+        return summarize_workflow_wait(parsed);
+    }
     if let Some(v) = parsed {
         if let Some(stderr) = v.get("stderr").and_then(|x| x.as_str()) {
             let s = truncate_chars(stderr.trim(), 160);
@@ -1213,14 +1275,28 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         state.started_at.as_deref().unwrap_or("—")
     );
     let _ = writeln!(out, "| Total turns | {} |", total_turns);
-    let _ = writeln!(out, "| Duration | {} |", format_duration(state.started_at.as_deref(), Some(&state.generated_at)));
+    let _ = writeln!(
+        out,
+        "| Duration | {} |",
+        format_duration(state.started_at.as_deref(), Some(&state.generated_at))
+    );
     let _ = writeln!(out, "| Last updated | {} |", state.generated_at);
     let _ = writeln!(out);
     {
         let agents_with_errors = state.agents.values().filter(|a| a.error_count > 0).count();
-        let awaiting = state.agents.values().filter(|a| a.status == "awaiting_approval").count();
-        let failed = state.agents.values().filter(|a| a.status == "failed").count();
-        let abnormal_exits = state.agents.values()
+        let awaiting = state
+            .agents
+            .values()
+            .filter(|a| a.status == "awaiting_approval")
+            .count();
+        let failed = state
+            .agents
+            .values()
+            .filter(|a| a.status == "failed")
+            .count();
+        let abnormal_exits = state
+            .agents
+            .values()
             .filter(|a| a.close_reason.as_deref().map_or(false, is_abnormal_close))
             .count();
         let health_line = if failed > 0 || agents_with_errors > 0 || abnormal_exits > 0 {
@@ -1326,7 +1402,9 @@ fn render_live_markdown(state: &SessionReportState) -> String {
     }
     let _ = writeln!(out);
     {
-        let abnormal: Vec<_> = state.agents.values()
+        let abnormal: Vec<_> = state
+            .agents
+            .values()
             .filter(|a| a.close_reason.as_deref().map_or(false, is_abnormal_close))
             .collect();
         let _ = writeln!(out, "## Abnormal Exits");
@@ -1457,9 +1535,15 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                     ),
                 };
                 let wait = if approval.status == "pending" {
-                    format!(" (waiting {})", format_duration(Some(&approval.created_at), Some(&state.generated_at)))
+                    format!(
+                        " (waiting {})",
+                        format_duration(Some(&approval.created_at), Some(&state.generated_at))
+                    )
                 } else if let Some(ref resolved) = approval.resolved_at {
-                    format!(" (waited {})", format_duration(Some(&approval.created_at), Some(resolved)))
+                    format!(
+                        " (waited {})",
+                        format_duration(Some(&approval.created_at), Some(resolved))
+                    )
                 } else {
                     String::new()
                 };
@@ -1486,16 +1570,22 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         }
         if !agent.delegations.is_empty() {
             let _ = writeln!(out, "- Delegations:");
-            let mut per_target: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            let mut per_target: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
             for d in &agent.delegations {
-                let idx = *per_target.entry(d.target_agent.as_str()).and_modify(|c| *c += 1).or_insert(0);
+                let idx = *per_target
+                    .entry(d.target_agent.as_str())
+                    .and_modify(|c| *c += 1)
+                    .or_insert(0);
                 let child = find_child_agent(state, &agent.session_id, &d.target_agent, idx);
                 let child_status = child.map(|a| a.status.as_str()).unwrap_or("unknown");
                 let child_errors = child.map(|a| a.error_count).unwrap_or(0);
                 let child_close = child.and_then(|a| a.close_reason.as_deref()).unwrap_or("—");
-                let child_output = child.and_then(|a| a.output_preview.as_deref())
+                let child_output = child
+                    .and_then(|a| a.output_preview.as_deref())
                     .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
-                let abnormal = child.and_then(|a| a.close_reason.as_deref())
+                let abnormal = child
+                    .and_then(|a| a.close_reason.as_deref())
                     .map_or(false, is_abnormal_close);
                 let _ = writeln!(
                     out,
@@ -1503,7 +1593,11 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                     d.target_agent,
                     child_status,
                     child_errors,
-                    if abnormal { format!(" ⚠ {}", truncate_chars(child_close, 60)) } else { String::new() },
+                    if abnormal {
+                        format!(" ⚠ {}", truncate_chars(child_close, 60))
+                    } else {
+                        String::new()
+                    },
                     truncate_chars(child_output, 120)
                 );
             }
@@ -1622,9 +1716,19 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
     out.push_str("</tbody></table>\n");
     {
         let agents_with_errors = state.agents.values().filter(|a| a.error_count > 0).count();
-        let awaiting = state.agents.values().filter(|a| a.status == "awaiting_approval").count();
-        let failed = state.agents.values().filter(|a| a.status == "failed").count();
-        let abnormal_exits = state.agents.values()
+        let awaiting = state
+            .agents
+            .values()
+            .filter(|a| a.status == "awaiting_approval")
+            .count();
+        let failed = state
+            .agents
+            .values()
+            .filter(|a| a.status == "failed")
+            .count();
+        let abnormal_exits = state
+            .agents
+            .values()
             .filter(|a| a.close_reason.as_deref().map_or(false, is_abnormal_close))
             .count();
         let (class, msg) = if failed > 0 || agents_with_errors > 0 || abnormal_exits > 0 {
@@ -1633,11 +1737,18 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
                 agents_with_errors, failed, awaiting, abnormal_exits
             ))
         } else if awaiting > 0 {
-            ("health-warn", format!("[WAITING] {} agent(s) awaiting approval", awaiting))
+            (
+                "health-warn",
+                format!("[WAITING] {} agent(s) awaiting approval", awaiting),
+            )
         } else {
             ("health-ok", "[OK] No issues detected".to_string())
         };
-        out.push_str(&format!("<div class=\"health-banner {}\">{}</div>\n", class, escape_html(&msg)));
+        out.push_str(&format!(
+            "<div class=\"health-banner {}\">{}</div>\n",
+            class,
+            escape_html(&msg)
+        ));
     }
 
     out.push_str("<h2>Active Agents</h2>\n");
@@ -1704,7 +1815,9 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
     }
 
     {
-        let abnormal: Vec<_> = state.agents.values()
+        let abnormal: Vec<_> = state
+            .agents
+            .values()
             .filter(|a| a.close_reason.as_deref().map_or(false, is_abnormal_close))
             .collect();
         out.push_str("<h2>Abnormal Exits</h2>\n");
@@ -1796,13 +1909,18 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
             );
             out.push_str("<table><thead><tr><th>Time</th><th>Tool</th><th>Summary</th><th>Context before</th></tr></thead><tbody>\n");
             for e in &agent.errors {
-                let ctx_items: Vec<String> = events_before(state, &agent.session_id, &e.created_at, 2)
-                    .iter()
-                    .map(|ctx| format!("[{}] {} {}",
-                        format_timestamp(Some(&ctx.created_at)),
-                        escape_html(&ctx.kind),
-                        truncate_html(&ctx.summary, 80)))
-                    .collect();
+                let ctx_items: Vec<String> =
+                    events_before(state, &agent.session_id, &e.created_at, 2)
+                        .iter()
+                        .map(|ctx| {
+                            format!(
+                                "[{}] {} {}",
+                                format_timestamp(Some(&ctx.created_at)),
+                                escape_html(&ctx.kind),
+                                truncate_html(&ctx.summary, 80)
+                            )
+                        })
+                        .collect();
                 out.push_str(&format!(
                     "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td style=\"font-size:0.8rem;color:var(--text-dim)\">{}</td></tr>\n",
                     format_timestamp(Some(&e.created_at)),
@@ -1829,7 +1947,10 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
                 let wait = if a.status == "pending" {
                     format_duration(Some(&a.created_at), Some(&state.generated_at))
                 } else if let Some(ref resolved) = a.resolved_at {
-                    format!("waited {}", format_duration(Some(&a.created_at), Some(resolved)))
+                    format!(
+                        "waited {}",
+                        format_duration(Some(&a.created_at), Some(resolved))
+                    )
                 } else {
                     "—".to_string()
                 };
@@ -1849,16 +1970,22 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
                 agent.delegations.len()
             );
             out.push_str("<table><thead><tr><th>Target</th><th>Status</th><th>Errors</th><th>Close</th><th>Output</th></tr></thead><tbody>\n");
-            let mut per_target: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            let mut per_target: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
             for d in &agent.delegations {
-                let idx = *per_target.entry(d.target_agent.as_str()).and_modify(|c| *c += 1).or_insert(0);
+                let idx = *per_target
+                    .entry(d.target_agent.as_str())
+                    .and_modify(|c| *c += 1)
+                    .or_insert(0);
                 let child = find_child_agent(state, &agent.session_id, &d.target_agent, idx);
                 let child_status = child.map(|a| a.status.as_str()).unwrap_or("unknown");
                 let child_errors = child.map(|a| a.error_count).unwrap_or(0);
                 let child_close = child.and_then(|a| a.close_reason.as_deref()).unwrap_or("—");
-                let child_output = child.and_then(|a| a.output_preview.as_deref())
+                let child_output = child
+                    .and_then(|a| a.output_preview.as_deref())
                     .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
-                let abnormal = child.and_then(|a| a.close_reason.as_deref())
+                let abnormal = child
+                    .and_then(|a| a.close_reason.as_deref())
                     .map_or(false, is_abnormal_close);
                 out.push_str(&format!("<tr><td><code>{}</code></td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td style=\"color:{}\">{}</td><td>{}</td></tr>\n",
                     escape_html(&d.target_agent),
@@ -1998,8 +2125,11 @@ fn render_final_markdown(state: &SessionReportState) -> String {
                 let child_output = child
                     .and_then(|a| a.output_preview.as_deref())
                     .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
-                let child_errors = child.map(|a| a.error_count.to_string()).unwrap_or_else(|| "—".to_string());
-                let child_close = child.and_then(|a| a.close_reason.as_deref())
+                let child_errors = child
+                    .map(|a| a.error_count.to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                let child_close = child
+                    .and_then(|a| a.close_reason.as_deref())
                     .map(|r| truncate_chars(r, 80))
                     .unwrap_or_else(|| "—".to_string());
                 let _ = writeln!(
@@ -2265,7 +2395,9 @@ pre { background: var(--surface); border: 1px solid var(--border); border-radius
                 let child_output = child
                     .and_then(|a| a.output_preview.as_deref())
                     .unwrap_or(d.output_preview.as_deref().unwrap_or("—"));
-                let child_errors = child.map(|a| a.error_count.to_string()).unwrap_or_else(|| "—".to_string());
+                let child_errors = child
+                    .map(|a| a.error_count.to_string())
+                    .unwrap_or_else(|| "—".to_string());
                 let child_close = child.and_then(|a| a.close_reason.as_deref()).unwrap_or("—");
                 out.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
                     escape_html(&agent.agent_id),
@@ -2890,7 +3022,8 @@ fn truncate_json_strings(value: &mut Value, max_len: usize) {
     match value {
         Value::String(s) => {
             if s.len() > max_len {
-                *s = format!("{}…", &s[..max_len]);
+                let truncated: String = s.chars().take(max_len).collect();
+                *s = format!("{}…", truncated);
             }
         }
         Value::Array(items) => {

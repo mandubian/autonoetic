@@ -259,6 +259,52 @@ pub fn execute_approved_action(
             "SessionEscalate approval is handled by injecting operator guidance into the conversation; no action execution needed"
         ),
 
+        ScheduledAction::CredentialRequest {
+            credential_id,
+            url,
+            method,
+            headers,
+            body,
+            inject_secret_as,
+            ..
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("credential_id".to_string(), serde_json::json!(credential_id));
+            args.insert("url".to_string(), serde_json::json!(url));
+            args.insert("approval_ref".to_string(), serde_json::json!(decision.request_id));
+            if let Some(m) = method {
+                args.insert("method".to_string(), serde_json::json!(m));
+            }
+            if let Some(h) = headers {
+                args.insert("headers".to_string(), serde_json::json!(h));
+            }
+            if let Some(b) = body {
+                args.insert("body".to_string(), b.clone());
+            }
+            if let Some(i) = inject_secret_as {
+                args.insert("inject_secret_as".to_string(), serde_json::json!(i));
+            }
+            tracing::info!(
+                target: "continuation",
+                request_id = %decision.request_id,
+                url = %url,
+                "Executing approved credential.request action"
+            );
+            registry.execute(
+                "credential.request",
+                manifest,
+                &policy,
+                agent_dir,
+                gateway_dir,
+                &serde_json::Value::Object(args).to_string(),
+                session_id,
+                None,
+                Some(config),
+                gateway_store,
+                None,
+            )
+        }
+
         other => {
             anyhow::bail!(
                 "execute_approved_action: unsupported ScheduledAction variant {:?}",

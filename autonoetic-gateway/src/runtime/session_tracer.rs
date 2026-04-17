@@ -559,6 +559,38 @@ impl SessionTracer {
         Ok(())
     }
 
+    /// Logged when the LLM driver returns an error before any completion is produced (causal chain + session report).
+    pub fn log_llm_request_failed(&mut self, err: &anyhow::Error) -> anyhow::Result<()> {
+        let msg = redact_text_for_logs(&err.to_string());
+        let payload = serde_json::json!({ "error": msg });
+        let event_id = self.log_event(
+            "llm",
+            "request_failed",
+            EntryStatus::Error,
+            Some(payload.clone()),
+        )?;
+        if let Some(w) = &self.live_report {
+            if let Err(e) = w.lock().unwrap().record_execution_failure(
+                "llm.complete",
+                &msg,
+                self.turn_id.as_deref(),
+                Some(payload),
+                Some(&event_id),
+            ) {
+                tracing::warn!(
+                    target: "session_report",
+                    error = %e,
+                    "session report record_execution_failure (llm) failed"
+                );
+            }
+        }
+        self.append_live_digest_event(
+            "llm.request_failed",
+            Some(serde_json::json!({ "error": msg })),
+        );
+        Ok(())
+    }
+
     pub fn log_tool_requested(&mut self, tool_name: &str, arguments: &str) -> anyhow::Result<()> {
         let redacted_args = redact_text_for_logs(arguments);
         if tool_name != "digest.annotate" {
