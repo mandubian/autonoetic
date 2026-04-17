@@ -1470,15 +1470,14 @@ layers: []
             .register_name(session_id, name, &handle)
             .unwrap();
     }
-    // Intentionally build with default kind ("binary"), not agent_bundle.
+    // Intentionally build with default kind ("binary") and NO entrypoints.
     let bundle = artifact_store
         .build(
             &[
                 "SKILL.md".to_string(),
                 "runtime.lock".to_string(),
-                "main.py".to_string(),
             ],
-            Some(&["main.py".to_string()]),
+            None,
             None,
             session_id,
         )
@@ -1506,8 +1505,8 @@ layers: []
             Some(store.clone()),
             None,
         )
-        .expect_err("revision creation must require artifact kind agent_bundle");
-    assert!(err.to_string().contains("requires kind 'agent_bundle'"));
+        .expect_err("revision creation must require artifact kind agent_bundle or binary with entrypoint");
+    assert!(err.to_string().contains("requires kind 'agent_bundle'") || err.to_string().contains("entrypoint"));
 }
 
 #[test]
