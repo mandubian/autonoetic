@@ -587,6 +587,15 @@ pub struct GatewayConfig {
     /// Scheduled jobs (cron) configuration.
     #[serde(default)]
     pub scheduled_jobs: ScheduledJobsConfig,
+
+    /// When true (default), JSON-RPC `interaction.answer` / `interaction.resolve_and_answer`
+    /// persist answers and orchestrate workflow task or session resume (gateway-owned path).
+    #[serde(default = "default_interaction_answer_orchestration")]
+    pub interaction_answer_orchestration: bool,
+}
+
+fn default_interaction_answer_orchestration() -> bool {
+    true
 }
 
 /// Scheduled jobs (cron) configuration.
@@ -1140,6 +1149,7 @@ impl Default for GatewayConfig {
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
             hooks: Vec::new(),
             scheduled_jobs: ScheduledJobsConfig::default(),
+            interaction_answer_orchestration: default_interaction_answer_orchestration(),
         }
     }
 }

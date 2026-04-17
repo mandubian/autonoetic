@@ -107,6 +107,23 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+    /// Approval subject + executable continuation: credential.request call blocked by
+    /// network policy (e.g. localhost). After operator approval, runtime retries the same
+    /// request with `approval_ref` and executes it.
+    CredentialRequest {
+        credential_id: String,
+        url: String,
+        #[serde(default)]
+        method: Option<String>,
+        #[serde(default)]
+        headers: Option<std::collections::HashMap<String, String>>,
+        #[serde(default)]
+        body: Option<serde_json::Value>,
+        #[serde(default)]
+        inject_secret_as: Option<String>,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
     /// Approval subject only: continue a session after max-turn circuit breaker trips.
     /// Not executed by the scheduler; once approved, the next resume attempt proceeds.
     SessionContinue {
@@ -165,6 +182,7 @@ impl ScheduledAction {
             } => *requires_approval,
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
+            | Self::CredentialRequest { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. } => true,
@@ -177,6 +195,7 @@ impl ScheduledAction {
             Self::SandboxExec { .. } => "sandbox_exec",
             Self::AgentInstall { .. } => "agent_install",
             Self::CredentialPrompt { .. } => "credential_prompt",
+            Self::CredentialRequest { .. } => "credential_request",
             Self::SessionContinue { .. } => "session_continue",
             Self::ProfileShare { .. } => "profile_share",
             Self::SessionEscalate { .. } => "session_escalate",
@@ -189,6 +208,7 @@ impl ScheduledAction {
             Self::SandboxExec { evidence_ref, .. } => evidence_ref.clone(),
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
+            | Self::CredentialRequest { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. } => None,
@@ -205,6 +225,7 @@ impl ScheduledAction {
             } => *r = evidence_ref,
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
+            | Self::CredentialRequest { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. } => {}

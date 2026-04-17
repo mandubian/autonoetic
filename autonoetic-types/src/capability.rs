@@ -52,10 +52,13 @@ pub enum Capability {
     },
 
     /// Execute scripts/code in the sandbox.
-    /// The `patterns` field limits which commands can be run.
+    /// The `patterns` field limits which commands can be run (prefix matching).
+    /// The `commands` field allows specific shell commands (word-boundary matching).
     CodeExecution {
         #[serde(default = "default_patterns_all")]
         patterns: Vec<String>,
+        #[serde(default)]
+        commands: Vec<String>,
     },
 
     /// Request a gateway-level emergency stop for a root session (dedicated responders only).
