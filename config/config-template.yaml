@@ -276,6 +276,19 @@ llm_presets:
     thinking:
       effort: medium
 
+  qwen36_35_a3b:
+    provider: "lmstudio"
+    model: "Qwen3.6-35B-A3B-GGUF"
+    temperature: 1.0
+    base_url: "http://192.168.1.20:8080/v1/chat/completions"
+    thinking:
+      effort: medium
+
+  elephant:
+    provider: "openrouter"
+    model: "openrouter/elephant-alpha"
+    temperature: 1.0
+
 
 llm_preset_mapping:
   planner: gemma4_31b             # routed
