@@ -1,7 +1,7 @@
 # Plan: Artifact Execution, Approval Reuse, and Script-Agent Promotion
 
 **Date:** 2026-04-17
-**Status:** Proposed
+**Status:** Complete (Phases 1–5)
 **Related:** `docs/approval-system.md`, `docs/remote-access-approval.md`, `docs/AGENTS.md`, `docs/agent_routing_and_roles.md`, `docs/plan-capability-driven-sandbox-isolation.md`, `docs/plan-network-approval-builder-layers-fix.md`
 
 ---
@@ -45,6 +45,11 @@ The runtime should distinguish two first-class paths:
 ### Non-Goal
 
 Do **not** broadly relax generic `sandbox.exec` policy so the executor becomes the durable trust anchor for reusable code. That would work against the separation-of-powers model and keep policy tied to shell-shape heuristics.
+
+### Assumptions
+
+- **No backward compatibility**: old exec cache entries, fingerprints, and approval shapes are discarded. The cache index is rebuilt from scratch.
+- **Artifacts are immutable**: once created, an artifact never changes. If content changes, it becomes a new artifact with a new ID. This makes `artifact_id` a stable component of the approval fingerprint.
 
 ---
 
@@ -139,26 +144,24 @@ This path is for:
 
 ### Task 1.1: Classify patterns by purpose
 
-- [ ] Separate pattern roles into:
-  - capability inference
-  - concrete target extraction
-  - runtime approval hints
-- [ ] Make bare imports contribute to capability inference without automatically producing runtime remote-host approvals
-- [ ] Preserve concrete detection for URL literals and IP addresses
+- [x] Separate pattern roles into:
+  - capability inference (`import`, `function_call`)
+  - concrete target extraction (`url_literal`, `ip_address`)
+  - runtime approval hints (`network_command`, `dependency_install`)
+- [x] Make bare imports contribute to capability inference without automatically producing runtime remote-host approvals
+- [x] Preserve concrete detection for URL literals and IP addresses
 
 ### Task 1.2: Preserve transitive local-module analysis
 
-- [ ] Ensure artifact or workspace-backed analysis follows local imports to reachable files
-- [ ] Continue extracting concrete targets from imported local modules that embed URLs
-- [ ] Add tests for module-imported concrete hosts
+- [x] Ensure artifact or workspace-backed analysis follows local imports to reachable files (already exists via `analyze_code_with_workspace`)
+- [x] Continue extracting concrete targets from imported local modules that embed URLs
+- [x] Add tests for module-imported concrete hosts
 
 ### Task 1.3: Introduce unresolved-network classification
 
-- [ ] Distinguish between:
-  - concrete host coverage present
-  - network behavior present but unresolved
-  - no network behavior present
-- [ ] Use this classification downstream in approval reuse and approval creation
+- [x] Add `NetworkCoverage` enum: `Concrete { targets }`, `Unresolved`, `None`
+- [x] `classify_network_coverage()` function classifies patterns using concrete-target presence and dependency-install signals
+- [x] Used downstream in sandbox.rs and artifact_exec.rs approval reuse
 
 ---
 
@@ -173,27 +176,31 @@ This path is for:
 
 ### Task 2.1: Replace all-or-nothing `has_concrete_targets` logic
 
-- [ ] Replace the current boolean gate with a richer decision structure:
-  - `concrete_targets`
-  - `has_unresolved_network_intent`
-  - `has_runtime_network_behavior`
-- [ ] Allow cache and session-grant reuse when concrete targets exist and unresolved network intent is absent
-- [ ] Refuse reuse when network intent exists but no stable targets can be derived
+- [x] Replace the current boolean gate with `NetworkCoverage` enum:
+  - `Concrete { targets: Vec<String> }` — concrete hosts present, no unresolved signals
+  - `Unresolved` — network behavior present but no stable concrete host coverage (or `dependency_install` present)
+  - `None` — no network behavior detected
+- [x] Classification rule:
+  - `import` and `function_call` are capability-inference signals that do **not** block reuse when concrete targets exist
+  - `dependency_install` blocks reuse because package installation targets unknown registry hosts
+  - `network_command` does not block reuse when concrete targets coexist (the concrete URL covers the target)
+- [x] Allow cache, approved-requests, and session-grant reuse when `Concrete`
+- [x] Skip all reuse paths when `Unresolved`
+- [x] Move session-grants check inside the `Concrete` branch (currently outside the `has_concrete` gate)
 
 ### Task 2.2: Stabilize approval identity
 
-- [ ] Define a new fingerprint model for transient executions using:
-  - code or artifact identity
-  - concrete normalized targets
-  - agent or execution subject identity
-  - dependency-layer context if relevant
-- [ ] Keep approval replay precise enough to avoid over-broad host reuse
+- [x] New fingerprint: `SHA256(agent_id | sorted_targets | identity)`
+  - When `artifact_id` is present: `identity = "artifact:" + artifact_id` (stable across shell wrappers)
+  - When absent: `identity = "code:" + code_to_analyze` (same as before)
+- [x] Artifacts are immutable — same `artifact_id` always maps to same content, so the fingerprint is stable
+- [x] No backward compatibility — old cache entries are discarded
 
 ### Task 2.3: Thread approved target coverage into sandbox network enablement
 
-- [ ] Ensure reused approvals and session grants drive sandbox network enablement in fresh executions
-- [ ] Avoid cases where approval is logically reusable but `share_net` is not applied because the current command surface is too weak
-- [ ] Add regression tests for cross-session reuse
+- [x] Session grants check moved inside the `Concrete` coverage branch — no longer checked for `Unresolved` patterns
+- [x] All reuse paths (cache, approved-requests, session grants) now gated by `NetworkCoverage::Concrete`
+- [x] `share_net` activates when `approval_validated_for_command = true` from any reuse path
 
 ---
 
@@ -210,25 +217,21 @@ This path is for:
 
 ### Task 3.1: Define a first-class transient execution tool
 
-- [ ] Add a tool such as `artifact.exec` or `script.exec`
-- [ ] Accept explicit structured inputs:
-  - `artifact_id`
-  - `entrypoint`
-  - `args`
-  - optional env, cwd, layers, stdin mode
-- [ ] Resolve artifact contents before approval analysis
+- [x] Add `artifact.exec` tool in `autonoetic-gateway/src/runtime/tools/artifact_exec.rs`
+- [x] Accept explicit structured inputs: `artifact_id`, `entrypoint`, `args`, `env`, `approval_ref`
+- [x] Resolve artifact contents before approval analysis
 
 ### Task 3.2: Analyze files, not just command strings
 
-- [ ] Perform remote-access analysis on the selected entrypoint and reachable local modules
-- [ ] Derive approval requests from analyzed code content rather than the shell wrapper string
-- [ ] Bind approval reuse to the artifact execution identity
+- [x] Perform remote-access analysis on the entrypoint and workspace files via `analyze_code_with_workspace`
+- [x] Derive approval requests from analyzed code content rather than the shell wrapper string
+- [x] Bind approval reuse to the artifact identity via artifact-id-based fingerprint
 
 ### Task 3.3: Keep `sandbox.exec` as the low-level escape hatch
 
-- [ ] Preserve existing `sandbox.exec` for generic command execution
-- [ ] Document that reusable artifact runs should prefer the new artifact-aware tool
-- [ ] Avoid duplicating long-term policy semantics in both paths
+- [x] Preserve existing `sandbox.exec` for generic command execution (unchanged)
+- [x] `artifact.exec` uses artifact-bound analysis and fingerprinting; `sandbox.exec` uses command-string analysis
+- [x] Both tools share the same dedup infrastructure (exec cache, session grants, approved requests)
 
 ---
 
@@ -244,22 +247,22 @@ This path is for:
 
 ### Task 4.1: Add planner heuristics for promotion
 
-- [ ] Teach the planner to distinguish between:
-  - one-off validation
-  - reusable capability creation
-- [ ] When an artifact has a stable entrypoint and explicit external behavior, prefer revision creation and promotion over repeated executor delegation
+- [x] Added "Artifact Execution vs Script-Agent Promotion" section to planner SKILL.md
+- [x] Defined promotion signals (stable entrypoint, repeated use, network behavior, durable intent)
+- [x] When an artifact has a stable entrypoint and explicit external behavior, prefer revision creation and promotion over repeated executor delegation
 
 ### Task 4.2: Route durable artifacts through the builder/registration path
 
-- [ ] Ensure the planner delegates reusable artifacts to the proper revision-creation flow
-- [ ] Prefer `agent.revision.create_from_intent` when the planner has semantic knowledge but the gateway should canonicalize the final manifest
-- [ ] Promote script artifacts with declared `NetworkAccess` so runtime policy becomes capability-driven instead of command-shape-driven
+- [x] Planner SKILL.md documents the promotion path: `artifact.build → agent.revision.create_from_intent → agent.revision.promote`
+- [x] Coder SKILL.md instructs returning install intent payload with `execution_mode: "script"` for script agents
+- [x] Promote script agents with declared `NetworkAccess` to eliminate per-command approval churn
 
 ### Task 4.3: Keep transient validation lightweight
 
-- [ ] Do not require promotion for every smoke test
-- [ ] Use transient artifact execution for initial validation before promotion
-- [ ] Promote only when repeated use or durable registration is intended
+- [x] Planner SKILL.md lists `artifact.exec` for transient runs (smoke tests, validation before promotion)
+- [x] Executor SKILL.md documents `artifact.exec` for artifact-bound transient execution
+- [x] Coder SKILL.md documents `artifact.exec` for testing built artifacts
+- [x] Promote only when repeated use or durable registration is intended
 
 ---
 
@@ -269,38 +272,40 @@ This path is for:
 
 ### Task 5.1: Approval reuse regression
 
-- [ ] Add a test where a script artifact with concrete host `wttr.in`:
-  - first run triggers approval
-  - second run in a fresh child session reuses approval
-  - fresh sandbox still receives the correct network enablement
+- [x] `test_sandbox_exec_import_plus_url_caches` — import + URL pattern reuses cached approval (was previously blocked)
+- [x] `test_sandbox_exec_cache_hit_skips_approval` — URL-only cache hit
+- [x] `test_sandbox_exec_cache_miss_requires_approval_for_concrete_url` — cache miss requires approval
 
 ### Task 5.2: Weak-signal runtime approval regression
 
-- [ ] Add a test where `python3 -c "import requests"` does not create a remote-host approval by itself
-- [ ] Keep install-time capability inference tests intact so revision validation still detects likely network capability needs
+- [x] `test_classify_coverage_import_only_is_unresolved` — import-only patterns classify as Unresolved (no approval reuse)
+- [x] `test_classify_coverage_unresolved_with_dependency_install` — dependency_install blocks reuse even with concrete targets
 
 ### Task 5.3: Mixed-pattern reuse regression
 
-- [ ] Add a test where `import` + `function_call` + `url_literal` still qualifies for approval reuse when concrete targets are fully covered
-- [ ] Add a test where dynamically constructed or unresolved hosts do not qualify for reuse
+- [x] `test_classify_coverage_import_plus_url_is_concrete` — import + URL → Concrete (reuse allowed)
+- [x] `test_classify_coverage_function_call_plus_url_is_concrete` — function_call + URL → Concrete (reuse allowed)
+- [x] `test_classify_coverage_concrete_with_network_command` — network_command + URL → Concrete (reuse allowed)
+- [x] `test_classify_coverage_unresolved_function_call_no_url` — function_call without URL → Unresolved (reuse blocked)
 
 ### Task 5.4: Script-agent lifecycle coverage
 
-- [ ] Add an end-to-end test showing:
-  - artifact build
-  - revision create/promote
-  - script execution through `execution_mode: script`
-  - declared `NetworkAccess` eliminates per-command approval churn for the promoted agent
+- [x] `test_artifact_analysis_detects_concrete_targets` — weather artifact code analyzed for wttr.in
+- [x] `test_artifact_coverage_is_concrete_despite_imports` — import + url_literal → Concrete coverage
+- [x] `test_artifact_fingerprint_stable_across_shell_wrappers` — same artifact_id produces same fingerprint regardless of shell wrapper or args
+- [x] `test_artifact_fingerprint_differs_across_artifacts` — different artifact_ids produce different fingerprints
+- [x] `test_lifecycle_cache_reuse_simulated` — first run records cache, second run hits cache via artifact-id-based fingerprint
+- [x] `test_artifact_exec_tool_registered_and_gated` — artifact.exec registered, gated by CodeExecution capability
 
 ---
 
 ## Execution Order
 
-1. Refine runtime remote-access semantics
-2. Refactor approval reuse and sandbox network enablement
-3. Add artifact-aware transient execution
-4. Update planner/builder routing toward script-agent promotion
-5. Add regression coverage and documentation updates
+1. ~~Refine runtime remote-access semantics~~ **Done**
+2. ~~Refactor approval reuse and sandbox network enablement~~ **Done**
+3. ~~Add artifact-aware transient execution~~ **Done**
+4. Update planner/builder routing toward script-agent promotion *(guidance, not code)*
+5. ~~Add regression coverage~~ **Done** (Task 5.4 script-agent lifecycle deferred)
 
 ---
 

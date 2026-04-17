@@ -167,6 +167,21 @@ sandbox.exec({
 })
 ```
 
+### Running Built Artifacts
+
+When you need to test an artifact you just built, prefer `artifact.exec` over `sandbox.exec`:
+
+```json
+// After artifact.build returns artifact_id "art-abc123":
+artifact.exec({
+  "artifact_id": "art-abc123",
+  "entrypoint": "main.py",
+  "args": ["--test"]
+})
+```
+
+`artifact.exec` analyzes the artifact's source files for remote access (not the shell command string), and binds approval reuse to the artifact identity. This means re-running the same artifact with different arguments will reuse prior approvals instead of re-requesting them.
+
 ### When to Use Dependencies
 You don't have `NetworkAccess`, so you cannot install packages directly. If your code needs external packages:
 

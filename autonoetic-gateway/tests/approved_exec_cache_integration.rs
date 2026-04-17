@@ -13,10 +13,10 @@ mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::approved_exec_cache::{
-    compute_fingerprint, has_concrete_targets, normalize_targets, ApprovedExecCache,
+    compute_fingerprint, normalize_targets, ApprovedExecCache,
     ApprovedExecEntry,
 };
-use autonoetic_gateway::runtime::remote_access::DetectedPattern;
+use autonoetic_gateway::runtime::remote_access::{classify_network_coverage, DetectedPattern, NetworkCoverage};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
@@ -179,59 +179,68 @@ fn test_cache_not_found() {
 }
 
 #[test]
-fn test_has_concrete_targets_url_only() {
+fn test_classify_coverage_url_only() {
     let patterns = vec![create_pattern(
         "url_literal",
         "https://api.example.com/data",
     )];
-    assert!(has_concrete_targets(&patterns));
+    let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
+    assert_eq!(coverage, NetworkCoverage::Concrete { targets: vec!["api.example.com".to_string()] });
 }
 
 #[test]
-fn test_has_concrete_targets_mixed_concrete() {
+fn test_classify_coverage_mixed_concrete() {
     let patterns = vec![
         create_pattern("url_literal", "https://api.example.com/data"),
         create_pattern("ip_address", "192.168.1.100"),
     ];
-    assert!(has_concrete_targets(&patterns));
+    let targets = vec!["192.168.1.100".to_string(), "api.example.com".to_string()];
+    let coverage = classify_network_coverage(&patterns, targets.clone());
+    assert_eq!(coverage, NetworkCoverage::Concrete { targets });
 }
 
 #[test]
-fn test_has_concrete_targets_with_import() {
-    // Import + literal URL should NOT cache - import is opaque
+fn test_classify_coverage_import_plus_url_is_concrete() {
     let patterns = vec![
         create_pattern("import", "import requests"),
         create_pattern("url_literal", "https://api.example.com/data"),
     ];
-    // Should NOT cache because import is opaque
-    assert!(!has_concrete_targets(&patterns));
+    let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
+    assert_eq!(
+        coverage,
+        NetworkCoverage::Concrete { targets: vec!["api.example.com".to_string()] },
+        "import + URL should classify as Concrete (imports are weak signals)"
+    );
 }
 
 #[test]
-fn test_has_concrete_targets_with_function_call() {
-    // URL literal + function call should NOT cache - function_call is opaque
+fn test_classify_coverage_function_call_plus_url_is_concrete() {
     let patterns = vec![
         create_pattern("url_literal", "https://api.example.com/data"),
         create_pattern("function_call", ".connect("),
     ];
-    // Should NOT cache because function_call is opaque
-    assert!(!has_concrete_targets(&patterns));
+    let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
+    assert_eq!(
+        coverage,
+        NetworkCoverage::Concrete { targets: vec!["api.example.com".to_string()] },
+        "function_call + URL should classify as Concrete (function_call is a weak signal)"
+    );
 }
 
 #[test]
-fn test_has_concrete_targets_only_import_no_url() {
-    // Only imports/function calls, no concrete URL - should NOT cache
+fn test_classify_coverage_import_only_is_unresolved() {
     let patterns = vec![
         create_pattern("import", "import requests"),
         create_pattern("function_call", "requests.get("),
     ];
-    // No concrete target - should NOT cache
-    assert!(!has_concrete_targets(&patterns));
+    let coverage = classify_network_coverage(&patterns, vec![]);
+    assert_eq!(coverage, NetworkCoverage::Unresolved);
 }
 
 #[test]
-fn test_has_concrete_targets_empty() {
-    assert!(!has_concrete_targets(&[]));
+fn test_classify_coverage_empty_is_none() {
+    let coverage = classify_network_coverage(&[], vec![]);
+    assert_eq!(coverage, NetworkCoverage::None);
 }
 
 #[test]
@@ -257,16 +266,16 @@ fn test_normalize_targets_dedup() {
 
 #[test]
 fn test_compute_fingerprint_deterministic() {
-    let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code");
-    let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code");
+    let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
+    let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
     assert_eq!(fp1, fp2);
     assert!(fp1.starts_with("sha256:"));
 }
 
 #[test]
 fn test_compute_fingerprint_different() {
-    let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code");
-    let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code");
+    let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code", None);
+    let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code", None);
     assert_ne!(fp1, fp2);
 }
 
@@ -281,6 +290,7 @@ fn test_cache_full_cycle() {
         "test.agent",
         &["api.example.com".to_string()],
         "import requests\nrequests.get('https://api.example.com')",
+        None,
     );
     assert!(cache.find(&fingerprint).is_none());
 
@@ -306,31 +316,31 @@ fn test_cache_full_cycle() {
         "test.agent",
         &["api.example.com".to_string()],
         "import requests\nrequests.post('https://api.example.com')", // POST instead of GET
+        None,
     );
     assert!(cache.find(&different_fingerprint).is_none());
 }
 
 #[test]
-fn test_cache_not_used_for_opaque_targets() {
+fn test_cache_not_used_for_unresolved_targets() {
     let temp = tempdir().expect("tempdir should create");
     let gateway_dir = temp.path();
 
-    // Code with ONLY imports/function calls, no concrete URL - should NOT cache
+    // Code with ONLY imports/function calls, no concrete URL - should classify as Unresolved
     let patterns = vec![
         create_pattern("import", "import requests"),
         create_pattern("function_call", "requests.get("),
     ];
 
-    assert!(!has_concrete_targets(&patterns));
+    let coverage = classify_network_coverage(&patterns, vec![]);
+    assert_eq!(coverage, NetworkCoverage::Unresolved);
 
-    // Even if we compute a fingerprint, it shouldn't be recorded because
-    // has_concrete_targets returns false
+    // Unresolved means no concrete targets to match against
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache should create");
     let targets = normalize_targets(&patterns);
-    let fingerprint = compute_fingerprint("test.agent", &targets, "code");
+    let fingerprint = compute_fingerprint("test.agent", &targets, "code", None);
 
-    // In the real flow, this would NOT be recorded because has_concrete_targets is false
-    // This test verifies the guard condition exists
+    // In the real flow, this would NOT be recorded because coverage is Unresolved
     assert_eq!(cache.len(), 0);
 }
 
@@ -360,7 +370,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
         "https://api.example.com/data",
     )];
     let targets = normalize_targets(&patterns);
-    let fingerprint = compute_fingerprint("test.agent", &targets, code_content);
+    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None);
 
     let cache = ApprovedExecCache::new(&gateway_dir).expect("cache should create");
     let now = chrono::Utc::now().to_rfc3339();
@@ -506,7 +516,7 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
 }
 
 #[test]
-fn test_sandbox_exec_opaque_import_never_caches() {
+fn test_sandbox_exec_import_plus_url_caches() {
     let temp = tempdir().expect("tempdir should create");
     let agents_dir = temp.path().join("agents");
     let gateway_dir = agents_dir.join(".gateway");
@@ -524,8 +534,7 @@ fn test_sandbox_exec_opaque_import_never_caches() {
         ..Default::default()
     };
 
-    // Code with import + URL literal - should NOT cache (import is opaque)
-    // Even if we manually add to cache, it shouldn't be used
+    // Code with import + URL literal - should NOW be cacheable (Concrete coverage)
     let code_content = r#"import requests
 requests.get("https://api.cache-test.dev")"#;
     let patterns = vec![
@@ -533,9 +542,18 @@ requests.get("https://api.cache-test.dev")"#;
         create_pattern("url_literal", "https://api.cache-test.dev"),
     ];
     let targets = normalize_targets(&patterns);
-    let fingerprint = compute_fingerprint("test.agent", &targets, code_content);
 
-    // Manually add to cache (bypassing the has_concrete_targets check)
+    // Verify classification is Concrete
+    let coverage = classify_network_coverage(&patterns, targets.clone());
+    assert_eq!(
+        coverage,
+        NetworkCoverage::Concrete { targets: targets.clone() },
+        "import + URL should classify as Concrete"
+    );
+
+    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None);
+
+    // Pre-populate cache
     let cache = ApprovedExecCache::new(&gateway_dir).expect("cache should create");
     let now = chrono::Utc::now().to_rfc3339();
     let entry = ApprovedExecEntry {
@@ -553,8 +571,7 @@ requests.get("https://api.cache-test.dev")"#;
     // Create script with the same content
     create_test_script(&agent_dir, "fetch_with_import.py", code_content);
 
-    // Call sandbox.exec - should STILL require approval because has_concrete_targets
-    // returns false for code with imports
+    // Call sandbox.exec - should hit cache and skip approval
     let registry = default_registry();
     let args = serde_json::json!({
         "command": "python3 scripts/fetch_with_import.py",
@@ -574,26 +591,25 @@ requests.get("https://api.cache-test.dev")"#;
         None,
     );
 
-    // Should require approval even though cache has entry
-    // because has_concrete_targets returns false for import patterns
+    // Should NOT require approval - cache hit because Concrete coverage
     match result {
         Ok(resp) => {
             let resp_val: serde_json::Value = serde_json::from_str(&resp).unwrap();
             assert!(
-                resp_val.get("approval_required").and_then(|v| v.as_bool()).unwrap_or(false),
-                "Opaque patterns (imports) should always require approval even with cache entry, but got: {}",
+                !resp_val.get("approval_required").and_then(|v| v.as_bool()).unwrap_or(false),
+                "import + URL with cache entry should skip approval (Concrete coverage), but got: {}",
                 resp
             );
-            tracing::info!(response = %resp, "sandbox.exec with import - approval still required");
+            tracing::info!(response = %resp, "sandbox.exec import+URL - cache hit, approval skipped");
         }
         Err(e) => {
             let err_msg = e.to_string();
             assert!(
-                err_msg.contains("approval") || err_msg.contains("approval_required"),
-                "Opaque patterns should require approval, but got: {}",
+                !err_msg.contains("approval_required"),
+                "Cache hit should skip approval requirement, but got error about approval: {}",
                 err_msg
             );
-            tracing::info!(error = %err_msg, "sandbox.exec with import - approval still required");
+            tracing::info!(error = %err_msg, "sandbox.exec import+URL - execution may fail in test env but approval was skipped");
         }
     }
 }
