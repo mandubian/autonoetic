@@ -1314,9 +1314,10 @@ pub fn apply_emergency_stop_to_workflow(
     })
 }
 
-/// Generate a compact, single-line summary of a workflow's current state.
+/// Generate a compact summary of a workflow's current state.
 /// Returns `None` if no workflow exists for the given root session.
-/// This is intended for injecting into chat at turn boundaries.
+/// Injected into the planner **system** prompt at hibernate; lifecycle also derives a
+/// user-visible assistant line for transcripts and JSON-RPC `assistant_reply`.
 pub fn compact_workflow_summary(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
