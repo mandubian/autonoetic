@@ -890,6 +890,12 @@ All transactional state in a single SQLite database:
 └── hook_deliveries                # Hook dispatch tracking (idempotency + retry state)
 ```
 
+### `user.ask` answers and gateway orchestration
+
+`user_interactions` rows can store `workflow_id`, `task_id`, and `checkpoint_turn_id` when the question was raised from a workflow task (tool run context). **Adapters and CLIs should submit answers via** JSON-RPC `interaction.answer` or `interaction.resolve_and_answer` (or the shared in-process orchestrator used by the chat TUI) so paused workflow tasks and `UserInputRequired` checkpoints resume deterministically—not via SQLite writes alone.
+
+See [`plan-channel-agnostic-interaction-answering.md`](./plan-channel-agnostic-interaction-answering.md).
+
 ### Retention Policy
 
 Configured in gateway config:

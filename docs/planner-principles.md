@@ -63,12 +63,13 @@ The planner's SKILL.md went from ~530 lines to ~230 lines (−57%) with no loss 
 
 ## The Foundational Agent Directory
 
-The planner knows these eleven agents by name. Each entry is one line: the role, when to use it, and the core capability that makes it the right choice.
+The planner knows these twelve agents by name. Each entry is one line: the role, when to use it, and the core capability that makes it the right choice.
 
 | Agent | Use when | Core capability |
 |---|---|---|
 | `researcher.default` | Web/evidence gathering, fetching URLs | NetworkAccess |
-| `coder.default` | Executable code, scripts | CodeExecution |
+| `executor.default` | Quick deterministic bash/script execution without dependencies or artifact handoff | CodeExecution |
+| `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | CodeExecution |
 | `architect.default` | Multi-file design, structural breakdown | — (design-only) |
 | `evaluator.default` | Behavioral validation, test execution | CodeExecution |
 | `auditor.default` | Security review, static analysis | — (analysis-only) |
@@ -95,22 +96,25 @@ For non-foundational (user-installed, evolved) agents, the planner uses `discove
 3. Research / web / evidence
    → researcher.default
 
-4. One-shot executable code
+4. Quick deterministic execution (bash, simple scripts, local transforms; no deps, no durable artifact)
+   → executor.default
+
+5. Durable implementation work (code that should be reused, reviewed, handed off, or installed)
    → coder.default
 
-5. Debugging
+6. Debugging
    → debugger.default
 
-6. Recurring/scheduled task
+7. Recurring/scheduled task
    → agent-factory.default → scheduler.cron.create
 
-7. Pure prose, analysis, knowledge lookup
+8. Pure prose, analysis, knowledge lookup
    → handle directly
 
-8. Structural design
+9. Structural design
    → architect.default
 
-9. Unknown intent (no foundational agent clearly fits)
+10. Unknown intent (no foundational agent clearly fits)
    → discovery.default
      If needs_new_agent: true → agent-factory.default
 ```
