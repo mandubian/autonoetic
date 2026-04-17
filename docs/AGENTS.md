@@ -381,6 +381,25 @@ For searching raw tool execution traces within sessions. Returns stdout, stderr,
 |------|-----------|-------------|
 | `execution.search` | `(tool_name?, success?, error_type?, command_pattern?, agent_id?, session_id?, limit?) → traces` | Search raw execution traces by tool name, success/failure, error type, command pattern, or agent. Returns full execution detail. For cross-session discovery of summaries, use `observability.search`. |
 
+### Artifact Execution Tool (Transient Runs)
+
+For running built artifact entrypoints in a sandbox with artifact-aware analysis and approval reuse. The tool analyzes the artifact's source files (not the shell command string) and binds approval reuse to the artifact identity.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `artifact.exec` | `(artifact_id: string, entrypoint: string, args?: [string], env?: {string: string}, approval_ref?: string) → result` | Execute an artifact entrypoint in a sandbox. Remote-access analysis runs against the artifact's source files. Approval reuse is bound to the artifact identity + concrete targets. Use for transient validation, smoke tests, and ad hoc runs. |
+
+**When to use `artifact.exec` vs `sandbox.exec`:**
+
+| Scenario | Tool | Why |
+|----------|------|-----|
+| Run a built artifact's entrypoint | `artifact.exec` | Analysis on source files, stable approval reuse |
+| Generic shell command | `sandbox.exec` | Command-string analysis, general purpose |
+| Smoke test before promotion | `artifact.exec` | Artifact-bound identity, no command-shape sensitivity |
+| Quick bash one-liner | `sandbox.exec` | No artifact involved |
+
+**Approval behavior:** `artifact.exec` uses the same dedup chain as `sandbox.exec` (exec cache → approved requests → session grants → create approval), but the fingerprint is based on `artifact_id` instead of the raw command string. This means the same artifact re-run with different arguments reuses the prior approval as long as the concrete network targets are covered.
+
 ### Observability Tools (Cross-Session Discovery)
 
 For discovering and reading published session reports across sessions. The high-level observability surface — complements `execution.search` (which is for raw tool traces).

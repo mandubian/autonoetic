@@ -126,6 +126,11 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 5. Durable implementation work (code that should be reviewed, reused, handed off, or installed)
    → coder.default
 
+5a. Transient artifact execution (smoke test a built artifact, ad hoc run, validation before promotion)
+   → executor.default or coder.default using `artifact.exec`
+   → This tool analyzes the artifact's source files for remote access, not the shell command string.
+   → Approval reuse is bound to the artifact identity — stable across different shell wrappers.
+
 6. Debugging / root cause
    → debugger.default
 
@@ -142,6 +147,45 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
    → discovery.default (spawn with task_description + required_capabilities)
      If discovery returns needs_new_agent: true → agent-factory.default
 ```
+
+---
+
+## Artifact Execution vs Script-Agent Promotion
+
+When a built artifact needs to run, choose the right path:
+
+### Use `artifact.exec` (transient) when:
+
+- Smoke-testing an artifact after build
+- One-off validation before deciding to install
+- Ad hoc user-triggered runs
+- Short-lived workflows that don't justify revision creation
+- The artifact will NOT be reused across sessions
+
+### Promote to script-agent (durable) when:
+
+- The artifact has a stable entrypoint and structured I/O
+- It will be called repeatedly (across sessions, by other agents, on a schedule)
+- It has external network behavior that should carry declared `NetworkAccess` instead of requiring per-command approval
+- The planner's intent is to create a durable capability, not just validate output
+
+### Promotion signals
+
+If you observe any of these, prefer revision creation + promotion over repeated `artifact.exec`:
+
+- The same artifact is executed more than once in a workflow
+- The artifact has a single stable entrypoint (e.g., `main.py`)
+- The artifact makes network calls to known hosts (declare `NetworkAccess` with those hosts)
+- The user's goal is to "create a tool" or "build an agent", not just "run this once"
+
+### Promotion path
+
+```
+artifact.build → agent.revision.create_from_intent → agent.revision.promote
+(spawn specialized_builder.default for the install step)
+```
+
+Promoted script agents run via `execution_mode: "script"` and bypass per-command approval when their declared `NetworkAccess` covers the required hosts.
 
 ---
 

@@ -30,6 +30,47 @@ pub struct DetectedPattern {
     pub reason: String,
 }
 
+/// Classification of network behavior in analyzed code.
+///
+/// Used downstream in approval reuse decisions:
+/// - `Concrete`: concrete hosts known → cache, session grants, and approved-request reuse allowed
+/// - `Unresolved`: network signals present but no stable concrete host coverage → skip reuse
+/// - `None`: no network behavior detected → no approval needed
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum NetworkCoverage {
+    Concrete { targets: Vec<String> },
+    Unresolved,
+    None,
+}
+
+/// Classifies detected patterns into a network coverage assessment.
+///
+/// `concrete_targets` should be pre-extracted via `normalize_targets()`.
+///
+/// Classification rules:
+/// - No patterns → `None`
+/// - No concrete targets (only `import`/`function_call`/`network_command`/`dependency_install`) → `Unresolved`
+/// - Concrete targets + `dependency_install` → `Unresolved` (package install targets unknown registries)
+/// - Concrete targets + any other signals → `Concrete` (weak signals like `import`/`function_call` don't block reuse)
+pub fn classify_network_coverage(
+    patterns: &[DetectedPattern],
+    concrete_targets: Vec<String>,
+) -> NetworkCoverage {
+    if concrete_targets.is_empty() {
+        if patterns.is_empty() {
+            NetworkCoverage::None
+        } else {
+            NetworkCoverage::Unresolved
+        }
+    } else if patterns.iter().any(|p| p.category == "dependency_install") {
+        NetworkCoverage::Unresolved
+    } else {
+        NetworkCoverage::Concrete {
+            targets: concrete_targets,
+        }
+    }
+}
+
 /// Static analyzer for detecting remote access patterns in code.
 pub struct RemoteAccessAnalyzer;
 
@@ -798,6 +839,144 @@ mymod.do_thing()
         assert!(!is_safe_inspection_command("pip install requests"));
         assert!(!is_safe_inspection_command("npm install express"));
         assert!(!is_safe_inspection_command("curl http://example.com"));
+    }
+
+    #[test]
+    fn test_classify_coverage_none() {
+        let patterns: Vec<DetectedPattern> = vec![];
+        let coverage = classify_network_coverage(&patterns, vec![]);
+        assert_eq!(coverage, NetworkCoverage::None);
+    }
+
+    #[test]
+    fn test_classify_coverage_unresolved_import_only() {
+        let patterns = vec![DetectedPattern {
+            category: "import".to_string(),
+            pattern: "import requests".to_string(),
+            line_number: Some(1),
+            reason: "HTTP client".to_string(),
+        }];
+        let coverage = classify_network_coverage(&patterns, vec![]);
+        assert_eq!(coverage, NetworkCoverage::Unresolved);
+    }
+
+    #[test]
+    fn test_classify_coverage_concrete_url_only() {
+        let patterns = vec![DetectedPattern {
+            category: "url_literal".to_string(),
+            pattern: "https://wttr.in/Paris".to_string(),
+            line_number: Some(1),
+            reason: "URL literal".to_string(),
+        }];
+        let coverage = classify_network_coverage(&patterns, vec!["wttr.in".to_string()]);
+        assert_eq!(
+            coverage,
+            NetworkCoverage::Concrete {
+                targets: vec!["wttr.in".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_coverage_concrete_with_import_and_function_call() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: "import requests".to_string(),
+                line_number: Some(1),
+                reason: "HTTP client".to_string(),
+            },
+            DetectedPattern {
+                category: "function_call".to_string(),
+                pattern: "requests.get(".to_string(),
+                line_number: Some(2),
+                reason: "HTTP GET".to_string(),
+            },
+            DetectedPattern {
+                category: "url_literal".to_string(),
+                pattern: "https://wttr.in/Paris".to_string(),
+                line_number: Some(2),
+                reason: "URL literal".to_string(),
+            },
+        ];
+        let coverage = classify_network_coverage(&patterns, vec!["wttr.in".to_string()]);
+        assert_eq!(
+            coverage,
+            NetworkCoverage::Concrete {
+                targets: vec!["wttr.in".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_coverage_unresolved_with_dependency_install() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: "import requests".to_string(),
+                line_number: Some(1),
+                reason: "HTTP client".to_string(),
+            },
+            DetectedPattern {
+                category: "url_literal".to_string(),
+                pattern: "https://wttr.in/Paris".to_string(),
+                line_number: Some(2),
+                reason: "URL literal".to_string(),
+            },
+            DetectedPattern {
+                category: "dependency_install".to_string(),
+                pattern: "packages: [requests]".to_string(),
+                line_number: None,
+                reason: "Package installation requires network".to_string(),
+            },
+        ];
+        let coverage = classify_network_coverage(&patterns, vec!["wttr.in".to_string()]);
+        assert_eq!(coverage, NetworkCoverage::Unresolved);
+    }
+
+    #[test]
+    fn test_classify_coverage_concrete_with_network_command() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "network_command".to_string(),
+                pattern: "curl".to_string(),
+                line_number: Some(1),
+                reason: "curl makes network requests".to_string(),
+            },
+            DetectedPattern {
+                category: "url_literal".to_string(),
+                pattern: "https://api.example.com/data".to_string(),
+                line_number: Some(1),
+                reason: "URL literal".to_string(),
+            },
+        ];
+        let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
+        assert_eq!(
+            coverage,
+            NetworkCoverage::Concrete {
+                targets: vec!["api.example.com".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_coverage_unresolved_function_call_no_url() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: "import requests".to_string(),
+                line_number: Some(1),
+                reason: "HTTP client".to_string(),
+            },
+            DetectedPattern {
+                category: "function_call".to_string(),
+                pattern: "requests.get(".to_string(),
+                line_number: Some(2),
+                reason: "HTTP GET".to_string(),
+            },
+        ];
+        let coverage = classify_network_coverage(&patterns, vec![]);
+        assert_eq!(coverage, NetworkCoverage::Unresolved);
     }
 }
 

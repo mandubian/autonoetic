@@ -3,11 +3,16 @@
 //! Caches approved sandbox.exec fingerprints so identical future executions
 //! skip creating new approval requests.
 //!
-//! Cache key = SHA256(agent_id + normalized_remote_targets + code_to_analyze)
+//! Cache key = SHA256(agent_id + sorted_targets + identity)
 //!
-//! Only caches when ALL detected remote access evidence resolves to concrete hosts.
-//! If any detected pattern is opaque (imports, function calls with variables),
-//! the exec is never cached.
+//! Identity is:
+//! - `artifact:<artifact_id>` when an artifact_id is provided (stable across shell wrappers)
+//! - `code:<code_to_analyze>` otherwise (exact code match)
+//!
+//! Reuse eligibility is determined by `NetworkCoverage` classification:
+//! - `Concrete`: cache/session-grant/approved-request reuse allowed
+//! - `Unresolved`: skip reuse (network behavior present but targets unknown)
+//! - `None`: no approval needed
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -112,31 +117,6 @@ impl ApprovedExecCache {
     }
 }
 
-/// Checks if ALL remote access evidence is concrete (cacheable).
-///
-/// Returns true only if EVERY detected pattern is a concrete target
-/// (url_literal or ip_address). Returns false if ANY pattern is opaque
-/// (import or function_call), even if concrete targets also exist.
-///
-/// This ensures that mixed concrete + opaque behavior is never cached.
-/// For example, code like:
-/// ```python
-/// import requests
-/// requests.get("https://api.example.com")  # concrete
-/// requests.get(variable_url)              # opaque
-/// ```
-/// will NOT be cached because the opaque function_call means we cannot
-/// guarantee what hosts might be accessed at runtime.
-pub fn has_concrete_targets(patterns: &[DetectedPattern]) -> bool {
-    if patterns.is_empty() {
-        return false;
-    }
-
-    patterns
-        .iter()
-        .all(|p| matches!(p.category.as_str(), "url_literal" | "ip_address"))
-}
-
 /// Extracts concrete host targets from detected patterns and normalizes them.
 ///
 /// For URL literals: extracts the host (e.g., "https://api.example.com/path" → "api.example.com")
@@ -174,14 +154,31 @@ pub fn normalize_targets(patterns: &[DetectedPattern]) -> Vec<String> {
 
 /// Computes the fingerprint for a sandbox exec request.
 ///
-/// Fingerprint = SHA256(agent_id + "|" + sorted_targets + "|" + code_to_analyze)
-pub fn compute_fingerprint(agent_id: &str, targets: &[String], code_to_analyze: &str) -> String {
+/// Fingerprint = SHA256(agent_id + "|" + sorted_targets + "|" + identity)
+///
+/// When `artifact_id` is provided, identity is `artifact:<artifact_id>` — this
+/// makes the fingerprint stable across different shell wrappers for the same artifact
+/// (artifacts are immutable, so the ID is a stable identity).
+///
+/// When absent, identity is `code:<code_to_analyze>` — exact code match.
+pub fn compute_fingerprint(
+    agent_id: &str,
+    targets: &[String],
+    code_to_analyze: &str,
+    artifact_id: Option<&str>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(agent_id.as_bytes());
     hasher.update(b"|");
     hasher.update(targets.join(",").as_bytes());
     hasher.update(b"|");
-    hasher.update(code_to_analyze.as_bytes());
+    if let Some(aid) = artifact_id {
+        hasher.update(b"artifact:");
+        hasher.update(aid.as_bytes());
+    } else {
+        hasher.update(b"code:");
+        hasher.update(code_to_analyze.as_bytes());
+    }
     format!("sha256:{:x}", hasher.finalize())
 }
 
@@ -204,115 +201,6 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_has_concrete_targets_url_only() {
-        let patterns = vec![DetectedPattern {
-            category: "url_literal".to_string(),
-            pattern: "https://api.example.com/data".to_string(),
-            line_number: Some(1),
-            reason: "URL literal".to_string(),
-        }];
-        assert!(has_concrete_targets(&patterns));
-    }
-
-    #[test]
-    fn test_has_concrete_targets_ip_only() {
-        let patterns = vec![DetectedPattern {
-            category: "ip_address".to_string(),
-            pattern: "192.168.1.100".to_string(),
-            line_number: Some(1),
-            reason: "IP address".to_string(),
-        }];
-        assert!(has_concrete_targets(&patterns));
-    }
-
-    #[test]
-    fn test_has_concrete_targets_mixed_concrete() {
-        let patterns = vec![
-            DetectedPattern {
-                category: "url_literal".to_string(),
-                pattern: "https://api.example.com/data".to_string(),
-                line_number: Some(1),
-                reason: "URL literal".to_string(),
-            },
-            DetectedPattern {
-                category: "ip_address".to_string(),
-                pattern: "10.0.0.1".to_string(),
-                line_number: Some(2),
-                reason: "IP address".to_string(),
-            },
-        ];
-        assert!(has_concrete_targets(&patterns));
-    }
-
-    #[test]
-    fn test_has_concrete_targets_with_import() {
-        // Import + literal URL should NOT cache - import is opaque
-        let patterns = vec![
-            DetectedPattern {
-                category: "import".to_string(),
-                pattern: "import requests".to_string(),
-                line_number: Some(1),
-                reason: "HTTP client".to_string(),
-            },
-            DetectedPattern {
-                category: "url_literal".to_string(),
-                pattern: "https://api.example.com/data".to_string(),
-                line_number: Some(2),
-                reason: "URL literal".to_string(),
-            },
-        ];
-        // Should NOT cache because import is opaque
-        assert!(!has_concrete_targets(&patterns));
-    }
-
-    #[test]
-    fn test_has_concrete_targets_with_function_call() {
-        // URL literal + function call should NOT cache - function_call is opaque
-        let patterns = vec![
-            DetectedPattern {
-                category: "url_literal".to_string(),
-                pattern: "https://api.example.com/data".to_string(),
-                line_number: Some(1),
-                reason: "URL literal".to_string(),
-            },
-            DetectedPattern {
-                category: "function_call".to_string(),
-                pattern: ".connect(".to_string(),
-                line_number: Some(2),
-                reason: "Socket connection".to_string(),
-            },
-        ];
-        // Should NOT cache because function_call is opaque
-        assert!(!has_concrete_targets(&patterns));
-    }
-
-    #[test]
-    fn test_has_concrete_targets_only_import_no_url() {
-        // Only imports, no concrete URL - should NOT cache
-        let patterns = vec![
-            DetectedPattern {
-                category: "import".to_string(),
-                pattern: "import requests".to_string(),
-                line_number: Some(1),
-                reason: "HTTP client".to_string(),
-            },
-            DetectedPattern {
-                category: "function_call".to_string(),
-                pattern: "requests.get(".to_string(),
-                line_number: Some(2),
-                reason: "HTTP GET".to_string(),
-            },
-        ];
-        // No concrete target - should NOT cache
-        assert!(!has_concrete_targets(&patterns));
-    }
-
-    #[test]
-    fn test_has_concrete_targets_empty() {
-        assert!(!has_concrete_targets(&[]));
-    }
 
     #[test]
     fn test_normalize_targets_urls() {
@@ -389,30 +277,72 @@ mod tests {
 
     #[test]
     fn test_compute_fingerprint_deterministic() {
-        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code");
-        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code");
+        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
+        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
         assert_eq!(fp1, fp2);
         assert!(fp1.starts_with("sha256:"));
     }
 
     #[test]
     fn test_compute_fingerprint_different_agents() {
-        let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code");
-        let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code");
+        let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code", None);
+        let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code", None);
         assert_ne!(fp1, fp2);
     }
 
     #[test]
     fn test_compute_fingerprint_different_code() {
-        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code_a");
-        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code_b");
+        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code_a", None);
+        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code_b", None);
         assert_ne!(fp1, fp2);
     }
 
     #[test]
     fn test_compute_fingerprint_different_targets() {
-        let fp1 = compute_fingerprint("agent.id", &["host_a.com".to_string()], "code");
-        let fp2 = compute_fingerprint("agent.id", &["host_b.com".to_string()], "code");
+        let fp1 = compute_fingerprint("agent.id", &["host_a.com".to_string()], "code", None);
+        let fp2 = compute_fingerprint("agent.id", &["host_b.com".to_string()], "code", None);
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_compute_fingerprint_artifact_stable_across_code_changes() {
+        let fp1 = compute_fingerprint(
+            "agent.id",
+            &["wttr.in".to_string()],
+            "python3 -c 'old wrapper'",
+            Some("art-abc123"),
+        );
+        let fp2 = compute_fingerprint(
+            "agent.id",
+            &["wttr.in".to_string()],
+            "python3 /tmp/main.py",
+            Some("art-abc123"),
+        );
+        assert_eq!(
+            fp1, fp2,
+            "same artifact_id + targets should produce same fingerprint regardless of code"
+        );
+    }
+
+    #[test]
+    fn test_compute_fingerprint_artifact_differs_from_code() {
+        let fp_artifact = compute_fingerprint(
+            "agent.id",
+            &["host.com".to_string()],
+            "code",
+            Some("art-123"),
+        );
+        let fp_code = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
+        assert_ne!(
+            fp_artifact, fp_code,
+            "artifact and code fingerprints should differ"
+        );
+    }
+
+    #[test]
+    fn test_compute_fingerprint_different_artifacts() {
+        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", Some("art-1"));
+        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", Some("art-2"));
         assert_ne!(fp1, fp2);
     }
 

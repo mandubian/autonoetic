@@ -23,12 +23,12 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 
 pub struct SandboxExecTool;
 
-struct LayerMount {
-    layer_id: String,
-    mount_path: String,
+pub struct LayerMount {
+    pub layer_id: String,
+    pub mount_path: String,
 }
 
-fn extract_and_mount_layers(
+pub fn extract_and_mount_layers(
     layers: &[LayerMount],
     gw_dir: &Path,
     source_label: &str,
@@ -116,6 +116,64 @@ fn sandbox_command_misuses_content_digest_as_path(command: &str) -> bool {
         search_from = after_prefix;
     }
     false
+}
+
+pub fn extract_artifact_source(gw_dir: &Path, artifact_id: &str) -> String {
+    let mut artifact_code = String::new();
+    if let Ok(store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
+        if let Ok(bundle) = store.inspect(artifact_id) {
+            let content_store = crate::runtime::content_store::ContentStore::new(gw_dir).ok();
+            for file in &bundle.files {
+                if let Some(cs) = &content_store {
+                    if let Ok(content) = cs.read(&file.handle) {
+                        if let Ok(text) = String::from_utf8(content) {
+                            artifact_code.push_str(&format!("\n# --- {} ---\n", file.name));
+                            artifact_code.push_str(&text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    artifact_code
+}
+
+pub fn extract_and_cache_artifact_analysis(
+    gw_dir: &Path,
+    artifact_id: &str,
+) -> Option<(String, crate::runtime::remote_access::RemoteAccessAnalysis)> {
+    let cache_path = gw_dir
+        .join("artifacts")
+        .join(artifact_id)
+        .join("remote_access_analysis.json");
+
+    if cache_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&cache_path) {
+            if let Ok(analysis) = serde_json::from_str::<
+                crate::runtime::remote_access::RemoteAccessAnalysis,
+            >(&content)
+            {
+                let code = extract_artifact_source(gw_dir, artifact_id);
+                if !code.is_empty() {
+                    return Some((code, analysis));
+                }
+            }
+        }
+    }
+
+    let code = extract_artifact_source(gw_dir, artifact_id);
+    if code.is_empty() {
+        return None;
+    }
+
+    let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&code);
+    let _ = std::fs::create_dir_all(cache_path.parent().unwrap());
+    let _ = std::fs::write(
+        &cache_path,
+        serde_json::to_string(&analysis).unwrap_or_default(),
+    );
+
+    Some((code, analysis))
 }
 
 fn extract_code_for_analysis(
@@ -251,7 +309,7 @@ fn detect_network_errors_in_output(output: &str) -> Vec<String> {
     found
 }
 
-fn apply_network_isolation_failure_to_result(
+pub fn apply_network_isolation_failure_to_result(
     body: &mut serde_json::Value,
     stdout: &str,
     stderr: &str,
@@ -292,7 +350,7 @@ fn apply_network_isolation_failure_to_result(
     Some(network_errors)
 }
 
-fn effective_root_session_id(session_id: &str, explicit_root: Option<&str>) -> String {
+pub fn effective_root_session_id(session_id: &str, explicit_root: Option<&str>) -> String {
     explicit_root
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -370,7 +428,7 @@ fn extract_hosts_from_text(text: &str) -> Vec<String> {
     hosts
 }
 
-fn approved_requests_cover_targets(
+pub fn approved_requests_cover_targets(
     approved: &[ApprovalRequest],
     required_targets: &[String],
     agent_dir: &Path,
@@ -519,6 +577,7 @@ impl NativeTool for SandboxExecTool {
                                 &manifest.agent.id,
                                 &normalized_targets,
                                 &code_to_analyze,
+                                args.artifact_id.as_deref(),
                             );
                             if let Some(gw_dir) = gateway_dir {
                                 if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
@@ -593,8 +652,29 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             anyhow::bail!(reason);
         }
 
-        let code_to_analyze =
-            extract_code_for_analysis(&effective_command, agent_dir, gateway_dir, session_id);
+        let mut artifact_analysis_override: Option<
+            crate::runtime::remote_access::RemoteAccessAnalysis,
+        > = None;
+        let code_to_analyze = if let Some(ref aid) = args.artifact_id {
+            if let Some(gw_dir) = gateway_dir {
+                match extract_and_cache_artifact_analysis(gw_dir, aid) {
+                    Some((code, analysis)) => {
+                        artifact_analysis_override = Some(analysis);
+                        code
+                    }
+                    None => extract_code_for_analysis(
+                        &effective_command,
+                        agent_dir,
+                        gateway_dir,
+                        session_id,
+                    ),
+                }
+            } else {
+                extract_code_for_analysis(&effective_command, agent_dir, gateway_dir, session_id)
+            }
+        } else {
+            extract_code_for_analysis(&effective_command, agent_dir, gateway_dir, session_id)
+        };
 
         let agent_has_network_access = manifest
             .capabilities
@@ -625,318 +705,16 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             }
         }
 
-        let artifact_id_for_approval = args.artifact_id.clone();
-        let artifact_remote_needs_approval = if let Some(ref aid) = args.artifact_id {
-            if let Some(gw_dir) = &gateway_dir {
-                let cache_path = std::path::Path::new(gw_dir)
-                    .join("artifacts")
-                    .join(aid)
-                    .join("remote_access_analysis.json");
-                if cache_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&cache_path) {
-                        if let Ok(analysis) = serde_json::from_str::<
-                            crate::runtime::remote_access::RemoteAccessAnalysis,
-                        >(&content)
-                        {
-                            Some(analysis.requires_approval)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    let mut artifact_code = String::new();
-                    let mut needs_analysis = false;
-                    if let Ok(store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
-                        if let Ok(bundle) = store.inspect(aid) {
-                            let content_store =
-                                crate::runtime::content_store::ContentStore::new(gw_dir).ok();
-                            // Analyze ALL files in the artifact, not just entrypoints.
-                            // Network patterns may live in non-entrypoint files (e.g.,
-                            // an API client module imported by the main script).
-                            for file in &bundle.files {
-                                if let Some(cs) = &content_store {
-                                    if let Ok(content) = cs.read(&file.handle) {
-                                        if let Ok(text) = String::from_utf8(content) {
-                                            artifact_code
-                                                .push_str(&format!("\n# --- {} ---\n", file.name));
-                                            artifact_code.push_str(&text);
-                                            needs_analysis = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if needs_analysis && !artifact_code.is_empty() {
-                        let analysis =
-                            crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(
-                                &artifact_code,
-                            );
-                        let _ = std::fs::create_dir_all(cache_path.parent().unwrap());
-                        let _ = std::fs::write(
-                            &cache_path,
-                            serde_json::to_string(&analysis).unwrap_or_default(),
-                        );
-                        Some(analysis.requires_approval)
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if artifact_remote_needs_approval == Some(true) && !approval_validated_for_command {
-            let artifact_domains: Vec<String> = if let Some(gw_dir) = gateway_dir {
-                if let Some(ref aid) = artifact_id_for_approval {
-                    let cache_path = gw_dir
-                        .join("artifacts")
-                        .join(aid)
-                        .join("remote_access_analysis.json");
-                    if cache_path.exists() {
-                        if let Ok(content) = std::fs::read_to_string(&cache_path) {
-                            if let Ok(analysis) = serde_json::from_str::<
-                                crate::runtime::remote_access::RemoteAccessAnalysis,
-                            >(&content)
-                            {
-                                normalize_targets(&analysis.detected_patterns)
-                            } else {
-                                vec![]
-                            }
-                        } else {
-                            vec![]
-                        }
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![]
-            };
-
-            let artifact_already_approved =
-                if let (Some(gw_store), Some(_aid)) = (&gateway_store, &artifact_id_for_approval) {
-                    if artifact_domains.is_empty() {
-                        false
-                    } else {
-                        let sid = session_id.unwrap_or("");
-                        let root_sid = crate::runtime::content_store::root_session_id(sid);
-                        let approved = gw_store
-                            .get_approved_approvals_for_root(root_sid)
-                            .unwrap_or_default();
-                        approved_requests_cover_targets(
-                            &approved,
-                            &artifact_domains,
-                            agent_dir,
-                            gateway_dir,
-                        )
-                    }
-                } else {
-                    false
-                };
-
-            let session_grants_cover = if artifact_already_approved {
-                false
-            } else if let (Some(gw_store), Some(sid)) = (&gateway_store, session_id) {
-                let root_sid = crate::runtime::content_store::root_session_id(sid);
-                if artifact_domains.is_empty() {
-                    false
-                } else {
-                    gw_store.session_grants_cover_targets(&root_sid, &artifact_domains)
-                }
-            } else {
-                false
-            };
-
-            if artifact_already_approved || session_grants_cover {
-                approval_validated_for_command = true;
-            } else {
-                if let Some(cfg) = config {
-                    let sid = session_id.unwrap_or("");
-                    let root_sid = crate::runtime::content_store::root_session_id(sid);
-                    let existing_root =
-                        crate::scheduler::approval::pending_approval_requests_for_root(
-                            cfg,
-                            gateway_store.as_deref(),
-                            root_sid,
-                        )
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|r| matches!(r.action, ScheduledAction::SandboxExec { .. }))
-                        .collect::<Vec<_>>();
-                    let existing_session =
-                        crate::scheduler::approval::pending_sandbox_exec_requests_for_session(
-                            cfg,
-                            gateway_store.as_deref(),
-                            sid,
-                        )
-                        .unwrap_or_default();
-                    let mut existing = existing_root;
-                    for e in existing_session {
-                        if !existing.iter().any(|r| r.request_id == e.request_id) {
-                            existing.push(e);
-                        }
-                    }
-                    if !existing.is_empty() {
-                        let ids: Vec<String> =
-                            existing.iter().map(|a| a.request_id.clone()).collect();
-                        let primary = &existing[0];
-                        let summary = format!(
-                            "Artifact {}: remote access detected",
-                            artifact_id_for_approval.as_deref().unwrap_or("")
-                        );
-                        let approval = build_approval_details(
-                            primary,
-                            "sandbox_exec",
-                            summary.clone(),
-                            "approval_ref",
-                            serde_json::json!({
-                                "artifact_id": artifact_id_for_approval.as_deref().unwrap_or(""),
-                                "approval_already_pending": true,
-                                "note": "A sandbox approval is already pending for this artifact. After operator approval, the approved command will execute automatically.",
-                            }),
-                        );
-                        return Ok(serde_json::json!({
-                        "ok": false,
-                        "exit_code": null,
-                        "stdout": "",
-                        "stderr": format!("Remote access detected in artifact {}. Operator approval required.", artifact_id_for_approval.as_deref().unwrap_or("")),
-                        "approval_required": true,
-                        "approval_already_pending": true,
-                        "suspended": true,
-                        "request_id": primary.request_id,
-                        "pending_request_ids": ids,
-                        "message": format!("Execution suspended. Approval {} is pending for artifact. The approved command is already persisted and will be used automatically on resume.", primary.request_id),
-                        "approval": approval,
-                    }).to_string());
-                    }
-                }
-                if let Some(cfg) = config {
-                    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                    let summary = format!(
-                        "Artifact {}: remote access detected",
-                        artifact_id_for_approval.as_deref().unwrap_or("")
-                    );
-                    let action = ScheduledAction::SandboxExec {
-                        command: effective_command.clone(),
-                        dependencies: args.dependencies.as_ref().map(|d| {
-                            autonoetic_types::background::ScheduledActionDependencies {
-                                runtime: d.runtime.clone(),
-                                packages: d.packages.clone(),
-                            }
-                        }),
-                        requires_approval: true,
-                        evidence_ref: None,
-                        detected_hosts: Some(artifact_domains.clone()),
-                    };
-                    let approval_workflow_id = {
-                        let sid = session_id.unwrap_or("");
-                        let root = crate::runtime::content_store::root_session_id(sid);
-                        crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
-                            .ok()
-                            .flatten()
-                    };
-                    let sid = session_id.unwrap_or("");
-                    let root_session_id = crate::runtime::content_store::root_session_id(sid);
-                    let reason_text = if artifact_domains.is_empty() {
-                        format!(
-                            "Remote access detected in artifact {}",
-                            artifact_id_for_approval.as_deref().unwrap_or("")
-                        )
-                    } else {
-                        format!(
-                            "Remote access detected in artifact {}. Domains: {}",
-                            artifact_id_for_approval.as_deref().unwrap_or(""),
-                            artifact_domains.join(", ")
-                        )
-                    };
-                    let request = autonoetic_types::background::ApprovalRequest {
-                        request_id: request_id.clone(),
-                        agent_id: manifest.agent.id.clone(),
-                        session_id: sid.to_string(),
-                        root_session_id: Some(root_session_id.to_string()),
-                        action: action.clone(),
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        status: None,
-                        decided_at: None,
-                        decided_by: None,
-                        reason: Some(reason_text),
-                        evidence_ref: None,
-                        workflow_id: approval_workflow_id.clone(),
-                        decision_reason: None,
-                        approval_level: crate::scheduler::approval::resolve_approval_level(
-                            cfg, &action,
-                        ),
-                        task_id: match (&approval_workflow_id, session_id) {
-                            (Some(wf_id), Some(sid)) => {
-                                crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
-                                    .ok()
-                                    .flatten()
-                            }
-                            _ => None,
-                        },
-                    };
-                    if let Some(store) = &gateway_store {
-                        store.create_approval(&request).map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to persist sandbox approval request '{}': {}",
-                                request_id,
-                                e
-                            )
-                        })?;
-                    } else {
-                        anyhow::bail!(
-                            "GatewayStore missing; cannot persist sandbox approval request '{}'",
-                            request_id
-                        );
-                    }
-                    let approval = build_approval_details(
-                        &request,
-                        "sandbox_exec",
-                        summary.clone(),
-                        "approval_ref",
-                        serde_json::json!({
-                            "artifact_id": artifact_id_for_approval.as_deref().unwrap_or(""),
-                        }),
-                    );
-                    return Ok(serde_json::json!({
-                    "ok": false,
-                    "exit_code": null,
-                    "stdout": "",
-                    "stderr": format!("Remote access detected in artifact {}. Operator approval required.", artifact_id_for_approval.as_deref().unwrap_or("")),
-                    "approval_required": true,
-                    "request_id": request_id,
-                    "suspended": true,
-                    "message": format!("Execution suspended pending operator approval ({}). The approved command is persisted and will be used automatically on resume.", request_id),
-                    "approval": approval,
-                }).to_string());
-                } else {
-                    return Ok(serde_json::json!({
-                    "ok": false,
-                    "exit_code": null,
-                    "stdout": "",
-                    "stderr": format!("Remote access detected in artifact {}. Operator approval required (no config available to persist approval).", artifact_id_for_approval.as_deref().unwrap_or("")),
-                    "approval_required": true,
-                    "suspended": true,
-                }).to_string());
-                }
-            }
-        }
-
         let dep_packages: Option<Vec<String>> =
             args.dependencies.as_ref().map(|d| d.packages.clone());
-        let remote_analysis =
+        let remote_analysis = if let Some(artifact_analysis) = artifact_analysis_override {
+            artifact_analysis
+        } else {
             crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
                 &code_to_analyze,
                 dep_packages.as_deref(),
-            );
+            )
+        };
 
         let agent_has_network_access = manifest
             .capabilities
@@ -1087,81 +865,86 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
             let detected_patterns = remote_analysis.detected_patterns.clone();
             let normalized_targets = normalize_targets(&detected_patterns);
 
-            // Check if this exact execution was previously approved (cache hit).
-            // Only use the cache when we have concrete targets (URLs, IPs).
-            // Import-only and other opaque patterns always require re-approval
-            // because they can resolve to different concrete targets at runtime.
-            let has_concrete =
-                crate::runtime::approved_exec_cache::has_concrete_targets(&detected_patterns);
-            if has_concrete {
-                if let Some(gw_dir) = gateway_dir {
-                    let fingerprint = compute_fingerprint(
-                        &manifest.agent.id,
-                        &normalized_targets,
-                        &code_to_analyze,
-                    );
-                    if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                        if let Some(entry) = cache.find(&fingerprint) {
-                            tracing::info!(
-                                target: "sandbox.exec",
-                                fingerprint = %fingerprint,
-                                previously_approved_by = %entry.approved_by,
-                                previously_approved_at = %entry.approved_at,
-                                "Cache hit: skipping approval for previously approved sandbox exec"
-                            );
-                            let _ = cache.update_last_used(&fingerprint);
-                            approval_validated_for_command = true;
+            let coverage = crate::runtime::remote_access::classify_network_coverage(
+                &detected_patterns,
+                normalized_targets.clone(),
+            );
+
+            match &coverage {
+                crate::runtime::remote_access::NetworkCoverage::Concrete { targets } => {
+                    let targets = targets.clone();
+
+                    // Cache lookup: check if this exact execution was previously approved.
+                    if let Some(gw_dir) = gateway_dir {
+                        let fingerprint = compute_fingerprint(
+                            &manifest.agent.id,
+                            &targets,
+                            &code_to_analyze,
+                            args.artifact_id.as_deref(),
+                        );
+                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                            if let Some(entry) = cache.find(&fingerprint) {
+                                tracing::info!(
+                                    target: "sandbox.exec",
+                                    fingerprint = %fingerprint,
+                                    previously_approved_by = %entry.approved_by,
+                                    previously_approved_at = %entry.approved_at,
+                                    "Cache hit: skipping approval for previously approved sandbox exec"
+                                );
+                                let _ = cache.update_last_used(&fingerprint);
+                                approval_validated_for_command = true;
+                            }
                         }
                     }
-                }
 
-                // Also check for recently approved requests in the store (not just pending).
-                // This catches cases where the operator approved but the cache hasn't been
-                // populated yet (e.g., first run after cache was cleared).
-                if !approval_validated_for_command {
-                    if let (Some(_cfg), Some(gw_store), Some(sid)) =
-                        (config, &gateway_store, session_id)
-                    {
-                        let root_sid = crate::runtime::content_store::root_session_id(sid);
-                        if !normalized_targets.is_empty() {
-                            if let Ok(approved) = gw_store.get_approved_approvals_for_root(root_sid)
-                            {
-                                if approved_requests_cover_targets(
-                                    &approved,
-                                    &normalized_targets,
-                                    agent_dir,
-                                    gateway_dir,
-                                ) {
-                                    tracing::info!(
-                                        target: "sandbox.exec",
-                                        targets = ?normalized_targets,
-                                        "Approved request covers targets, skipping new approval"
-                                    );
-                                    approval_validated_for_command = true;
+                    // Approved request coverage: check recently approved requests in the store.
+                    if !approval_validated_for_command {
+                        if let (Some(_cfg), Some(gw_store), Some(sid)) =
+                            (config, &gateway_store, session_id)
+                        {
+                            let root_sid = crate::runtime::content_store::root_session_id(sid);
+                            if !targets.is_empty() {
+                                if let Ok(approved) =
+                                    gw_store.get_approved_approvals_for_root(root_sid)
+                                {
+                                    if approved_requests_cover_targets(
+                                        &approved,
+                                        &targets,
+                                        agent_dir,
+                                        gateway_dir,
+                                    ) {
+                                        tracing::info!(
+                                            target: "sandbox.exec",
+                                            targets = ?targets,
+                                            "Approved request covers targets, skipping new approval"
+                                        );
+                                        approval_validated_for_command = true;
 
-                                    // Backfill exec cache so future checks hit the fast path
-                                    let fingerprint = compute_fingerprint(
-                                        &manifest.agent.id,
-                                        &normalized_targets,
-                                        &code_to_analyze,
-                                    );
-                                    if let Some(gw_dir) = gateway_dir {
-                                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                                            if cache.find(&fingerprint).is_none() {
-                                                let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
-                                                    fingerprint: fingerprint.clone(),
-                                                    agent_id: manifest.agent.id.clone(),
-                                                    remote_targets: normalized_targets.clone(),
-                                                    code_content: code_to_analyze.clone(),
-                                                    approval_request_id: approved.iter()
-                                                        .find(|r| matches!(r.action, ScheduledAction::SandboxExec { .. }))
-                                                        .map(|r| r.request_id.clone())
-                                                        .unwrap_or_default(),
-                                                    approved_at: chrono::Utc::now().to_rfc3339(),
-                                                    approved_by: "operator".to_string(),
-                                                    last_used_at: chrono::Utc::now().to_rfc3339(),
-                                                };
-                                                let _ = cache.record(entry);
+                                        // Backfill exec cache so future checks hit the fast path
+                                        let fingerprint = compute_fingerprint(
+                                            &manifest.agent.id,
+                                            &targets,
+                                            &code_to_analyze,
+                                            args.artifact_id.as_deref(),
+                                        );
+                                        if let Some(gw_dir) = gateway_dir {
+                                            if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                                                if cache.find(&fingerprint).is_none() {
+                                                    let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                                                        fingerprint: fingerprint.clone(),
+                                                        agent_id: manifest.agent.id.clone(),
+                                                        remote_targets: targets.clone(),
+                                                        code_content: code_to_analyze.clone(),
+                                                        approval_request_id: approved.iter()
+                                                            .find(|r| matches!(r.action, ScheduledAction::SandboxExec { .. }))
+                                                            .map(|r| r.request_id.clone())
+                                                            .unwrap_or_default(),
+                                                        approved_at: chrono::Utc::now().to_rfc3339(),
+                                                        approved_by: "operator".to_string(),
+                                                        last_used_at: chrono::Utc::now().to_rfc3339(),
+                                                    };
+                                                    let _ = cache.record(entry);
+                                                }
                                             }
                                         }
                                     }
@@ -1169,24 +952,32 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                             }
                         }
                     }
-                }
-            } // end has_concrete guard
 
-            if !approval_validated_for_command {
-                if let (Some(gw_store), Some(sid)) = (&gateway_store, session_id) {
-                    let root_sid = crate::runtime::content_store::root_session_id(sid);
-                    if !normalized_targets.is_empty() {
-                        if gw_store.session_grants_cover_targets(&root_sid, &normalized_targets) {
-                            tracing::info!(
-                                target: "sandbox.exec",
-                                agent_id = %manifest.agent.id,
-                                root_session_id = %root_sid,
-                                targets = ?normalized_targets,
-                                "Session grant covers targets — auto-approving sandbox exec"
-                            );
-                            approval_validated_for_command = true;
+                    // Session grants: host-level approvals within root session.
+                    if !approval_validated_for_command {
+                        if let (Some(gw_store), Some(sid)) = (&gateway_store, session_id) {
+                            let root_sid = crate::runtime::content_store::root_session_id(sid);
+                            if !targets.is_empty() {
+                                if gw_store.session_grants_cover_targets(&root_sid, &targets) {
+                                    tracing::info!(
+                                        target: "sandbox.exec",
+                                        agent_id = %manifest.agent.id,
+                                        root_session_id = %root_sid,
+                                        targets = ?targets,
+                                        "Session grant covers targets — auto-approving sandbox exec"
+                                    );
+                                    approval_validated_for_command = true;
+                                }
+                            }
                         }
                     }
+                }
+                crate::runtime::remote_access::NetworkCoverage::Unresolved => {
+                    // Network behavior present but no stable concrete host coverage.
+                    // Skip cache, approved-requests, and session grants — go to pending check.
+                }
+                crate::runtime::remote_access::NetworkCoverage::None => {
+                    // Should not happen (requires_approval is true), but handle gracefully.
                 }
             }
 
@@ -1721,8 +1512,12 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                     dep_packages.as_deref(),
                 );
             let normalized_targets = normalize_targets(&remote_analysis_cached.detected_patterns);
-            let fingerprint =
-                compute_fingerprint(&manifest.agent.id, &normalized_targets, &code_to_analyze);
+            let fingerprint = compute_fingerprint(
+                &manifest.agent.id,
+                &normalized_targets,
+                &code_to_analyze,
+                args.artifact_id.as_deref(),
+            );
             if let Some(gw_dir) = gateway_dir {
                 if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                     if cache.find(&fingerprint).is_none() {

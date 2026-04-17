@@ -62,6 +62,22 @@ If the task is primarily root-cause analysis, tell the planner to use `debugger.
 - Do not call `artifact.build`
 - Do not produce install intent or agent bundle outputs
 
+## Running Built Artifacts
+
+When asked to run or test a previously built artifact, use `artifact.exec` instead of `sandbox.exec`:
+
+```json
+artifact.exec({
+  "artifact_id": "art-abc123",
+  "entrypoint": "main.py",
+  "args": ["Paris"]
+})
+```
+
+`artifact.exec` analyzes the artifact's actual source files for remote access (not the shell command string) and binds approval reuse to the artifact identity. Use it for transient validation, smoke tests, and ad hoc runs.
+
+Do NOT use `artifact.exec` for generic shell commands — use `sandbox.exec` for those.
+
 ## Running Code
 
 Your `CodeExecution` capability allows: `python3 `, `python `, `node `, `bash -c `, `sh -c `, `python3 scripts/`, `python scripts/`, plus common shell commands (date, ls, echo, cat, pwd, wc, grep, sed, awk, sort, head, tail, cut, tr, tee, find, xargs, diff, mkdir, touch, cp, mv, stat, du, df, uname, hostname, whoami, which, basename, dirname, readlink, file, sleep, test, true, false).
