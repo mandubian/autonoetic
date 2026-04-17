@@ -3930,6 +3930,42 @@ Hope this helps!"#;
     }
 }
 
+/// Normalizes a message the same way [`persist_history_to_content_store`] does before
+/// persisting, so we can compare fresh turns to already-stored (redacted) rows.
+fn normalize_message_for_persist_snapshot(msg: &Message, disclosure_state: &DisclosureState) -> Message {
+    let mut m = msg.clone();
+    m.content = crate::log_redaction::redact_text_for_logs(
+        &disclosure_state.filter_reply(&m.content),
+    );
+    for tc in &mut m.tool_calls {
+        tc.arguments = crate::log_redaction::redact_text_for_logs(
+            &disclosure_state.filter_reply(&tc.arguments),
+        );
+    }
+    m
+}
+
+/// Longest `k` such that `merged[len-k..]` matches `incoming[0..k]` after normalizing
+/// incoming messages to the persisted snapshot form. Avoids re-appending the full in-memory
+/// transcript on every hibernate (which duplicated older turns in the content store).
+fn longest_history_suffix_prefix_overlap(
+    merged: &[Message],
+    incoming: &[Message],
+    disclosure_state: &DisclosureState,
+) -> usize {
+    let max_k = merged.len().min(incoming.len());
+    for k in (1..=max_k).rev() {
+        let suf = &merged[merged.len() - k..];
+        let pre = &incoming[..k];
+        if suf.iter().zip(pre.iter()).all(|(persisted, fresh)| {
+            *persisted == normalize_message_for_persist_snapshot(fresh, disclosure_state)
+        }) {
+            return k;
+        }
+    }
+    0
+}
+
 /// Persists conversation history to content store at hibernate points.
 fn persist_history_to_content_store(
     _agent_dir: &Path,
@@ -3957,14 +3993,21 @@ fn persist_history_to_content_store(
     if merged_history.is_empty() {
         merged_history.extend_from_slice(history);
     } else {
-        for msg in history {
-            if matches!(msg.role, crate::llm::Role::System) {
-                // Keep only the first system instruction block in persisted history
-                // to avoid duplicate foundation prompts on every turn.
-                continue;
-            }
-            merged_history.push(msg.clone());
-        }
+        // Skip the live system prompt when merging: persisted history already keeps the
+        // first system block; the in-memory `history` repeats it every run.
+        let incoming_tail: Vec<Message> = history
+            .iter()
+            .filter(|m| !matches!(m.role, crate::llm::Role::System))
+            .cloned()
+            .collect();
+
+        let overlap =
+            longest_history_suffix_prefix_overlap(&merged_history, &incoming_tail, disclosure_state);
+        merged_history.extend(
+            incoming_tail[overlap..]
+                .iter()
+                .cloned(),
+        );
     }
 
     // Bound persisted history size while preserving the first system message if present.
@@ -4124,6 +4167,64 @@ mod history_persistence_tests {
         let raw = serde_json::to_string(&persisted)?;
         assert!(raw.contains("***REDACTED***"));
         assert!(!raw.contains("very-secret-value"));
+        Ok(())
+    }
+
+    #[test]
+    fn sequential_persist_appends_only_new_tail() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir)?;
+
+        let mut tracer = SessionTracer::test_tracer();
+        let disclosure = DisclosureState::default();
+
+        let h1 = vec![
+            Message::system("sys"),
+            Message::user("hello"),
+            Message::assistant("hi there"),
+        ];
+        persist_history_to_content_store(
+            temp.path(),
+            "sess-merge",
+            &h1,
+            &gateway_dir,
+            &mut tracer,
+            &disclosure,
+            None,
+            None,
+            None,
+        )?;
+
+        // Second hibernate passes the *full* transcript again (simulates executor state).
+        let h2 = vec![
+            Message::system("sys"),
+            Message::user("hello"),
+            Message::assistant("hi there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        persist_history_to_content_store(
+            temp.path(),
+            "sess-merge",
+            &h2,
+            &gateway_dir,
+            &mut tracer,
+            &disclosure,
+            None,
+            None,
+            None,
+        )?;
+
+        let store = ContentStore::new(&gateway_dir)?;
+        let bytes = store.read_by_name("sess-merge", "session_history")?;
+        let persisted: Vec<Message> = serde_json::from_slice(&bytes)?;
+
+        assert_eq!(persisted.len(), 5, "expected sys + 4 non-system, no duplicated hello turn");
+        assert_eq!(persisted[1].content, "hello");
+        assert_eq!(persisted[2].content, "hi there");
+        assert_eq!(persisted[3].content, "next");
+        assert_eq!(persisted[4].content, "done");
         Ok(())
     }
 }

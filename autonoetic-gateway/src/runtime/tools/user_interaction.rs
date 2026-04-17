@@ -147,7 +147,16 @@ impl NativeTool for UserAskTool {
             let pending_approvals = store
                 .get_pending_approvals_for_root(&root_session_id)
                 .unwrap_or_default();
-            if !pending_approvals.is_empty() {
+            let session_blocking_approvals: Vec<_> = pending_approvals
+                .iter()
+                .filter(|r| {
+                    !matches!(
+                        r.action,
+                        autonoetic_types::background::ScheduledAction::SandboxExec { .. }
+                    )
+                })
+                .collect();
+            if !session_blocking_approvals.is_empty() {
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error": "user.ask is not available while approvals are pending. Use workflow.wait to handle pending approvals."
@@ -178,6 +187,15 @@ impl NativeTool for UserAskTool {
 
         let now = chrono::Utc::now().to_rfc3339();
 
+        let (workflow_id, task_id, checkpoint_turn_id) = match _run_context {
+            Some(ctx) => (
+                ctx.workflow_id.clone(),
+                ctx.task_id.clone(),
+                turn_id.map(|t| t.to_string()),
+            ),
+            None => (None, None, turn_id.map(|t| t.to_string())),
+        };
+
         let interaction = UserInteraction {
             interaction_id: interaction_id.clone(),
             session_id: sid.to_string(),
@@ -196,9 +214,9 @@ impl NativeTool for UserAskTool {
             created_at: now,
             answered_at: None,
             expires_at: None,
-            workflow_id: None,
-            task_id: None,
-            checkpoint_turn_id: None,
+            workflow_id,
+            task_id,
+            checkpoint_turn_id,
         };
 
         if let Some(store) = gateway_store {

@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod causal_chain;
 pub mod config;
 pub mod execution;
+pub mod interaction_answer;
 pub mod layer_store;
 pub mod llm;
 pub mod log_redaction;
@@ -32,6 +33,9 @@ pub use autonoetic_types::runtime_lock::RuntimeLock;
 pub use bootstrap::bootstrap_agents;
 pub use causal_chain::CausalLogger;
 pub use execution::{GatewayExecutionService, SpawnResult};
+pub use interaction_answer::{
+    InteractionAnswerOutcome, InteractionAnswerParams, InteractionResolveAndAnswerParams,
+};
 pub use layer_store::LayerStore;
 pub use llm::{build_driver, LlmDriver};
 pub use policy::PolicyEngine;

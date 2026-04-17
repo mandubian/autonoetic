@@ -29,13 +29,20 @@ use autonoetic_gateway::router::{
     JsonRpcRequest as GatewayJsonRpcRequest, JsonRpcResponse as GatewayJsonRpcResponse,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::background::UserInteraction;
+use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction, UserInteraction};
+use autonoetic_types::config::GatewayConfig;
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Soft cap per field when printing approvals in the TUI (avoids runaway memory on pathological payloads).
+const CHAT_APPROVAL_FIELD_MAX_CHARS: usize = 16_384;
+
+/// Status bar preview of `latest_signal` (first line); main transcript shows full messages.
+const STATUS_BAR_EVENT_PREVIEW_CHARS: usize = 160;
 
 /// If `handle_chat` enables raw mode / alternate screen then exits early (missing env, I/O error,
 /// `run_loop` failure), the tty stays raw with echo off unless we restore it—keyboard input looks
@@ -134,9 +141,12 @@ impl SessionOverview {
             .filter(|value| !value.is_empty())
             .map(|value| {
                 let compact = value.lines().next().unwrap_or(value).trim();
-                let shortened: String = compact.chars().take(60).collect();
-                if compact.chars().count() > 60 {
-                    format!(" | event:{}...", shortened)
+                let shortened: String = compact
+                    .chars()
+                    .take(STATUS_BAR_EVENT_PREVIEW_CHARS)
+                    .collect();
+                if compact.chars().count() > STATUS_BAR_EVENT_PREVIEW_CHARS {
+                    format!(" | event:{}…", shortened)
                 } else {
                     format!(" | event:{}", shortened)
                 }
@@ -180,11 +190,13 @@ struct App {
     // Persistent clipboard — must stay alive so arboard's background ownership
     // thread keeps running and clipboard managers have time to capture the content.
     clipboard: Option<arboard::Clipboard>,
-    /// Inline approvals: pending approval request IDs tracked from workflow events.
+    /// Inline approvals: pending approval request IDs from workflow events and gateway store sync.
     /// Populated when `chat.inline_approvals` is enabled in config.
     pending_approval_ids: Vec<String>,
     /// Whether inline approvals are enabled (from `config.chat.inline_approvals`).
     inline_approvals_enabled: bool,
+    /// Store-derived approval IDs we already announced (avoid repeating every poll).
+    announced_store_approval_ids: HashSet<String>,
 }
 
 impl App {
@@ -215,6 +227,7 @@ impl App {
             clipboard: std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None),
             pending_approval_ids: Vec::new(),
             inline_approvals_enabled: false,
+            announced_store_approval_ids: HashSet::new(),
         }
     }
 
@@ -608,11 +621,15 @@ fn format_workflow_event_card(
                 let reason_part = if reason.is_empty() {
                     String::new()
                 } else {
-                    format!("\n   Reason: {}", reason)
+                    let mut block = String::from("\n   Reason:");
+                    for ln in reason.lines() {
+                        block.push_str(&format!("\n   {}", ln));
+                    }
+                    block
                 };
                 format!(
-                    "\n   → Approve: autonoetic gateway approvals approve {}{}\n   → After approval, execution resumes automatically — no retry needed.",
-                    apr_id, reason_part
+                    "{}\n   → Approve: autonoetic gateway approvals approve {}\n   → After approval, execution resumes automatically — no retry needed.",
+                    reason_part, apr_id
                 )
             };
             Some((
@@ -937,7 +954,10 @@ fn extract_structured_approval(text: &str) -> Option<StructuredApprovalView> {
     lines.push(format!("summary: {}", summary));
     lines.push(format!("reason: {}", reason));
     if !details.is_empty() {
-        lines.push(format!("subject: {}", details.join(" | ")));
+        lines.push("subject:".to_string());
+        for d in details {
+            lines.push(format!("  {}", d));
+        }
     }
     lines.push(format!("retry field: {}", retry_field));
 
@@ -1297,15 +1317,21 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
 
     // Open gateway store for approvals and signals (same path as gateway daemon)
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config.as_ref());
-    let gateway_store = match autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-        &gateway_dir,
-    ) {
-        Ok(store) => Some(store),
-        Err(e) => {
-            tracing::debug!(target: "chat", error = %e, "Gateway store unavailable, continuing without workflow events");
-            None
-        }
-    };
+    let gateway_store: Option<std::sync::Arc<autonoetic_gateway::scheduler::gateway_store::GatewayStore>> =
+        match autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir) {
+            Ok(store) => Some(std::sync::Arc::new(store)),
+            Err(e) => {
+                tracing::debug!(target: "chat", error = %e, "Gateway store unavailable, continuing without workflow events");
+                None
+            }
+        };
+
+    let execution_for_interactions = gateway_store.as_ref().map(|store| {
+        std::sync::Arc::new(autonoetic_gateway::execution::GatewayExecutionService::new(
+            config.as_ref().clone(),
+            Some(store.clone()),
+        ))
+    });
 
     if let Some(ref store) = gateway_store {
         if let Ok(snapshot) = poll_session_snapshot(
@@ -1320,6 +1346,12 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
                 &snapshot.pending_interactions,
             );
         }
+        let _ = merge_gateway_store_pending_approvals(
+            &mut app,
+            config.as_ref(),
+            store.as_ref(),
+            &session_id,
+        );
     }
 
     // Main loop
@@ -1358,7 +1390,10 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             write_half,
             &mut gateway_lines,
             &config,
-            gateway_store.as_ref(),
+            gateway_store
+                .as_ref()
+                .map(|s| s.as_ref()),
+            execution_for_interactions.as_ref(),
             &session_id,
             &envelope,
             &tx,
@@ -1399,6 +1434,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
     gateway_lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>>,
     config: &Arc<autonoetic_types::config::GatewayConfig>,
     gateway_store: Option<&autonoetic_gateway::scheduler::gateway_store::GatewayStore>,
+    execution_for_interactions: Option<&std::sync::Arc<autonoetic_gateway::execution::GatewayExecutionService>>,
     session_id: &str,
     envelope: &serde_json::Value,
     tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
@@ -1554,33 +1590,57 @@ async fn run_loop<B: ratatui::backend::Backend>(
             // User message to send
             msg = rx.recv() => {
                 if let Some((id, message)) = msg {
-                    // Check if there's a pending user interaction waiting for an answer.
-                    // If so, answer it directly and store, then send event.ingest to trigger resume.
-                    if let Some(ref store) = gateway_store {
-                        if let Ok(pending) = list_pending_user_interactions_for_terminal_session(store, session_id) {
+                    // Pending user.ask: gateway-owned answer + resume (workflow Runnable or session checkpoint).
+                    let mut skip_chat_ingest = false;
+                    if let (Some(store), Some(exec)) = (gateway_store, execution_for_interactions) {
+                        if let Ok(pending) =
+                            list_pending_user_interactions_for_terminal_session(store, session_id)
+                        {
                             if let Some(interaction) = pending.into_iter().next() {
-                                let answer = autonoetic_types::background::UserInteractionAnswer {
-                                    interaction_id: interaction.interaction_id.clone(),
-                                    answer_text: Some(message.clone()),
-                                    answer_option_id: None,
-                                    answered_by: "chat-tui".to_string(),
+                                use autonoetic_gateway::interaction_answer::{
+                                    answer_and_orchestrate_resume, InteractionAnswerParams,
                                 };
-                                match store.answer_user_interaction(&answer) {
-                                    Ok(()) => {
+                                match answer_and_orchestrate_resume(
+                                    exec,
+                                    InteractionAnswerParams {
+                                        interaction_id: interaction.interaction_id.clone(),
+                                        answer_text: Some(message.clone()),
+                                        answer_option_id: None,
+                                        answered_by: Some("chat-tui".to_string()),
+                                        follow_up_message: Some(message.clone()),
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(out) => {
                                         app.add_message(
                                             MessageRole::System,
-                                            format!("Answered interaction {} (text: {})", interaction.interaction_id, message),
+                                            format!(
+                                                "Answered interaction {} (gateway resume: resumed={}, wf_unblocked={})",
+                                                interaction.interaction_id, out.resumed, out.workflow_task_unblocked
+                                            ),
                                         );
+                                        skip_chat_ingest = true;
                                     }
                                     Err(e) => {
                                         app.add_message(
                                             MessageRole::System,
-                                            format!("Failed to answer interaction: {}", e),
+                                            format!("interaction answer orchestration failed: {}", e),
                                         );
+                                        skip_chat_ingest = true;
                                     }
                                 }
                             }
                         }
+                    }
+
+                    if skip_chat_ingest {
+                        // We answered the interaction in-process and intentionally skipped
+                        // sending `event.ingest`, so clear the in-flight request marker
+                        // created when the user pressed Enter.
+                        app.remove_pending(id);
+                        needs_redraw = true;
+                        continue;
                     }
 
                     let req_id = format!("tui-{}", id);
@@ -1634,6 +1694,10 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             None,
                                         ) {
                                             Ok(_decision) => {
+                                                app.pending_approval_ids
+                                                    .retain(|id| id != &apr_id);
+                                                app.announced_store_approval_ids
+                                                    .remove(&apr_id);
                                                 app.add_message(
                                                     MessageRole::System,
                                                     format!("Approved: {}", apr_id),
@@ -1834,6 +1898,311 @@ fn handle_key(
     Ok(HandleKeyAction::Continue)
 }
 
+fn clamp_chat_field(s: &str) -> String {
+    let count = s.chars().count();
+    if count <= CHAT_APPROVAL_FIELD_MAX_CHARS {
+        s.to_string()
+    } else {
+        let take = CHAT_APPROVAL_FIELD_MAX_CHARS.saturating_sub(1);
+        format!(
+            "{}…",
+            s.chars().take(take).collect::<String>()
+        )
+    }
+}
+
+fn approval_level_as_str(level: &ApprovalLevel) -> String {
+    match level {
+        ApprovalLevel::Operator => "operator".to_string(),
+        ApprovalLevel::Admin => "admin".to_string(),
+        ApprovalLevel::Agent(a) => format!("agent:{a}"),
+    }
+}
+
+/// Full action detail lines for store-backed approvals (scrollable in the transcript).
+fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String> {
+    match action {
+        ScheduledAction::SessionContinue {
+            session_id,
+            root_session_id,
+            requested_by_agent_id,
+            turn_counter,
+            max_turns,
+            payload,
+        } => {
+            let mut v = vec![
+                "type: session_continue".to_string(),
+                format!("  session: {}", clamp_chat_field(session_id)),
+                format!("  root: {}", clamp_chat_field(root_session_id)),
+                format!("  requested_by: {}", clamp_chat_field(requested_by_agent_id)),
+                format!("  turns: {turn_counter} (max {max_turns})"),
+            ];
+            if let Some(p) = payload {
+                if let Ok(s) = serde_json::to_string_pretty(p) {
+                    v.push("  payload:".to_string());
+                    for ln in s.lines() {
+                        v.push(format!("    {}", clamp_chat_field(ln)));
+                    }
+                }
+            }
+            v
+        }
+        ScheduledAction::CredentialRequest {
+            credential_id,
+            url,
+            method,
+            headers,
+            body,
+            inject_secret_as,
+            ..
+        } => {
+            let mut v = vec![
+                "type: credential_request".to_string(),
+                format!("  credential_id: {}", clamp_chat_field(credential_id)),
+            ];
+            if let Some(m) = method {
+                v.push(format!("  method: {m}"));
+            }
+            v.push(format!("  url: {}", clamp_chat_field(url)));
+            if let Some(h) = headers {
+                if let Ok(s) = serde_json::to_string_pretty(h) {
+                    v.push("  headers:".to_string());
+                    for ln in s.lines() {
+                        v.push(format!("    {}", clamp_chat_field(ln)));
+                    }
+                }
+            }
+            if let Some(b) = body {
+                if let Ok(s) = serde_json::to_string_pretty(b) {
+                    v.push("  body:".to_string());
+                    for ln in s.lines() {
+                        v.push(format!("    {}", clamp_chat_field(ln)));
+                    }
+                }
+            }
+            if let Some(i) = inject_secret_as {
+                v.push(format!("  inject_secret_as: {i}"));
+            }
+            v
+        }
+        ScheduledAction::CredentialPrompt {
+            service,
+            credential_id,
+            message,
+            secret_fields,
+            ..
+        } => {
+            let mut v = vec![
+                "type: credential_prompt".to_string(),
+                format!("  service: {}", clamp_chat_field(service)),
+                format!("  credential_id: {}", clamp_chat_field(credential_id)),
+                format!("  message: {}", clamp_chat_field(message)),
+            ];
+            if !secret_fields.is_empty() {
+                v.push(format!(
+                    "  secret_fields: {}",
+                    secret_fields
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            v
+        }
+        ScheduledAction::SandboxExec {
+            command,
+            dependencies,
+            detected_hosts,
+            ..
+        } => {
+            let mut v = vec![
+                "type: sandbox_exec".to_string(),
+                format!("  command: {}", clamp_chat_field(command)),
+            ];
+            if let Some(deps) = dependencies {
+                if let Ok(s) = serde_json::to_string(deps) {
+                    v.push(format!("  dependencies: {}", clamp_chat_field(&s)));
+                }
+            }
+            if let Some(hosts) = detected_hosts {
+                v.push(format!(
+                    "  detected_hosts: {}",
+                    hosts
+                        .iter()
+                        .map(|h| clamp_chat_field(h.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            v
+        }
+        ScheduledAction::WriteFile {
+            path,
+            content,
+            ..
+        } => {
+            let preview = clamp_chat_field(content);
+            vec![
+                "type: write_file".to_string(),
+                format!("  path: {}", clamp_chat_field(path)),
+                format!("  content (preview):\n{}", indent_block("    ", &preview)),
+            ]
+        }
+        ScheduledAction::AgentInstall {
+            agent_id,
+            summary,
+            requested_by_agent_id,
+            install_fingerprint,
+            ..
+        } => {
+            vec![
+                "type: agent_install".to_string(),
+                format!("  agent_id: {}", clamp_chat_field(agent_id)),
+                format!("  summary: {}", clamp_chat_field(summary)),
+                format!("  requested_by: {}", clamp_chat_field(requested_by_agent_id)),
+                format!("  install_fingerprint: {}", clamp_chat_field(install_fingerprint)),
+            ]
+        }
+        ScheduledAction::ProfileShare {
+            user_id,
+            agent_id,
+            scope,
+        } => {
+            vec![
+                "type: profile_share".to_string(),
+                format!("  user_id: {}", clamp_chat_field(user_id)),
+                format!("  agent_id: {}", clamp_chat_field(agent_id)),
+                format!("  scope: {}", clamp_chat_field(scope)),
+            ]
+        }
+        ScheduledAction::SessionEscalate {
+            session_id,
+            root_session_id,
+            requested_by_agent_id,
+            reason,
+            context,
+            urgency,
+            suggested_actions,
+            ..
+        } => {
+            let mut v = vec![
+                "type: session_escalate".to_string(),
+                format!("  session: {}", clamp_chat_field(session_id)),
+                format!("  root: {}", clamp_chat_field(root_session_id)),
+                format!("  requested_by: {}", clamp_chat_field(requested_by_agent_id)),
+                format!("  urgency: {}", clamp_chat_field(urgency)),
+                format!("  reason: {}", clamp_chat_field(reason)),
+            ];
+            if !context.is_empty() {
+                v.push("  context:".to_string());
+                for ln in context.lines() {
+                    v.push(format!("    {}", clamp_chat_field(ln)));
+                }
+            }
+            if !suggested_actions.is_empty() {
+                v.push(format!(
+                    "  suggested_actions: {}",
+                    suggested_actions
+                        .iter()
+                        .map(|s| clamp_chat_field(s.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+            }
+            v
+        }
+    }
+}
+
+fn indent_block(prefix: &str, text: &str) -> String {
+    text.lines()
+        .map(|ln| format!("{prefix}{}", clamp_chat_field(ln)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Multi-line card for a persisted [`ApprovalRequest`] (gateway store sync).
+fn format_store_approval_card(req: &ApprovalRequest, approval_instructions: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("⏸ Pending approval — {}", req.request_id));
+    lines.push(format!(
+        "required approval level: {}",
+        approval_level_as_str(&req.approval_level)
+    ));
+    lines.push(String::new());
+    lines.push("Action:".to_string());
+    for ln in format_scheduled_action_detail_lines(&req.action) {
+        lines.push(ln);
+    }
+    if let Some(r) = req.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        lines.push(String::new());
+        lines.push("Reason:".to_string());
+        for ln in r.lines() {
+            lines.push(format!("  {}", clamp_chat_field(ln)));
+        }
+    }
+    if let Some(ev) = req.evidence_ref.as_deref().filter(|s| !s.is_empty()) {
+        lines.push(String::new());
+        lines.push(format!("Evidence ref: {}", clamp_chat_field(ev)));
+    }
+    lines.push(String::new());
+    lines.push(approval_instructions.to_string());
+    lines.join("\n")
+}
+
+/// Merge pending gateway approvals for this chat's root session into `pending_approval_ids` so
+/// approvals that never appear as workflow cards (e.g. `SessionContinue`) still work with Ctrl+A.
+/// Returns true if a new system message was added.
+fn merge_gateway_store_pending_approvals(
+    app: &mut App,
+    config: &GatewayConfig,
+    store: &GatewayStore,
+    session_id: &str,
+) -> bool {
+    let root = autonoetic_gateway::runtime::content_store::root_session_id(session_id);
+    let Ok(mut list) = autonoetic_gateway::scheduler::pending_approval_requests_for_root(
+        config,
+        Some(store),
+        &root,
+    ) else {
+        return false;
+    };
+    list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    let store_ordered: Vec<String> = list.iter().map(|r| r.request_id.clone()).collect();
+    let store_set: HashSet<String> = store_ordered.iter().cloned().collect();
+
+    let mut merged: Vec<String> = store_ordered;
+    for id in &app.pending_approval_ids {
+        if !store_set.contains(id) && !merged.contains(id) {
+            merged.push(id.clone());
+        }
+    }
+    app.pending_approval_ids = merged;
+
+    let mut announced = false;
+    for req in list {
+        if app.announced_store_approval_ids.insert(req.request_id.clone()) {
+            let detail = if app.inline_approvals_enabled {
+                format!(
+                    "Approve: Ctrl+A, or `autonoetic gateway approvals approve {} …`.",
+                    req.request_id
+                )
+            } else {
+                format!(
+                    "Resolve with `autonoetic gateway approvals approve {} …` (set `chat.inline_approvals: true` for Ctrl+A).",
+                    req.request_id
+                )
+            };
+            let card = format_store_approval_card(&req, &detail);
+            app.add_message(MessageRole::Signal, card);
+            announced = true;
+        }
+    }
+    announced
+}
+
 /// Check for signals and inject into app. Returns true if signals were processed.
 async fn check_signals(
     app: &mut App,
@@ -2025,6 +2394,12 @@ async fn check_signals(
         append_new_pending_user_interaction_prompts(app, &snapshot.pending_interactions);
     if new_prompts > 0 {
         processed_any = true;
+    }
+
+    if let Some(store) = store {
+        if merge_gateway_store_pending_approvals(app, config, store, session_id) {
+            processed_any = true;
+        }
     }
 
     tracing::debug!(target: "chat", processed_any = processed_any, total_messages = app.messages.len(), "check_signals: complete");

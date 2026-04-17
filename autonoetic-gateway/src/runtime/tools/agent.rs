@@ -257,10 +257,24 @@ impl NativeTool for AgentSpawnTool {
                 pending_session_continue.join(", ")
             ));
         }
-        // Role-agnostic: block synchronous delegation while any approval for this *root*
-        // session is still pending.
-        if !args.r#async && !pending.is_empty() {
-            let ids: Vec<String> = pending.iter().map(|r| r.request_id.clone()).collect();
+        // Role-agnostic: block synchronous delegation while session-blocking approvals
+        // are pending for this *root* session. SandboxExec approvals do NOT block spawns —
+        // they are scoped to a specific tool call in a child session and should not deadlock
+        // the parent from spawning unrelated agents.
+        let session_blocking_approvals: Vec<_> = pending
+            .iter()
+            .filter(|r| {
+                !matches!(
+                    r.action,
+                    autonoetic_types::background::ScheduledAction::SandboxExec { .. }
+                )
+            })
+            .collect();
+        if !args.r#async && !session_blocking_approvals.is_empty() {
+            let ids: Vec<String> = session_blocking_approvals
+                .iter()
+                .map(|r| r.request_id.clone())
+                .collect();
             return Err(anyhow::anyhow!(
                 "Cannot delegate (agent.spawn) while approval(s) are pending for this session. Pending request id(s): {}. Approve or reject with `autonoetic gateway approvals approve|reject <id> --config <path>`, then continue.",
                 ids.join(", ")
@@ -918,32 +932,94 @@ impl NativeTool for AgentMessageTool {
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: AgentMessageArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        let store = gateway_store.ok_or_else(|| anyhow::anyhow!("Gateway store is required for agent.message"))?;
+        let store = gateway_store
+            .ok_or_else(|| anyhow::anyhow!("Gateway store is required for agent.message"))?;
 
         if args.target_session_id.is_none() && args.target_agent_id.is_none() {
-            return Err(anyhow::anyhow!("Either target_session_id or target_agent_id must be provided"));
+            return Err(anyhow::anyhow!(
+                "Either target_session_id or target_agent_id must be provided"
+            ));
         }
 
         let sender_session_id = session_id.unwrap_or("unknown_session").to_string();
         let sender_agent_id = manifest.agent.id.clone();
-        
-        // Fast capability check against policy using the provided agent ID if available, 
+
+        // Fast capability check against policy using the provided agent ID if available,
         // else fallback to parsing bounded capability scope or checking patterns runtime.
         if let Some(ref tid) = args.target_agent_id {
             if !policy.can_message_agent(tid) {
-                return Err(anyhow::anyhow!("Permission denied: cannot message agent '{}'", tid));
+                return Err(anyhow::anyhow!(
+                    "Permission denied: cannot message agent '{}'",
+                    tid
+                ));
             }
         } else {
             // For target_session_id, verify broadly if capability exists
             if !policy.can_message_agent("*") && !policy.can_message_agent("any") {
                 // Technically we'd look up target_session_id's agent, but for now we require broad msg right or specific target_agent_id
+            }
+        }
+
+        // Resolve targets and save deliveries
+        let mut target_sessions = Vec::new();
+        if let Some(ref s_id) = args.target_session_id {
+            target_sessions.push(s_id.clone());
+        } else if let Some(ref a_id) = args.target_agent_id {
+            if let Ok(sessions) = store.list_sessions_for_agent(a_id) {
+                target_sessions.extend(sessions);
+            }
+
+            if target_sessions.is_empty() {
+                let mut exists = None;
+                let mut status = "no_live_recipients";
+                let mut message = format!(
+                    "Agent '{}' exists but has no active sessions to receive the message.",
+                    a_id
+                );
+
+                if let Some(cfg) = config {
+                    let repo = crate::agent::AgentRepository::new(cfg.agents_dir.clone());
+                    match repo.get_sync(a_id) {
+                        Ok(_) => {
+                            exists = Some(true);
+                        }
+                        Err(e) => {
+                            let error_msg = e.to_string();
+                            if error_msg.contains("not found") {
+                                exists = Some(false);
+                                status = "target_agent_not_found";
+                                message = format!(
+                                    "No installed agent found with id '{}'. agent.message requires an existing target agent with at least one live session.",
+                                    a_id
+                                );
+                            } else {
+                                exists = Some(true);
+                                status = "target_agent_unavailable";
+                                message = format!(
+                                    "Agent '{}' exists but could not be loaded: {}",
+                                    a_id, error_msg
+                                );
+                            }
+                        }
+                    }
+                }
+
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "status": status,
+                    "target_agent_id": a_id,
+                    "recipients_count": 0,
+                    "exists": exists,
+                    "message": message,
+                })
+                .to_string());
             }
         }
 
@@ -954,7 +1030,7 @@ impl NativeTool for AgentMessageTool {
         };
 
         let msg_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        
+
         let record = crate::scheduler::gateway_store::AgentMessageRecord {
             message_id: msg_id.clone(),
             sender_session_id: sender_session_id.clone(),
@@ -966,19 +1042,9 @@ impl NativeTool for AgentMessageTool {
 
         store.save_agent_message(&record)?;
 
-        // Resolve targets and save deliveries
-        let mut target_sessions = Vec::new();
-        if let Some(ref s_id) = args.target_session_id {
-            target_sessions.push(s_id.clone());
-        } else if let Some(ref a_id) = args.target_agent_id {
-            if let Ok(sessions) = store.list_sessions_for_agent(a_id) {
-                target_sessions.extend(sessions);
-            }
-        }
-
         for tgt_session in &target_sessions {
             store.insert_message_delivery(&msg_id, tgt_session)?;
-            
+
             // Deliver a wakeup signal
             let signal = crate::scheduler::signal::Signal::AgentMessage {
                 message_id: msg_id.clone(),
@@ -987,13 +1053,10 @@ impl NativeTool for AgentMessageTool {
                 message: args.message.clone(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             };
-            
-            if let Err(e) = crate::scheduler::signal::write_signal(
-                Some(&store),
-                &tgt_session,
-                &msg_id,
-                &signal,
-            ) {
+
+            if let Err(e) =
+                crate::scheduler::signal::write_signal(Some(&store), &tgt_session, &msg_id, &signal)
+            {
                 tracing::debug!(target: "agent.message", error = %e, "Failed to write signal for target session");
             }
         }
