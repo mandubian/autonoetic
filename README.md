@@ -78,6 +78,7 @@ Current bundles:
   - `agents/specialists/researcher.default/`
   - `agents/specialists/architect.default/`
   - `agents/specialists/coder.default/`
+  - `agents/specialists/executor.default/`
   - `agents/specialists/debugger.default/`
   - `agents/specialists/evaluator.default/`
   - `agents/specialists/auditor.default/`

@@ -54,7 +54,7 @@ autonoetic/
 ├── autonoetic-mcp/       # Model Context Protocol
 ├── agents/               # Reference agent bundles
 │   ├── lead/             # Lead agents (planner.default)
-│   ├── specialists/      # Specialist agents (coder, researcher, etc.)
+│   ├── specialists/      # Specialist agents (executor, coder, researcher, etc.)
 │   ├── evolution/        # Evolution agents (specialized_builder, etc.)
 │   └── examples/         # Example agents (fibonacci, weather)
 └── docs/                 # Documentation

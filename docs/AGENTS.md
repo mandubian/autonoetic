@@ -57,6 +57,7 @@ When a message arrives at the gateway:
 | **Researcher** | `researcher.default` | Gathers evidence, cites sources |
 | **Architect** | `architect.default` | Defines structure, interfaces, trade-offs |
 | **Packager** | `packager.default` | Resolves and packages build-time dependencies into artifact layers |
+| **Executor** | `executor.default` | Runs quick deterministic shell/script tasks without durable artifact expectations |
 | **Coder** | `coder.default` | Produces runnable artifacts |
 | **Debugger** | `debugger.default` | Isolates root causes, proposes fixes |
 | **Evaluator** | `evaluator.default` | Validates behavior with tests/metrics |
@@ -76,7 +77,7 @@ When a message arrives at the gateway:
 
 ### Delegation Ladder (for Planner)
 
-1. **Foundational match**: route directly to the appropriate foundational agent (researcher, coder, debugger, registration, …)
+1. **Foundational match**: route directly to the appropriate foundational agent (researcher, executor, coder, debugger, registration, …)
 2. **Unknown intent**: `discovery.default` → semantic match among installed agents → spawn best candidate
 3. **No candidate**: `agent-factory.default` → builds new agent end-to-end (design → code → package → gate → install)
 4. **Recurring task**: `agent-factory.default` → install agent → `scheduler.cron.create`

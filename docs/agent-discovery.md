@@ -15,7 +15,7 @@ The solution: separate enumeration (dumb, gateway-level) from semantic matching 
 ```
 Planner
   │
-  ├─ Foundational agents (knows by name: researcher, coder, builder, ...)
+  ├─ Foundational agents (knows by name: researcher, executor, coder, builder, ...)
   │
   └─ Unknown intent → discovery.default
                            │
@@ -112,7 +112,7 @@ exclude_foundational: true  (optional — skip agents planner already knows)
 
 ```
 # 1. Try foundational agents first (no overhead)
-#    researcher, coder, architect, evaluator, auditor, packager,
+#    researcher, executor, coder, architect, evaluator, auditor, packager,
 #    specialized_builder, debugger, registration, agent-factory
 
 # 2. If none clearly fit, spawn discovery
@@ -136,7 +136,8 @@ agent.spawn("agent-factory.default", message="Build an agent that posts to Moltb
 
 Discovery is wasted overhead when the intent clearly maps to a foundational agent:
 - "fetch this URL" → `researcher.default` (not discovery)
-- "write a Python script" → `coder.default` (not discovery)
+- "run this quick shell command or one-off script" → `executor.default` (not discovery)
+- "write a reusable Python script" → `coder.default` (not discovery)
 - "register with Moltbook" → `registration.default` (not discovery)
 - "build a new agent" → `agent-factory.default` (not discovery)
 - "debug this failure" → `debugger.default` (not discovery)

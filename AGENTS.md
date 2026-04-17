@@ -45,7 +45,7 @@ autonoetic-ofp/          OpenFang Protocol — gateway federation
 autonoetic-mcp/          Model Context Protocol integration
 agents/                  Agent bundles (SKILL.md manifests)
   lead/                  planner.default
-  specialists/           coder, researcher, architect, debugger, evaluator, auditor
+  specialists/           coder, executor, researcher, architect, debugger, evaluator, auditor
   evolution/             specialized_builder, evolution_steward, memory_curator
 ```
 

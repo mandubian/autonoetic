@@ -55,6 +55,15 @@ For example:
 * `ecosystem.artifact_mount`: Requests a previously published artifact handle to be mounted into a sandbox or made visible to another Agent.
 * `ecosystem.capsule_export` / `ecosystem.capsule_import`: Packages or restores an Agent bundle together with its runtime closure for portable relaunch.
 
+### Gateway JSON-RPC (control plane, newline-delimited TCP)
+
+The daemon also serves **JSON-RPC 2.0** on its configured TCP port for operators and channel adapters. Besides `agent.spawn` / `event.ingest`, user-interaction answering is first-class:
+
+- **`interaction.answer`**: Persist a `user.ask` response when `interaction_id` is known (`answer_text` *xor* `answer_option_id`), then run **gateway-owned resume** (workflow task `Paused` → `Runnable` + durable queue, or `resume_from_user_interaction` for standalone sessions).
+- **`interaction.resolve_and_answer`**: For “dumb” inbound channels; resolves the interaction by deterministic priority (`interaction_id` → `reply_to_interaction_id` → exactly one pending under `root_session_id`), then applies the same orchestration as `interaction.answer`.
+
+Contract, resolution order, and rollout notes: [`docs/plan-channel-agnostic-interaction-answering.md`](../plan-channel-agnostic-interaction-answering.md).
+
 ## 3. Agent <-> Sandbox Protocol (The SDK Layer)
 
 A Sandbox process executing a generated Python text script does not speak directly to the Agent. All SDK calls (`autonoetic_sdk.memory.read()`) actually flow to the Gateway as JSON-RPC requests over a local Unix socket mounted in the Sandbox.
