@@ -98,7 +98,9 @@ impl GeminiDriver {
                 "functionDeclarations": req.tools.iter().map(|t| json!({
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.input_schema,
+                    // Gemini's functionDeclaration schema is *not* full JSON Schema; in particular
+                    // it rejects fields like `additionalProperties` (400 INVALID_ARGUMENT).
+                    "parameters": sanitize_schema_for_gemini(&t.input_schema),
                 })).collect::<Vec<_>>()
             }]);
         }
@@ -131,6 +133,29 @@ impl GeminiDriver {
 
         body
     }
+}
+
+fn sanitize_schema_for_gemini(schema: &serde_json::Value) -> serde_json::Value {
+    fn sanitize(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, val) in map {
+                    if k == "additionalProperties" {
+                        continue;
+                    }
+                    out.insert(k.clone(), sanitize(val));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(sanitize).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    sanitize(schema)
 }
 
 fn model_is_gemma(model: &str) -> bool {
@@ -220,5 +245,42 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
         tool_calls,
         stop_reason,
         usage,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_schema_for_gemini;
+    use serde_json::json;
+
+    #[test]
+    fn sanitize_schema_strips_additional_properties_recursively() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "properties": { "b": { "type": "string" } }
+                }
+            },
+            "anyOf": [
+                { "type": "object", "additionalProperties": true }
+            ]
+        });
+
+        let sanitized = sanitize_schema_for_gemini(&schema);
+        assert!(sanitized.get("additionalProperties").is_none());
+        assert!(
+            sanitized["properties"]["a"]
+                .get("additionalProperties")
+                .is_none()
+        );
+        assert!(
+            sanitized["anyOf"][0]
+                .get("additionalProperties")
+                .is_none()
+        );
     }
 }
