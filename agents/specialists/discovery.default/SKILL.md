@@ -36,7 +36,7 @@ You find installed agents that best match a task intent. You do not execute task
 
 - `task_description`: natural language of what needs doing (required)
 - `required_capabilities` (optional): capability types the agent must have (e.g. `["NetworkAccess"]`)
-- `exclude_foundational` (optional, default false): skip the well-known foundational agents that the planner already knows (researcher, coder, architect, evaluator, auditor, packager, specialized_builder, debugger, registration, agent-factory, discovery)
+- `exclude_foundational` (optional, default false): skip the well-known foundational agents that the planner already knows (researcher, executor, coder, architect, evaluator, auditor, packager, specialized_builder, debugger, registration, agent-factory, discovery)
 
 ## Workflow
 
@@ -79,6 +79,6 @@ Set `confidence: "low"` when multiple candidates have similar scores and you can
 ## Rules
 
 - Do not spawn agents to test them — reasoning about descriptions and capabilities is sufficient.
-- Do not recommend foundational agents (researcher, coder, etc.) when `exclude_foundational: true`.
+- Do not recommend foundational agents (researcher, executor, coder, etc.) when `exclude_foundational: true`.
 - If `agent.list` returns zero results, set `needs_new_agent: true` immediately.
 - Keep `rationale` concise (one sentence per candidate).

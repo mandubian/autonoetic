@@ -24,6 +24,11 @@ metadata:
         allowed: ["knowledge.", "sandbox."]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "bash -c ", "sh -c ", "python3 scripts/", "python scripts/"]
+        commands: ["which", "date", "echo", "cat", "ls", "pwd", "wc",
+                   "grep", "sed", "awk", "sort", "head", "tail", "cut", "tr", "tee",
+                   "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat",
+                   "du", "uname", "hostname", "whoami", "basename", "dirname",
+                   "readlink", "file", "sleep", "test", "true", "false"]
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
