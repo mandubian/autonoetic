@@ -1190,6 +1190,9 @@ impl AgentExecutor {
         )
         .await;
         let mut latest_assistant_text: Option<String> = None;
+        // Set when compact_workflow_summary runs at hibernate so assistant_reply / persisted
+        // history show workflow progress (system prompt injection alone is UI-invisible).
+        let mut workflow_transcript_supplement: Option<String> = None;
         let policy = PolicyEngine::new(self.manifest.clone());
         let max_empty_other_retries = max_other_empty_retries();
         let mut empty_other_retries_used = 0usize;
@@ -2207,6 +2210,15 @@ impl AgentExecutor {
                                 summary = %summary,
                                 "Injected workflow summary at turn end"
                             );
+
+                            // Surface workflow state in the transcript and JSON-RPC `assistant_reply`
+                            // (system injection alone is invisible to typical chat UIs).
+                            let planner_empty = response.text.trim().is_empty();
+                            let note =
+                                workflow_status_user_message_for_chat(&summary, planner_empty);
+                            let note = disclosure_state.filter_reply(&note);
+                            history.push(Message::assistant(note.clone()));
+                            workflow_transcript_supplement = Some(note);
                         }
 
                         // Durable planner checkpoint at turn end
@@ -2285,9 +2297,16 @@ impl AgentExecutor {
             }
         }
 
-        let outcome = Ok(TurnOutcome::Completed(
-            latest_assistant_text.map(|t| disclosure_state.filter_reply(&t)),
-        ));
+        let mut reply = latest_assistant_text.map(|t| disclosure_state.filter_reply(&t));
+        if let Some(note) = workflow_transcript_supplement {
+            reply = match reply {
+                None => Some(note),
+                Some(t) if t.trim().is_empty() => Some(note),
+                Some(t) => Some(format!("{}\n\n{}", t, note)),
+            };
+        }
+
+        let outcome = Ok(TurnOutcome::Completed(reply));
         self.last_history = history.clone();
         outcome
     }
@@ -3930,6 +3949,39 @@ Hope this helps!"#;
     }
 }
 
+/// User-visible workflow status for chat, turn completion, and JSON-RPC `assistant_reply`.
+/// When the model produced no assistant text, include a truncated "last intent" snippet from
+/// the compact summary so the user sees what completed.
+fn workflow_status_user_message_for_chat(summary: &str, planner_text_empty: bool) -> String {
+    let head = summary
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Workflow updated.");
+    let mut out = format!("**Workflow status:** {}", head);
+    if !planner_text_empty {
+        return out;
+    }
+    if let Some(pos) = summary.find("last intent") {
+        let tail = &summary[pos..];
+        if let Some(colon) = tail.find(':') {
+            let body = tail[colon + 1..].trim();
+            if !body.is_empty() {
+                const MAX: usize = 1200;
+                let snippet = if body.len() > MAX {
+                    format!("{}…", &body[..MAX])
+                } else {
+                    body.to_string()
+                };
+                out.push_str("\n\n");
+                out.push_str(&snippet);
+            }
+        }
+    }
+    out
+}
+
 /// Normalizes a message the same way [`persist_history_to_content_store`] does before
 /// persisting, so we can compare fresh turns to already-stored (redacted) rows.
 fn normalize_message_for_persist_snapshot(msg: &Message, disclosure_state: &DisclosureState) -> Message {
@@ -4226,6 +4278,28 @@ mod history_persistence_tests {
         assert_eq!(persisted[3].content, "next");
         assert_eq!(persisted[4].content, "done");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod workflow_status_chat_tests {
+    use super::workflow_status_user_message_for_chat;
+
+    #[test]
+    fn workflow_chat_planner_nonempty_only_headline() {
+        let s = "workflow wf-abc · 2 done [RESUMABLE]\n  last intent (v3): long details here";
+        let m = workflow_status_user_message_for_chat(s, false);
+        assert!(m.starts_with("**Workflow status:**"));
+        assert!(m.contains("wf-abc"));
+        assert!(!m.contains("long details"));
+    }
+
+    #[test]
+    fn workflow_chat_planner_empty_includes_intent_snippet() {
+        let s = "workflow wf-abc · 2 done [RESUMABLE]\n  last intent (v3): Done with task.";
+        let m = workflow_status_user_message_for_chat(s, true);
+        assert!(m.contains("wf-abc"));
+        assert!(m.contains("Done with task."));
     }
 }
 
