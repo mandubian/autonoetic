@@ -28,6 +28,7 @@ fn test_manifest() -> AgentManifest {
         capabilities: vec![
             Capability::CodeExecution {
                 patterns: vec!["*".to_string()],
+                commands: vec![],
             },
             Capability::ReadAccess {
                 scopes: vec!["*".to_string()],

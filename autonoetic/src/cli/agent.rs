@@ -1630,6 +1630,7 @@ pub fn handle_agent_import_skill(
                         },
                         autonoetic_types::capability::Capability::CodeExecution {
                             patterns: vec!["*".to_string()],
+                            commands: vec![],
                         },
                     ]
                 } else {

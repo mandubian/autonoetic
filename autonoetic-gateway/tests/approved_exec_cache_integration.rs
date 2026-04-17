@@ -50,6 +50,7 @@ fn test_agent_manifest() -> AgentManifest {
         },
         capabilities: vec![Capability::CodeExecution {
             patterns: vec!["*".to_string()],
+            commands: vec![],
         }],
         llm_config: None,
         limits: None,

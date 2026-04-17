@@ -13,6 +13,7 @@ fn test_overrides_from_capabilities_with_network_access() {
     let caps = vec![
         Capability::CodeExecution {
             patterns: vec!["*".to_string()],
+            commands: vec![],
         },
         Capability::NetworkAccess {
             hosts: vec!["api.example.com".to_string()],
@@ -30,6 +31,7 @@ fn test_overrides_from_capabilities_without_network_access() {
     let caps = vec![
         Capability::CodeExecution {
             patterns: vec!["*".to_string()],
+            commands: vec![],
         },
         Capability::ReadAccess {
             scopes: vec!["self.*".to_string()],

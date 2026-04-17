@@ -214,6 +214,7 @@ pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
         });
         caps.push(Capability::CodeExecution {
             patterns: vec!["*".to_string()],
+            commands: vec![],
         });
     }
 
