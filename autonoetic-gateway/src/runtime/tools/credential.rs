@@ -182,6 +182,8 @@ struct CredentialRequestArgs {
     body: Option<serde_json::Value>,
     /// Path to extract secret from vault (e.g. "token" for Bearer injection)
     inject_secret_as: Option<String>,
+    /// Approval request ID from a previous approval-required response.
+    approval_ref: Option<String>,
 }
 
 impl NativeTool for CredentialRequestTool {
@@ -220,6 +222,10 @@ impl NativeTool for CredentialRequestTool {
                     "inject_secret_as": {
                         "type": "string",
                         "description": "How to inject the secret: 'bearer', 'header:X-Custom-Header', or env var name"
+                    },
+                    "approval_ref": {
+                        "type": "string",
+                        "description": "Approval request ID (from previous approval_required response). Provide this after operator approval to run a network-policy-blocked request."
                     }
                 },
                 "required": ["credential_id", "url"]
@@ -280,14 +286,132 @@ impl NativeTool for CredentialRequestTool {
             .to_string());
         }
 
-        // Check network policy
         let url_host = extract_host(&args.url)?;
-        if !policy.can_connect_net(&url_host) {
+        let approval_validated = if let Some(approval_ref) = args.approval_ref.as_deref() {
+            match store.get_approval(approval_ref)? {
+                Some(approval)
+                    if approval.status == Some(autonoetic_types::background::ApprovalStatus::Approved) =>
+                {
+                    match approval.action {
+                        ScheduledAction::CredentialRequest {
+                            credential_id,
+                            url,
+                            method,
+                            headers,
+                            body,
+                            inject_secret_as,
+                            ..
+                        } => {
+                            let method_matches = method.as_deref() == args.method.as_deref();
+                            let headers_matches = headers == args.headers;
+                            let body_matches = body == args.body;
+                            let inject_matches = inject_secret_as == args.inject_secret_as;
+                            if credential_id == args.credential_id
+                                && url == args.url
+                                && method_matches
+                                && headers_matches
+                                && body_matches
+                                && inject_matches
+                            {
+                                true
+                            } else {
+                                return Ok(json!({
+                                    "ok": false,
+                                    "error": "approval_ref does not match this credential.request payload",
+                                })
+                                .to_string());
+                            }
+                        }
+                        _ => {
+                            return Ok(json!({
+                                "ok": false,
+                                "error": format!("approval_ref '{}' is not for credential.request", approval_ref),
+                            })
+                            .to_string());
+                        }
+                    }
+                }
+                _ => {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": format!("Invalid or unresolved approval_ref: {}", approval_ref),
+                    })
+                    .to_string());
+                }
+            }
+        } else {
+            false
+        };
+
+        // Check network policy unless this exact request has been explicitly approved.
+        if !policy.can_connect_net(&url_host) && !approval_validated {
+            let Some(cfg) = _config else {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("Network access denied for host: {}", url_host),
+                    "approval_required": true,
+                    "reason": format!("HTTP request to {} requires approval", url_host),
+                })
+                .to_string());
+            };
+            let sid = _session_id.unwrap_or("");
+            let root_session_id = _run_context
+                .map(|rc| rc.root_session_id.clone())
+                .unwrap_or_else(|| crate::runtime::content_store::root_session_id(sid).to_string());
+            let workflow_id = _run_context
+                .and_then(|rc| rc.workflow_id.clone())
+                .or_else(|| crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root_session_id).ok().flatten());
+            let task_id = _run_context
+                .and_then(|rc| rc.task_id.clone())
+                .or_else(|| {
+                    workflow_id.as_ref().and_then(|wf| {
+                        crate::scheduler::resolve_task_id_for_session(cfg, None, wf, sid)
+                            .ok()
+                            .flatten()
+                    })
+                });
+            let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            let action = ScheduledAction::CredentialRequest {
+                credential_id: args.credential_id.clone(),
+                url: args.url.clone(),
+                method: args.method.clone(),
+                headers: args.headers.clone(),
+                body: args.body.clone(),
+                inject_secret_as: args.inject_secret_as.clone(),
+                payload: Some(json!({ "host": url_host, "retry_field": "approval_ref" })),
+            };
+            let req = ApprovalRequest {
+                request_id: request_id.clone(),
+                agent_id: manifest.agent.id.clone(),
+                session_id: sid.to_string(),
+                root_session_id: Some(root_session_id),
+                workflow_id: workflow_id.clone(),
+                task_id,
+                action: action.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                status: None,
+                decided_at: None,
+                decided_by: None,
+                reason: Some(format!("HTTP request to {} requires approval", url_host)),
+                evidence_ref: None,
+                decision_reason: None,
+                approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+            };
+            store.create_approval(&req)?;
             return Ok(json!({
                 "ok": false,
                 "error": format!("Network access denied for host: {}", url_host),
                 "approval_required": true,
+                "request_id": request_id,
+                "suspended": true,
                 "reason": format!("HTTP request to {} requires approval", url_host),
+                "message": format!("Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.", request_id),
+                "approval": {
+                    "kind": "credential_request",
+                    "summary": format!("Credential request to {}", url_host),
+                    "reason": format!("HTTP request to {} requires approval", url_host),
+                    "retry_field": "approval_ref"
+                }
             })
             .to_string());
         }
