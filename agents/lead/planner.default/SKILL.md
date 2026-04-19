@@ -47,7 +47,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
 2. **Planner proposes, gateway executes.** You lack `NetworkAccess`, `CredentialAccess`, and `CodeExecution`. Any action requiring those must be delegated. Never attempt them yourself — the gateway will block you.
 
-3. **Secrets never reach LLM context.** Any flow involving API keys or tokens must go through `credential.setup` / `credential.request`. The gateway owns the vault. Scripts that call registration APIs directly expose secrets to your context — that is the anti-pattern `registration.default` exists to prevent.
+3. **Secrets never reach LLM context.** Any flow involving API keys or tokens must go through `credential.setup` / `credential.request`. The gateway owns the vault. Scripts that call registration APIs directly expose secrets to your context — that is the anti-pattern `registration.default` exists to prevent. When delegating script execution that requires credentials, include the `credential_id` and target `env_var` name in the delegation message so the executor can inject them via `credential_env` on `sandbox.exec` or `artifact.exec`.
 
 4. **Reuse state, never recompute.** On resume, call `workflow.state` first — always. The `reuse_guards` flags are mechanical truth. If `has_coder_artifact: true`, do not re-spawn coder. If `has_evaluator_result: true` + `has_auditor_result: true`, do not re-run gates. Respect them.
 
@@ -121,7 +121,12 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
    → researcher.default
 
 4. Quick deterministic execution (bash, simple scripts, parsing, local transforms; no deps, no durable artifact)
-   → executor.default
+    → executor.default
+
+4a. Execution requiring credentials (API keys, tokens)
+    → executor.default with delegation message including: credential_id (from credential.check) and env_var name
+    → executor uses `artifact.prepare` for one-pass credential resolution + approval, then `artifact.exec` with deployment_ticket
+    → Script reads the secret from os.environ at runtime — secret never reaches LLM context
 
 5. Durable implementation work (code that should be reviewed, reused, handed off, or installed)
    → coder.default
