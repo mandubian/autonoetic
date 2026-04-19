@@ -734,7 +734,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
-pub fn handle_gateway_interactions(
+pub async fn handle_gateway_interactions(
     config_path: &Path,
     command: &super::common::GatewayInteractionCommands,
 ) -> anyhow::Result<()> {
@@ -814,8 +814,7 @@ pub fn handle_gateway_interactions(
                 ),
             );
 
-            let rt = tokio::runtime::Runtime::new()?;
-            let out = rt.block_on(answer_and_orchestrate_resume(
+            let out = answer_and_orchestrate_resume(
                 &execution,
                 InteractionAnswerParams {
                     interaction_id: interaction_id.clone(),
@@ -824,7 +823,8 @@ pub fn handle_gateway_interactions(
                     answered_by: Some("cli".to_string()),
                     follow_up_message: None,
                 },
-            ))?;
+            )
+            .await?;
 
             println!("Answered interaction {}", interaction_id);
             if let Some(opt) = option {

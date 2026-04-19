@@ -343,6 +343,11 @@ pub enum AgentCommands {
         #[arg(long)]
         model: Option<String>,
     },
+    /// Manage vault-stored credentials
+    Credential {
+        #[command(subcommand)]
+        command: AgentCredentialCommands,
+    },
 }
 
 /// Trust mode for importing external AgentSkills.io skills.
@@ -355,6 +360,51 @@ pub enum TrustMode {
     Strict,
     /// Restrict to read-only access; all operations require approval before execution.
     Audit,
+}
+
+#[derive(Subcommand)]
+pub enum AgentCredentialCommands {
+    /// Store a secret in the encrypted vault and register a credential record
+    Put {
+        /// Service name (e.g., openweathermap, github, stripe)
+        #[arg(long)]
+        service: String,
+        /// Vault key name for the secret (e.g., OPENWEATHER_API_KEY)
+        #[arg(long)]
+        secret_name: String,
+        /// Read the secret value from this environment variable instead of prompting
+        #[arg(long, conflicts_with = "value")]
+        from_env: Option<String>,
+        /// Provide the secret value directly (use --from-env for better security)
+        #[arg(long)]
+        value: Option<String>,
+        /// Credential ID (auto-generated if omitted)
+        #[arg(long)]
+        credential_id: Option<String>,
+        /// How the credential is injected when used (e.g., env:API_KEY, bearer, header:X-Custom)
+        #[arg(long)]
+        inject_as: Option<String>,
+        /// Hosts this credential is allowed to be used with (e.g., api.openweathermap.org)
+        #[arg(long)]
+        allowed_hosts: Option<Vec<String>>,
+        /// ISO 8601 expiry timestamp
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// List registered credentials (shows metadata only, never secret values)
+    List {
+        /// Filter by service name
+        #[arg(long)]
+        service: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a credential and its secret from the vault
+    Rm {
+        /// Credential ID to remove
+        credential_id: String,
+    },
 }
 
 #[derive(Subcommand)]
