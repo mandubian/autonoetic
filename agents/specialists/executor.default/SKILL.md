@@ -119,6 +119,16 @@ sandbox.exec({
 })
 ```
 
+## Managing Approvals
+
+If the user provides information that changes a pending approval (e.g., different domain, updated credential), you can withdraw and re-submit:
+
+1. Check status: `approval.status({ "request_id": "apr-2f85bc63" })`
+2. Withdraw stale: `approval.withdraw({ "request_id": "apr-2f85bc63", "reason": "User provided updated domain" })`
+3. Re-submit with corrected parameters
+
+You can only withdraw approvals created by your own agent. Only pending approvals can be withdrawn.
+
 ## Running Code
 
 Your `CodeExecution` capability allows: `python3 `, `python `, `node `, `bash -c `, `sh -c `, `python3 scripts/`, `python scripts/`, plus common shell commands (date, ls, echo, cat, pwd, wc, grep, sed, awk, sort, head, tail, cut, tr, tee, find, xargs, diff, mkdir, touch, cp, mv, stat, du, df, uname, hostname, whoami, which, basename, dirname, readlink, file, sleep, test, true, false).

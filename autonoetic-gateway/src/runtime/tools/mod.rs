@@ -634,6 +634,7 @@ pub(crate) fn dependency_plan_from_lock(
 
 pub mod agent;
 pub mod agent_revision;
+pub mod approval;
 pub mod artifact;
 pub mod artifact_exec;
 pub mod artifact_prepare;
@@ -671,6 +672,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::session::register_tools(&mut registry);
     crate::runtime::tools::content::register_tools(&mut registry);
     crate::runtime::tools::agent_revision::register_tools(&mut registry);
+    crate::runtime::tools::approval::register_tools(&mut registry);
     crate::runtime::tools::evaluation::register_tools(&mut registry);
     crate::runtime::tools::credential::register_tools(&mut registry);
     crate::runtime::tools::web::register_tools(&mut registry);

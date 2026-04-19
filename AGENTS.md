@@ -39,6 +39,7 @@ autonoetic-gateway/      Core runtime — all logic lives here
       tools/promotion.rs   promotion.record tool — severity gating (error/critical block pass=true)
       tools/sandbox.rs     sandbox.exec tool — session approval grants, remote access checks
       tools/artifact_prepare.rs artifact.prepare — one-pass credential + approval preflight
+      tools/approval.rs      approval.status / approval.withdraw — agent approval management
     runtime/analysis/      Static analysis helpers
   tests/                  50+ integration tests — use tempfile for isolation, serial_test for ordering
 autonoetic-types/        Shared types: Agent, Capability, Memory, RuntimeLock, background actions
