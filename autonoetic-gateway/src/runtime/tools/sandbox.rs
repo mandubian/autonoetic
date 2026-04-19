@@ -14,6 +14,7 @@ use autonoetic_types::background::{ApprovalDecision, ApprovalRequest, ScheduledA
 use autonoetic_types::capability::Capability;
 use autonoetic_types::runtime_lock::LockedLayerMount;
 use autonoetic_types::tool_error::tagged;
+use secrecy::ExposeSecret;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -499,6 +500,18 @@ impl NativeTool for SandboxExecTool {
                                 "mount_as": { "type": "string", "description": "The mount paths where this layer will be mounted inside the sandbox when the artifact is later used (e.g., '/opt/venv'). This must match the expected path the artifact consumer expects." }
                             },
                             "required": ["path", "mount_as"]
+                        }
+                    },
+                    "credential_env": {
+                        "type": "array",
+                        "description": "Inject vault-stored credentials as environment variables into the sandbox. The gateway resolves the secret server-side — it never appears in tool arguments or responses. Use credential_id from credential.check output.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "credential_id": { "type": "string", "description": "Credential ID (from credential.check or delegated by planner)" },
+                                "env_var": { "type": "string", "description": "Environment variable name to inject (e.g., 'API_KEY')" }
+                            },
+                            "required": ["credential_id", "env_var"]
                         }
                     }
                 },
@@ -1350,11 +1363,64 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
         }
 
         let layer_python_path_str = layer_python_paths.join(":");
-        let extra_env: Vec<(String, String)> = if !layer_python_path_str.is_empty() {
+        let mut extra_env: Vec<(String, String)> = if !layer_python_path_str.is_empty() {
             vec![("PYTHONPATH".to_string(), layer_python_path_str)]
         } else {
             vec![]
         };
+
+        if let Some(credential_mappings) = &args.credential_env {
+            if let (Some(gw_dir), Some(store)) = (gateway_dir, &gateway_store) {
+                let vault_dir = gw_dir.parent().unwrap_or(gw_dir);
+                crate::vault::ensure_default_key(vault_dir)?;
+                let vault_path = crate::vault::default_vault_path(vault_dir);
+                let vault = match crate::vault::Vault::load_from_file(&vault_path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "sandbox.exec",
+                            error = %e,
+                            "Failed to load vault for credential_env resolution"
+                        );
+                        return Err(anyhow::anyhow!(
+                            "credential_env requires a valid vault but vault could not be loaded: {}",
+                            e
+                        ));
+                    }
+                };
+                for mapping in credential_mappings {
+                    let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "credential_env: credential '{}' not found in store",
+                            mapping.credential_id
+                        )
+                    })?;
+                    let secret_value = vault
+                        .get_secret(&cred.secret_name)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "credential_env: secret '{}' for credential '{}' not found in vault",
+                                cred.secret_name,
+                                mapping.credential_id
+                            )
+                        })?;
+                    tracing::info!(
+                        target: "sandbox.exec",
+                        credential_id = %mapping.credential_id,
+                        env_var = %mapping.env_var,
+                        "Injecting credential into sandbox as environment variable"
+                    );
+                    extra_env.push((
+                        mapping.env_var.clone(),
+                        secret_value.expose_secret().to_string(),
+                    ));
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "credential_env requires gateway_dir and GatewayStore"
+                ));
+            }
+        }
 
         let root_session_id = session_id.map(crate::runtime::content_store::root_session_id);
 

@@ -552,6 +552,12 @@ pub(crate) struct CapturePath {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct CredentialEnvMapping {
+    pub credential_id: String,
+    pub env_var: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct SandboxExecArgs {
     pub command: String,
     #[serde(default, deserialize_with = "deserialize_deps_lenient")]
@@ -562,6 +568,8 @@ pub(crate) struct SandboxExecArgs {
     pub artifact_id: Option<String>,
     #[serde(default)]
     pub capture_paths: Option<Vec<CapturePath>>,
+    #[serde(default)]
+    pub credential_env: Option<Vec<CredentialEnvMapping>>,
 }
 
 fn parse_dependency_plan(runtime: &str, packages: Vec<String>) -> anyhow::Result<DependencyPlan> {
@@ -628,6 +636,7 @@ pub mod agent;
 pub mod agent_revision;
 pub mod artifact;
 pub mod artifact_exec;
+pub mod artifact_prepare;
 pub mod content;
 pub mod credential;
 pub mod digest;
@@ -667,6 +676,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::web::register_tools(&mut registry);
     crate::runtime::tools::artifact::register_tools(&mut registry);
     crate::runtime::tools::artifact_exec::register_tools(&mut registry);
+    crate::runtime::tools::artifact_prepare::register_tools(&mut registry);
     crate::runtime::tools::knowledge::register_tools(&mut registry);
     crate::runtime::tools::agent::register_tools(&mut registry);
     crate::runtime::tools::sandbox::register_tools(&mut registry);
