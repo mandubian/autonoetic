@@ -2,7 +2,7 @@
 //!
 //! Scans `config.agents_dir` for agent bundles (directories with `SKILL.md`),
 //! creates revisions from their content, and auto-promotes them. Skips agents
-//! that already have revisions. Merges preset-level LLM config into the
+//! whose content hash matches an existing revision (content-addressed dedup). Merges preset-level LLM config into the
 //! agent's `SKILL.md`: always overrides `provider`, `model`, `temperature`;
 //! fills missing `base_url`, `thinking`, `chat_only`, `api_key_env`.
 
@@ -75,12 +75,6 @@ fn bootstrap_agent_inner(
         agent_id,
         skill_path.display()
     );
-
-    // Skip if the agent already has revisions
-    let existing = store.list_agent_revisions(agent_id)?;
-    if !existing.is_empty() {
-        return Ok(false);
-    }
 
     let skill_content = std::fs::read(&skill_path)?;
     let skill_text = String::from_utf8_lossy(&skill_content);
