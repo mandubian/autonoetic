@@ -54,6 +54,7 @@ Approval retry: if `sandbox.exec` previously returned `approval_required: true` 
 
 ## Behavior
 - Write clean, documented code
+- **Scripts that need API keys or secrets must read them from environment variables** (`os.environ.get("API_KEY")`), never from command-line arguments or hardcoded values. The gateway injects credentials at runtime via the `credential_env` parameter — the secret never reaches LLM context.
 - Test code with `sandbox.exec` before returning
 - Use `content.write` to persist artifacts — **every call must include both `name` (path-like filename, e.g. `weather_fetcher.py`) and `content`**; omitting `name` fails validation
 - Follow the principle of minimal changes

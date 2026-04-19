@@ -60,3 +60,14 @@ if __name__ == "__main__":
 - **Memory visibility**: `sdk.memory.remember()` stores data with `session` visibility by default — any agent in the same root session can read it via `sdk.memory.recall()` or the native `knowledge.recall`/`knowledge.search` tools. Use Tier 1 `sdk.memory.write()` for private scratch data that should not be shared.
 - The SDK bridge only supports the methods listed above. Calling unsupported methods (e.g., `sdk.secrets.get`, `sdk.message.send`) will raise `AutonoeticSdkError`.
 - The SDK is injected via `PYTHONPATH` and communicates with the gateway over a Unix socket. No network access is required.
+
+## Credential Injection via Environment Variables
+
+When a script needs an API key or secret, **read it from an environment variable** — never from a command-line argument or hardcoded value:
+
+```python
+import os
+api_key = os.environ.get("OPENWEATHER_API_KEY")
+```
+
+The gateway injects credentials into the sandbox via the `credential_env` parameter on `sandbox.exec` and `artifact.exec`. The secret is resolved server-side from the encrypted vault and never exposed to LLM context. When delegating execution that requires credentials, include the `credential_env` mapping so the secret is available at runtime.

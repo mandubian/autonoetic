@@ -78,6 +78,47 @@ artifact.exec({
 
 Do NOT use `artifact.exec` for generic shell commands — use `sandbox.exec` for those.
 
+## Injecting Credentials
+
+When the planner delegates a task that requires an API key or secret, use `artifact.prepare` to resolve everything in one pass before executing:
+
+```json
+artifact.prepare({
+  "artifact_id": "art_5bda3712",
+  "entrypoint": "weather_lookup.py",
+  "args": ["London", "tomorrow"],
+  "required_credentials": [
+    { "credential_id": "cred_abc123", "env_var": "OPENWEATHER_API_KEY" }
+  ]
+})
+```
+
+This returns a `deployment_ticket`. If credentials are missing, it fails immediately with a clear error. If remote access approval is needed, it creates a single approval covering all domains + credential injection.
+
+Once you have the ticket, execute:
+
+```json
+artifact.exec({
+  "deployment_ticket": "dtk-abc12345def",
+  "artifact_id": "art_5bda3712",
+  "entrypoint": "weather_lookup.py",
+  "args": ["London", "tomorrow"]
+})
+```
+
+The gateway resolves the secret from the encrypted vault and injects it as an environment variable inside the sandbox. The secret value never appears in your context.
+
+For simple sandbox.exec calls without artifacts, use `credential_env` directly:
+
+```json
+sandbox.exec({
+  "command": "python3 /tmp/script.py",
+  "credential_env": [
+    { "credential_id": "cred_abc123", "env_var": "OPENWEATHER_API_KEY" }
+  ]
+})
+```
+
 ## Running Code
 
 Your `CodeExecution` capability allows: `python3 `, `python `, `node `, `bash -c `, `sh -c `, `python3 scripts/`, `python scripts/`, plus common shell commands (date, ls, echo, cat, pwd, wc, grep, sed, awk, sort, head, tail, cut, tr, tee, find, xargs, diff, mkdir, touch, cp, mv, stat, du, df, uname, hostname, whoami, which, basename, dirname, readlink, file, sleep, test, true, false).
