@@ -8,7 +8,8 @@ use crate::runtime::remote_access::{
     classify_network_coverage, is_safe_inspection_command, NetworkCoverage, RemoteAccessAnalyzer,
 };
 use crate::runtime::tools::{
-    build_approval_details, load_session_content_mounts, NativeTool, NativeToolRegistry,
+    build_approval_details, load_session_content_mounts, CredentialEnvMapping, NativeTool,
+    NativeToolRegistry,
 };
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
 use autonoetic_types::agent::AgentManifest;
@@ -16,6 +17,7 @@ use autonoetic_types::background::{
     ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
 };
 use autonoetic_types::capability::Capability;
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -34,6 +36,10 @@ struct ArtifactExecArgs {
     env: std::collections::HashMap<String, String>,
     #[serde(default)]
     approval_ref: Option<String>,
+    #[serde(default)]
+    deployment_ticket: Option<String>,
+    #[serde(default)]
+    credential_env: Option<Vec<CredentialEnvMapping>>,
 }
 
 pub struct ArtifactExecTool;
@@ -75,9 +81,25 @@ impl NativeTool for ArtifactExecTool {
                         "additionalProperties": { "type": "string" },
                         "description": "Environment variables to set in the sandbox"
                     },
+                    "credential_env": {
+                        "type": "array",
+                        "description": "Inject vault-stored credentials as environment variables into the sandbox. The gateway resolves the secret server-side — it never appears in tool arguments or responses. Use credential_id from credential.check output.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "credential_id": { "type": "string", "description": "Credential ID (from credential.check or delegated by planner)" },
+                                "env_var": { "type": "string", "description": "Environment variable name to inject (e.g., 'API_KEY')" }
+                            },
+                            "required": ["credential_id", "env_var"]
+                        }
+                    },
                     "approval_ref": {
                         "type": "string",
                         "description": "Approval request ID from a previous approval_required response"
+                    },
+                    "deployment_ticket": {
+                        "type": "string",
+                        "description": "Deployment ticket from artifact.prepare. When provided, remote-access approval and credential injection are resolved from the ticket — no separate approval_ref or credential_env needed."
                     }
                 },
                 "required": ["artifact_id", "entrypoint"],
@@ -104,6 +126,28 @@ impl NativeTool for ArtifactExecTool {
 
         let gw_dir = gateway_dir
             .ok_or_else(|| anyhow::anyhow!("artifact.exec requires a gateway directory"))?;
+
+        if let Some(ticket_id) = &args.deployment_ticket {
+            if let Some(store) = &gateway_store {
+                if let Some(ticket) = crate::runtime::tools::artifact_prepare::resolve_deployment_ticket(
+                    store, ticket_id,
+                )? {
+                    if !ticket.approved_domains.is_empty() {
+                        tracing::info!(
+                            target: "artifact.exec",
+                            ticket_id = %ticket_id,
+                            domains = ?ticket.approved_domains,
+                            "Deployment ticket resolved — skipping approval"
+                        );
+                    }
+                    return execute_with_ticket(
+                        manifest, policy, agent_dir, gw_dir, &args, &ticket, config, gateway_store,
+                    );
+                } else {
+                    anyhow::bail!("deployment_ticket '{}' not found or expired", ticket_id);
+                }
+            }
+        }
 
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
         let bundle = artifact_store.inspect(&args.artifact_id)?;
@@ -509,6 +553,54 @@ impl NativeTool for ArtifactExecTool {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
+        if let Some(credential_mappings) = &args.credential_env {
+            if let (Some(gw_dir), Some(store)) = (gateway_dir, &gateway_store) {
+                let vault_dir = gw_dir.parent().unwrap_or(gw_dir);
+                crate::vault::ensure_default_key(vault_dir)?;
+                let vault_path = crate::vault::default_vault_path(vault_dir);
+                let vault = match crate::vault::Vault::load_from_file(&vault_path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "credential_env requires a valid vault but vault could not be loaded: {}",
+                            e
+                        ));
+                    }
+                };
+                for mapping in credential_mappings {
+                    let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "credential_env: credential '{}' not found in store",
+                            mapping.credential_id
+                        )
+                    })?;
+                    let secret_value = vault
+                        .get_secret(&cred.secret_name)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "credential_env: secret '{}' for credential '{}' not found in vault",
+                                cred.secret_name,
+                                mapping.credential_id
+                            )
+                        })?;
+                    tracing::info!(
+                        target: "artifact.exec",
+                        credential_id = %mapping.credential_id,
+                        env_var = %mapping.env_var,
+                        "Injecting credential into sandbox as environment variable"
+                    );
+                    extra_env.push((
+                        mapping.env_var.clone(),
+                        secret_value.expose_secret().to_string(),
+                    ));
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "credential_env requires gateway_dir and GatewayStore"
+                ));
+            }
+        }
+
         let root_session_id = session_id.map(crate::runtime::content_store::root_session_id);
 
         let runner = SandboxRunner::spawn_with_session_content_and_env(
@@ -614,4 +706,151 @@ fn validate_approval_ref_context(
         current_root
     );
     Ok(())
+}
+
+fn execute_with_ticket(
+    manifest: &AgentManifest,
+    _policy: &PolicyEngine,
+    agent_dir: &Path,
+    gw_dir: &Path,
+    args: &ArtifactExecArgs,
+    ticket: &crate::runtime::tools::artifact_prepare::DeploymentTicket,
+    _config: Option<&autonoetic_types::config::GatewayConfig>,
+    gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+) -> anyhow::Result<String> {
+    let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
+    let bundle = artifact_store.inspect(&args.artifact_id)?;
+    let resolved_files = artifact_store.resolve_files(&args.artifact_id)?;
+
+    let driver = SandboxDriverKind::parse(&manifest.runtime.sandbox)?;
+    let agent_dir_str = agent_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Agent directory is not valid UTF-8"))?;
+
+    let mut mounts = Vec::new();
+    let temp_base = std::env::temp_dir()
+        .join("autonoetic_artifact")
+        .join(args.artifact_id.replace('/', "_"));
+    std::fs::create_dir_all(&temp_base)?;
+
+    for (name, content) in resolved_files {
+        let temp_file = temp_base.join(&name);
+        if let Some(parent) = temp_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&temp_file, &content)?;
+        let dest_path = format!("/tmp/{}", name);
+        mounts.push(SandboxMount {
+            source: temp_file,
+            dest: dest_path,
+            readonly: false,
+        });
+    }
+
+    if !bundle.layers.is_empty() {
+        let artifact_layers: Vec<crate::runtime::tools::sandbox::LayerMount> = bundle
+            .layers
+            .iter()
+            .map(|l| crate::runtime::tools::sandbox::LayerMount {
+                layer_id: l.layer_id.clone(),
+                mount_path: l.mount_path.clone(),
+            })
+            .collect();
+        let mut layer_python_paths = Vec::new();
+        crate::runtime::tools::sandbox::extract_and_mount_layers(
+            &artifact_layers,
+            gw_dir,
+            "artifact",
+            &mut mounts,
+            &mut layer_python_paths,
+        )?;
+    }
+
+    let mut overrides =
+        crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
+    overrides.share_net = !ticket.approved_domains.is_empty();
+
+    let mut extra_env: Vec<(String, String)> = args
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    if !ticket.credential_env.is_empty() {
+        let store = gateway_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("deployment_ticket with credentials requires GatewayStore")
+        })?;
+        let vault_dir = gw_dir.parent().unwrap_or(gw_dir);
+        crate::vault::ensure_default_key(vault_dir)?;
+        let vault_path = crate::vault::default_vault_path(vault_dir);
+        let vault = crate::vault::Vault::load_from_file(&vault_path)?;
+        for mapping in &ticket.credential_env {
+            let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "deployment_ticket: credential '{}' not found in store",
+                    mapping.credential_id
+                )
+            })?;
+            let secret_value = vault.get_secret(&cred.secret_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "deployment_ticket: secret '{}' for credential '{}' not found in vault",
+                    cred.secret_name,
+                    mapping.credential_id
+                )
+            })?;
+            tracing::info!(
+                target: "artifact.exec",
+                credential_id = %mapping.credential_id,
+                env_var = %mapping.env_var,
+                "Injecting credential from deployment ticket"
+            );
+            extra_env.push((
+                mapping.env_var.clone(),
+                secret_value.expose_secret().to_string(),
+            ));
+        }
+    }
+
+    let command = build_command(&args.entrypoint, &args.args);
+
+    let runner = SandboxRunner::spawn_with_session_content_and_env(
+        driver,
+        agent_dir_str,
+        &command,
+        None,
+        mounts,
+        Some(&overrides),
+        &extra_env,
+        None,
+    )?;
+
+    let output = runner.process.wait_with_output()?;
+    let ok = output.status.success();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let mut body = serde_json::json!({
+        "ok": ok,
+        "exit_code": output.status.code(),
+        "stdout": stdout,
+        "stderr": stderr,
+        "artifact_id": args.artifact_id,
+        "entrypoint": args.entrypoint,
+        "deployment_ticket": args.deployment_ticket,
+    });
+
+    if !overrides.share_net {
+        let has_network_cap = manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::NetworkAccess { .. }));
+        crate::runtime::tools::sandbox::apply_network_isolation_failure_to_result(
+            &mut body,
+            &stdout,
+            &stderr,
+            has_network_cap,
+        );
+    }
+
+    serde_json::to_string(&body).map_err(Into::into)
 }
