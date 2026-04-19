@@ -387,7 +387,7 @@ For running built artifact entrypoints in a sandbox with artifact-aware analysis
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `artifact.exec` | `(artifact_id: string, entrypoint: string, args?: [string], env?: {string: string}, approval_ref?: string) → result` | Execute an artifact entrypoint in a sandbox. Remote-access analysis runs against the artifact's source files. Approval reuse is bound to the artifact identity + concrete targets. Use for transient validation, smoke tests, and ad hoc runs. |
+| `artifact.exec` | `(artifact_id: string, entrypoint: string, args?: [string], env?: {string: string}, credential_env?: [{credential_id: string, env_var: string}], deployment_ticket?: string, approval_ref?: string) → result` | Execute an artifact entrypoint in a sandbox. Remote-access analysis runs against the artifact's source files. Approval reuse is bound to the artifact identity + concrete targets. Use for transient validation, smoke tests, and ad hoc runs. `credential_env` injects vault-stored secrets as environment variables — the gateway resolves them server-side, they never reach LLM context. `deployment_ticket` from `artifact.prepare` resolves both approval and credentials in one pass. |
 
 **When to use `artifact.exec` vs `sandbox.exec`:**
 
@@ -399,6 +399,35 @@ For running built artifact entrypoints in a sandbox with artifact-aware analysis
 | Quick bash one-liner | `sandbox.exec` | No artifact involved |
 
 **Approval behavior:** `artifact.exec` uses the same dedup chain as `sandbox.exec` (exec cache → approved requests → session grants → create approval), but the fingerprint is based on `artifact_id` instead of the raw command string. This means the same artifact re-run with different arguments reuses the prior approval as long as the concrete network targets are covered.
+
+### Artifact Preparation Tool (One-Pass Preflight)
+
+For resolving credentials + approval in a single pass before execution. Eliminates the multi-suspend dance where an artifact first needs approval, then credential resolution, then re-approval.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `artifact.prepare` | `(artifact_id: string, entrypoint: string, args?: [string], required_credentials?: [{credential_id: string, env_var: string}]) → result` | One-pass preflight: analyzes artifact source for remote access, resolves credentials from the vault, creates a single approval covering all domains + credential injection. Returns a `deployment_ticket` for use with `artifact.exec`. |
+
+**Flow:**
+```
+1. agent calls artifact.prepare({ artifact_id, entrypoint, required_credentials })
+2. gateway analyzes source → detects domains
+3. gateway resolves all credentials → verifies they exist in vault
+4. gateway checks exec cache / session grants → auto-approves if covered
+5. if new approval needed → creates ONE request (domains + credentials declared)
+6. returns deployment_ticket
+7. agent calls artifact.exec({ deployment_ticket, artifact_id, entrypoint, args })
+8. gateway injects credentials as env vars → executes with network access → done
+```
+
+**When to use `artifact.prepare` vs calling `artifact.exec` directly:**
+
+| Scenario | Tool | Why |
+|----------|------|-----|
+| Artifact needs credentials + network access | `artifact.prepare` → `artifact.exec` | One-pass resolution, single approval |
+| Simple artifact, no network, no credentials | `artifact.exec` directly | No preflight needed |
+| Re-running an already-approved artifact | `artifact.prepare` → `artifact.exec` | Reuses cached approval, resolves credentials |
+| Quick smoke test, no secrets | `artifact.exec` directly | Minimal ceremony |
 
 ### Observability Tools (Cross-Session Discovery)
 

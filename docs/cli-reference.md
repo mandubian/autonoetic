@@ -152,6 +152,42 @@ autonoetic agent bootstrap --overwrite
 | `-f, --from` | Path to reference bundles root |
 | `-o, --overwrite` | Overwrite existing agents |
 
+### `autonoetic agent credential`
+
+Manage vault-stored credentials.
+
+```bash
+# Store a secret (prompts for value if --from-env and --value omitted)
+autonoetic agent credential put --service openweathermap --secret-name OPENWEATHER_API_KEY
+
+# Read secret from environment variable
+autonoetic agent credential put --service github --secret-name GITHUB_TOKEN --from-env GITHUB_TOKEN
+
+# With all options
+autonoetic agent credential put \
+  --service openweathermap \
+  --secret-name OPENWEATHER_API_KEY \
+  --from-env OPENWEATHER_API_KEY \
+  --credential-id cred_weather \
+  --inject-as env:OPENWEATHER_API_KEY \
+  --allowed-hosts api.openweathermap.org
+
+# List all credentials
+autonoetic agent credential list
+
+# List credentials for a service
+autonoetic agent credential list --service openweathermap
+
+# Remove a credential
+autonoetic agent credential rm cred_abc123
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `put` | Store secret in vault + create credential record |
+| `list` | List credential metadata (never secret values) |
+| `rm` | Remove credential and its secret |
+
 ---
 
 ## Chat
