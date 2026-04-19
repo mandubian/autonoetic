@@ -1,8 +1,9 @@
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::cli::common::{AgentAliasCommands, AgentRevisionCommands};
+use crate::cli::common::{AgentAliasCommands, AgentCredentialCommands, AgentRevisionCommands};
 use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::NativeTool;
@@ -1956,6 +1957,151 @@ pub fn handle_agent_import_skill(
     Ok(())
 }
 
+pub fn handle_agent_credential(
+    config_path: &Path,
+    command: &AgentCredentialCommands,
+) -> anyhow::Result<()> {
+    match command {
+        AgentCredentialCommands::Put {
+            service,
+            secret_name,
+            from_env,
+            value,
+            credential_id,
+            inject_as,
+            allowed_hosts,
+            expires_at,
+        } => handle_credential_put(
+            config_path,
+            service,
+            secret_name,
+            from_env,
+            value,
+            credential_id,
+            inject_as,
+            allowed_hosts,
+            expires_at,
+        ),
+        AgentCredentialCommands::List { service, json } => {
+            handle_credential_list(config_path, service, *json)
+        }
+        AgentCredentialCommands::Rm { credential_id } => {
+            handle_credential_rm(config_path, credential_id)
+        }
+    }
+}
+
+fn handle_credential_put(
+    config_path: &Path,
+    service: &str,
+    secret_name: &str,
+    from_env: &Option<String>,
+    value: &Option<String>,
+    credential_id: &Option<String>,
+    inject_as: &Option<String>,
+    allowed_hosts: &Option<Vec<String>>,
+    expires_at: &Option<String>,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    let secret_value = if let Some(env_var) = from_env {
+        std::env::var(env_var).map_err(|_| {
+            anyhow::anyhow!("Environment variable '{}' is not set", env_var)
+        })?
+    } else if let Some(val) = value {
+        val.clone()
+    } else {
+        print!("Enter secret value for '{}': ", secret_name);
+        std::io::stdout().flush().ok();
+        let input = rpassword::prompt_password("").map_err(|e| {
+            anyhow::anyhow!("Failed to read secret from terminal: {}", e)
+        })?;
+        if input.is_empty() {
+            anyhow::bail!("Secret value must not be empty");
+        }
+        input
+    };
+
+    autonoetic_gateway::vault::ensure_default_key(&config.agents_dir)?;
+    let vault_path = autonoetic_gateway::vault::default_vault_path(&config.agents_dir);
+    let mut vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_path)?;
+    vault.set_secret(secret_name, secret_value);
+    vault.persist_to_file(&vault_path)?;
+
+    let cred_id = credential_id
+        .clone()
+        .unwrap_or_else(|| format!("cred_{}", uuid::Uuid::new_v4().to_string().replace('-', "")));
+
+    let cred = autonoetic_types::agent::CredentialRecord {
+        credential_id: cred_id.clone(),
+        service: service.to_string(),
+        secret_name: secret_name.to_string(),
+        inject_as: inject_as.clone(),
+        created_by_agent: None,
+        expires_at: expires_at.clone(),
+        shared_with: vec![],
+        allowed_hosts: allowed_hosts.clone().unwrap_or_default(),
+    };
+    store.upsert_credential(&cred)?;
+
+    println!("Stored credential '{}' for service '{}' (secret_name: {})", cred_id, service, secret_name);
+    Ok(())
+}
+
+fn handle_credential_list(
+    config_path: &Path,
+    service_filter: &Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    let credentials: Vec<autonoetic_types::agent::CredentialRecord> = if let Some(svc) =
+        service_filter
+    {
+        store.list_credentials_by_service(svc)?
+    } else {
+        store.list_all_credentials()?
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&credentials)?);
+    } else if credentials.is_empty() {
+        println!("No credentials found.");
+    } else {
+        println!(
+            "{:<36} {:<24} {:<24} {:<16} EXPIRES",
+            "CREDENTIAL ID", "SERVICE", "SECRET NAME", "INJECT AS"
+        );
+        for cred in &credentials {
+            let inject = cred.inject_as.as_deref().unwrap_or("-");
+            let expires = cred.expires_at.as_deref().unwrap_or("-");
+            println!(
+                "{:<36} {:<24} {:<24} {:<16} {}",
+                cred.credential_id, cred.service, cred.secret_name, inject, expires
+            );
+        }
+    }
+    Ok(())
+}
+
+fn handle_credential_rm(config_path: &Path, credential_id: &str) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    let deleted = store.delete_credential(credential_id)?;
+    if deleted {
+        println!("Removed credential '{}'", credential_id);
+    } else {
+        println!("Credential '{}' not found", credential_id);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1969,6 +2115,8 @@ mod tests {
         AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus, PromotionKind, PromotionRecord,
     };
     use autonoetic_types::artifact::ArtifactKind;
+    use secrecy::ExposeSecret;
+    use serial_test::serial;
     use tempfile::tempdir;
 
     struct DenySandboxExecDriver;
@@ -2237,6 +2385,16 @@ Use tools when needed.
         let first = std::fs::read_to_string(&installed_path).expect("installed skill should read");
         assert!(first.contains("description: \"v1\""));
 
+        let gw_config = autonoetic_gateway::config::load_config(&config_path).expect("config should load");
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&gw_config);
+        let store = GatewayStore::open(&gateway_dir).expect("store should open");
+        let v1_revisions = store.list_agent_revisions("planner.default").expect("should list");
+        assert_eq!(v1_revisions.len(), 1, "first bootstrap should create exactly one revision");
+        let v1_rev_id = v1_revisions[0].revision_id.clone();
+        let v1_alias = store.get_agent_alias("planner.default").expect("alias should resolve");
+        assert_eq!(v1_alias.unwrap().revision_id, v1_rev_id, "alias should point to v1 revision");
+
+        // Without overwrite, files on disk stay the same and no new revision is created
         write_reference_bundle(&reference_root, "lead", "planner.default", "v2");
         handle_agent_bootstrap(
             &config_path,
@@ -2246,7 +2404,10 @@ Use tools when needed.
         .expect("second bootstrap should succeed");
         let second = std::fs::read_to_string(&installed_path).expect("installed skill should read");
         assert!(second.contains("description: \"v1\""));
+        let v1_revisions_after = store.list_agent_revisions("planner.default").expect("should list");
+        assert_eq!(v1_revisions_after.len(), 1, "no overwrite should not create new revision");
 
+        // With overwrite, disk is updated AND a new revision is created and promoted
         handle_agent_bootstrap(
             &config_path,
             Some(reference_root.to_str().expect("utf-8 path")),
@@ -2255,6 +2416,10 @@ Use tools when needed.
         .expect("overwrite bootstrap should succeed");
         let third = std::fs::read_to_string(&installed_path).expect("installed skill should read");
         assert!(third.contains("description: \"v2\""));
+        let v2_revisions = store.list_agent_revisions("planner.default").expect("should list");
+        assert_eq!(v2_revisions.len(), 2, "overwrite should create a second revision");
+        let v2_alias = store.get_agent_alias("planner.default").expect("alias should resolve");
+        assert_ne!(v2_alias.unwrap().revision_id, v1_rev_id, "alias should point to the new v2 revision");
     }
 
     #[test]
@@ -2830,6 +2995,108 @@ llm_presets:
                 autonoetic_types::capability::Capability::ApprovalQueue { .. }
             )),
             "reparsed manifest should have ApprovalQueue capability"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_credential_put_list_rm_roundtrip() {
+        std::env::remove_var("AUTONOETIC_VAULT_KEY");
+        std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+        let temp = tempdir().expect("tempdir should create");
+        let config_path = temp.path().join("config.yaml");
+        let agents_dir = temp.path().join("runtime_agents");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agents_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
+                agents_dir.display()
+            ),
+        )
+        .expect("config should write");
+
+        handle_credential_put(
+            &config_path,
+            "openweathermap",
+            "OPENWEATHER_API_KEY",
+            &None,
+            &Some("test-secret-123".to_string()),
+            &Some("cred_test001".to_string()),
+            &None,
+            &Some(vec!["api.openweathermap.org".to_string()]),
+            &None,
+        )
+        .expect("credential put should succeed");
+
+        let config = autonoetic_gateway::config::load_config(&config_path).unwrap();
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+        let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            .unwrap();
+
+        let cred = store.get_credential("cred_test001").unwrap().expect("credential should exist");
+        assert_eq!(cred.service, "openweathermap");
+        assert_eq!(cred.secret_name, "OPENWEATHER_API_KEY");
+        assert_eq!(cred.allowed_hosts, vec!["api.openweathermap.org"]);
+
+        let vault_path = autonoetic_gateway::vault::default_vault_path(&config.agents_dir);
+        let vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_path).unwrap();
+        assert_eq!(
+            vault.get_secret("OPENWEATHER_API_KEY").unwrap().expose_secret(),
+            "test-secret-123"
+        );
+
+        let all = store.list_all_credentials().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].credential_id, "cred_test001");
+
+        let by_service = store.list_credentials_by_service("openweathermap").unwrap();
+        assert_eq!(by_service.len(), 1);
+
+        let empty = store.list_credentials_by_service("nonexistent").unwrap();
+        assert!(empty.is_empty());
+
+        handle_credential_rm(&config_path, "cred_test001").expect("credential rm should succeed");
+        assert!(store.get_credential("cred_test001").unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_credential_put_from_env() {
+        std::env::remove_var("AUTONOETIC_VAULT_KEY");
+        std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+        let temp = tempdir().expect("tempdir should create");
+        let config_path = temp.path().join("config.yaml");
+        let agents_dir = temp.path().join("runtime_agents");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agents_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
+                agents_dir.display()
+            ),
+        )
+        .expect("config should write");
+
+        std::env::set_var("TEST_AUTONOETIC_CREDO", "env-secret-value");
+        handle_credential_put(
+            &config_path,
+            "testservice",
+            "TEST_KEY",
+            &Some("TEST_AUTONOETIC_CREDO".to_string()),
+            &None,
+            &Some("cred_envtest".to_string()),
+            &None,
+            &None,
+            &None,
+        )
+        .expect("credential put --from-env should succeed");
+        std::env::remove_var("TEST_AUTONOETIC_CREDO");
+
+        let config = autonoetic_gateway::config::load_config(&config_path).unwrap();
+        let vault_path = autonoetic_gateway::vault::default_vault_path(&config.agents_dir);
+        let vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_path).unwrap();
+        assert_eq!(
+            vault.get_secret("TEST_KEY").unwrap().expose_secret(),
+            "env-secret-value"
         );
     }
 }

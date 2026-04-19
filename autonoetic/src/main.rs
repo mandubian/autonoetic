@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 cli::gateway::handle_gateway_approvals(&config_path, command).await?;
             }
             cli::common::GatewayCommands::Interactions { command } => {
-                cli::gateway::handle_gateway_interactions(&config_path, command)?;
+                cli::gateway::handle_gateway_interactions(&config_path, command).await?;
             }
         },
 
@@ -213,6 +213,9 @@ async fn main() -> anyhow::Result<()> {
                     provider.as_deref(),
                     model.as_deref(),
                 )?;
+            }
+            cli::common::AgentCommands::Credential { command } => {
+                cli::agent::handle_agent_credential(&config_path, command)?;
             }
         },
 
