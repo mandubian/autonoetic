@@ -115,6 +115,41 @@ impl GatewayStore {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
+    /// List all credentials.
+    pub fn list_all_credentials(
+        &self,
+    ) -> Result<Vec<autonoetic_types::agent::CredentialRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts
+             FROM credentials ORDER BY service, credential_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let shared_with: Vec<String> = row
+                .get::<_, String>(6)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let allowed_hosts: Vec<String> = row
+                .get::<_, String>(7)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            Ok(autonoetic_types::agent::CredentialRecord {
+                credential_id: row.get(0)?,
+                service: row.get(1)?,
+                secret_name: row.get(2)?,
+                inject_as: row.get(3)?,
+                created_by_agent: row.get(4)?,
+                expires_at: row.get(5)?,
+                shared_with,
+                allowed_hosts,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
     /// Delete a credential by ID.
     pub fn delete_credential(&self, credential_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
