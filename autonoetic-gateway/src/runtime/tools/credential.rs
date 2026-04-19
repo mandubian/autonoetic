@@ -21,6 +21,12 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+fn vault_dir(gateway_dir: Option<&Path>, agent_dir: &Path) -> PathBuf {
+    gateway_dir
+        .and_then(|gd| gd.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| agent_dir.to_path_buf())
+}
+
 /// Execute a blocking HTTP request inside `block_in_place` to avoid deadlocking
 /// the tokio runtime. `reqwest::blocking::Client` creates its own internal runtime,
 /// which can deadlock when called directly from an async context.
@@ -461,11 +467,12 @@ impl NativeTool for CredentialRequestTool {
         }
 
         // Vault auto-init + resolve path
-        crate::vault::ensure_default_key(_agent_dir)?;
+        let vdir = vault_dir(_gateway_dir, _agent_dir);
+        crate::vault::ensure_default_key(&vdir)?;
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
             .map(PathBuf::from)
-            .unwrap_or_else(|| crate::vault::default_vault_path(_agent_dir));
+            .unwrap_or_else(|| crate::vault::default_vault_path(&vdir));
 
         let secret_value: Option<String> = {
             use secrecy::ExposeSecret;
@@ -895,11 +902,12 @@ impl NativeTool for CredentialSetupTool {
             let resume_from = state.current_step + 1;
 
             // Vault auto-init + load.
-            crate::vault::ensure_default_key(_agent_dir)?;
+            let vdir = vault_dir(_gateway_dir, _agent_dir);
+            crate::vault::ensure_default_key(&vdir)?;
             let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
                 .ok()
                 .map(PathBuf::from)
-                .unwrap_or_else(|| crate::vault::default_vault_path(_agent_dir));
+                .unwrap_or_else(|| crate::vault::default_vault_path(&vdir));
             let mut vault = crate::vault::Vault::load_from_file(&vault_path)?;
 
             return execute_steps(
@@ -1081,11 +1089,12 @@ impl NativeTool for CredentialSetupTool {
         }
 
         // Vault auto-init + load.
-        crate::vault::ensure_default_key(_agent_dir)?;
+        let vdir = vault_dir(_gateway_dir, _agent_dir);
+        crate::vault::ensure_default_key(&vdir)?;
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
             .map(PathBuf::from)
-            .unwrap_or_else(|| crate::vault::default_vault_path(_agent_dir));
+            .unwrap_or_else(|| crate::vault::default_vault_path(&vdir));
         let mut vault = crate::vault::Vault::load_from_file(&vault_path)?;
 
         let credential_id = args.credential_id.clone().unwrap_or_else(|| {
@@ -1387,6 +1396,18 @@ fn execute_steps(
     }
 
     // All steps complete — persist vault and create credential record.
+    // If secret_names was populated by ApiCall extract_secrets, use those.
+    // Otherwise, if the flow only had UserInput steps, treat all collected
+    // vars as secrets (they're the credential values the user provided).
+    if secret_names.is_empty() && !vars.is_empty() {
+        for (name, value) in &vars {
+            vault.set_secret(name, value.clone());
+            if !secret_names.contains(name) {
+                secret_names.push(name.clone());
+            }
+        }
+    }
+
     vault.persist_to_file(vault_path)?;
     let _ = store.delete_credential_setup_state(credential_id);
 
