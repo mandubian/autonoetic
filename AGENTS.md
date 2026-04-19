@@ -38,6 +38,7 @@ autonoetic-gateway/      Core runtime — all logic lives here
       response_validation.rs Response contract enforcement
       tools/promotion.rs   promotion.record tool — severity gating (error/critical block pass=true)
       tools/sandbox.rs     sandbox.exec tool — session approval grants, remote access checks
+      tools/artifact_prepare.rs artifact.prepare — one-pass credential + approval preflight
     runtime/analysis/      Static analysis helpers
   tests/                  50+ integration tests — use tempfile for isolation, serial_test for ordering
 autonoetic-types/        Shared types: Agent, Capability, Memory, RuntimeLock, background actions
@@ -114,4 +115,5 @@ SDKs live outside the Rust workspace:
 - `docs/ARCHITECTURE.md` — System design, security model, data flow, emergency stop
 - `docs/approval-system.md` — Full approval lifecycle, session grants, promotion gating
 - `docs/remote-access-approval.md` — Static analysis detection, approval flow diagram
+- `docs/credential-management.md` — Credential vault, `credential_env` injection, CLI credential commands
 - `docs/AGENTS.md` — Agent roles, SKILL.md format, capabilities (user-facing, not dev instructions)

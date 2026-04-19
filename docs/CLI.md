@@ -216,6 +216,48 @@ Seed reference agent bundles into the runtime agents directory.
 autonoetic agent bootstrap [--from PATH] [--overwrite]
 ```
 
+### `autonoetic agent credential put`
+
+Store a secret in the encrypted vault and register a credential record.
+
+```bash
+# Interactive prompt (masked input)
+autonoetic agent credential put --service openweathermap --secret-name OPENWEATHER_API_KEY
+
+# From environment variable
+autonoetic agent credential put --service openweathermap --secret-name OPENWEATHER_API_KEY --from-env OPENWEATHER_API_KEY
+
+# Direct value
+autonoetic agent credential put --service openweathermap --secret-name OPENWEATHER_API_KEY --value "your-key"
+```
+
+| Option | Description |
+|--------|-------------|
+| `--service <SERVICE>` | Service name (required) |
+| `--secret-name <NAME>` | Vault key for the secret (required) |
+| `--from-env <VAR>` | Read secret from environment variable |
+| `--value <VALUE>` | Provide secret directly |
+| `--credential-id <ID>` | Credential ID (auto-generated if omitted) |
+| `--inject-as <METHOD>` | Injection method (e.g., `env:API_KEY`, `bearer`) |
+| `--allowed-hosts <HOSTS>` | Hosts this credential may be used with |
+| `--expires-at <TIMESTAMP>` | ISO 8601 expiry timestamp |
+
+### `autonoetic agent credential list`
+
+List registered credentials (metadata only, never secret values).
+
+```bash
+autonoetic agent credential list [--service SVC] [--json]
+```
+
+### `autonoetic agent credential rm`
+
+Remove a credential and its secret from the vault.
+
+```bash
+autonoetic agent credential rm <credential_id>
+```
+
 ### `autonoetic agent seed`
 
 Seed an alias to a specific revision for deterministic setup and tests.
