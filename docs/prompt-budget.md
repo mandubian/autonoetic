@@ -76,7 +76,16 @@ metadata:
       - core
 ```
 
-When unset (default), all tiers are available.
+When unset (default), the tier filter is determined by runtime state:
+
+| State | Filter | Rationale |
+|-------|--------|-----------|
+| Root session, no pending approvals | All tiers | Full capability surface |
+| Root session, pending approvals | Core + Workflow + approval tools | Prevents agents from launching new specialized operations while waiting for human approval |
+| Child session (no explicit tiers) | Core only | Child agents get minimal tools unless parent explicitly requests more via `allowed_tool_tiers` |
+| Manifest declares `allowed_tool_tiers` | Explicit tiers + approval tools | Agent-declared restriction always takes precedence |
+
+The approval-exception ensures that `approval.status`, `approval.withdraw`, and other approval-prefixed tools are always available when approvals are pending, so the agent can check and respond to approval decisions.
 
 ## Tool Schema Compression
 
