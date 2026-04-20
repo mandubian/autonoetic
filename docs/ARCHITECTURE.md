@@ -710,7 +710,7 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 | `stdout`, `stderr` | Full output (not truncated) |
 | `duration_ms` | Execution wall time |
 | `success` | Boolean |
-| `error_type` | compilation, runtime, permission, timeout... |
+| `error_type` | compilation, runtime, permission, validation, resource, conflict, quota_exceeded, not_found, timeout |
 
 ### Agent Learning Tools
 

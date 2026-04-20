@@ -85,14 +85,17 @@ Write content with visibility control.
 // Response
 {
   "ok": true,
-  "handle": "sha256:abc123...",
+  "ref": "cnt_a1b2c3d4",
   "alias": "a1b2c3d4",
   "name": "src/main.py",
+  "sandbox_path": "/tmp/src/main.py",
   "visibility": "session"
 }
 ```
 
 Default visibility is `session` (collaborative). Use `private` for scratchpads/drafts.
+Use `sandbox_path` when passing files to `sandbox.exec`.
+`cnt_...` and `sha256:...` are content references for `content.read`, not filesystem paths.
 
 ### `content.read`
 
@@ -162,6 +165,9 @@ Inspect an artifact by ID.
   "builder_session_id": "..."
 }
 ```
+
+`artifact.inspect` accepts explicit artifact bundle IDs (`art_...`) only.
+Implicit workflow output handles (`impl_task-...`) are content records and should be consumed via `content.read`.
 
 ## Artifact Trust Boundary
 

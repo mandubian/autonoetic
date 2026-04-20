@@ -408,6 +408,14 @@ For resolving credentials + approval in a single pass before execution. Eliminat
 |------|-----------|-------------|
 | `artifact.prepare` | `(artifact_id: string, entrypoint: string, args?: [string], required_credentials?: [{credential_id: string, env_var: string}]) → result` | One-pass preflight: analyzes artifact source for remote access, resolves credentials from the vault, creates a single approval covering all domains + credential injection. Returns a `deployment_ticket` for use with `artifact.exec`. |
 
+Artifact ID constraints:
+- `artifact.prepare`, `artifact.exec`, and `artifact.inspect` require explicit bundle IDs (`art_...`).
+- Implicit workflow outputs (`impl_task-...`) are content records, not executable bundles. Use `content.read` on the implicit handle and then select `content.artifacts[*].artifact_id`.
+
+Credential reference constraints:
+- `credential_id` references used by artifact/sandbox credential injection must be canonical IDs from credential tools (`cred_...`).
+- Raw secret-like strings are rejected as `credential_id` values.
+
 **Flow:**
 ```
 1. agent calls artifact.prepare({ artifact_id, entrypoint, required_credentials })

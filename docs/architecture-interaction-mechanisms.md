@@ -120,6 +120,15 @@ See [`plan-channel-agnostic-interaction-answering.md`](./plan-channel-agnostic-i
 - **Blocked during orchestration**: Runtime guard prevents `user.ask` when workflow has active children or pending approvals
 - **Clear suspension state**: When accepted, `user.ask` suspends as `jsonrpc_spawn_suspended_user_input` (not a normal completion)
 
+### `user.interaction.status` Access Scope
+
+Status reads are scope-checked by the gateway. Access is allowed when either condition is true:
+
+- The caller agent is the interaction owner (`agent_id` matches)
+- The caller session belongs to the same `root_session_id` as the interaction
+
+Cross-root, cross-agent status reads return a permission error.
+
 ### Example
 
 ```json

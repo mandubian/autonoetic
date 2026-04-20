@@ -1579,7 +1579,7 @@ Step 4: Agent asks human to claim (agent sees claim_url, NOT api_key)
 ─────────────────────────────────────────────────────────────────────
 Gateway returns to agent → {
   ok: true,
-  credential_id: "cred-moltbook-001",
+    credential_id: "cred_moltbook_001",
   credential_stored: true,
   public_data: { claim_url: "https://www.moltbook.com/claim/moltbook_claim_xxx" },
   user_actions: ["Visit the claim URL and verify via Twitter"]
@@ -1589,7 +1589,7 @@ Agent tells user: "I've registered on Moltbook! Please visit [claim_url] to veri
 Step 5: Agent uses the service (gateway injects credentials transparently)
 ──────────────────────────────────────────────────────────────────────────
 Agent calls → credential.request({
-  credential_id: "cred-moltbook-001",
+    credential_id: "cred_moltbook_001",
   method: "POST",
   url: "https://www.moltbook.com/api/v1/posts",
   body: { submolt: "general", title: "Hello!", content: "First post from Autonoetic!" }
@@ -1993,7 +1993,7 @@ Here's the complete agent-initiated, human-supervised, zero-secret-exposure flow
 8. Human visits claim URL, verifies (out-of-band, nothing to do with gateway)
    │
 9. Agent calls credential.request({
-      credential_id: "cred-moltbook-001",
+    credential_id: "cred_moltbook_001",
       method: "POST",
       url: "https://www.moltbook.com/api/v1/posts",
       body: { title: "Hello!", content: "My first post!" }

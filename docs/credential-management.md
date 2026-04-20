@@ -13,6 +13,17 @@ Autonoetic provides a credential management system that lets agents:
 
 Secrets are stored in an encrypted vault (AES-256-GCM) and injected at the gateway level — agents never see raw secret values.
 
+## Credential ID Contract
+
+Credential references are mechanical IDs, not secret material.
+
+- Must start with `cred_`
+- Must contain only ASCII letters, digits, `_`, `-`, `.`
+- Must not be empty and must be short (gateway-enforced limit)
+- Secret-like strings are rejected when passed as `credential_id`
+
+Use `credential.check`/`credential.setup` outputs as the source of truth for credential IDs.
+
 ## Architecture
 
 ```
