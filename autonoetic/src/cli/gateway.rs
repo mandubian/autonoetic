@@ -860,8 +860,16 @@ pub async fn handle_gateway_interactions(
             }
 
             println!();
-            println!("The gateway daemon will resume the session automatically on its next tick.");
-            println!("If the gateway is not running, start it with: autonoetic gateway start");
+            if interaction.workflow_id.is_some() {
+                println!("The gateway daemon will resume the session automatically on its next tick.");
+            } else {
+                println!("Restart the session to apply the answer. For example:");
+                println!("  autonoetic gateway start   (daemon will resume on next tick)");
+                println!("  autonoetic chat --session {}   (interactive resume)", interaction.session_id);
+            }
+            if !interaction.workflow_id.is_some() {
+                println!("If the gateway is not running, start it with: autonoetic gateway start");
+            }
         }
         super::common::GatewayInteractionCommands::Cancel {
             interaction_id,

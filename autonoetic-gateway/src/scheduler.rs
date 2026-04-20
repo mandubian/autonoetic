@@ -191,8 +191,13 @@ async fn run_scheduler_tick_at(
     }
 
     // Process queued async workflow tasks (Phase 2)
-    if let Err(e) = process_queued_workflow_tasks(execution).await {
+    if let Err(e) = process_queued_workflow_tasks(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to process queued workflow tasks");
+    }
+
+    // Resume standalone sessions whose user interaction has been answered
+    if let Err(e) = resume_answered_standalone_interactions(execution).await {
+        tracing::warn!(error = %e, "Failed to resume answered standalone interactions");
     }
 
     Ok(())
@@ -510,6 +515,55 @@ fn task_claim_stale_after_secs(config: &autonoetic_types::config::GatewayConfig)
 
 /// Process queued workflow tasks: dequeue, create TaskRun records, and spawn child agents.
 ///
+async fn resume_answered_standalone_interactions(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let store = execution
+        .gateway_store()
+        .ok_or_else(|| anyhow::anyhow!("GatewayStore required"))?;
+
+    let answered = store.get_answered_standalone_interactions()?;
+    if answered.is_empty() {
+        return Ok(());
+    }
+
+    for interaction in answered {
+        tracing::info!(
+            target: "scheduler",
+            interaction_id = %interaction.interaction_id,
+            session_id = %interaction.session_id,
+            agent_id = %interaction.agent_id,
+            "Resuming standalone session after answered user interaction"
+        );
+
+        match execution
+            .resume_from_user_interaction(
+                &interaction.interaction_id,
+                Some("[scheduler] User answered the pending question; resuming from gateway tick."),
+            )
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    target: "scheduler",
+                    interaction_id = %interaction.interaction_id,
+                    "Standalone session resumed successfully"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "scheduler",
+                    interaction_id = %interaction.interaction_id,
+                    error = %e,
+                    "Failed to resume standalone session"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Called by the scheduler tick after processing background agents.
 /// Each queued task must first acquire a durable claim before it is launched.
 /// The tokio task runs `spawn_agent_once`, heartbeats its claim, and cleans up on completion.

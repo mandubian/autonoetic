@@ -308,6 +308,28 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn get_answered_standalone_interactions(&self) -> Result<Vec<UserInteraction>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT interaction_id FROM user_interactions \
+             WHERE status = 'answered' AND (workflow_id IS NULL OR workflow_id = '') \
+             ORDER BY answered_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let id = row?;
+            if let Some(interaction) = Self::get_user_interaction_with_conn(&conn, &id)? {
+                results.push(interaction);
+            }
+        }
+        Ok(results)
+    }
+
     pub fn list_user_interactions_for_session_trace(
         &self,
         session_id: &str,
