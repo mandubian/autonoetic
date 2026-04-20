@@ -1,4 +1,5 @@
 use crate::llm::ToolDefinition;
+use crate::log_redaction::looks_like_secret_collection_prompt;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{default_true, NativeTool, NativeToolRegistry};
@@ -6,21 +7,6 @@ use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::UserInteractionStatus;
 use serde::Deserialize;
 use std::path::Path;
-
-fn looks_like_secret_collection_prompt(text: &str) -> bool {
-    let s = text.to_ascii_lowercase();
-    s.contains("api key")
-        || s.contains("apikey")
-        || s.contains("token")
-        || s.contains("password")
-        || s.contains("secret")
-        || s.contains("private key")
-        || s.contains("bearer")
-        || s.contains("credential value")
-        || s.contains("paste the key")
-        || s.contains("paste your key")
-        || s.contains("enter your key")
-}
 
 fn asks_for_secret(args: &Args) -> bool {
     if looks_like_secret_collection_prompt(&args.question) {

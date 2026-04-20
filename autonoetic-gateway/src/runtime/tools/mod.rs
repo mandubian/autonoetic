@@ -1,4 +1,5 @@
 use crate::llm::ToolDefinition;
+use crate::log_redaction::looks_like_secret_value;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::prompt_budget::tool_tier;
@@ -7,9 +8,7 @@ use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::background::ApprovalRequest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::tagged;
-use regex::Regex;
 use serde::Deserialize;
-use std::sync::LazyLock;
 
 use std::path::Path;
 
@@ -569,9 +568,6 @@ pub(crate) struct CredentialEnvMapping {
     pub env_var: String,
 }
 
-static HEX_SECRET_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-fA-F0-9]{24,}$").expect("valid hex secret regex"));
-
 /// Ensure `credential_id` looks like a credential reference and not a raw secret.
 ///
 /// This keeps gateway behavior mechanical: only stable references should cross
@@ -584,14 +580,7 @@ pub(crate) fn ensure_safe_credential_id_reference(credential_id: &str) -> anyhow
         "credential_id is too long; expected a short credential reference"
     );
 
-    let lower = id.to_ascii_lowercase();
-    let looks_like_secret = id.starts_with("sk-")
-        || id.contains("-----BEGIN")
-        || lower.contains("bearer")
-        || lower.contains("api_key")
-        || lower.contains("apikey")
-        || lower.contains("access_token")
-        || HEX_SECRET_RE.is_match(id);
+    let looks_like_secret = looks_like_secret_value(id);
 
     anyhow::ensure!(
         !looks_like_secret,

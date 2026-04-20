@@ -3,27 +3,11 @@
 //! See `docs/plan-channel-agnostic-interaction-answering.md`.
 
 use crate::execution::GatewayExecutionService;
+use crate::log_redaction::looks_like_secret_value;
 use crate::scheduler::workflow_store;
 use autonoetic_types::background::{UserInteractionAnswer, UserInteractionStatus};
 use autonoetic_types::workflow::TaskRunStatus;
-use regex::Regex;
 use std::sync::Arc;
-use std::sync::LazyLock;
-
-static SECRET_ENV_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b[A-Z][A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|ACCESS[_-]?TOKEN|AUTHORIZATION)[A-Z0-9_]*\s*=\s*\S+",
-    )
-    .expect("valid secret env assignment regex")
-});
-
-static LONG_HEX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b[a-fA-F0-9]{24,}\b").expect("valid long hex regex"));
-
-static JWT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
-        .expect("valid jwt regex")
-});
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InteractionAnswerOutcome {
@@ -90,26 +74,9 @@ fn validate_answer_payload(
     Ok(())
 }
 
-fn looks_like_secret_answer(answer_text: &str) -> bool {
-    let t = answer_text.trim();
-    if t.is_empty() {
-        return false;
-    }
-    let lower = t.to_ascii_lowercase();
-    lower.contains("bearer ")
-        || lower.contains("api_key")
-        || lower.contains("apikey")
-        || lower.contains("access_token")
-        || t.starts_with("sk-")
-        || t.contains("-----BEGIN")
-        || SECRET_ENV_ASSIGN_RE.is_match(t)
-        || LONG_HEX_RE.is_match(t)
-        || JWT_RE.is_match(t)
-}
-
 fn validate_nonsecret_answer_payload(answer_text: &Option<String>) -> anyhow::Result<()> {
     if let Some(text) = answer_text.as_deref() {
-        if looks_like_secret_answer(text) {
+        if looks_like_secret_value(text) {
             anyhow::bail!(
                 "Secret-like values are not accepted via interaction.answer. Use credential.setup / credential.prompt flow so secrets stay in vault-backed channels."
             );

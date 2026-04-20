@@ -24,6 +24,21 @@ static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(bearer\s+)([^\s,;]+)").expect("valid bearer redaction regex")
 });
 
+static SECRET_ENV_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b[A-Z][A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|ACCESS[_-]?TOKEN|AUTHORIZATION)[A-Z0-9_]*\s*=\s*\S+",
+    )
+    .expect("valid secret env assignment regex")
+});
+
+static LONG_HEX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[a-fA-F0-9]{24,}\b").expect("valid long hex regex"));
+
+static JWT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+        .expect("valid jwt regex")
+});
+
 fn is_sensitive_key(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
     k.contains("secret")
@@ -73,6 +88,40 @@ fn redact_embedded_secrets(text: &str) -> String {
         return REDACTED.to_string();
     }
     masked_bearer
+}
+
+/// Detect whether free-form text appears to contain secret material.
+pub fn looks_like_secret_value(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower.contains("bearer ")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("access_token")
+        || t.starts_with("sk-")
+        || t.contains("-----BEGIN")
+        || SECRET_ENV_ASSIGN_RE.is_match(t)
+        || LONG_HEX_RE.is_match(t)
+        || JWT_RE.is_match(t)
+}
+
+/// Detect whether a prompt appears to solicit secret input from users.
+pub fn looks_like_secret_collection_prompt(text: &str) -> bool {
+    let s = text.to_ascii_lowercase();
+    s.contains("api key")
+        || s.contains("apikey")
+        || s.contains("token")
+        || s.contains("password")
+        || s.contains("secret")
+        || s.contains("private key")
+        || s.contains("bearer")
+        || s.contains("credential value")
+        || s.contains("paste the key")
+        || s.contains("paste your key")
+        || s.contains("enter your key")
 }
 
 /// Redact potentially sensitive content for structured logging.
@@ -141,5 +190,19 @@ mod tests {
         let out = redact_text_for_logs(input);
         assert!(out.contains("appid=***REDACTED***"));
         assert!(!out.contains("TEST_PLACEHOLDER_DO_NOT_USE_XXXX"));
+    }
+
+    #[test]
+    fn test_detects_secret_like_value() {
+        assert!(super::looks_like_secret_value(
+            "OPENWEATHER_API_KEY=TEST_PLACEHOLDER_DO_NOT_USE_XXXX"
+        ));
+    }
+
+    #[test]
+    fn test_detects_secret_collection_prompt() {
+        assert!(super::looks_like_secret_collection_prompt(
+            "Please paste your API key to continue"
+        ));
     }
 }
