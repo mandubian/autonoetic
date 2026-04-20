@@ -17,7 +17,6 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 | 3 | Credential management | 250 / 1,130 | Low-Med | Unblocks agent-to-service interaction |
 | 4 | FTS session search | — / 915 | Medium | Biggest learning infrastructure unlock |
 | 5 | Agent Skills compatibility | — / 820 | Low | Ecosystem growth enabler |
-<<<<<<< HEAD
 | 6 | User modeling | ~500 / 500 | Medium | Phases A-C complete; Phase D (federation) deferred |
 | 7 | Context compression | ~590 / ~1000 | Med-High | All phases (A, B, C, D) complete |
 
