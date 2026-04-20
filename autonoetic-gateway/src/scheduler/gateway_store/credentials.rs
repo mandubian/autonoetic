@@ -2,19 +2,63 @@ use super::GatewayStore;
 use anyhow::Result;
 use rusqlite::params;
 
+fn row_to_credential(
+    row: &rusqlite::Row,
+) -> std::result::Result<autonoetic_types::agent::CredentialRecord, rusqlite::Error> {
+    use autonoetic_types::agent::CredentialRecord;
+    let shared_with: Vec<String> = row
+        .get::<_, String>(6)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let allowed_hosts: Vec<String> = row
+        .get::<_, String>(7)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let refresh_headers: Option<std::collections::HashMap<String, String>> = row
+        .get::<_, Option<String>>(12)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    Ok(CredentialRecord {
+        credential_id: row.get(0)?,
+        service: row.get(1)?,
+        secret_name: row.get(2)?,
+        inject_as: row.get(3)?,
+        created_by_agent: row.get(4)?,
+        expires_at: row.get(5)?,
+        shared_with,
+        allowed_hosts,
+        refresh_token_secret_name: row.get(8)?,
+        refresh_url: row.get(9)?,
+        refresh_method: row.get(10)?,
+        refresh_headers,
+        refresh_extract_access_token: row.get(11)?,
+        refresh_extract_refresh_token: row.get(13)?,
+        refresh_extract_expires_in: row.get(14)?,
+    })
+}
+
+const CREDENTIAL_COLUMNS: &str = "credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts, refresh_token_secret_name, refresh_url, refresh_method, refresh_headers, refresh_extract_access_token, refresh_extract_refresh_token, refresh_extract_expires_in";
+
 impl GatewayStore {
-    /// Store or update a credential record.
     pub fn upsert_credential(
         &self,
         cred: &autonoetic_types::agent::CredentialRecord,
     ) -> Result<()> {
         let shared_with_json = serde_json::to_string(&cred.shared_with).unwrap_or_default();
         let allowed_hosts_json = serde_json::to_string(&cred.allowed_hosts).unwrap_or_default();
+        let refresh_headers_json = cred
+            .refresh_headers
+            .as_ref()
+            .map(|h| serde_json::to_string(h).unwrap_or_default())
+            .unwrap_or_default();
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO credentials (credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            &format!("INSERT INTO credentials ({CREDENTIAL_COLUMNS}, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(credential_id) DO UPDATE SET
                 service = excluded.service,
                 secret_name = excluded.secret_name,
@@ -22,7 +66,14 @@ impl GatewayStore {
                 expires_at = excluded.expires_at,
                 shared_with = excluded.shared_with,
                 allowed_hosts = excluded.allowed_hosts,
-                updated_at = excluded.updated_at",
+                refresh_token_secret_name = excluded.refresh_token_secret_name,
+                refresh_url = excluded.refresh_url,
+                refresh_method = excluded.refresh_method,
+                refresh_headers = excluded.refresh_headers,
+                refresh_extract_access_token = excluded.refresh_extract_access_token,
+                refresh_extract_refresh_token = excluded.refresh_extract_refresh_token,
+                refresh_extract_expires_in = excluded.refresh_extract_expires_in,
+                updated_at = excluded.updated_at"),
             params![
                 cred.credential_id,
                 cred.service,
@@ -32,6 +83,13 @@ impl GatewayStore {
                 cred.expires_at,
                 shared_with_json,
                 allowed_hosts_json,
+                cred.refresh_token_secret_name,
+                cred.refresh_url,
+                cred.refresh_method,
+                refresh_headers_json,
+                cred.refresh_extract_access_token,
+                cred.refresh_extract_refresh_token,
+                cred.refresh_extract_expires_in,
                 now,
                 now,
             ],
@@ -39,38 +97,15 @@ impl GatewayStore {
         Ok(())
     }
 
-    /// Get a credential by ID.
     pub fn get_credential(
         &self,
         credential_id: &str,
     ) -> Result<Option<autonoetic_types::agent::CredentialRecord>> {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
-            "SELECT credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts
-             FROM credentials WHERE credential_id = ?1",
+            &format!("SELECT {CREDENTIAL_COLUMNS} FROM credentials WHERE credential_id = ?1"),
             params![credential_id],
-            |row| {
-                let shared_with: Vec<String> = row
-                    .get::<_, String>(6)
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
-                let allowed_hosts: Vec<String> = row
-                    .get::<_, String>(7)
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
-                Ok(autonoetic_types::agent::CredentialRecord {
-                    credential_id: row.get(0)?,
-                    service: row.get(1)?,
-                    secret_name: row.get(2)?,
-                    inject_as: row.get(3)?,
-                    created_by_agent: row.get(4)?,
-                    expires_at: row.get(5)?,
-                    shared_with,
-                    allowed_hosts,
-                })
-            },
+            row_to_credential,
         );
         match row {
             Ok(r) => Ok(Some(r)),
@@ -79,73 +114,27 @@ impl GatewayStore {
         }
     }
 
-    /// List credentials for a service.
     pub fn list_credentials_by_service(
         &self,
         service: &str,
     ) -> Result<Vec<autonoetic_types::agent::CredentialRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts
-             FROM credentials WHERE service = ?1",
+            &format!("SELECT {CREDENTIAL_COLUMNS} FROM credentials WHERE service = ?1"),
         )?;
-        let rows = stmt.query_map(params![service], |row| {
-            let shared_with: Vec<String> = row
-                .get::<_, String>(6)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            let allowed_hosts: Vec<String> = row
-                .get::<_, String>(7)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            Ok(autonoetic_types::agent::CredentialRecord {
-                credential_id: row.get(0)?,
-                service: row.get(1)?,
-                secret_name: row.get(2)?,
-                inject_as: row.get(3)?,
-                created_by_agent: row.get(4)?,
-                expires_at: row.get(5)?,
-                shared_with,
-                allowed_hosts,
-            })
-        })?;
+        let rows = stmt.query_map(params![service], row_to_credential)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// List all credentials.
     pub fn list_all_credentials(
         &self,
     ) -> Result<Vec<autonoetic_types::agent::CredentialRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts
-             FROM credentials ORDER BY service, credential_id",
+            &format!("SELECT {CREDENTIAL_COLUMNS} FROM credentials ORDER BY service, credential_id"),
         )?;
-        let rows = stmt.query_map([], |row| {
-            let shared_with: Vec<String> = row
-                .get::<_, String>(6)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            let allowed_hosts: Vec<String> = row
-                .get::<_, String>(7)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            Ok(autonoetic_types::agent::CredentialRecord {
-                credential_id: row.get(0)?,
-                service: row.get(1)?,
-                secret_name: row.get(2)?,
-                inject_as: row.get(3)?,
-                created_by_agent: row.get(4)?,
-                expires_at: row.get(5)?,
-                shared_with,
-                allowed_hosts,
-            })
-        })?;
+        let rows = stmt.query_map([], row_to_credential)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!(e))
     }
