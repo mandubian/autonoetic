@@ -853,3 +853,101 @@ pub async fn handle_gateway_interactions(
 
     Ok(())
 }
+
+pub async fn handle_gateway_system_agents(
+    config_path: &Path,
+    command: &super::common::SystemAgentCommands,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = std::path::PathBuf::from(&config.agents_dir).join(".gateway");
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
+    );
+
+    match command {
+        super::common::SystemAgentCommands::List { ref json } => {
+            if config.system_agents.is_empty() {
+                if *json {
+                    println!("[]");
+                } else {
+                    println!("No system agents declared in config.");
+                }
+                return Ok(());
+            }
+
+            let scheduled = store.list_scheduled_jobs_for_owner("system", None, None)
+                .unwrap_or_default();
+
+            if *json {
+                let entries: Vec<serde_json::Value> = config.system_agents.iter().map(|e| {
+                    let active_job = scheduled.iter().find(|j| j.target_agent_id == e.agent_id && j.status == autonoetic_types::scheduled_job::ScheduledJobStatus::Active);
+                    serde_json::json!({
+                        "agent_id": e.agent_id,
+                        "schedule": e.schedule,
+                        "enabled": e.enabled,
+                        "has_active_job": active_job.is_some(),
+                        "job_id": active_job.map(|j| j.job_id.clone()),
+                        "next_run_at": active_job.map(|j| j.next_run_at.clone()),
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else {
+                println!("{:<40} {:<20} {:<8} {:<10} {}", "AGENT_ID", "SCHEDULE", "ENABLED", "JOB", "NEXT_RUN");
+                for e in &config.system_agents {
+                    let active_job = scheduled.iter().find(|j| j.target_agent_id == e.agent_id && j.status == autonoetic_types::scheduled_job::ScheduledJobStatus::Active);
+                    let schedule = e.schedule.as_deref().unwrap_or("(oneshot)");
+                    let job_status = active_job.map(|j| j.job_id.as_str()).unwrap_or("-");
+                    let next_run = active_job.map(|j| j.next_run_at.as_str()).unwrap_or("-");
+                    println!("{:<40} {:<20} {:<8} {:<10} {}", e.agent_id, schedule, e.enabled, job_status, next_run);
+                }
+            }
+        }
+
+        super::common::SystemAgentCommands::Bootstrap => {
+            let results = autonoetic_gateway::scheduler::system_agents::reconcile_system_agents(
+                &config, &store,
+            );
+            if results.is_empty() {
+                println!("No system agents to reconcile.");
+            } else {
+                for r in &results {
+                    let icon = match r.action {
+                        autonoetic_gateway::scheduler::system_agents::ReconcileAction::Created => "+",
+                        autonoetic_gateway::scheduler::system_agents::ReconcileAction::SkippedExists => "=",
+                        autonoetic_gateway::scheduler::system_agents::ReconcileAction::SkippedDisabled => "-",
+                        autonoetic_gateway::scheduler::system_agents::ReconcileAction::SkippedMissing => "!",
+                        autonoetic_gateway::scheduler::system_agents::ReconcileAction::SkippedNoSchedule => "o",
+                        autonoetic_gateway::scheduler::system_agents::ReconcileAction::Failed => "x",
+                    };
+                    println!("{} {} {}", icon, r.agent_id, r.message);
+                }
+            }
+        }
+
+        super::common::SystemAgentCommands::Run { agent_id: ref agent_id } => {
+            let entry = config.system_agents.iter().find(|e| e.agent_id == *agent_id);
+            if entry.is_none() {
+                anyhow::bail!("Agent '{}' is not declared as a system agent in config.", agent_id);
+            }
+
+            let repo = autonoetic_gateway::agent::repository::AgentRepository::from_config(&config);
+            let _loaded = repo.get_sync(&agent_id)
+                .map_err(|e| anyhow::anyhow!("Could not load agent '{}': {}", agent_id, e))?;
+
+            let message = entry.and_then(|e| e.message.clone())
+                .unwrap_or_else(|| format!("Manual trigger for {}", agent_id));
+
+            println!("Spawning system agent '{}'...", agent_id);
+
+            let agent_ref = autonoetic_gateway::resolve_target_to_agent_ref(
+                &agent_id, store.as_ref(),
+            ).map_err(|e| anyhow::anyhow!("Could not resolve agent '{}': {}", agent_id, e))?;
+
+            println!("Target: {} @ {}", agent_ref.agent_id, agent_ref.revision_id);
+            println!("Message: {}", message);
+            println!("Note: Actual agent execution requires a running gateway. Use 'autonoetic gateway start' to run the agent.");
+        }
+    }
+
+    Ok(())
+}

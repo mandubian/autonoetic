@@ -428,7 +428,7 @@ where
     }
 }
 
-pub(crate) fn resolve_target_to_agent_ref(
+pub fn resolve_target_to_agent_ref(
     target: &str,
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
 ) -> anyhow::Result<autonoetic_types::agent_revision::AgentRef> {

@@ -148,6 +148,11 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayInteractionCommands,
     },
+    /// Manage system agents (declared in config, auto-scheduled on startup).
+    SystemAgents {
+        #[command(subcommand)]
+        command: SystemAgentCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -220,6 +225,23 @@ pub enum GatewayInteractionCommands {
         /// Optional cancellation reason.
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SystemAgentCommands {
+    /// List declared system agents and their status.
+    List {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reconcile system agents now (create missing cron jobs).
+    Bootstrap,
+    /// Manually trigger a system agent run (bypasses schedule).
+    Run {
+        /// Agent ID to trigger.
+        agent_id: String,
     },
 }
 

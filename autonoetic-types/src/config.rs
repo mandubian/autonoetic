@@ -588,6 +588,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub scheduled_jobs: ScheduledJobsConfig,
 
+    /// System agents: declared background agents that the gateway reconciles on startup.
+    #[serde(default)]
+    pub system_agents: Vec<SystemAgentEntry>,
+
     /// When true (default), JSON-RPC `interaction.answer` / `interaction.resolve_and_answer`
     /// persist answers and orchestrate workflow task or session resume (gateway-owned path).
     #[serde(default = "default_interaction_answer_orchestration")]
@@ -635,6 +639,31 @@ fn default_scheduled_jobs_max_per_root() -> usize {
 
 fn default_scheduled_jobs_max_due_per_tick() -> usize {
     16
+}
+
+/// A system agent declaration for gateway-managed background execution.
+///
+/// System agents are reconciled on gateway startup: their cron jobs are
+/// created if missing, and they can be manually controlled via CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemAgentEntry {
+    /// Agent ID (e.g. "evolution-orchestrator.default").
+    pub agent_id: String,
+    /// Cron schedule expression (e.g. "0 */4 * * *"). If absent, the agent
+    /// is bootstrapped once on startup but not scheduled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// Message payload sent to the agent on each trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Whether this system agent is enabled. Disabled agents are skipped
+    /// during reconciliation. Default: true.
+    #[serde(default = "default_system_agent_enabled")]
+    pub enabled: bool,
+}
+
+fn default_system_agent_enabled() -> bool {
+    true
 }
 
 /// Chat TUI configuration.
@@ -1149,6 +1178,7 @@ impl Default for GatewayConfig {
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
             hooks: Vec::new(),
             scheduled_jobs: ScheduledJobsConfig::default(),
+            system_agents: Vec::new(),
             interaction_answer_orchestration: default_interaction_answer_orchestration(),
         }
     }
