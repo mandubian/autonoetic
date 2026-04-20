@@ -7,6 +7,57 @@ use autonoetic_types::background::UserInteractionStatus;
 use serde::Deserialize;
 use std::path::Path;
 
+fn looks_like_secret_collection_prompt(text: &str) -> bool {
+    let s = text.to_ascii_lowercase();
+    s.contains("api key")
+        || s.contains("apikey")
+        || s.contains("token")
+        || s.contains("password")
+        || s.contains("secret")
+        || s.contains("private key")
+        || s.contains("bearer")
+        || s.contains("credential value")
+        || s.contains("paste the key")
+        || s.contains("paste your key")
+        || s.contains("enter your key")
+}
+
+fn asks_for_secret(args: &Args) -> bool {
+    if looks_like_secret_collection_prompt(&args.question) {
+        return true;
+    }
+    if let Some(ctx) = args.context.as_deref() {
+        if looks_like_secret_collection_prompt(ctx) {
+            return true;
+        }
+    }
+    args.options.iter().any(|v| {
+        ["label", "value", "id"].iter().any(|k| {
+            v.get(*k)
+                .and_then(|x| x.as_str())
+                .map(looks_like_secret_collection_prompt)
+                .unwrap_or(false)
+        })
+    })
+}
+
+#[derive(Deserialize)]
+struct Args {
+    #[serde(default = "default_kind")]
+    kind: String,
+    question: String,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    options: Vec<serde_json::Value>,
+    #[serde(default = "default_true")]
+    allow_freeform: bool,
+}
+
+fn default_kind() -> String {
+    "clarification".to_string()
+}
+
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(UserAskTool));
     registry.register(Box::new(UserInteractionStatusTool));
@@ -86,25 +137,18 @@ impl NativeTool for UserAskTool {
             UserInteraction, UserInteractionKind, UserInteractionOption,
         };
 
-        #[derive(Deserialize)]
-        struct Args {
-            #[serde(default = "default_kind")]
-            kind: String,
-            question: String,
-            #[serde(default)]
-            context: Option<String>,
-            #[serde(default)]
-            options: Vec<serde_json::Value>,
-            #[serde(default = "default_true")]
-            allow_freeform: bool,
-        }
-
-        fn default_kind() -> String {
-            "clarification".to_string()
-        }
-
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        if asks_for_secret(&args) {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "validation",
+                "message": "user.ask cannot be used to request secrets or credential values.",
+                "repair_hint": "Use credential.setup / credential.prompt flows so secrets stay in gateway vault-backed channels.",
+                "error": "secret_collection_not_allowed"
+            }).to_string());
+        }
 
         let sid = session_id.unwrap_or("unknown");
         let root_session_id = crate::runtime::content_store::root_session_id(sid).to_string();
