@@ -1738,6 +1738,13 @@ async fn run_loop<B: ratatui::backend::Backend>(
 }
 
 fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
+    // Shift+mouse events pass through to the terminal for native selection/copy.
+    // This lets users hold Shift to use the terminal emulator's built-in
+    // click-drag-to-select and middle-click-to-paste without interference
+    // from the application's mouse capture.
+    if mouse.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+        return false;
+    }
     match mouse.kind {
         crossterm::event::MouseEventKind::ScrollUp => {
             app.scroll_messages_up(3);
