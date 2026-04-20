@@ -795,9 +795,7 @@ pub async fn handle_gateway_interactions(
             text,
             option,
         } => {
-            use autonoetic_gateway::interaction_answer::{
-                answer_and_orchestrate_resume, InteractionAnswerParams,
-            };
+            use autonoetic_types::background::{UserInteractionAnswer, UserInteractionStatus};
 
             if text.is_none() && option.is_none() {
                 anyhow::bail!("Must provide either --text or --option to answer an interaction");
@@ -807,24 +805,26 @@ pub async fn handle_gateway_interactions(
             }
 
             let store = std::sync::Arc::new(gateway_store);
-            let execution = std::sync::Arc::new(
-                autonoetic_gateway::execution::GatewayExecutionService::new(
-                    config.clone(),
-                    Some(store.clone()),
-                ),
+
+            // Validate the interaction exists and is pending
+            let interaction = store
+                .get_user_interaction(interaction_id)?
+                .ok_or_else(|| anyhow::anyhow!("Unknown interaction '{}'", interaction_id))?;
+            anyhow::ensure!(
+                interaction.status == UserInteractionStatus::Pending,
+                "Interaction '{}' is {:?}; only pending interactions can be answered",
+                interaction_id,
+                interaction.status
             );
 
-            let out = answer_and_orchestrate_resume(
-                &execution,
-                InteractionAnswerParams {
-                    interaction_id: interaction_id.clone(),
-                    answer_text: text.clone(),
-                    answer_option_id: option.clone(),
-                    answered_by: Some("cli".to_string()),
-                    follow_up_message: None,
-                },
-            )
-            .await?;
+            let answer = UserInteractionAnswer {
+                interaction_id: interaction_id.clone(),
+                answer_text: text.clone(),
+                answer_option_id: option.clone(),
+                answered_by: "cli".to_string(),
+            };
+
+            store.answer_user_interaction(&answer)?;
 
             println!("Answered interaction {}", interaction_id);
             if let Some(opt) = option {
@@ -833,8 +833,35 @@ pub async fn handle_gateway_interactions(
             if let Some(txt) = text {
                 println!("  Answer text: {}", txt);
             }
+
+            // Workflow-bound: update task status to Runnable so the durable queue picks it up
+            if let (Some(wf_id), Some(t_id)) = (
+                interaction.workflow_id.as_deref(),
+                interaction.task_id.as_deref(),
+            ) {
+                use autonoetic_types::workflow::TaskRunStatus;
+                if let Some(task) =
+                    autonoetic_gateway::scheduler::workflow_store::load_task_run(&config, Some(store.as_ref()), wf_id, t_id)?
+                {
+                    if task.status == TaskRunStatus::Paused {
+                        autonoetic_gateway::scheduler::workflow_store::update_task_run_status(
+                            &config,
+                            Some(store.as_ref()),
+                            wf_id,
+                            t_id,
+                            TaskRunStatus::Runnable,
+                            Some("user interaction answered; task queued for execution".to_string()),
+                            None,
+                            None,
+                        )?;
+                        println!("  Workflow task {} queued for execution", t_id);
+                    }
+                }
+            }
+
             println!();
-            println!("Gateway orchestration: resumed={} workflow_unblocked={}", out.resumed, out.workflow_task_unblocked);
+            println!("The gateway daemon will resume the session automatically on its next tick.");
+            println!("If the gateway is not running, start it with: autonoetic gateway start");
         }
         super::common::GatewayInteractionCommands::Cancel {
             interaction_id,
