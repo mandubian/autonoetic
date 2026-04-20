@@ -447,6 +447,10 @@ fn infer_trace_error_type(
             ToolErrorType::Validation => "validation",
             ToolErrorType::Permission => "permission",
             ToolErrorType::Resource => "resource",
+            ToolErrorType::Conflict => "conflict",
+            ToolErrorType::QuotaExceeded => "quota",
+            ToolErrorType::NotFound => "not_found",
+            ToolErrorType::Timeout => "timeout",
             ToolErrorType::Execution | ToolErrorType::Fatal => "runtime",
         };
         return Some(mapped.to_string());

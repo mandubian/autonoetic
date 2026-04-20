@@ -64,10 +64,10 @@ impl NativeTool for ApprovalListTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            }).to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::fatal(
+                "Gateway store not available",
+                None::<String>,
+            ).to_error_response());
         };
 
         if let Some(rid) = &args.request_id {
@@ -77,10 +77,10 @@ impl NativeTool for ApprovalListTool {
                     "ok": true,
                     "approval": approval_summary(&r),
                 }).to_string()),
-                None => Ok(serde_json::json!({
-                    "ok": false,
-                    "error": format!("Approval '{}' not found", rid),
-                }).to_string()),
+                None => Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("approval '{}'", rid),
+                    Some("Use approval.list to see all pending approvals for this session.".to_string()),
+                ).to_error_response()),
             };
         }
 
@@ -171,27 +171,24 @@ impl NativeTool for ApprovalWithdrawTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            }).to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::fatal(
+                "Gateway store not available",
+                None::<String>,
+            ).to_error_response());
         };
 
         let request = store.get_approval(&args.request_id)?;
         match request {
-            None => Ok(serde_json::json!({
-                "ok": false,
-                "error": format!("Approval '{}' not found", args.request_id),
-            }).to_string()),
+            None => Ok(autonoetic_types::tool_error::ToolError::not_found(
+                format!("approval '{}'", args.request_id),
+                Some("Use approval.list to see all pending approvals for this session.".to_string()),
+            ).to_error_response()),
             Some(r) => {
                 if r.agent_id != manifest.agent.id {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "error": format!(
-                            "Approval '{}' belongs to agent '{}', not '{}'. Can only withdraw your own approvals.",
-                            args.request_id, r.agent_id, manifest.agent.id
-                        ),
-                    }).to_string());
+                    return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                        "Approval '{}' belongs to agent '{}', not '{}'. Can only withdraw your own approvals.",
+                        args.request_id, r.agent_id, manifest.agent.id
+                    )).to_error_response());
                 }
                 let status_str = r
                     .status
@@ -203,10 +200,10 @@ impl NativeTool for ApprovalWithdrawTool {
                     })
                     .unwrap_or("pending");
                 if status_str != "pending" {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "error": format!("Approval '{}' is already '{}' — only pending approvals can be withdrawn", args.request_id, status_str),
-                    }).to_string());
+                    return Ok(autonoetic_types::tool_error::ToolError::conflict(
+                        format!("Approval '{}' is already '{}'", args.request_id, status_str),
+                        Some("Only pending approvals can be withdrawn. Create a new approval request if needed.".to_string()),
+                    ).to_error_response());
                 }
 
                 let reason = args.reason.as_deref().unwrap_or("Withdrawn by agent");

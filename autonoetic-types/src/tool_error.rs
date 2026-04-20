@@ -21,6 +21,18 @@ pub enum ToolErrorType {
     /// Fatal error: corrupted state, invariant violation, unsafe condition.
     /// The agent session should abort; this is not recoverable.
     Fatal,
+    /// Conflict error: duplicate entry, state conflict, concurrent modification.
+    /// The agent should resolve the conflict and retry.
+    Conflict,
+    /// Quota exceeded: budget exhausted, rate limit hit, max attempts reached.
+    /// The agent should wait or use an alternative path.
+    QuotaExceeded,
+    /// Not found: requested resource does not exist.
+    /// The agent can create it or use an alternative.
+    NotFound,
+    /// Timeout: operation exceeded its time limit.
+    /// The agent can retry with backoff.
+    Timeout,
 }
 
 impl std::fmt::Display for ToolErrorType {
@@ -31,6 +43,10 @@ impl std::fmt::Display for ToolErrorType {
             ToolErrorType::Resource => write!(f, "resource"),
             ToolErrorType::Execution => write!(f, "execution"),
             ToolErrorType::Fatal => write!(f, "fatal"),
+            ToolErrorType::Conflict => write!(f, "conflict"),
+            ToolErrorType::QuotaExceeded => write!(f, "quota_exceeded"),
+            ToolErrorType::NotFound => write!(f, "not_found"),
+            ToolErrorType::Timeout => write!(f, "timeout"),
         }
     }
 }
@@ -111,15 +127,53 @@ impl ToolError {
         }
     }
 
+    /// Creates a new conflict error.
+    pub fn conflict(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
+        Self {
+            success: false,
+            error_type: ToolErrorType::Conflict,
+            message: message.into(),
+            repair_hint: repair_hint.map(|h| h.into()),
+            details: None,
+        }
+    }
+
+    /// Creates a new quota exceeded error.
+    pub fn quota_exceeded(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
+        Self {
+            success: false,
+            error_type: ToolErrorType::QuotaExceeded,
+            message: message.into(),
+            repair_hint: repair_hint.map(|h| h.into()),
+            details: None,
+        }
+    }
+
+    /// Creates a new not found error.
+    pub fn not_found(resource: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
+        Self {
+            success: false,
+            error_type: ToolErrorType::NotFound,
+            message: format!("{} not found", resource.into()),
+            repair_hint: repair_hint.map(|h| h.into()),
+            details: None,
+        }
+    }
+
+    /// Creates a new timeout error.
+    pub fn timeout(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
+        Self {
+            success: false,
+            error_type: ToolErrorType::Timeout,
+            message: message.into(),
+            repair_hint: repair_hint.map(|h| h.into()),
+            details: None,
+        }
+    }
+
     /// Returns true if this error is recoverable (agent can retry).
     pub fn is_recoverable(&self) -> bool {
-        matches!(
-            self.error_type,
-            ToolErrorType::Validation
-                | ToolErrorType::Permission
-                | ToolErrorType::Resource
-                | ToolErrorType::Execution
-        )
+        !matches!(self.error_type, ToolErrorType::Fatal)
     }
 
     /// Converts the error to a JSON string for tool_result.
@@ -131,6 +185,90 @@ impl ToolError {
             )
         })
     }
+
+    /// Creates a JSON response with ok=false for tool execution failure.
+    pub fn to_error_response(&self) -> String {
+        self.to_json_string()
+    }
+}
+
+/// Helper macro to return a structured error from a tool's execute method.
+///
+/// Usage:
+/// ```ignore
+/// return tool_error!(validation, "missing field 'id'", "Include an 'id' field in your request");
+/// return tool_error!(permission, "NetworkAccess required for host api.example.com");
+/// return tool_error!(not_found, "agent '{}' not found", agent_id);
+/// ```
+#[macro_export]
+macro_rules! tool_error {
+    (validation, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::validation($msg, Some($hint)).to_error_response());
+    }};
+    (validation, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::validation($msg, None::<String>).to_error_response());
+    }};
+    (permission, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::permission($msg).to_error_response());
+    }};
+    (resource, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::resource($msg, Some($hint)).to_error_response());
+    }};
+    (resource, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::resource($msg, None::<String>).to_error_response());
+    }};
+    (execution, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::execution($msg, Some($hint)).to_error_response());
+    }};
+    (execution, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::execution($msg, None::<String>).to_error_response());
+    }};
+    (fatal, $msg:expr, $details:expr) => {{
+        return Ok($crate::tool_error::ToolError::fatal($msg, Some($details)).to_error_response());
+    }};
+    (fatal, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::fatal($msg, None::<String>).to_error_response());
+    }};
+    (conflict, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::conflict($msg, Some($hint)).to_error_response());
+    }};
+    (conflict, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::conflict($msg, None::<String>).to_error_response());
+    }};
+    (quota_exceeded, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::quota_exceeded($msg, Some($hint)).to_error_response());
+    }};
+    (quota_exceeded, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::quota_exceeded($msg, None::<String>).to_error_response());
+    }};
+    (not_found, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::not_found($msg, Some($hint)).to_error_response());
+    }};
+    (not_found, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::not_found($msg, None::<String>).to_error_response());
+    }};
+    (timeout, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::timeout($msg, Some($hint)).to_error_response());
+    }};
+    (timeout, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::timeout($msg, None::<String>).to_error_response());
+    }};
+}
+
+/// Helper macro to return a structured error from a tool's execute method using anyhow.
+///
+/// Usage:
+/// ```ignore
+/// return tool_error_tagged!(validation, anyhow::anyhow!("invalid JSON"));
+/// return tool_error_tagged!(permission, anyhow::anyhow!("denied"));
+/// ```
+#[macro_export]
+macro_rules! tool_error_tagged {
+    ($variant:ident, $err:expr) => {{
+        let tagged = $crate::tool_error::tagged::Tagged::$variant($err);
+        let err: $crate::tool_error::ToolError = tagged.into();
+        return Ok(err.to_error_response());
+    }};
 }
 
 /// Helper to create tagged errors with explicit error type classification.
@@ -189,6 +327,34 @@ pub mod tagged {
                 source: err.into(),
             }
         }
+
+        pub fn conflict(err: impl Into<anyhow::Error>) -> Self {
+            Self {
+                error_type: ToolErrorType::Conflict,
+                source: err.into(),
+            }
+        }
+
+        pub fn quota_exceeded(err: impl Into<anyhow::Error>) -> Self {
+            Self {
+                error_type: ToolErrorType::QuotaExceeded,
+                source: err.into(),
+            }
+        }
+
+        pub fn not_found(err: impl Into<anyhow::Error>) -> Self {
+            Self {
+                error_type: ToolErrorType::NotFound,
+                source: err.into(),
+            }
+        }
+
+        pub fn timeout(err: impl Into<anyhow::Error>) -> Self {
+            Self {
+                error_type: ToolErrorType::Timeout,
+                source: err.into(),
+            }
+        }
     }
 
     impl std::fmt::Display for Tagged {
@@ -213,17 +379,17 @@ pub mod tagged {
 
 impl From<tagged::Tagged> for ToolError {
     fn from(tagged: tagged::Tagged) -> Self {
-        // Extract the error type and message from the tagged error
         let (error_type, message) = tagged.into_parts();
         match error_type {
             ToolErrorType::Validation => Self::validation(message, None::<String>),
             ToolErrorType::Permission => Self::permission(message),
             ToolErrorType::Resource => Self::resource(message, None::<String>),
             ToolErrorType::Execution => Self::execution(message, None::<String>),
-            ToolErrorType::Fatal => {
-                let msg2 = message.clone();
-                Self::fatal(message, Some(msg2))
-            }
+            ToolErrorType::Fatal => Self::fatal(message.clone(), Some(message)),
+            ToolErrorType::Conflict => Self::conflict(message, None::<String>),
+            ToolErrorType::QuotaExceeded => Self::quota_exceeded(message, None::<String>),
+            ToolErrorType::NotFound => Self::not_found(message, None::<String>),
+            ToolErrorType::Timeout => Self::timeout(message, None::<String>),
         }
     }
 }
@@ -283,6 +449,18 @@ impl From<anyhow::Error> for ToolError {
             } else if msg.starts_with("fatal:") {
                 let inner = msg.strip_prefix("fatal:").unwrap_or(&msg);
                 return Self::fatal(inner.to_string(), Some(err.to_string()));
+            } else if msg.starts_with("conflict:") {
+                let inner = msg.strip_prefix("conflict:").unwrap_or(&msg);
+                return Self::conflict(inner.to_string(), None::<String>);
+            } else if msg.starts_with("quota_exceeded:") {
+                let inner = msg.strip_prefix("quota_exceeded:").unwrap_or(&msg);
+                return Self::quota_exceeded(inner.to_string(), None::<String>);
+            } else if msg.starts_with("not_found:") {
+                let inner = msg.strip_prefix("not_found:").unwrap_or(&msg);
+                return Self::not_found(inner.to_string(), None::<String>);
+            } else if msg.starts_with("timeout:") {
+                let inner = msg.strip_prefix("timeout:").unwrap_or(&msg);
+                return Self::timeout(inner.to_string(), None::<String>);
             }
         }
 
