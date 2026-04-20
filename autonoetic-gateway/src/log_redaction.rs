@@ -1,8 +1,28 @@
 //! Log redaction helpers to avoid leaking secrets in traces.
 
+use regex::Regex;
 use serde_json::Value;
+use std::sync::LazyLock;
 
 const REDACTED: &str = "***REDACTED***";
+
+static ENV_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)\b([A-Z][A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|ACCESS[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|AUTHORIZATION)[A-Z0-9_]*)=("[^"]*"|'[^']*'|[^\s&;]+)"#,
+    )
+    .expect("valid env assignment redaction regex")
+});
+
+static QUERY_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)([?&](?:api[_-]?key|apikey|appid|token|access_token|refresh_token|client_secret|password|secret|authorization)=)([^&#\s]+)",
+    )
+    .expect("valid query assignment redaction regex")
+});
+
+static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(bearer\s+)([^\s,;]+)").expect("valid bearer redaction regex")
+});
 
 fn is_sensitive_key(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
@@ -33,15 +53,26 @@ fn redact_json_value(value: &Value) -> Value {
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
         Value::String(s) => {
-            // Basic bearer/sk- token masking in free text.
-            if s.to_ascii_lowercase().contains("bearer ") || s.starts_with("sk-") {
-                Value::String(REDACTED.to_string())
-            } else {
-                Value::String(s.clone())
-            }
+            Value::String(redact_embedded_secrets(s))
         }
         other => other.clone(),
     }
+}
+
+fn redact_embedded_secrets(text: &str) -> String {
+    let masked_env = ENV_ASSIGN_RE
+        .replace_all(text, "${1}=***REDACTED***")
+        .to_string();
+    let masked_query = QUERY_ASSIGN_RE
+        .replace_all(&masked_env, "${1}***REDACTED***")
+        .to_string();
+    let masked_bearer = BEARER_RE
+        .replace_all(&masked_query, "${1}***REDACTED***")
+        .to_string();
+    if masked_bearer.starts_with("sk-") {
+        return REDACTED.to_string();
+    }
+    masked_bearer
 }
 
 /// Redact potentially sensitive content for structured logging.
@@ -51,10 +82,21 @@ pub fn redact_text_for_logs(text: &str) -> String {
             serde_json::to_string(&redact_json_value(&v)).unwrap_or_else(|_| REDACTED.to_string())
         }
         Err(_) => {
+            let lower = text.to_ascii_lowercase();
+            if lower.contains("token")
+                || lower.contains("secret")
+                || lower.contains("authorization")
+            {
+                return REDACTED.to_string();
+            }
+
+            let redacted = redact_embedded_secrets(text);
+            if redacted != text {
+                return redacted;
+            }
+
             // Non-JSON payloads: avoid accidentally dumping long secrets.
-            if text.to_ascii_lowercase().contains("token")
-                || text.to_ascii_lowercase().contains("secret")
-                || text.to_ascii_lowercase().contains("authorization")
+            if lower.contains("api_key") || lower.contains("apikey")
             {
                 REDACTED.to_string()
             } else {
@@ -82,5 +124,22 @@ mod tests {
     fn test_redacts_secret_like_plain_text() {
         let out = redact_text_for_logs("Authorization: Bearer very-secret-value");
         assert_eq!(out, "***REDACTED***");
+    }
+
+    #[test]
+    fn test_redacts_api_key_assignment_in_json_string_value() {
+        let input =
+            r#"{"command":"export OPENWEATHER_API_KEY=TEST_PLACEHOLDER_DO_NOT_USE_XXXX && python3 /tmp/weather.py"}"#;
+        let out = redact_text_for_logs(input);
+        assert!(out.contains("OPENWEATHER_API_KEY=***REDACTED***"));
+        assert!(!out.contains("TEST_PLACEHOLDER_DO_NOT_USE_XXXX"));
+    }
+
+    #[test]
+    fn test_redacts_api_key_in_query_string() {
+        let input = "http://api.openweathermap.org/data/2.5/weather?appid=TEST_PLACEHOLDER_DO_NOT_USE_XXXX&q=Paris";
+        let out = redact_text_for_logs(input);
+        assert!(out.contains("appid=***REDACTED***"));
+        assert!(!out.contains("TEST_PLACEHOLDER_DO_NOT_USE_XXXX"));
     }
 }
