@@ -729,7 +729,7 @@ mod tests {
             always_include_approval_tools: true,
         };
         assert!(!filter.allows("web.search"));
-        assert!(filter.allows("approval.status"));
+        assert!(filter.allows("approval.list"));
         assert!(filter.allows("approval.answer"));
     }
 

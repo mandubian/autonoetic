@@ -123,9 +123,10 @@ sandbox.exec({
 
 If the user provides information that changes a pending approval (e.g., different domain, updated credential), you can withdraw and re-submit:
 
-1. Check status: `approval.status({ "request_id": "apr-2f85bc63" })`
-2. Withdraw stale: `approval.withdraw({ "request_id": "apr-2f85bc63", "reason": "User provided updated domain" })`
-3. Re-submit with corrected parameters
+1. List pending: `approval.list({})`
+2. Check specific: `approval.status({ "approval_id": "apr-2f85bc63" })`
+3. Withdraw stale: `approval.withdraw({ "request_id": "apr-2f85bc63", "reason": "User provided updated domain" })`
+4. Re-submit with corrected parameters
 
 You can only withdraw approvals created by your own agent. Only pending approvals can be withdrawn.
 

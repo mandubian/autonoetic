@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
-    registry.register(Box::new(ApprovalStatusTool));
+    registry.register(Box::new(ApprovalListTool));
     registry.register(Box::new(ApprovalWithdrawTool));
 }
 
@@ -19,11 +19,11 @@ struct ApprovalStatusArgs {
     request_id: Option<String>,
 }
 
-pub struct ApprovalStatusTool;
+pub struct ApprovalListTool;
 
-impl NativeTool for ApprovalStatusTool {
+impl NativeTool for ApprovalListTool {
     fn name(&self) -> &'static str {
-        "approval.status"
+        "approval.list"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -33,7 +33,7 @@ impl NativeTool for ApprovalStatusTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Check the status of approval requests for the current session. Returns pending, approved, and rejected approvals. Use this to discover if an approval is still pending before deciding to withdraw and re-submit.".to_string(),
+            description: "List approval requests for the current session. Returns pending approvals and recent decisions. Use this to discover if an approval is still pending before deciding to withdraw and re-submit. For querying a specific approval by ID, use approval.status.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
