@@ -1747,19 +1747,17 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                     }
                 };
                 for mapping in credential_mappings {
+                    crate::runtime::tools::ensure_safe_credential_id_reference(
+                        &mapping.credential_id,
+                    )?;
                     let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "credential_env: credential '{}' not found in store",
-                            mapping.credential_id
-                        )
+                        anyhow::anyhow!("credential_env: credential reference not found in store")
                     })?;
                     let secret_value = vault
                         .get_secret(&cred.secret_name)
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "credential_env: secret '{}' for credential '{}' not found in vault",
-                                cred.secret_name,
-                                mapping.credential_id
+                                "credential_env: secret for referenced credential not found in vault"
                             )
                         })?;
                     tracing::info!(

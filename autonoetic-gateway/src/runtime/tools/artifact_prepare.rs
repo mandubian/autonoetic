@@ -192,17 +192,15 @@ impl NativeTool for ArtifactPrepareTool {
             let vault = crate::vault::Vault::load_from_file(&vault_path)?;
 
             for rc in required {
+                crate::runtime::tools::ensure_safe_credential_id_reference(&rc.credential_id)?;
                 let cred = store.get_credential(&rc.credential_id)?.ok_or_else(|| {
                     anyhow::anyhow!(
-                        "required_credentials: credential '{}' not found in store",
-                        rc.credential_id
+                        "required_credentials: credential reference not found in store"
                     )
                 })?;
                 if vault.get_secret(&cred.secret_name).is_none() {
                     anyhow::bail!(
-                        "required_credentials: secret '{}' for credential '{}' not found in vault",
-                        cred.secret_name,
-                        rc.credential_id
+                        "required_credentials: secret for referenced credential not found in vault"
                     );
                 }
                 tracing::info!(

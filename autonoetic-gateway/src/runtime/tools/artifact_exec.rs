@@ -127,6 +127,25 @@ impl NativeTool for ArtifactExecTool {
         let gw_dir = gateway_dir
             .ok_or_else(|| anyhow::anyhow!("artifact.exec requires a gateway directory"))?;
 
+        if args.artifact_id.starts_with("impl_") {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "validation",
+                "error": "invalid_artifact_id",
+                "message": format!(
+                    "'{}' is an implicit task artifact (a content record), not an executable artifact bundle. \
+                     artifact.exec only accepts art_... IDs produced by artifact.build.",
+                    args.artifact_id
+                ),
+                "repair_hint": format!(
+                    "Call content.read('{}') to inspect the implicit artifact JSON. \
+                     Pick an entry from content.artifacts[*].artifact_id and call artifact.exec with that art_... ID.",
+                    args.artifact_id
+                ),
+            })
+            .to_string());
+        }
+
         if let Some(ticket_id) = &args.deployment_ticket {
             if let Some(store) = &gateway_store {
                 if let Some(ticket) = crate::runtime::tools::artifact_prepare::resolve_deployment_ticket(
@@ -568,19 +587,17 @@ impl NativeTool for ArtifactExecTool {
                     }
                 };
                 for mapping in credential_mappings {
+                    crate::runtime::tools::ensure_safe_credential_id_reference(
+                        &mapping.credential_id,
+                    )?;
                     let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "credential_env: credential '{}' not found in store",
-                            mapping.credential_id
-                        )
+                        anyhow::anyhow!("credential_env: credential reference not found in store")
                     })?;
                     let secret_value = vault
                         .get_secret(&cred.secret_name)
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "credential_env: secret '{}' for credential '{}' not found in vault",
-                                cred.secret_name,
-                                mapping.credential_id
+                                "credential_env: secret for referenced credential not found in vault"
                             )
                         })?;
                     tracing::info!(
@@ -785,17 +802,13 @@ fn execute_with_ticket(
         let vault_path = crate::vault::default_vault_path(vault_dir);
         let vault = crate::vault::Vault::load_from_file(&vault_path)?;
         for mapping in &ticket.credential_env {
+            crate::runtime::tools::ensure_safe_credential_id_reference(&mapping.credential_id)?;
             let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "deployment_ticket: credential '{}' not found in store",
-                    mapping.credential_id
-                )
+                anyhow::anyhow!("deployment_ticket: credential reference not found in store")
             })?;
             let secret_value = vault.get_secret(&cred.secret_name).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "deployment_ticket: secret '{}' for credential '{}' not found in vault",
-                    cred.secret_name,
-                    mapping.credential_id
+                    "deployment_ticket: secret for referenced credential not found in vault"
                 )
             })?;
             tracing::info!(
