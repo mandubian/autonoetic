@@ -22,6 +22,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Emergency Stop](#emergency-stop)
 - [Human Escalation](#human-escalation)
 - [Scheduled Tasks](#scheduled-tasks)
+- [System Agents](#system-agents)
 - [Design Principles](#design-principles)
 
 ---
@@ -1062,6 +1063,27 @@ scheduled_jobs:
   max_per_root: 50         # Max jobs per root session
   max_due_per_tick: 16     # Max due jobs processed per tick
 ```
+
+### System Agents
+
+System agents are **operator-declared background agents** that the gateway auto-schedules on startup. Unlike agent-created cron jobs, system agents are defined in `config.yaml` and reconciled idempotently.
+
+```yaml
+system_agents:
+  - agent_id: evolution-orchestrator.default
+    schedule: "0 */4 * * *"
+    message: "Run evolution analysis cycle"
+    enabled: true
+```
+
+On startup, the gateway checks each declared agent:
+- If the agent exists and has a `schedule` but no active cron job → creates one (owned by `"system"`)
+- If disabled or missing → logs and skips
+- If an active job already exists → skips (idempotent)
+
+CLI control: `autonoetic gateway system-agents list|bootstrap|run <agent_id>`
+
+System agent jobs use the same `scheduled_jobs` table and execution path as agent-created jobs — no special privileges. See [Scheduled Tasks Guide](scheduled-tasks.md) for full documentation.
 
 ---
 
