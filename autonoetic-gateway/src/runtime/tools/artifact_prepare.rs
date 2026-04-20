@@ -125,6 +125,28 @@ impl NativeTool for ArtifactPrepareTool {
             anyhow::anyhow!("artifact.prepare requires a session_id")
         })?;
 
+        // Implicit artifacts (impl_task-...) are content-store metadata records, not
+        // executable artifact bundles.  Give the agent a clear, actionable error
+        // rather than the cryptic prefix guard inside ArtifactStore::inspect.
+        if args.artifact_id.starts_with("impl_") {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "validation",
+                "error": "invalid_artifact_id",
+                "message": format!(
+                    "'{}' is an implicit task artifact (a content record), not an executable artifact bundle. \
+                     artifact.prepare only accepts art_... IDs produced by artifact.build.",
+                    args.artifact_id
+                ),
+                "repair_hint": format!(
+                    "Call content.read('{}') to inspect the implicit artifact JSON. \
+                     Look in 'content.artifacts' for the art_... ID built by the child session, \
+                     then call artifact.prepare with that art_... ID instead.",
+                    args.artifact_id
+                ),
+            }).to_string());
+        }
+
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
         let bundle = artifact_store.inspect(&args.artifact_id)?;
         anyhow::ensure!(

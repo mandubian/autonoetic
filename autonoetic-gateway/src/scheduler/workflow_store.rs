@@ -749,6 +749,25 @@ fn create_implicit_artifact(
 
     let named_outputs_count = named_outputs.len();
 
+    // Collect art_... artifacts built by the child session so the parent can pass
+    // the correct artifact_id to artifact.prepare / artifact.exec directly.
+    let artifact_store = crate::artifact_store::ArtifactStore::new(&gw_dir);
+    let built_artifacts: Vec<String> = artifact_store
+        .map(|store| {
+            store
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|art_id| {
+                    store
+                        .inspect(art_id)
+                        .map(|bundle| bundle.builder_session_id == task.session_id)
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Build implicit artifact — spec §4.2 structure.
     let implicit_data = serde_json::json!({
         "artifact_id": artifact_id,
@@ -762,6 +781,9 @@ fn create_implicit_artifact(
         "content": {
             // Named outputs from the child session — use name or ref with content.read
             "named_outputs": named_outputs,
+            // Executable artifacts built in the child session via artifact.build.
+            // Use these art_... IDs with artifact.prepare / artifact.exec.
+            "artifacts": built_artifacts,
         },
     });
 
