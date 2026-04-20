@@ -1602,6 +1602,27 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                 );
             }
         }
+        let tool_events: Vec<&ReportEvent> = state
+            .timeline
+            .iter()
+            .filter(|e| {
+                e.session_id == agent.session_id && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR")
+            })
+            .rev()
+            .take(MAX_RECENT_EVENTS_PER_AGENT)
+            .collect();
+        if !tool_events.is_empty() {
+            let _ = writeln!(out, "- Tool calls:");
+            for event in tool_events.into_iter().rev() {
+                let _ = writeln!(
+                    out,
+                    "  - [{}] {} {}",
+                    format_timestamp(Some(&event.created_at)),
+                    event.kind,
+                    truncate_chars(&event.summary, 200)
+                );
+            }
+        }
         let recent: Vec<&ReportEvent> = state
             .timeline
             .iter()
@@ -1994,6 +2015,29 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
                     if abnormal { "var(--red)" } else { "inherit" },
                     truncate_html(child_close, 80),
                     truncate_html(child_output, 80),
+                ));
+            }
+            out.push_str("</tbody></table></details>\n");
+        }
+        let tool_events: Vec<_> = state
+            .timeline
+            .iter()
+            .filter(|e| e.session_id == agent.session_id && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR"))
+            .rev()
+            .take(MAX_RECENT_EVENTS_PER_AGENT)
+            .collect();
+        if !tool_events.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Tool Calls ({})</summary>",
+                tool_events.len()
+            );
+            out.push_str("<table><thead><tr><th style=\"width:13%\">Time</th><th style=\"width:10%\">Kind</th><th>Summary</th></tr></thead><tbody>\n");
+            for event in tool_events.into_iter().rev() {
+                out.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    format_timestamp(Some(&event.created_at)),
+                    escape_html(&event.kind),
+                    truncate_html(&event.summary, 150),
                 ));
             }
             out.push_str("</tbody></table></details>\n");
@@ -2648,6 +2692,29 @@ pre { background: var(--surface); border: 1px solid var(--border); border-radius
                 ));
             }
             out.push_str("</details>\n");
+        }
+        let tool_events: Vec<_> = state
+            .timeline
+            .iter()
+            .filter(|e| e.session_id == agent.session_id && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR"))
+            .rev()
+            .take(MAX_RECENT_EVENTS_PER_AGENT)
+            .collect();
+        if !tool_events.is_empty() {
+            let _ = writeln!(
+                out,
+                "<details><summary>Tool Calls ({})</summary>",
+                tool_events.len()
+            );
+            out.push_str("<table><thead><tr><th style=\"width:13%\">Time</th><th style=\"width:10%\">Kind</th><th>Summary</th></tr></thead><tbody>\n");
+            for event in tool_events.into_iter().rev() {
+                out.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    format_timestamp(Some(&event.created_at)),
+                    escape_html(&event.kind),
+                    truncate_html(&event.summary, 150),
+                ));
+            }
+            out.push_str("</tbody></table></details>\n");
         }
         let recent: Vec<_> = state
             .timeline
