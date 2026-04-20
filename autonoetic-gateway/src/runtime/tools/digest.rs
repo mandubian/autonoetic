@@ -3,6 +3,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -67,11 +68,10 @@ impl NativeTool for DigestAnnotateTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
         let allowed = ["reasoning", "decision", "observation", "lesson"];
         if !allowed.contains(&args.annotation_type.as_str()) {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error_type": "validation",
-                "message": format!("type must be one of: {}", allowed.join(", "))
-            }))?);
+            return Ok(ToolError::validation(
+                format!("type must be one of: {}", allowed.join(", ")),
+                None::<String>,
+            ).to_error_response());
         }
         if let Some(ctx) = run_context {
             if let Some(w) = &ctx.live_digest {

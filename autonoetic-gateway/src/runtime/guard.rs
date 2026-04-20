@@ -20,6 +20,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use autonoetic_types::config::LoopGuardConfig;
+use autonoetic_types::tool_error::ToolErrorType;
 
 pub struct LoopGuard {
     max_loops_without_progress: u32,
@@ -94,7 +95,14 @@ impl LoopGuard {
     }
 
     /// Track a tool failure — failures accumulate per tool name regardless of arguments.
-    pub fn register_failure(&mut self, tool_name: &str, _arguments: &str) {
+    ///
+    /// Permission errors are excluded from the budget: the agent cannot fix
+    /// them by retrying with different arguments, so counting them would
+    /// unfairly exhaust the budget and abort the session prematurely.
+    pub fn register_failure(&mut self, tool_name: &str, _arguments: &str, error_type: Option<&ToolErrorType>) {
+        if let Some(ToolErrorType::Permission) = error_type {
+            return;
+        }
         *self
             .tool_failure_counts
             .entry(tool_name.to_string())
@@ -211,11 +219,11 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         for _ in 0..4 {
-            guard.register_failure("web.fetch", r#"{"url":"https://example.com/a"}"#);
+            guard.register_failure("web.fetch", r#"{"url":"https://example.com/a"}"#, None);
             guard.register_progress("web.fetch", r#"{"url":"https://example.com/a"}"#);
             assert!(guard.check_loop().is_ok());
         }
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com/z"}"#);
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com/z"}"#, None);
         assert!(guard.check_loop().is_err());
     }
 
@@ -230,12 +238,12 @@ mod tests {
             } else {
                 "https://weather.com/b"
             };
-            guard.register_failure("web.fetch", &format!(r#"{{"url":"{}"}}"#, url));
+            guard.register_failure("web.fetch", &format!(r#"{{"url":"{}"}}"#, url), None);
             guard.register_progress("web.fetch", &format!(r#"{{"url":"{}"}}"#, url));
             assert!(guard.check_loop().is_ok());
         }
 
-        guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/e"}"#);
+        guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/e"}"#, None);
         assert!(guard.check_loop().is_err());
     }
 
@@ -245,13 +253,13 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         for _ in 0..4 {
-            guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#);
-            guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#);
+            guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#, None);
+            guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#, None);
             guard.register_progress("sandbox.exec", r#"{"command":"python3 test.py"}"#);
             assert!(guard.check_loop().is_ok());
         }
 
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#);
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#, None);
         assert!(guard.check_loop().is_err());
     }
 
@@ -261,19 +269,19 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         for _ in 0..4 {
-            guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#);
+            guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#, None);
             guard.register_progress("sandbox.exec", r#"{"command":"python3 test.py"}"#);
             assert!(guard.check_loop().is_ok());
         }
-        guard.register_failure("sandbox.exec", r#"{"command":"python3 other.py"}"#);
+        guard.register_failure("sandbox.exec", r#"{"command":"python3 other.py"}"#, None);
         assert!(guard.check_loop().is_err());
     }
 
     #[test]
     fn test_loop_guard_snapshot_restore() {
         let mut guard = LoopGuard::new(3);
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#);
-        guard.register_failure("web.fetch", r#"{"url":"https://other.com"}"#);
+        guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#, None);
+        guard.register_failure("web.fetch", r#"{"url":"https://other.com"}"#, None);
         assert_eq!(guard.check_loop().unwrap(), ());
 
         let snap = guard.snapshot();
@@ -300,6 +308,34 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_permission_errors_do_not_count_against_budget() {
+        let mut guard = LoopGuard::new(100);
+
+        for _ in 0..10 {
+            guard.register_failure("web.fetch", r#"{"url":"https://denied.com"}"#, Some(&ToolErrorType::Permission));
+            guard.register_progress("web.fetch", r#"{"url":"https://denied.com"}"#);
+            assert!(guard.check_loop().is_ok());
+        }
+
+        guard.register_failure("web.fetch", r#"{"url":"https://denied.com"}"#, Some(&ToolErrorType::Permission));
+        assert!(guard.check_loop().is_ok());
+    }
+
+    #[test]
+    fn test_validation_errors_do_count_against_budget() {
+        let mut guard = LoopGuard::new(100);
+        assert!(guard.check_loop().is_ok());
+
+        for _ in 0..4 {
+            guard.register_failure("web.fetch", r#"{"url":"https://bad.com"}"#, Some(&ToolErrorType::Validation));
+            guard.register_progress("web.fetch", r#"{"url":"https://bad.com"}"#);
+            assert!(guard.check_loop().is_ok());
+        }
+        guard.register_failure("web.fetch", r#"{"url":"https://bad.com"}"#, Some(&ToolErrorType::Validation));
         assert!(guard.check_loop().is_err());
     }
 

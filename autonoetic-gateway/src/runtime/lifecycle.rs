@@ -2173,8 +2173,22 @@ impl AgentExecutor {
                         ));
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
                             if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
+                                let error_type = parsed.get("error_type")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| match s {
+                                        "validation" => Some(autonoetic_types::tool_error::ToolErrorType::Validation),
+                                        "permission" => Some(autonoetic_types::tool_error::ToolErrorType::Permission),
+                                        "resource" => Some(autonoetic_types::tool_error::ToolErrorType::Resource),
+                                        "execution" => Some(autonoetic_types::tool_error::ToolErrorType::Execution),
+                                        "fatal" => Some(autonoetic_types::tool_error::ToolErrorType::Fatal),
+                                        "conflict" => Some(autonoetic_types::tool_error::ToolErrorType::Conflict),
+                                        "quota_exceeded" => Some(autonoetic_types::tool_error::ToolErrorType::QuotaExceeded),
+                                        "not_found" => Some(autonoetic_types::tool_error::ToolErrorType::NotFound),
+                                        "timeout" => Some(autonoetic_types::tool_error::ToolErrorType::Timeout),
+                                        _ => None,
+                                    });
                                 if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id) {
-                                    self.guard.register_failure(&tc.name, &tc.arguments);
+                                    self.guard.register_failure(&tc.name, &tc.arguments, error_type.as_ref());
                                 }
                             } else if tool_result_counts_as_progress(result) {
                                 if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id) {

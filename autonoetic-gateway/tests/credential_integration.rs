@@ -402,10 +402,11 @@ fn test_credential_request_denied_host_not_in_allowed_hosts() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
+    assert!(parsed["message"]
         .as_str()
         .unwrap()
         .contains("is not authorized for host 'evil.com'"));
+    assert_eq!(parsed["error_type"], "permission");
 }
 
 #[test]
@@ -684,11 +685,11 @@ fn test_credential_request_denied_expired() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
+    assert!(parsed["message"]
         .as_str()
         .unwrap()
         .contains("Credential expired at"));
-    assert_eq!(parsed["expired"], true);
+    assert_eq!(parsed["error_type"], "resource");
 }
 
 #[test]
@@ -749,11 +750,11 @@ fn test_credential_request_denied_malformed_expiry() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
+    assert!(parsed["message"]
         .as_str()
         .unwrap()
         .contains("unparseable expiry timestamp"));
-    assert_eq!(parsed["expires_at_parse_error"], true);
+    assert_eq!(parsed["error_type"], "validation");
 }
 
 #[test]
@@ -879,10 +880,11 @@ fn test_credential_setup_denied_wrong_service() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
+    assert!(parsed["message"]
         .as_str()
         .unwrap()
         .contains("Credential setup denied for service: stripe"));
+    assert_eq!(parsed["error_type"], "permission");
 }
 
 #[test]

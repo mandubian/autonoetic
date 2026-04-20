@@ -6,6 +6,7 @@ use crate::scheduler::gateway_store::admin_proposals::AdminProposal;
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::notification::{NotificationRecord, NotificationType};
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
@@ -81,28 +82,28 @@ impl NativeTool for AdminProposalCreateTool {
 
         let valid_categories = ["capability", "tool", "protocol", "ux", "agent"];
         if !valid_categories.contains(&args.category.as_str()) {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("category must be one of: {}", valid_categories.join(", "))
-            }).to_string());
+            return Ok(ToolError::validation(
+                format!("category must be one of: {}", valid_categories.join(", ")),
+                None::<String>,
+            ).to_error_response());
         }
         let valid_blast = ["low", "medium", "high"];
         if !valid_blast.contains(&args.blast_radius.as_str()) {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("blast_radius must be one of: {}", valid_blast.join(", "))
-            }).to_string());
+            return Ok(ToolError::validation(
+                format!("blast_radius must be one of: {}", valid_blast.join(", ")),
+                None::<String>,
+            ).to_error_response());
         }
         let valid_priority = ["low", "medium", "high", "critical"];
         if !valid_priority.contains(&args.priority.as_str()) {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("priority must be one of: {}", valid_priority.join(", "))
-            }).to_string());
+            return Ok(ToolError::validation(
+                format!("priority must be one of: {}", valid_priority.join(", ")),
+                None::<String>,
+            ).to_error_response());
         }
 
         let Some(store) = gateway_store else {
-            return Ok(json!({"ok": false, "error": "GatewayStore not available"}).to_string());
+            return Ok(ToolError::resource("GatewayStore not available", None::<String>).to_error_response());
         };
 
         let existing = store.find_open_proposals_by_title_category(&args.title, &args.category)?;
@@ -240,7 +241,7 @@ impl NativeTool for AdminProposalListTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(json!({"ok": false, "error": "GatewayStore not available"}).to_string());
+            return Ok(ToolError::resource("GatewayStore not available", None::<String>).to_error_response());
         };
 
         let limit = args.limit.min(200);

@@ -837,10 +837,11 @@ fn test_scheduler_cron_create_rejects_sub10s_for_reasoning_target() {
         serde_json::from_str(&result).expect("scheduler response should decode");
     assert_eq!(parsed.get("ok"), Some(&serde_json::json!(false)));
     assert!(parsed
-        .get("error")
+        .get("message")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .contains("Sub-10s schedules are only allowed for script-mode agents"));
+    assert_eq!(parsed.get("error_type"), Some(&serde_json::json!("validation")));
 }
 
 #[test]

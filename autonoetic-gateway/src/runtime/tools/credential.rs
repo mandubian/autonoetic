@@ -127,11 +127,10 @@ impl NativeTool for CredentialCheckTool {
         }
 
         let Some(store) = gateway_store else {
-            return Ok(json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            })
-            .to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::resource(
+                "Gateway store not available",
+                None::<String>,
+            ).to_error_response());
         };
 
         let credentials = store.list_credentials_by_service(&args.service)?;
@@ -264,20 +263,18 @@ impl NativeTool for CredentialRequestTool {
         let args: CredentialRequestArgs = serde_json::from_str(arguments_json)?;
 
         let Some(store) = gateway_store else {
-            return Ok(json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            })
-            .to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::resource(
+                "Gateway store not available",
+                None::<String>,
+            ).to_error_response());
         };
 
         // Look up the credential to check service-scoped authorization
         let Some(cred) = store.get_credential(&args.credential_id)? else {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("Credential not found: {}", args.credential_id)
-            })
-            .to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                format!("credential '{}'", args.credential_id),
+                Some("Use credential.check to list available credentials for this service.".to_string()),
+            ).to_error_response());
         };
 
         // Check service-scoped authorization
@@ -323,28 +320,25 @@ impl NativeTool for CredentialRequestTool {
                             {
                                 true
                             } else {
-                                return Ok(json!({
-                                    "ok": false,
-                                    "error": "approval_ref does not match this credential.request payload",
-                                })
-                                .to_string());
+                                return Ok(autonoetic_types::tool_error::ToolError::validation(
+                                    "approval_ref does not match this credential.request payload",
+                                    Some("Ensure all parameters match the original request that created the approval.".to_string()),
+                                ).to_error_response());
                             }
                         }
                         _ => {
-                            return Ok(json!({
-                                "ok": false,
-                                "error": format!("approval_ref '{}' is not for credential.request", approval_ref),
-                            })
-                            .to_string());
+                            return Ok(autonoetic_types::tool_error::ToolError::validation(
+                                format!("approval_ref '{}' is not for credential.request", approval_ref),
+                                Some("Use the approval_ref from a credential.request approval response.".to_string()),
+                            ).to_error_response());
                         }
                     }
                 }
                 _ => {
-                    return Ok(json!({
-                        "ok": false,
-                        "error": format!("Invalid or unresolved approval_ref: {}", approval_ref),
-                    })
-                    .to_string());
+                    return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                        format!("approval '{}'", approval_ref),
+                        Some("The approval may not exist, may have expired, or may not yet be decided.".to_string()),
+                    ).to_error_response());
                 }
             }
         } else {
@@ -432,14 +426,12 @@ impl NativeTool for CredentialRequestTool {
                 .iter()
                 .any(|h| h == "*" || h == &url_host)
         {
-            return Ok(json!({
-                "ok": false,
-                "error": format!(
+            return Ok(autonoetic_types::tool_error::ToolError::permission(
+                format!(
                     "Credential '{}' for service '{}' is not authorized for host '{}'. Allowed hosts: {:?}",
                     args.credential_id, cred.service, url_host, cred.allowed_hosts
                 ),
-            })
-            .to_string());
+            ).to_error_response());
         }
 
         // Check expiry using proper DateTime parsing — fail-closed on parse errors
@@ -448,22 +440,17 @@ impl NativeTool for CredentialRequestTool {
                 Ok(expiry) => {
                     let now = chrono::Utc::now();
                     if expiry < now {
-                        return Ok(json!({
-                            "ok": false,
-                            "error": format!("Credential expired at {}", exp_str),
-                            "expired": true,
-                        })
-                        .to_string());
+                        return Ok(autonoetic_types::tool_error::ToolError::resource(
+                            format!("Credential expired at {}", exp_str),
+                            Some("Use credential.refresh to obtain a new token, or set up a new credential.".to_string()),
+                        ).to_error_response());
                     }
                 }
                 Err(_) => {
-                    return Ok(json!({
-                        "ok": false,
-                        "error": format!("Credential has unparseable expiry timestamp: {}", exp_str),
-                        "expired": null,
-                        "expires_at_parse_error": true,
-                    })
-                    .to_string());
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
+                        format!("Credential has unparseable expiry timestamp: {}", exp_str),
+                        None::<String>,
+                    ).to_error_response());
                 }
             }
         }
@@ -487,11 +474,10 @@ impl NativeTool for CredentialRequestTool {
         };
 
         if secret_value.is_none() {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("Secret '{}' not found in vault for credential {}", cred.secret_name, args.credential_id),
-            })
-            .to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                format!("secret '{}' in vault for credential {}", cred.secret_name, args.credential_id),
+                Some("The credential record exists but the vault secret is missing. Re-register the credential.".to_string()),
+            ).to_error_response());
         }
 
         let method = args.method.as_deref().unwrap_or("GET").to_string();
@@ -653,11 +639,17 @@ impl NativeTool for CredentialRefreshTool {
             .unwrap_or("")
             .to_string();
         if credential_id.is_empty() {
-            return Ok(json!({"ok": false, "error": "credential_id is required"}).to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::validation(
+                "credential_id is required",
+                Some("Provide the credential_id of the credential to refresh.".to_string()),
+            ).to_error_response());
         }
 
         let Some(store) = gateway_store else {
-            return Ok(json!({"ok": false, "error": "GatewayStore not available"}).to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::resource(
+                "GatewayStore not available",
+                None::<String>,
+            ).to_error_response());
         };
 
         let cap_service = manifest.capabilities.iter().find_map(|c| {
@@ -670,46 +662,45 @@ impl NativeTool for CredentialRefreshTool {
         let allowed_services = match cap_service {
             Some(s) => s,
             None => {
-                return Ok(json!({"ok": false, "error": "CredentialAccess capability required"}).to_string());
+                return Ok(autonoetic_types::tool_error::ToolError::permission(
+                    "CredentialAccess capability required",
+                ).to_error_response());
             }
         };
 
         let cred = match store.get_credential(&credential_id)? {
             Some(c) => c,
             None => {
-                return Ok(json!({
-                    "ok": false,
-                    "error": format!("Credential '{}' not found", credential_id),
-                }).to_string());
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("credential '{}'", credential_id),
+                    Some("Use credential.check to list available credentials.".to_string()),
+                ).to_error_response());
             }
         };
 
         if !allowed_services.iter().any(|s| s == "*" || s == &cred.service) {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("CredentialAccess does not permit service '{}'", cred.service),
-            }).to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::permission(
+                format!("CredentialAccess does not permit service '{}'", cred.service),
+            ).to_error_response());
         }
 
         let refresh_url = match &cred.refresh_url {
             Some(u) => u.clone(),
             None => {
-                return Ok(json!({
-                    "ok": false,
-                    "error": "Credential has no refresh_url configured. Use credential.setup with refresh metadata to enable token refresh.",
-                    "credential_id": credential_id,
-                }).to_string());
+                return Ok(autonoetic_types::tool_error::ToolError::validation(
+                    "Credential has no refresh_url configured",
+                    Some("Use credential.setup with refresh metadata to enable token refresh.".to_string()),
+                ).to_error_response());
             }
         };
 
         let refresh_token_secret = match &cred.refresh_token_secret_name {
             Some(s) => s.clone(),
             None => {
-                return Ok(json!({
-                    "ok": false,
-                    "error": "Credential has no refresh_token_secret_name. Store a refresh token during credential.setup to enable refresh.",
-                    "credential_id": credential_id,
-                }).to_string());
+                return Ok(autonoetic_types::tool_error::ToolError::validation(
+                    "Credential has no refresh_token_secret_name",
+                    Some("Store a refresh token during credential.setup to enable refresh.".to_string()),
+                ).to_error_response());
             }
         };
 
@@ -724,11 +715,10 @@ impl NativeTool for CredentialRefreshTool {
         let refresh_token = match vault.get_secret(&refresh_token_secret) {
             Some(s) => s.expose_secret().to_string(),
             None => {
-                return Ok(json!({
-                    "ok": false,
-                    "error": format!("Refresh token '{}' not found in vault", refresh_token_secret),
-                    "credential_id": credential_id,
-                }).to_string());
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("refresh token '{}' in vault", refresh_token_secret),
+                    Some("The refresh token was not stored in the vault. Re-register the credential with a refresh token.".to_string()),
+                ).to_error_response());
             }
         };
 
@@ -771,12 +761,10 @@ impl NativeTool for CredentialRefreshTool {
         })?;
 
         if status >= 400 {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("Refresh endpoint returned HTTP {}", status),
-                "status": status,
-                "credential_id": credential_id,
-            }).to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::execution(
+                format!("Refresh endpoint returned HTTP {}", status),
+                Some("The refresh endpoint rejected the request. Check if the refresh token is still valid.".to_string()),
+            ).to_error_response());
         }
 
         let body_value: serde_json::Value =
@@ -785,11 +773,10 @@ impl NativeTool for CredentialRefreshTool {
         let new_access_token = match extract_json_path(&body_value, extract_access) {
             Some(t) => t,
             None => {
-                return Ok(json!({
-                    "ok": false,
-                    "error": format!("Could not extract access token from refresh response at path '{}'", extract_access),
-                    "credential_id": credential_id,
-                }).to_string());
+                return Ok(autonoetic_types::tool_error::ToolError::execution(
+                    format!("Could not extract access token from refresh response at path '{}'", extract_access),
+                    Some("Check the credential's refresh_extract_access_token configuration.".to_string()),
+                ).to_error_response());
             }
         };
 
@@ -1189,11 +1176,10 @@ impl NativeTool for CredentialSetupTool {
         let args: CredentialSetupArgs = serde_json::from_str(arguments_json)?;
 
         let Some(store) = gateway_store else {
-            return Ok(json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            })
-            .to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::resource(
+                "Gateway store not available",
+                None::<String>,
+            ).to_error_response());
         };
 
         // ------------------------------------------------------------------
@@ -1222,14 +1208,10 @@ impl NativeTool for CredentialSetupTool {
                     }
                 }
             }
-            return Ok(json!({
-                "ok": false,
-                "error": format!(
-                    "Approval reference '{}' not found, not yet approved, or credential not yet created",
-                    approval_ref
-                ),
-            })
-            .to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                format!("approval '{}' for credential setup", approval_ref),
+                Some("The approval reference may be invalid, not yet approved, or not for a credential setup flow.".to_string()),
+            ).to_error_response());
         }
 
         // ------------------------------------------------------------------
@@ -1238,11 +1220,10 @@ impl NativeTool for CredentialSetupTool {
         if let (Some(ref cred_id), Some(ref resume_vars)) = (&args.credential_id, &args.resume_vars)
         {
             let Some(state_json) = store.load_credential_setup_state(cred_id)? else {
-                return Ok(json!({
-                    "ok": false,
-                    "error": format!("No suspended setup state found for credential_id '{}'", cred_id),
-                })
-                .to_string());
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("suspended setup state for credential '{}'", cred_id),
+                    Some("No in-progress setup was found. Start a new credential.setup call.".to_string()),
+                ).to_error_response());
             };
             let mut state: CredentialSetupState = serde_json::from_str(&state_json)?;
 
@@ -1252,11 +1233,9 @@ impl NativeTool for CredentialSetupTool {
                     if services.iter().any(|s| s == "*" || s == &state.service))
             });
             if !service_allowed {
-                return Ok(json!({
-                    "ok": false,
-                    "error": format!("Credential setup denied for service: {}", state.service),
-                })
-                .to_string());
+                return Ok(autonoetic_types::tool_error::ToolError::permission(
+                    format!("Credential setup denied for service: {}", state.service),
+                ).to_error_response());
             }
 
             // Merge the user's answers and advance past the UserInput step.
@@ -1330,33 +1309,29 @@ impl NativeTool for CredentialSetupTool {
                     })?;
 
                 if !(200..300).contains(&(http_status as i32)) {
-                    return Ok(json!({
-                    "ok": false,
-                    "error": format!("Failed to fetch skill.md from {}: HTTP {}", url, http_status),
-                })
-                .to_string());
+                    return Ok(autonoetic_types::tool_error::ToolError::execution(
+                        format!("Failed to fetch skill.md from {}: HTTP {}", url, http_status),
+                        Some("Verify the skill_url is correct and accessible.".to_string()),
+                    ).to_error_response());
                 }
 
                 let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
                 let parsed = match matter.parse::<SkillMdFrontmatter>(&content) {
                     Ok(v) => v,
                     Err(e) => {
-                        return Ok(json!({
-                            "ok": false,
-                            "error": format!("Failed to parse skill.md content: {}", e),
-                        })
-                        .to_string());
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            format!("Failed to parse skill.md content: {}", e),
+                            Some("Ensure the skill.md has valid YAML frontmatter.".to_string()),
+                        ).to_error_response());
                     }
                 };
                 let fm = match parsed.data {
                     Some(d) => d,
                     None => {
-                        return Ok(json!({
-                            "ok": false,
-                            "error": "No YAML frontmatter found in skill.md",
-                            "skill_body": content,
-                        })
-                        .to_string());
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            "No YAML frontmatter found in skill.md",
+                            Some("The skill.md must start with a YAML frontmatter block (--- delimited).".to_string()),
+                        ).to_error_response());
                     }
                 };
 
@@ -1387,11 +1362,10 @@ impl NativeTool for CredentialSetupTool {
                     match raw.into_credential_step(&base_url) {
                         Ok(s) => steps.push(s),
                         Err(e) => {
-                            return Ok(json!({
-                                "ok": false,
-                                "error": format!("Invalid onboarding step in skill.md: {}", e),
-                            })
-                            .to_string());
+                            return Ok(autonoetic_types::tool_error::ToolError::validation(
+                                format!("Invalid onboarding step in skill.md: {}", e),
+                                Some("Fix the step definition in the skill.md onboarding section.".to_string()),
+                            ).to_error_response());
                         }
                     }
                 }
@@ -1402,11 +1376,10 @@ impl NativeTool for CredentialSetupTool {
                 let service = match args.service {
                     Some(s) => s,
                     None => {
-                        return Ok(json!({
-                            "ok": false,
-                            "error": "Either 'skill_url' or 'service' + 'steps' must be provided",
-                        })
-                        .to_string());
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            "Either 'skill_url' or 'service' + 'steps' must be provided",
+                            Some("Provide a skill_url or specify service and steps directly.".to_string()),
+                        ).to_error_response());
                     }
                 };
                 let steps = args.steps.unwrap_or_default();
@@ -1421,13 +1394,9 @@ impl NativeTool for CredentialSetupTool {
                 if services.iter().any(|s| s == "*" || s == &service))
         });
         if !service_allowed {
-            return Ok(json!({
-                "ok": false,
-                "error": format!("Credential setup denied for service: {}", service),
-                "approval_required": true,
-                "reason": format!("Setup for {} credentials requires approval", service),
-            })
-            .to_string());
+            return Ok(autonoetic_types::tool_error::ToolError::permission(
+                format!("Credential setup denied for service: {}", service),
+            ).to_error_response());
         }
 
         // Network policy pre-check for all ApiCall step URLs.
