@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 11;
+const SCHEMA_VERSION_LATEST: i64 = 12;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -489,6 +489,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_scheduled_jobs_v9(conn)?;
     apply_credential_setup_state_v10(conn)?;
     apply_agent_messages_v11(conn)?;
+    apply_credential_refresh_fields_v12(conn)?;
 
     Ok(())
 }
@@ -919,6 +920,44 @@ fn apply_agent_messages_v11(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![11_i64, "agent_messages", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_credential_refresh_fields_v12(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 12 {
+        return Ok(());
+    }
+
+    let cols = [
+        ("refresh_token_secret_name", "TEXT"),
+        ("refresh_url", "TEXT"),
+        ("refresh_method", "TEXT"),
+        ("refresh_headers", "TEXT"),
+        ("refresh_extract_access_token", "TEXT"),
+        ("refresh_extract_refresh_token", "TEXT"),
+        ("refresh_extract_expires_in", "TEXT"),
+    ];
+    for (col, ty) in &cols {
+        let has_col: bool = conn
+            .prepare(&format!("SELECT {col} FROM credentials LIMIT 0"))
+            .is_ok();
+        if !has_col {
+            conn.execute(
+                &format!("ALTER TABLE credentials ADD COLUMN {col} {ty}"),
+                [],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![12_i64, "credential_refresh_fields", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

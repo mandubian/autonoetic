@@ -241,7 +241,7 @@ pub struct CredentialRecord {
     pub credential_id: String,
     /// Service name (e.g. "github", "stripe", "slack").
     pub service: String,
-    /// Secret name/key in the vault.
+    /// Secret name/key in the vault for the access token.
     pub secret_name: String,
     /// Environment variable or header name to inject as.
     pub inject_as: Option<String>,
@@ -255,6 +255,27 @@ pub struct CredentialRecord {
     /// Hosts this credential is bound to (prevents exfiltration to unrelated hosts).
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// Secret name/key in the vault for the refresh token.
+    #[serde(default)]
+    pub refresh_token_secret_name: Option<String>,
+    /// URL to call for token refresh (e.g. "https://oauth.provider.com/token").
+    #[serde(default)]
+    pub refresh_url: Option<String>,
+    /// HTTP method for refresh (default: POST).
+    #[serde(default)]
+    pub refresh_method: Option<String>,
+    /// Static headers for the refresh request (e.g. Content-Type).
+    #[serde(default)]
+    pub refresh_headers: Option<std::collections::HashMap<String, String>>,
+    /// JSON path to extract the new access token from the refresh response (e.g. "$.access_token").
+    #[serde(default)]
+    pub refresh_extract_access_token: Option<String>,
+    /// JSON path to extract a new refresh token from the refresh response (if rotation).
+    #[serde(default)]
+    pub refresh_extract_refresh_token: Option<String>,
+    /// JSON path to extract the new expiry from the refresh response (e.g. "$.expires_in").
+    #[serde(default)]
+    pub refresh_extract_expires_in: Option<String>,
 }
 
 /// A step in the credential setup (automated registration) workflow.

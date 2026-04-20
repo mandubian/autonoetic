@@ -258,6 +258,13 @@ pub fn approve_request(
             expires_at,
             shared_with: vec![],
             allowed_hosts,
+            refresh_token_secret_name: None,
+            refresh_url: None,
+            refresh_method: None,
+            refresh_headers: None,
+            refresh_extract_access_token: None,
+            refresh_extract_refresh_token: None,
+            refresh_extract_expires_in: None,
         };
         store.upsert_credential(&cred)?;
 

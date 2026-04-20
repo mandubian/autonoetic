@@ -16,6 +16,7 @@ use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentManifest, CredentialRecord, CredentialSetupStep};
 use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -50,6 +51,7 @@ where
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(CredentialCheckTool));
     registry.register(Box::new(CredentialRequestTool));
+    registry.register(Box::new(CredentialRefreshTool));
     registry.register(Box::new(CredentialSetupTool));
 }
 
@@ -496,45 +498,76 @@ impl NativeTool for CredentialRequestTool {
         let url = args.url.clone();
         let headers = args.headers.clone();
         let body = args.body.clone();
-        let secret_value_clone = secret_value.clone();
+        let mut secret_value_clone = secret_value.clone();
+        let mut cred = cred.clone();
         let effective_inject = cred.inject_as.clone().or(args.inject_secret_as.clone());
+        let v_path = vault_path.clone();
+        let mut refreshed = false;
 
-        let (status, body) = blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()?;
+        let (status, body) = 'request: loop {
+            let method = method.clone();
+            let url = url.clone();
+            let headers = headers.clone();
+            let body = body.clone();
+            let svc = secret_value_clone.clone();
+            let eff = effective_inject.clone();
 
-            let mut req = client.request(reqwest::Method::from_bytes(method.as_bytes())?, &url);
+            let (status, body) = blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()?;
 
-            if let Some(headers) = &headers {
-                for (k, v) in headers {
-                    req = req.header(k, v);
+                let mut req = client.request(reqwest::Method::from_bytes(method.as_bytes())?, &url);
+
+                if let Some(headers) = &headers {
+                    for (k, v) in headers {
+                        req = req.header(k, v);
+                    }
+                }
+
+                if let Some(ref secret) = svc {
+                    let inject = eff
+                        .as_ref()
+                        .map(String::as_str)
+                        .unwrap_or("bearer");
+                    if inject == "bearer" || inject == "Authorization" {
+                        req = req.header("Authorization", format!("Bearer {}", secret));
+                    } else if inject.starts_with("header:") {
+                        req = req.header(&inject["header:".len()..], secret);
+                    } else {
+                        req = req.header("Authorization", format!("Bearer {}", secret));
+                    }
+                }
+
+                if let Some(ref b) = body {
+                    req = req.json(b);
+                }
+
+                let resp = req.send()?;
+                let status = resp.status().as_u16();
+                let body = resp.text()?;
+                Ok((status, body))
+            })?;
+
+            if status == 401 && !refreshed && cred.refresh_url.is_some() {
+                match try_auto_refresh(&cred, &store, &v_path) {
+                    Ok(updated_cred) => {
+                        cred = updated_cred;
+                        let mut vault = crate::Vault::load_from_file(&v_path)?;
+                        secret_value_clone = vault
+                            .get_secret(&cred.secret_name)
+                            .map(|s| s.expose_secret().to_string());
+                        refreshed = true;
+                        continue 'request;
+                    }
+                    Err(_) => {
+                        break 'request (status, body);
+                    }
                 }
             }
 
-            if let Some(ref secret) = secret_value_clone {
-                let inject = effective_inject
-                    .as_ref()
-                    .map(String::as_str)
-                    .unwrap_or("bearer");
-                if inject == "bearer" || inject == "Authorization" {
-                    req = req.header("Authorization", format!("Bearer {}", secret));
-                } else if inject.starts_with("header:") {
-                    req = req.header(&inject["header:".len()..], secret);
-                } else {
-                    req = req.header("Authorization", format!("Bearer {}", secret));
-                }
-            }
-
-            if let Some(ref b) = body {
-                req = req.json(b);
-            }
-
-            let resp = req.send()?;
-            let status = resp.status().as_u16();
-            let body = resp.text()?;
-            Ok((status, body))
-        })?;
+            break 'request (status, body);
+        };
 
         // Sanitize response: redact secret value to prevent leakage into LLM context
         let sanitized_body = if let Some(ref secret) = secret_value {
@@ -559,6 +592,337 @@ impl NativeTool for CredentialRequestTool {
 fn extract_host(url: &str) -> anyhow::Result<String> {
     let parsed = url::Url::parse(url)?;
     Ok(parsed.host_str().unwrap_or("").to_string())
+}
+
+// ---------------------------------------------------------------------------
+// credential.refresh
+// ---------------------------------------------------------------------------
+
+/// Refresh an expired or stale credential using a stored refresh token.
+///
+/// Sends a POST to `refresh_url` with the refresh token, extracts the new
+/// access token (and optionally a new refresh token + expiry) from the
+/// response, updates the vault and credential record.
+struct CredentialRefreshTool;
+
+impl NativeTool for CredentialRefreshTool {
+    fn name(&self) -> &'static str {
+        "credential.refresh"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "credential.refresh".to_string(),
+            description: "Refresh an expired credential using a stored refresh token. The gateway sends a request to the configured refresh_url, extracts the new access token from the response, and updates the vault. Returns the updated credential metadata without exposing secrets.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "credential_id": {
+                        "type": "string",
+                        "description": "The credential to refresh."
+                    }
+                },
+                "required": ["credential_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest.capabilities.iter().any(|c| {
+            matches!(c, Capability::CredentialAccess { .. })
+        })
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: serde_json::Value = serde_json::from_str(arguments_json)?;
+        let credential_id = args["credential_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if credential_id.is_empty() {
+            return Ok(json!({"ok": false, "error": "credential_id is required"}).to_string());
+        }
+
+        let Some(store) = gateway_store else {
+            return Ok(json!({"ok": false, "error": "GatewayStore not available"}).to_string());
+        };
+
+        let cap_service = manifest.capabilities.iter().find_map(|c| {
+            if let Capability::CredentialAccess { services } = c {
+                Some(services.clone())
+            } else {
+                None
+            }
+        });
+        let allowed_services = match cap_service {
+            Some(s) => s,
+            None => {
+                return Ok(json!({"ok": false, "error": "CredentialAccess capability required"}).to_string());
+            }
+        };
+
+        let cred = match store.get_credential(&credential_id)? {
+            Some(c) => c,
+            None => {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("Credential '{}' not found", credential_id),
+                }).to_string());
+            }
+        };
+
+        if !allowed_services.iter().any(|s| s == "*" || s == &cred.service) {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("CredentialAccess does not permit service '{}'", cred.service),
+            }).to_string());
+        }
+
+        let refresh_url = match &cred.refresh_url {
+            Some(u) => u.clone(),
+            None => {
+                return Ok(json!({
+                    "ok": false,
+                    "error": "Credential has no refresh_url configured. Use credential.setup with refresh metadata to enable token refresh.",
+                    "credential_id": credential_id,
+                }).to_string());
+            }
+        };
+
+        let refresh_token_secret = match &cred.refresh_token_secret_name {
+            Some(s) => s.clone(),
+            None => {
+                return Ok(json!({
+                    "ok": false,
+                    "error": "Credential has no refresh_token_secret_name. Store a refresh token during credential.setup to enable refresh.",
+                    "credential_id": credential_id,
+                }).to_string());
+            }
+        };
+
+        let v_dir = vault_dir(gateway_dir, agent_dir);
+        crate::vault::ensure_default_key(&v_dir)?;
+        let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| crate::vault::default_vault_path(&v_dir));
+
+        let mut vault = crate::Vault::load_from_file(&vault_path)?;
+        let refresh_token = match vault.get_secret(&refresh_token_secret) {
+            Some(s) => s.expose_secret().to_string(),
+            None => {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("Refresh token '{}' not found in vault", refresh_token_secret),
+                    "credential_id": credential_id,
+                }).to_string());
+            }
+        };
+
+        let extract_access = cred
+            .refresh_extract_access_token
+            .as_deref()
+            .unwrap_or("access_token");
+        let extract_refresh = cred.refresh_extract_refresh_token.as_deref();
+        let extract_expires = cred.refresh_extract_expires_in.as_deref();
+        let refresh_method = cred
+            .refresh_method
+            .as_deref()
+            .unwrap_or("POST")
+            .to_string();
+        let refresh_headers = cred.refresh_headers.clone();
+
+        let rt = refresh_token.clone();
+        let ru = refresh_url.clone();
+        let rm = refresh_method.clone();
+        let rh = refresh_headers.clone();
+        let (status, body) = blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
+            let mut req =
+                client.request(reqwest::Method::from_bytes(rm.as_bytes())?, &ru);
+            if let Some(headers) = &rh {
+                for (k, v) in headers {
+                    req = req.header(k, v);
+                }
+            }
+            req = req.json(&serde_json::json!({
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+            }));
+            let resp = req.send()?;
+            let status = resp.status().as_u16();
+            let body = resp.text()?;
+            Ok((status, body))
+        })?;
+
+        if status >= 400 {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("Refresh endpoint returned HTTP {}", status),
+                "status": status,
+                "credential_id": credential_id,
+            }).to_string());
+        }
+
+        let body_value: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_default();
+
+        let new_access_token = match extract_json_path(&body_value, extract_access) {
+            Some(t) => t,
+            None => {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("Could not extract access token from refresh response at path '{}'", extract_access),
+                    "credential_id": credential_id,
+                }).to_string());
+            }
+        };
+
+        vault.load_secret(&cred.secret_name, new_access_token);
+
+        if let (Some(rp), Some(new_rt)) = (extract_refresh, extract_refresh.and_then(|p| extract_json_path(&body_value, p))) {
+            if !rp.is_empty() {
+                vault.load_secret(&refresh_token_secret, new_rt);
+            }
+        }
+
+        let mut updated_cred = cred.clone();
+        if let Some(expires_path) = extract_expires {
+            if let Some(expires_in_str) = extract_json_path(&body_value, expires_path) {
+                if let Ok(secs) = expires_in_str.parse::<i64>() {
+                    let new_expiry = chrono::Utc::now()
+                        + chrono::Duration::seconds(secs);
+                    updated_cred.expires_at = Some(new_expiry.to_rfc3339());
+                }
+            }
+        }
+
+        vault.persist_to_file(&vault_path)?;
+        store.upsert_credential(&updated_cred)?;
+
+        Ok(json!({
+            "ok": true,
+            "credential_id": credential_id,
+            "refreshed": true,
+            "new_expires_at": updated_cred.expires_at,
+        }).to_string())
+    }
+}
+
+/// Attempt a token refresh for a credential with refresh metadata.
+/// Called internally when `credential.request` gets a 401.
+/// Returns Ok(updated_credential) on success, Err on failure.
+fn try_auto_refresh(
+    cred: &CredentialRecord,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    vault_path: &Path,
+) -> anyhow::Result<CredentialRecord> {
+    let refresh_url = cred
+        .refresh_url
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no refresh_url"))?;
+    let rt_secret_name = cred
+        .refresh_token_secret_name
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no refresh_token_secret_name"))?;
+
+    let mut vault = crate::Vault::load_from_file(vault_path)?;
+    let refresh_token = vault
+        .get_secret(rt_secret_name)
+        .ok_or_else(|| anyhow::anyhow!("refresh token not found in vault"))?
+        .expose_secret()
+        .to_string();
+
+    let extract_access = cred
+        .refresh_extract_access_token
+        .as_deref()
+        .unwrap_or("access_token");
+    let extract_refresh = cred.refresh_extract_refresh_token.as_deref();
+    let extract_expires = cred.refresh_extract_expires_in.as_deref();
+    let refresh_method = cred
+        .refresh_method
+        .as_deref()
+        .unwrap_or("POST")
+        .to_string();
+    let refresh_headers = cred.refresh_headers.clone();
+
+    let rt = refresh_token.clone();
+    let ru = refresh_url.clone();
+    let rm = refresh_method.clone();
+    let rh = refresh_headers.clone();
+    let (status, body) = blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        let mut req =
+            client.request(reqwest::Method::from_bytes(rm.as_bytes())?, &ru);
+        if let Some(headers) = &rh {
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+        req = req.json(&serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": rt,
+        }));
+        let resp = req.send()?;
+        Ok((resp.status().as_u16(), resp.text()?))
+    })?;
+
+    if status >= 400 {
+        anyhow::bail!("Refresh endpoint returned HTTP {}", status);
+    }
+
+    let body_value: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_default();
+
+    let new_access_token =
+        extract_json_path(&body_value, extract_access).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not extract access token at path '{}'",
+                extract_access
+            )
+        })?;
+
+    vault.load_secret(&cred.secret_name, new_access_token);
+
+    if let (Some(rp), Some(new_rt)) =
+        (extract_refresh, extract_refresh.and_then(|p| extract_json_path(&body_value, p)))
+    {
+        if !rp.is_empty() {
+            vault.load_secret(rt_secret_name, new_rt);
+        }
+    }
+
+    let mut updated_cred = cred.clone();
+    if let Some(expires_path) = extract_expires {
+        if let Some(expires_in_str) = extract_json_path(&body_value, expires_path) {
+            if let Ok(secs) = expires_in_str.parse::<i64>() {
+                let new_expiry =
+                    chrono::Utc::now() + chrono::Duration::seconds(secs);
+                updated_cred.expires_at = Some(new_expiry.to_rfc3339());
+            }
+        }
+    }
+
+    vault.persist_to_file(vault_path)?;
+    store.upsert_credential(&updated_cred)?;
+    Ok(updated_cred)
 }
 
 // ---------------------------------------------------------------------------
@@ -1421,6 +1785,13 @@ fn execute_steps(
             expires_at: expires_at.map(str::to_string),
             shared_with: vec![],
             allowed_hosts: allowed_hosts.to_vec(),
+            refresh_token_secret_name: None,
+            refresh_url: None,
+            refresh_method: None,
+            refresh_headers: None,
+            refresh_extract_access_token: None,
+            refresh_extract_refresh_token: None,
+            refresh_extract_expires_in: None,
         };
         store.upsert_credential(&cred)?;
     }
