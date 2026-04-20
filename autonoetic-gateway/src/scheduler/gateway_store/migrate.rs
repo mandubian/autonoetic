@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 12;
+const SCHEMA_VERSION_LATEST: i64 = 13;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -490,6 +490,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_credential_setup_state_v10(conn)?;
     apply_agent_messages_v11(conn)?;
     apply_credential_refresh_fields_v12(conn)?;
+    apply_admin_proposals_v13(conn)?;
 
     Ok(())
 }
@@ -958,6 +959,45 @@ fn apply_credential_refresh_fields_v12(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![12_i64, "credential_refresh_fields", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_admin_proposals_v13(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 13 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS admin_proposals (
+            proposal_id     TEXT PRIMARY KEY,
+            title           TEXT NOT NULL,
+            category        TEXT NOT NULL,
+            evidence_json   TEXT NOT NULL,
+            remediation     TEXT NOT NULL,
+            blast_radius    TEXT NOT NULL,
+            priority        TEXT NOT NULL DEFAULT 'medium',
+            created_by      TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'open',
+            triaged_by      TEXT,
+            triaged_at      TEXT,
+            decision_reason TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_admin_proposals_status ON admin_proposals(status);
+        CREATE INDEX IF NOT EXISTS idx_admin_proposals_category ON admin_proposals(category);
+        CREATE INDEX IF NOT EXISTS idx_admin_proposals_created_at ON admin_proposals(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![13_i64, "admin_proposals", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

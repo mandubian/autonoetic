@@ -116,6 +116,7 @@ pub fn tool_tier(tool_name: &str) -> ToolTier {
         n if n.starts_with("execution.") => ToolTier::Specialized,
         n if n.starts_with("promotion.") => ToolTier::Specialized,
         n if n.starts_with("agent.revision.") => ToolTier::Specialized,
+        n if n.starts_with("admin.proposal.") => ToolTier::Specialized,
         _ => ToolTier::Specialized,
     }
 }
