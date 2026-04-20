@@ -463,6 +463,7 @@ fn create_revision_from_files(
     skill_content: &[u8],
     health_report: Option<&crate::runtime::install_contract::BundleHealthReport>,
     script_entry: Option<&str>,
+    artifact_content_digest: Option<&str>,
 ) -> anyhow::Result<PersistedRevisionResult> {
     let expected_layers = bundle.map(expected_locked_layers).unwrap_or_default();
     let normalized_lock = normalize_runtime_lock(parsed_lock);
@@ -494,7 +495,9 @@ fn create_revision_from_files(
     let runtime_lock_hash = format!("sha256:{}", sha256_hex(&canonical_lock_bytes));
     let revision_digest_hex = compute_revision_content_digest_hex(file_map);
     let revision_id = format!("rev_sha256:{}", revision_digest_hex);
-    let content_digest = format!("sha256:{}", revision_digest_hex);
+    let content_digest = artifact_content_digest
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| format!("sha256:{}", revision_digest_hex));
 
     if let Some(existing_rev) = gateway_store.get_agent_revision(&revision_id)? {
         let _ = materialize_revision_directory(
@@ -814,6 +817,7 @@ impl NativeTool for AgentRevisionCreateTool {
             parsed_lock,
             &skill_content,
             None,
+            None,
             bundle_manifest.script_entry.as_deref(),
         )?;
         Ok(persisted.response.to_string())
@@ -1101,6 +1105,14 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             &args.instructions,
         )?;
         let skill_content = canonical_skill.as_bytes().to_vec();
+
+        let artifact_only_digest = if !file_map.is_empty() {
+            let digest_hex = compute_revision_content_digest_hex(&file_map);
+            Some(format!("sha256:{}", digest_hex))
+        } else {
+            None
+        };
+
         file_map.insert("SKILL.md".to_string(), skill_content.clone());
 
         let lock_rel_path = target_manifest.runtime.runtime_lock.clone();
@@ -1129,6 +1141,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             &skill_content,
             health_report.as_ref(),
             resolved_script_entry.as_deref(),
+            artifact_only_digest.as_deref(),
         )?;
 
         let mut response = persisted.response;
