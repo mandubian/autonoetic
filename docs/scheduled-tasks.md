@@ -121,3 +121,104 @@ Scheduled job execution uses the same workflow execution paths as `agent.spawn`.
 - **UTC only**: No timezone support beyond UTC
 - **No cross-agent mutation**: You cannot modify another agent's jobs
 - **No natural-language ambiguity resolution**: Ambiguous phrases are rejected with guidance
+
+---
+
+## System Agents
+
+System agents are **declared in config** and **auto-scheduled on gateway startup**. They provide an operator-managed way to run recurring background agents without requiring any agent to self-register its own cron job.
+
+### Declaration
+
+In `config.yaml`:
+
+```yaml
+system_agents:
+  - agent_id: evolution-orchestrator.default
+    schedule: "0 */4 * * *"
+    message: "Run evolution analysis cycle"
+    enabled: true
+
+  - agent_id: memory-curator.default
+    # no schedule = one-shot (not auto-scheduled, but registered for manual control)
+    enabled: true
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `agent_id` | Yes | Agent ID (must be bootstrapped and promoted) |
+| `schedule` | No | Cron expression. If absent, agent is registered but not auto-scheduled |
+| `message` | No | Prompt sent on each trigger. Defaults to `"Scheduled run for <agent_id>"` |
+| `enabled` | No | `true` (default) or `false`. Disabled agents are skipped during reconciliation |
+
+### Startup Reconciliation
+
+When the gateway starts, it reconciles each declared system agent:
+
+1. Checks if the agent exists (bootstrapped and promoted)
+2. Checks if an **active** cron job targeting that agent already exists
+3. If no active job and `schedule` is set → creates one (owned by `"system"`)
+4. If agent is disabled or missing → logs and skips
+
+Reconciliation is **idempotent** — safe to run multiple times. Existing jobs are never modified or duplicated.
+
+### CLI Control
+
+```bash
+# List declared system agents and their status
+autonoetic gateway system-agents list
+
+# JSON output
+autonoetic gateway system-agents list --json
+
+# Manually trigger reconciliation (create missing cron jobs)
+autonoetic gateway system-agents bootstrap
+
+# Manually trigger a specific agent run
+autonoetic gateway system-agents run evolution-orchestrator.default
+```
+
+Output for `list`:
+
+```
+AGENT_ID                                 SCHEDULE             ENABLED JOB        NEXT_RUN
+evolution-orchestrator.default           0 */4 * * *          true    sj-sys-abc 2026-04-20T08:00:00Z
+memory-curator.default                   (oneshot)            true    -          -
+```
+
+Bootstrap output:
+
+```
++ evolution-orchestrator.default Cron job created: 0 */4 * * * (next run: 2026-04-20T08:00:00Z)
+o memory-curator.default No schedule declared (one-shot agent)
+```
+
+Icons: `+` created, `=` already exists, `-` disabled, `!` missing agent, `o` no schedule, `x` failed.
+
+### How System Agent Jobs Differ from Agent-Created Jobs
+
+| Aspect | System Agent Job | Agent-Created Job |
+|--------|-----------------|-------------------|
+| **Owner** | `"system"` | Calling agent ID |
+| **Trigger** | Gateway startup reconciliation | `scheduler.cron.create` tool call |
+| **Creation** | Config-driven, idempotent | Runtime, agent-initiated |
+| **Control** | CLI `system-agents bootstrap` | `scheduler.cron.pause/resume/cancel` |
+| **Persistence** | Same `scheduled_jobs` table | Same `scheduled_jobs` table |
+
+Both use the same execution path — the background scheduler picks up due jobs, enqueues workflow tasks, and runs agents through the standard approval gates. System agent jobs have no special privileges.
+
+### Example: Evolution Pipeline
+
+```yaml
+system_agents:
+  - agent_id: evolution-orchestrator.default
+    schedule: "0 */4 * * *"
+    message: "Run evolution analysis cycle"
+```
+
+On gateway startup:
+1. Reconciliation finds no active cron for `evolution-orchestrator.default`
+2. Creates a system-owned cron job: `0 */4 * * *` (every 4 hours)
+3. Every 4 hours, the scheduler wakes the orchestrator
+4. Orchestrator spawns curator → steward → factory pipeline
+5. Results surface as admin proposals and knowledge entries
