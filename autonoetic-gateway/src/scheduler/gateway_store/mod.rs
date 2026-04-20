@@ -1,3 +1,4 @@
+pub mod admin_proposals;
 mod agent_registry;
 mod approvals;
 mod artifacts;

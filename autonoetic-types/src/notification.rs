@@ -37,6 +37,7 @@ pub enum NotificationType {
     ApprovalResolved,
     WorkflowJoinSatisfied,
     AgentMessage,
+    AdminProposal,
 }
 
 impl NotificationRecord {

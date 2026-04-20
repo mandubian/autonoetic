@@ -642,6 +642,8 @@ pub(crate) fn dependency_plan_from_lock(
     parse_dependency_plan(runtime, merged_packages).map(Some)
 }
 
+pub mod admin_proposal;
+
 pub mod agent;
 pub mod agent_revision;
 pub mod approval;
@@ -699,6 +701,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::promotion::register_tools(&mut registry);
     crate::runtime::tools::scheduler::register_tools(&mut registry);
     crate::runtime::tools::skill::register_tools(&mut registry);
+    crate::runtime::tools::admin_proposal::register_tools(&mut registry);
     registry
 }
 
