@@ -139,6 +139,9 @@ impl NativeTool for UserAskTool {
                 if has_active_children {
                     return Ok(serde_json::json!({
                         "ok": false,
+                        "error_type": "conflict",
+                        "message": "user.ask is not available while workflow tasks are active. Use workflow.wait to handle pending child tasks, or respond in prose for clarifications.",
+                        "repair_hint": "Call workflow.wait until child tasks complete, then retry user.ask.",
                         "error": "user.ask is not available while workflow tasks are active. Use workflow.wait to handle pending child tasks, or respond in prose for clarifications."
                     }).to_string());
                 }
@@ -159,6 +162,9 @@ impl NativeTool for UserAskTool {
             if !session_blocking_approvals.is_empty() {
                 return Ok(serde_json::json!({
                     "ok": false,
+                    "error_type": "conflict",
+                    "message": "user.ask is not available while approvals are pending. Use workflow.wait to handle pending approvals.",
+                    "repair_hint": "Resolve or wait for pending approvals, then retry user.ask.",
                     "error": "user.ask is not available while approvals are pending. Use workflow.wait to handle pending approvals."
                 }).to_string());
             }
@@ -275,6 +281,9 @@ impl NativeTool for UserAskTool {
         } else {
             return Ok(serde_json::json!({
                 "ok": false,
+                "error_type": "resource",
+                "message": "Gateway store not available; user.ask requires persistent store",
+                "repair_hint": "Configure GatewayStore for this runtime before calling user.ask.",
                 "error": "Gateway store not available; user.ask requires persistent store"
             })
             .to_string());
@@ -372,7 +381,9 @@ impl NativeTool for UserInteractionStatusTool {
                     response["answered_at"] = serde_json::Value::String(answered_at.clone());
                 }
                 if let Some(answer_text) = &interaction.answer_text {
-                    response["answer_text"] = serde_json::Value::String(answer_text.clone());
+                    response["answer_text"] = serde_json::Value::String(
+                        crate::log_redaction::redact_text_for_logs(answer_text),
+                    );
                 }
                 if let Some(answer_option_id) = &interaction.answer_option_id {
                     response["answer_option_id"] =
@@ -391,6 +402,9 @@ impl NativeTool for UserInteractionStatusTool {
             Err(e) => serde_json::to_string(&serde_json::json!({
                 "ok": false,
                 "interaction_id": args.interaction_id,
+                "error_type": "resource",
+                "message": e.to_string(),
+                "repair_hint": "Verify the interaction id and gateway store availability, then retry.",
                 "error": e.to_string()
             }))
             .map_err(Into::into),
