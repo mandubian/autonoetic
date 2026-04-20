@@ -54,6 +54,16 @@ impl ToolTierFilter {
         }
     }
 
+    /// Create a filter that allows Core + Workflow tiers and always includes
+    /// approval tools. Used when approvals are pending so the agent can still
+    /// check approval status but cannot launch new specialized operations.
+    pub fn core_and_workflow_with_approvals() -> Self {
+        Self {
+            allowed_tiers: vec![ToolTier::Core, ToolTier::Workflow],
+            always_include_approval_tools: true,
+        }
+    }
+
     /// Create a filter that allows all tiers (no filtering).
     pub fn all() -> Self {
         Self {
@@ -731,6 +741,19 @@ mod tests {
         assert!(!filter.allows("web.search"));
         assert!(filter.allows("approval.list"));
         assert!(filter.allows("approval.answer"));
+    }
+
+    #[test]
+    fn test_tool_tier_filter_core_and_workflow_with_approvals() {
+        let filter = ToolTierFilter::core_and_workflow_with_approvals();
+        assert!(filter.allows("content.write"));
+        assert!(filter.allows("sandbox.exec"));
+        assert!(filter.allows("agent.spawn"));
+        assert!(filter.allows("approval.status"));
+        assert!(filter.allows("workflow.state"));
+        assert!(!filter.allows("web.search"));
+        assert!(!filter.allows("promotion.record"));
+        assert!(!filter.allows("agent.revision.create"));
     }
 
     #[test]

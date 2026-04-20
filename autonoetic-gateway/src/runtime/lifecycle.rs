@@ -698,6 +698,20 @@ impl AgentExecutor {
             .count() as u64)
     }
 
+    fn has_pending_approvals(&self) -> bool {
+        let (Some(cfg), Some(session_id)) = (self.config.as_ref(), self.session_id.as_ref()) else {
+            return false;
+        };
+        let root = crate::runtime::content_store::root_session_id(session_id);
+        crate::scheduler::approval::pending_approval_requests_for_root(
+            cfg,
+            self.gateway_store.as_deref(),
+            root,
+        )
+        .map(|p| !p.is_empty())
+        .unwrap_or(false)
+    }
+
     fn pending_session_continue_request_id(
         &self,
         cfg: &GatewayConfig,
@@ -1242,25 +1256,21 @@ impl AgentExecutor {
             history.insert(0, Message::system(&system_instructions));
 
             let tools: Vec<ToolDefinition> = {
+                let pending_approvals = self.has_pending_approvals();
                 let tier_filter = determine_tool_tier_filter(
                     &self.manifest,
-                    self.workflow_id.as_deref(),
-                    self.task_id.as_deref(),
+                    self.session_id.as_deref(),
+                    pending_approvals,
                 );
                 let mut t: Vec<ToolDefinition> = mcp_runtime
                     .tool_definitions()?
                     .into_iter()
                     .filter(|def| policy.can_invoke_tool(&def.name))
-                    .filter(|def| {
-                        tier_filter
-                            .as_ref()
-                            .map(|f| f.allows(&def.name))
-                            .unwrap_or(true)
-                    })
+                    .filter(|def| tier_filter.allows(&def.name))
                     .collect();
                 t.extend(
                     self.registry
-                        .available_definitions_filtered(&self.manifest, tier_filter.as_ref()),
+                        .available_definitions_filtered(&self.manifest, Some(&tier_filter)),
                 );
                 let turn_index = self.turn_counter.saturating_sub(1);
                 let should_compress = self
@@ -2591,24 +2601,48 @@ fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-/// Determine the tool tier filter based on agent manifest configuration.
+/// Determine the tool tier filter based on agent manifest configuration and
+/// runtime workflow state.
 ///
-/// Agents can declare `allowed_tool_tiers` in their manifest to restrict
-/// which tool tiers are exposed to them. When not declared (empty list),
-/// all tiers are available and the DemoteTools enforcement strategy handles
-/// runtime tier reduction when the prompt budget is exceeded.
+/// Three inputs drive the filter:
+///
+/// 1. **Manifest-declared tiers**: agents can declare `allowed_tool_tiers` to
+///    permanently restrict their tool surface.
+/// 2. **Pending approvals**: when the session (or any session in the same root)
+///    has pending approvals, the tool surface is narrowed to Core + Workflow
+///    tiers with `always_include_approval_tools: true`. This prevents agents
+///    from launching new specialized operations (web search, revision creation,
+///    promotion) while waiting for human approval.
+/// 3. **Child session handoff**: child agent sessions (session_id contains `/`)
+///    get Core-only tools by default unless the parent explicitly requests more
+///    via manifest-declared tiers.
+///
+/// Manifest-declared tiers always take precedence over runtime inference — if an
+/// agent explicitly restricts itself, the restriction is honoured.
 fn determine_tool_tier_filter(
     manifest: &AgentManifest,
-    _workflow_id: Option<&str>,
-    _task_id: Option<&str>,
-) -> Option<crate::runtime::tools::ToolTierFilter> {
-    if manifest.allowed_tool_tiers.is_empty() {
-        return None;
+    session_id: Option<&str>,
+    has_pending_approvals: bool,
+) -> crate::runtime::tools::ToolTierFilter {
+    if !manifest.allowed_tool_tiers.is_empty() {
+        return crate::runtime::tools::ToolTierFilter {
+            allowed_tiers: manifest.allowed_tool_tiers.clone(),
+            always_include_approval_tools: true,
+        };
     }
-    Some(crate::runtime::tools::ToolTierFilter {
-        allowed_tiers: manifest.allowed_tool_tiers.clone(),
-        always_include_approval_tools: false,
-    })
+
+    if has_pending_approvals {
+        return crate::runtime::tools::ToolTierFilter::core_and_workflow_with_approvals();
+    }
+
+    let is_child = session_id
+        .map(|sid| sid.contains('/'))
+        .unwrap_or(false);
+    if is_child {
+        return crate::runtime::tools::ToolTierFilter::core_only();
+    }
+
+    crate::runtime::tools::ToolTierFilter::all()
 }
 
 /// Manifest/env first; if still unknown and provider is OpenRouter, use the public models API cache.
@@ -4365,5 +4399,99 @@ mod loop_guard_tests {
     #[test]
     fn test_tool_result_counts_as_progress_invalid_json() {
         assert!(!tool_result_counts_as_progress("not json"));
+    }
+}
+
+#[cfg(test)]
+mod tier_filter_tests {
+    use super::determine_tool_tier_filter;
+    use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration, ToolTier};
+
+    fn test_manifest() -> AgentManifest {
+        AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "test".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            response_contract: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+        }
+    }
+
+    #[test]
+    fn test_root_session_no_pending_approvals_allows_all() {
+        let manifest = test_manifest();
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false);
+        assert!(filter.allows("content.write"));
+        assert!(filter.allows("web.search"));
+        assert!(filter.allows("agent.spawn"));
+        assert!(filter.allows("promotion.record"));
+    }
+
+    #[test]
+    fn test_child_session_core_only_by_default() {
+        let manifest = test_manifest();
+        let filter = determine_tool_tier_filter(&manifest, Some("root/child-session"), false);
+        assert!(filter.allows("content.write"));
+        assert!(filter.allows("sandbox.exec"));
+        assert!(!filter.allows("web.search"));
+        assert!(!filter.allows("agent.spawn"));
+        assert!(!filter.allows("promotion.record"));
+    }
+
+    #[test]
+    fn test_pending_approvals_restricts_to_core_and_workflow() {
+        let manifest = test_manifest();
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), true);
+        assert!(filter.allows("content.write"));
+        assert!(filter.allows("sandbox.exec"));
+        assert!(filter.allows("agent.spawn"));
+        assert!(filter.allows("approval.status"));
+        assert!(filter.allows("workflow.state"));
+        assert!(!filter.allows("web.search"));
+        assert!(!filter.allows("promotion.record"));
+        assert!(!filter.allows("agent.revision.create"));
+    }
+
+    #[test]
+    fn test_manifest_declared_tiers_override_runtime_inference() {
+        let mut manifest = test_manifest();
+        manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
+        let filter = determine_tool_tier_filter(&manifest, Some("root/child"), true);
+        assert!(filter.allows("content.write"));
+        assert!(filter.allows("web.search"));
+        assert!(!filter.allows("agent.spawn"));
+        assert!(filter.allows("approval.status"));
+    }
+
+    #[test]
+    fn test_no_session_id_allows_all() {
+        let manifest = test_manifest();
+        let filter = determine_tool_tier_filter(&manifest, None, false);
+        assert!(filter.allows("web.search"));
     }
 }
