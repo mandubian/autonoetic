@@ -434,6 +434,7 @@ fn infer_trace_success(
 fn normalize_error_type(raw: &str) -> String {
     match raw {
         "execution" | "fatal" => "runtime".to_string(),
+        "quota" => "quota_exceeded".to_string(),
         _ => raw.to_string(),
     }
 }
@@ -448,7 +449,7 @@ fn infer_trace_error_type(
             ToolErrorType::Permission => "permission",
             ToolErrorType::Resource => "resource",
             ToolErrorType::Conflict => "conflict",
-            ToolErrorType::QuotaExceeded => "quota",
+            ToolErrorType::QuotaExceeded => "quota_exceeded",
             ToolErrorType::NotFound => "not_found",
             ToolErrorType::Timeout => "timeout",
             ToolErrorType::Execution | ToolErrorType::Fatal => "runtime",

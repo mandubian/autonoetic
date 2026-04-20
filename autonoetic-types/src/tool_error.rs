@@ -480,10 +480,11 @@ impl From<anyhow::Error> for ToolError {
                     .to_string()
             });
             Self::validation(msg, Some(repair_hint))
+        } else if msg_trimmed.contains("timeout") {
+            Self::timeout(msg, Some("The operation timed out. Retry with backoff."))
         } else if msg_trimmed.contains("not found")
             || msg_trimmed.contains("File not found")
             || msg_trimmed.contains("connection")
-            || msg_trimmed.contains("timeout")
         {
             Self::resource(msg, Some("Verify the resource exists or try again later."))
         } else if msg_trimmed.contains("corrupted")
@@ -546,6 +547,14 @@ mod tests {
         let anyhow_err = anyhow::anyhow!("id must not be empty");
         let err: ToolError = anyhow_err.into();
         assert_eq!(err.error_type, ToolErrorType::Validation);
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn test_timeout_classification_from_anyhow() {
+        let anyhow_err = anyhow::anyhow!("request timeout while contacting upstream service");
+        let err: ToolError = anyhow_err.into();
+        assert_eq!(err.error_type, ToolErrorType::Timeout);
         assert!(err.is_recoverable());
     }
 

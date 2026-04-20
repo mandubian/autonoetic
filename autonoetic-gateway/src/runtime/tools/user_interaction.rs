@@ -360,12 +360,12 @@ impl NativeTool for UserInteractionStatusTool {
 
     fn execute(
         &self,
-        _manifest: &AgentManifest,
+        manifest: &AgentManifest,
         _policy: &PolicyEngine,
         _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -389,6 +389,22 @@ impl NativeTool for UserInteractionStatusTool {
 
         match store.get_user_interaction(&args.interaction_id) {
             Ok(Some(interaction)) => {
+                let same_agent = interaction.agent_id == manifest.agent.id;
+                let same_root_scope = session_id
+                    .map(crate::runtime::content_store::root_session_id)
+                    .map(|root| root == interaction.root_session_id)
+                    .unwrap_or(false);
+                if !(same_agent || same_root_scope) {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "interaction_id": args.interaction_id,
+                        "message": "Access denied for user interaction status: interaction belongs to a different root session and agent.",
+                        "repair_hint": "Query status from the interaction owner agent session or from another session under the same root_session_id.",
+                    })
+                    .to_string());
+                }
+
                 let status = match &interaction.status {
                     UserInteractionStatus::Pending => "pending",
                     UserInteractionStatus::Answered => "answered",

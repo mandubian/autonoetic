@@ -122,6 +122,36 @@ fn sandbox_command_misuses_content_digest_as_path(command: &str) -> bool {
     false
 }
 
+/// True if `command` appears to use a content handle (`cnt_<8hex>`) as a sandbox path.
+/// Handles are stable content references for content.read, not filesystem paths.
+fn sandbox_command_misuses_content_handle_as_path(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut i = 0usize;
+    while i + 12 <= bytes.len() {
+        if &bytes[i..i + 4] == b"cnt_" {
+            let hex = &bytes[i + 4..i + 12];
+            if hex.iter().all(|b| b.is_ascii_hexdigit()) {
+                let prev_ok = if i == 0 {
+                    true
+                } else {
+                    matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/')
+                };
+                let next_ok = if i + 12 >= bytes.len() {
+                    true
+                } else {
+                    matches!(bytes[i + 12], b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/')
+                };
+                if prev_ok && next_ok {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 pub fn extract_artifact_source(gw_dir: &Path, artifact_id: &str) -> String {
     let mut artifact_code = String::new();
     if let Ok(store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
@@ -790,10 +820,26 @@ impl NativeTool for SandboxExecTool {
             }
         }
 
+        if let Some(artifact_id) = args.artifact_id.as_deref() {
+            if artifact_id.starts_with("impl_") {
+                return Ok(
+                    crate::runtime::tools::implicit_artifact_id_error(self.name(), artifact_id)
+                        .to_string(),
+                );
+            }
+        }
+
         if sandbox_command_misuses_content_digest_as_path(&effective_command) {
             anyhow::bail!(
                 "sandbox.exec: content digests (sha256:...) are not filesystem paths in the sandbox. \
 Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass artifact_id so artifact files are mounted under /tmp/."
+            );
+        }
+
+        if sandbox_command_misuses_content_handle_as_path(&effective_command) {
+            anyhow::bail!(
+                "sandbox.exec: content handles (cnt_...) are not filesystem paths in the sandbox. \
+Use content.read(cnt_...) to inspect content by handle, or use the path returned by content.write (`sandbox_path`, typically /tmp/<name>) when executing files."
             );
         }
 
@@ -2000,7 +2046,10 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
 
 #[cfg(test)]
 mod sandbox_digest_path_tests {
-    use super::sandbox_command_misuses_content_digest_as_path;
+    use super::{
+        sandbox_command_misuses_content_digest_as_path,
+        sandbox_command_misuses_content_handle_as_path,
+    };
 
     #[test]
     fn detects_sha256_hex_as_path_misuse() {
@@ -2016,6 +2065,23 @@ mod sandbox_digest_path_tests {
         ));
         assert!(!sandbox_command_misuses_content_digest_as_path(
             "echo sha256: not a digest"
+        ));
+    }
+
+    #[test]
+    fn detects_cnt_handle_path_misuse() {
+        assert!(sandbox_command_misuses_content_handle_as_path(
+            "python3 /tmp/cnt_deadbeef"
+        ));
+        assert!(sandbox_command_misuses_content_handle_as_path(
+            "cat cnt_deadbeef"
+        ));
+    }
+
+    #[test]
+    fn allows_normal_tmp_paths_without_cnt_pattern() {
+        assert!(!sandbox_command_misuses_content_handle_as_path(
+            "python3 /tmp/weather_agent.py"
         ));
     }
 }

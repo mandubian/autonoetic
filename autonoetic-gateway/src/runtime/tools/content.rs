@@ -233,9 +233,9 @@ impl NativeTool for ContentReadTool {
                             return Ok(serde_json::json!({
                                 "ok": false,
                                 "error_type": "resource",
+                                "repair_hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
                                 "error": "content_not_found",
                                 "message": format!("Content '{}' not found in session '{}'", input, sid),
-                                "hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
                                 "available_artifacts": hints
                             }).to_string());
                         }

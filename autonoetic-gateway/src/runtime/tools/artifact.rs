@@ -308,6 +308,13 @@ impl NativeTool for ArtifactInspectTool {
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
+        if args.artifact_id.starts_with("impl_") {
+            return Ok(
+                crate::runtime::tools::implicit_artifact_id_error(self.name(), &args.artifact_id)
+                    .to_string(),
+            );
+        }
+
         let Some(gw_dir) = gateway_dir else {
             anyhow::bail!("Artifact store requires gateway directory to be configured");
         };

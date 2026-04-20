@@ -128,22 +128,10 @@ impl NativeTool for ArtifactExecTool {
             .ok_or_else(|| anyhow::anyhow!("artifact.exec requires a gateway directory"))?;
 
         if args.artifact_id.starts_with("impl_") {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "validation",
-                "error": "invalid_artifact_id",
-                "message": format!(
-                    "'{}' is an implicit task artifact (a content record), not an executable artifact bundle. \
-                     artifact.exec only accepts art_... IDs produced by artifact.build.",
-                    args.artifact_id
-                ),
-                "repair_hint": format!(
-                    "Call content.read('{}') to inspect the implicit artifact JSON. \
-                     Pick an entry from content.artifacts[*].artifact_id and call artifact.exec with that art_... ID.",
-                    args.artifact_id
-                ),
-            })
-            .to_string());
+            return Ok(
+                crate::runtime::tools::implicit_artifact_id_error(self.name(), &args.artifact_id)
+                    .to_string(),
+            );
         }
 
         if let Some(ticket_id) = &args.deployment_ticket {

@@ -579,6 +579,19 @@ pub(crate) fn ensure_safe_credential_id_reference(credential_id: &str) -> anyhow
         id.len() <= 128,
         "credential_id is too long; expected a short credential reference"
     );
+    anyhow::ensure!(
+        id.starts_with("cred_"),
+        "credential_id must use canonical reference format and start with 'cred_'"
+    );
+    anyhow::ensure!(
+        id.len() > "cred_".len(),
+        "credential_id must include an identifier after 'cred_'"
+    );
+    anyhow::ensure!(
+        id.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.'),
+        "credential_id may only contain ASCII letters, digits, '_', '-' and '.'"
+    );
 
     let looks_like_secret = looks_like_secret_value(id);
 
@@ -588,6 +601,24 @@ pub(crate) fn ensure_safe_credential_id_reference(credential_id: &str) -> anyhow
     );
 
     Ok(())
+}
+
+pub(crate) fn implicit_artifact_id_error(tool_name: &str, artifact_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "error_type": "validation",
+        "error": "invalid_artifact_id",
+        "message": format!(
+            "'{}' is an implicit task artifact (a content record), not an executable artifact bundle. {} only accepts art_... IDs produced by artifact.build.",
+            artifact_id,
+            tool_name
+        ),
+        "repair_hint": format!(
+            "Call content.read('{}') to inspect the implicit artifact JSON. Pick an entry from content.artifacts[*].artifact_id (art_...) and retry {} with that explicit artifact ID.",
+            artifact_id,
+            tool_name
+        ),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -756,6 +787,14 @@ mod tests {
         assert!(filter.allows("agent.spawn"));
         assert!(!filter.allows("web.search"));
         assert!(!filter.allows("promotion.record"));
+    }
+
+    #[test]
+    fn credential_id_reference_requires_canonical_format() {
+        assert!(ensure_safe_credential_id_reference("cred_openweather_api").is_ok());
+        assert!(ensure_safe_credential_id_reference("openweather_api").is_err());
+        assert!(ensure_safe_credential_id_reference("cred_").is_err());
+        assert!(ensure_safe_credential_id_reference("cred_bad/value").is_err());
     }
 
     #[test]

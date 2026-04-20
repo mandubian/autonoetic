@@ -117,9 +117,13 @@ impl NativeTool for CredentialCheckTool {
             matches!(c, Capability::CredentialAccess { services } if services.iter().any(|s| s == "*" || s == &args.service))
         });
         if !service_allowed {
+            let message = format!("Credential access denied for service: {}", args.service);
             return Ok(json!({
                 "ok": false,
-                "error": format!("Credential access denied for service: {}", args.service),
+                "error_type": "permission",
+                "message": message,
+                "repair_hint": "Request CredentialAccess for this service or choose an authorized service.",
+                "error": message,
                 "approval_required": true,
                 "reason": format!("Access to {} credentials requires approval", args.service),
             })
@@ -261,6 +265,7 @@ impl NativeTool for CredentialRequestTool {
         _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: CredentialRequestArgs = serde_json::from_str(arguments_json)?;
+        crate::runtime::tools::ensure_safe_credential_id_reference(&args.credential_id)?;
 
         let Some(store) = gateway_store else {
             return Ok(autonoetic_types::tool_error::ToolError::resource(
@@ -282,9 +287,13 @@ impl NativeTool for CredentialRequestTool {
             matches!(c, Capability::CredentialAccess { services } if services.iter().any(|s| s == "*" || s == &cred.service))
         });
         if !service_allowed {
+            let message = format!("Credential access denied for service: {}", cred.service);
             return Ok(json!({
                 "ok": false,
-                "error": format!("Credential access denied for service: {}", cred.service),
+                "error_type": "permission",
+                "message": message,
+                "repair_hint": "Request CredentialAccess for this service or choose an authorized service.",
+                "error": message,
                 "approval_required": true,
                 "reason": format!("Access to {} credentials requires approval", cred.service),
             })
@@ -348,9 +357,13 @@ impl NativeTool for CredentialRequestTool {
         // Check network policy unless this exact request has been explicitly approved.
         if !policy.can_connect_net(&url_host) && !approval_validated {
             let Some(cfg) = _config else {
+                let message = format!("Network access denied for host: {}", url_host);
                 return Ok(json!({
                     "ok": false,
-                    "error": format!("Network access denied for host: {}", url_host),
+                    "error_type": "permission",
+                    "message": message,
+                    "repair_hint": "Request network approval for this host and retry with approval_ref.",
+                    "error": message,
                     "approval_required": true,
                     "reason": format!("HTTP request to {} requires approval", url_host),
                 })
@@ -400,14 +413,20 @@ impl NativeTool for CredentialRequestTool {
                 approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
             };
             store.create_approval(&req)?;
+            let message = format!(
+                "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
+                request_id
+            );
             return Ok(json!({
                 "ok": false,
+                "error_type": "permission",
+                "message": message,
+                "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
                 "error": format!("Network access denied for host: {}", url_host),
                 "approval_required": true,
                 "request_id": request_id,
                 "suspended": true,
                 "reason": format!("HTTP request to {} requires approval", url_host),
-                "message": format!("Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.", request_id),
                 "approval": {
                     "kind": "credential_request",
                     "summary": format!("Credential request to {}", url_host),
@@ -644,6 +663,7 @@ impl NativeTool for CredentialRefreshTool {
                 Some("Provide the credential_id of the credential to refresh.".to_string()),
             ).to_error_response());
         }
+        crate::runtime::tools::ensure_safe_credential_id_reference(&credential_id)?;
 
         let Some(store) = gateway_store else {
             return Ok(autonoetic_types::tool_error::ToolError::resource(
@@ -1282,9 +1302,13 @@ impl NativeTool for CredentialSetupTool {
                 // Policy-check the skill_url host.
                 let url_host = extract_host(url)?;
                 if url_host.is_empty() || !policy.can_connect_net(&url_host) {
+                    let message = format!("Network access denied for skill_url host: {}", url_host);
                     return Ok(json!({
                         "ok": false,
-                        "error": format!("Network access denied for skill_url host: {}", url_host),
+                        "error_type": "permission",
+                        "message": message,
+                        "repair_hint": "Request network approval for this host or use a skill_url on an allowed host.",
+                        "error": message,
                         "approval_required": true,
                         "reason": format!("Fetching skill.md from {} requires approval", url_host),
                     })
@@ -1404,12 +1428,13 @@ impl NativeTool for CredentialSetupTool {
             if let CredentialSetupStep::ApiCall { url, .. } = step {
                 let host = extract_host(url)?;
                 if host.is_empty() || !policy.can_connect_net(&host) {
+                    let denied_host = if host.is_empty() { "<empty>" } else { &host };
                     return Ok(json!({
                         "ok": false,
-                        "error": format!(
-                            "Network access denied for host: {}",
-                            if host.is_empty() { "<empty>" } else { &host }
-                        ),
+                        "error_type": "permission",
+                        "message": format!("Network access denied for host: {}", denied_host),
+                        "repair_hint": "Request network approval for this host or remove the blocked ApiCall step.",
+                        "error": format!("Network access denied for host: {}", denied_host),
                         "approval_required": true,
                         "reason": format!(
                             "API call to {} requires approval",
@@ -1437,6 +1462,7 @@ impl NativeTool for CredentialSetupTool {
                 uuid::Uuid::new_v4().to_string().replace('-', "")
             )
         });
+        crate::runtime::tools::ensure_safe_credential_id_reference(&credential_id)?;
 
         execute_steps(
             &steps,
@@ -1623,8 +1649,12 @@ fn execute_steps(
                 // Persist any secrets extracted so far.
                 vault.persist_to_file(vault_path)?;
 
+                let message = "credential.setup suspended for user input; call user.ask with the provided question, then resume with credential_id and resume_vars";
                 return Ok(json!({
                     "ok": false,
+                    "error_type": "conflict",
+                    "message": message,
+                    "repair_hint": "Ask the user the question, collect values for var_name, then call credential.setup with credential_id + resume_vars.",
                     "suspended_for_user_input": true,
                     "credential_id": credential_id,
                     "question": resolved_question,
@@ -1700,8 +1730,12 @@ fn execute_steps(
                             .and_then(|v| v.as_str().map(String::from))
                     })
                     .next();
+                let message = "credential.setup suspended pending human input for secret fields";
                 return Ok(json!({
                     "ok": false,
+                    "error_type": "permission",
+                    "message": message,
+                    "repair_hint": "Wait for approval or provide requested secret fields, then resume credential.setup.",
                     "suspended": true,
                     "approval_required": true,
                     "request_id": approval_request_id,
