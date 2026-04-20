@@ -172,6 +172,69 @@ api_key = os.environ.get("OPENWEATHER_API_KEY")
 
 The `artifact.prepare` tool eliminates the multi-suspend problem where execution first needs approval, then credential resolution, then re-approval. It does everything in a single pass: static analysis for remote access, credential verification, and a single approval request covering all domains + credential injection.
 
+## Token Refresh (OAuth / Expiring Credentials)
+
+When credentials have expiring access tokens (e.g. OAuth2), the gateway can automatically refresh them without human intervention.
+
+### How it works
+
+A `CredentialRecord` can carry **refresh metadata** — 7 optional fields that tell the gateway how to obtain a new access token when the current one expires:
+
+| Field | Purpose | Default |
+|-------|---------|---------|
+| `refresh_token_secret_name` | Vault key holding the refresh token | — |
+| `refresh_url` | OAuth token endpoint URL | — |
+| `refresh_method` | HTTP method for refresh request | `POST` |
+| `refresh_headers` | Static headers (e.g. `Content-Type`) | — |
+| `refresh_extract_access_token` | JSON path to extract new access token from response | `access_token` |
+| `refresh_extract_refresh_token` | JSON path to extract rotated refresh token | — |
+| `refresh_extract_expires_in` | JSON path to extract TTL in seconds | — |
+
+If `refresh_url` is `None`, the credential is considered non-refreshable.
+
+### credential.refresh (explicit)
+
+Agents can call `credential.refresh` to force a token refresh:
+
+```python
+result = sdk.tools.invoke("credential.refresh", {
+    "credential_id": "cred_oauth_github"
+})
+# → { "ok": true, "credential_id": "...", "refreshed": true, "new_expires_at": "..." }
+```
+
+The gateway:
+1. Reads the refresh token from the vault
+2. POSTs `{ "grant_type": "refresh_token", "refresh_token": "..." }` to `refresh_url`
+3. Extracts the new access token from the JSON response via `refresh_extract_access_token`
+4. If `refresh_extract_refresh_token` is set, extracts and stores the rotated refresh token
+5. If `refresh_extract_expires_in` is set, updates `expires_at` on the credential record
+6. Persists the updated vault and credential record
+
+### 401 Auto-Retry (implicit)
+
+When `credential.request` receives a **401 Unauthorized** response, the gateway automatically attempts a refresh before retrying the original request — provided the credential has `refresh_url` set and no prior refresh was attempted in the same call:
+
+```
+1. credential.request → HTTP request with current access token
+2. Server returns 401
+3. Gateway calls try_auto_refresh() internally
+4. On success: retries the original request with the new access token
+5. On failure: returns the 401 response to the agent
+```
+
+The auto-retry only fires once per `credential.request` call (guarded by a `refreshed` flag) to avoid infinite loops.
+
+### Configuring refresh during credential.setup
+
+Refresh metadata is typically set during `credential.setup` or via the CLI. For OAuth flows, the setup steps would capture both the access token and refresh token, storing the refresh metadata alongside the credential record.
+
+### Security
+
+- The refresh token is stored in the same encrypted vault as the access token
+- Refresh tokens are never exposed to the agent context — only the gateway reads and uses them
+- Refresh token rotation (extracting a new refresh token from the response) is supported but optional
+
 ## Vault Encryption
 
 Secrets are stored in an encrypted vault using AES-256-GCM with a random 96-bit nonce per entry.
@@ -275,7 +338,7 @@ capabilities:
 | File | Role |
 |------|------|
 | `autonoetic-gateway/src/vault.rs` | Vault (SecretString anti-leak, AES-256-GCM) |
-| `autonoetic-gateway/src/runtime/tools/credential.rs` | credential.check, credential.request, credential.setup |
+| `autonoetic-gateway/src/runtime/tools/credential.rs` | credential.check, credential.request, credential.setup, credential.refresh |
 | `autonoetic-gateway/src/runtime/tools/sandbox.rs` | sandbox.exec with `credential_env` injection |
 | `autonoetic-gateway/src/runtime/tools/artifact_exec.rs` | artifact.exec with `credential_env` injection |
 | `autonoetic-gateway/src/scheduler/gateway_store/credentials.rs` | Credential CRUD in SQLite |
