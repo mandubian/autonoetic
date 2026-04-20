@@ -140,7 +140,7 @@ impl NativeTool for ArtifactPrepareTool {
                 ),
                 "repair_hint": format!(
                     "Call content.read('{}') to inspect the implicit artifact JSON. \
-                     Look in 'content.artifacts' for the art_... ID built by the child session, \
+                     Look in 'content.artifacts[*].artifact_id' for art_... IDs built by the child session, \
                      then call artifact.prepare with that art_... ID instead.",
                     args.artifact_id
                 ),

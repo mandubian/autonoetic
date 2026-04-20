@@ -749,22 +749,41 @@ fn create_implicit_artifact(
 
     let named_outputs_count = named_outputs.len();
 
-    // Collect art_... artifacts built by the child session so the parent can pass
-    // the correct artifact_id to artifact.prepare / artifact.exec directly.
+    // Collect art_... artifacts built by the child session and expose enough
+    // metadata for agents to pick the right one without gateway-side heuristics.
     let artifact_store = crate::artifact_store::ArtifactStore::new(&gw_dir);
-    let built_artifacts: Vec<String> = artifact_store
+    let built_artifacts: Vec<serde_json::Value> = artifact_store
         .map(|store| {
-            store
+            let mut items: Vec<serde_json::Value> = store
                 .list()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|art_id| {
-                    store
-                        .inspect(art_id)
-                        .map(|bundle| bundle.builder_session_id == task.session_id)
-                        .unwrap_or(false)
+                .filter_map(|art_id| {
+                    let bundle = store.inspect(&art_id).ok()?;
+                    if bundle.builder_session_id != task.session_id {
+                        return None;
+                    }
+                    Some(serde_json::json!({
+                        "artifact_id": bundle.artifact_id,
+                        "kind": bundle.kind,
+                        "entrypoints": bundle.entrypoints,
+                        "file_count": bundle.files.len(),
+                        "created_at": bundle.created_at,
+                    }))
                 })
-                .collect()
+                .collect();
+            items.sort_by(|a, b| {
+                let aid = a
+                    .get("artifact_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let bid = b
+                    .get("artifact_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                aid.cmp(bid)
+            });
+            items
         })
         .unwrap_or_default();
 
@@ -782,7 +801,8 @@ fn create_implicit_artifact(
             // Named outputs from the child session — use name or ref with content.read
             "named_outputs": named_outputs,
             // Executable artifacts built in the child session via artifact.build.
-            // Use these art_... IDs with artifact.prepare / artifact.exec.
+            // Gateway intentionally does not choose one; agents decide using
+            // metadata such as kind/entrypoints/file_count.
             "artifacts": built_artifacts,
         },
     });
