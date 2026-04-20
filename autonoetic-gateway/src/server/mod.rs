@@ -61,6 +61,37 @@ impl GatewayServer {
             );
         }
 
+        // Reconcile system agents (create cron jobs if missing)
+        let reconcile_results = crate::scheduler::system_agents::reconcile_system_agents(
+            &self.config,
+            &gateway_store,
+        );
+        for r in &reconcile_results {
+            match r.action {
+                crate::scheduler::system_agents::ReconcileAction::Created => {
+                    tracing::info!(
+                        target: "system_agents",
+                        agent_id = %r.agent_id,
+                        "System agent cron job created: {}", r.message
+                    );
+                }
+                crate::scheduler::system_agents::ReconcileAction::Failed => {
+                    tracing::warn!(
+                        target: "system_agents",
+                        agent_id = %r.agent_id,
+                        "System agent reconciliation failed: {}", r.message
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "system_agents",
+                        agent_id = %r.agent_id,
+                        "System agent skipped: {}", r.message
+                    );
+                }
+            }
+        }
+
         let jsonrpc_router = Arc::new(crate::router::JsonRpcRouter::new(
             self.config.as_ref().clone(),
             Some(gateway_store.clone()),

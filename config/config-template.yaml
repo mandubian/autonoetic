@@ -333,3 +333,14 @@ llm_preset_mapping:
 #   recent_turns_to_keep: 3
 #   max_summary_tokens: 500
 #   min_turns_between_compression: 3
+
+# ── System Agents ─────────────────────────────────────────────────────
+# Declared background agents that the gateway reconciles on startup.
+# Each entry gets its cron job created automatically if missing.
+# Control manually: autonoetic gateway system-agents list|bootstrap|run
+#
+# system_agents:
+#   - agent_id: evolution-orchestrator.default
+#     schedule: "0 */4 * * *"
+#     message: "Run evolution analysis cycle"
+#     enabled: true
