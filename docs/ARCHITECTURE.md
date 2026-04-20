@@ -23,6 +23,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Human Escalation](#human-escalation)
 - [Scheduled Tasks](#scheduled-tasks)
 - [System Agents](#system-agents)
+- [Error Taxonomy](#error-taxonomy)
 - [Design Principles](#design-principles)
 
 ---
@@ -1084,6 +1085,51 @@ On startup, the gateway checks each declared agent:
 CLI control: `autonoetic gateway system-agents list|bootstrap|run <agent_id>`
 
 System agent jobs use the same `scheduled_jobs` table and execution path as agent-created jobs — no special privileges. See [Scheduled Tasks Guide](scheduled-tasks.md) for full documentation.
+
+---
+
+## Error Taxonomy
+
+Native tools return structured error responses using a consistent envelope. When a tool call fails, the gateway returns a `ToolError` JSON object:
+
+```json
+{
+  "ok": false,
+  "error_type": "validation",
+  "message": "schedule interval (5s) is below the minimum allowed (10s)",
+  "repair_hint": "Use a less frequent schedule."
+}
+```
+
+### Error Types
+
+| Error Type | Meaning | Agent Can Recover By |
+|------------|---------|---------------------|
+| `validation` | Malformed input, missing required field, policy denial | Fixing the request, adjusting parameters |
+| `permission` | Agent lacks required capability or scope | Requesting additional authorization, adjusting scope |
+| `resource` | Missing file, unavailable service, rate limit | Retrying with backoff, using an alternative |
+| `execution` | Tool ran but produced an unexpected result | Inspecting output, adjusting approach |
+| `conflict` | Duplicate entry, state conflict, concurrent modification | Resolving the conflict, retrying |
+| `quota_exceeded` | Budget exhausted, max attempts reached | Waiting, reducing usage, using alternative |
+| `not_found` | Requested resource does not exist | Creating it, using an alternative |
+| `timeout` | Operation exceeded its time limit | Retrying with backoff |
+| `fatal` | Corrupted state, invariant violation, unsafe condition | **Not recoverable** — session should abort |
+
+### LoopGuard Integration
+
+The LoopGuard uses `error_type` to distinguish recoverable from non-recoverable failures:
+
+- **Permission errors do NOT count against the tool failure budget** — the agent cannot fix them by retrying with different arguments, so counting them would unfairly exhaust the budget.
+- **Fatal errors** indicate genuine invariant violations and should trigger immediate session abort.
+- All other error types count normally against the per-tool failure budget (default: 5 failures).
+
+### Design Rule
+
+All native tools must return either:
+1. A success response (`ok: true`) with tool-specific data
+2. A `ToolError` envelope (`ok: false`) with `error_type`, `message`, and optional `repair_hint`
+
+Flow-control responses (e.g., `approval_required: true`, `suspended: true`) may use a custom JSON shape but should still include `error_type` when the response represents a failure condition.
 
 ---
 
