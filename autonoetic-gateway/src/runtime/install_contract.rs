@@ -217,7 +217,29 @@ pub fn render_skill_document(
     manifest: &AgentManifest,
     instructions: &str,
 ) -> anyhow::Result<String> {
-    let mut frontmatter = serde_yaml::to_string(manifest).map_err(|e| {
+    #[derive(serde::Serialize)]
+    struct MetadataWrapper<'a> {
+        autonoetic: &'a AgentManifest,
+    }
+    #[derive(serde::Serialize)]
+    struct SkillFrontmatter<'a> {
+        name: &'a str,
+        description: &'a str,
+        metadata: MetadataWrapper<'a>,
+    }
+
+    let name = if manifest.agent.name.is_empty() {
+        &manifest.agent.id
+    } else {
+        &manifest.agent.name
+    };
+    let wrapper = SkillFrontmatter {
+        name,
+        description: &manifest.agent.description,
+        metadata: MetadataWrapper { autonoetic: manifest },
+    };
+
+    let mut frontmatter = serde_yaml::to_string(&wrapper).map_err(|e| {
         anyhow::anyhow!("Failed to serialize canonical SKILL.md frontmatter: {}", e)
     })?;
     if let Some(stripped) = frontmatter.strip_prefix("---\n") {
@@ -1223,7 +1245,9 @@ artifacts: "not_a_sequence"
         };
         let rendered = render_skill_document(&manifest, "# Instructions").unwrap();
         assert!(rendered.starts_with("---\n"));
-        assert!(rendered.contains("agent:\n  id: roundtrip.agent"));
+        assert!(rendered.contains("name: Roundtrip Agent\n"), "missing top-level name, got:\n{rendered}");
+        assert!(rendered.contains("metadata:\n  autonoetic:\n"), "missing metadata.autonoetic wrapper, got:\n{rendered}");
+        assert!(rendered.contains("id: roundtrip.agent"), "missing agent id, got:\n{rendered}");
         assert!(rendered.contains("# Instructions"));
     }
 
