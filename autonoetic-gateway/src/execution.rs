@@ -3382,12 +3382,17 @@ async fn execute_script_in_sandbox(
         autonoetic_types::agent::ScriptInputMode::Stdin => entrypoint_relative,
     };
 
-    let mut runner = crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies(
+    // Always expose the raw message via AUTONOETIC_INPUT so script agents can
+    // read structured input through env var instead of argv / stdin parsing.
+    let autonoetic_env = vec![("AUTONOETIC_INPUT".to_string(), input_payload.to_string())];
+    let mut runner = crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies_and_env(
         driver,
         &agent_dir.to_string_lossy(),
         &shell_command,
         None,
         Some(&overrides),
+        &autonoetic_env,
+        None,
     )?;
 
     let _script_sandbox_guard = sandbox_kill.as_ref().and_then(|(reg, root)| {

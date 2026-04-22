@@ -154,6 +154,56 @@ import sys
 
 The gateway executes script agents directly (no interpreter prefix), so the shebang is mandatory. Scripts without a shebang will be rejected at install time.
 
+### Script Agent Input Convention
+
+The gateway always sets `AUTONOETIC_INPUT` env var with the raw delegation message before running a script. **Read from this env var — do NOT use `sys.argv` or `sys.stdin` for structured agent input.**
+
+When the caller sends JSON (e.g. `{"location":"Paris","date":"2026-05-01"}`), parse it directly:
+
+```python
+#!/usr/bin/env python3
+import os, json, sys
+
+raw = os.environ.get("AUTONOETIC_INPUT", "")
+try:
+    data = json.loads(raw)
+    location = data["location"]
+    date = data["date"]
+except (json.JSONDecodeError, KeyError):
+    print(f"Error: expected JSON input with 'location' and 'date'. Got: {raw!r}", file=sys.stderr)
+    sys.exit(1)
+```
+
+**Do NOT write `if len(sys.argv) < 3: ...` guards for agent-driven inputs.** Those fail because the gateway does not split free-text messages into separate argv tokens.
+
+If the script also needs to work standalone as a CLI tool, add an argv fallback AFTER the env-var path:
+
+```python
+raw = os.environ.get("AUTONOETIC_INPUT", "")
+if raw:
+    data = json.loads(raw)
+    location = data["location"]
+    date = data["date"]
+else:
+    # CLI fallback only
+    if len(sys.argv) < 3:
+        print("Usage: script.py <location> <date>", file=sys.stderr)
+        sys.exit(1)
+    location, date = sys.argv[1], sys.argv[2]
+```
+
+When writing a script agent that accepts structured inputs, always declare `io.accepts` in the install intent so callers format their message as JSON:
+
+```yaml
+io:
+  accepts:
+    type: object
+    required: [location, date]
+    properties:
+      location: {type: string}
+      date: {type: string, description: "YYYY-MM-DD"}
+```
+
 ### Workflow for Writing and Running Scripts
 
 ```json
