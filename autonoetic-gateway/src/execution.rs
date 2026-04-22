@@ -12,10 +12,11 @@ use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
+use crate::runtime::session_report::SessionReportWriter;
 use crate::scheduler::gateway_store::default_gateway_host_id;
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
 use autonoetic_types::background::{ScheduledAction, UserInteraction, UserInteractionStatus};
-use autonoetic_types::causal_chain::EntryStatus;
+use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
 use autonoetic_types::config::GatewayConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -795,19 +796,31 @@ impl GatewayExecutionService {
                     );
                 }
 
-                // Log script start to gateway causal chain
-                let gateway_logger = init_gateway_causal_logger(self.config.as_ref())?;
-                log_gateway_causal_event(
-                    &gateway_logger,
+                // Open session report for this script agent so it appears in
+                // session_overview.md and causal_events — the LLM fast path skips the
+                // full SessionTracer, so we wire it up manually here.
+                let gateway_dir = self.config.agents_dir.join(".gateway");
+                let mut report =
+                    SessionReportWriter::open(&gateway_dir, session_id, agent_id).ok();
+                if let Some(ref mut r) = report {
+                    let _ = r.start_session(message);
+                    let _ = r.record_tool_requested(
+                        "sandbox.exec",
+                        &format!("run {}", script_entry),
+                        None,
+                    );
+                }
+                script_causal_event(
+                    self.gateway_store.as_deref(),
                     agent_id,
                     session_id,
                     1,
-                    "script.started",
-                    EntryStatus::Success,
-                    Some(serde_json::json!({
+                    "started",
+                    "success",
+                    serde_json::json!({
                         "script_entry": script_entry,
                         "sandbox": loaded.manifest.runtime.sandbox
-                    })),
+                    }),
                 );
 
                 // Execute script directly in sandbox
@@ -827,32 +840,54 @@ impl GatewayExecutionService {
                 )
                 .await;
 
-                // Log script completion/failure
+                // Record completion/failure in session report and causal_events
                 match &script_result {
-                    Ok(result) => {
-                        log_gateway_causal_event(
-                            &gateway_logger,
+                    Ok(output) => {
+                        if let Some(ref mut r) = report {
+                            let result_json = serde_json::json!({
+                                "ok": true,
+                                "exit_code": 0,
+                                "stdout": &output[..output.len().min(512)],
+                            })
+                            .to_string();
+                            let _ = r.record_tool_completed(
+                                "sandbox.exec",
+                                &result_json,
+                                None,
+                                None,
+                                None,
+                            );
+                            let _ = r.finish_session("script_exec_complete", Some(output));
+                        }
+                        script_causal_event(
+                            self.gateway_store.as_deref(),
                             agent_id,
                             session_id,
                             2,
-                            "script.completed",
-                            EntryStatus::Success,
-                            Some(serde_json::json!({
-                                "result_len": result.len()
-                            })),
+                            "completed",
+                            "success",
+                            serde_json::json!({ "result_len": output.len() }),
                         );
                     }
                     Err(e) => {
-                        log_gateway_causal_event(
-                            &gateway_logger,
+                        if let Some(ref mut r) = report {
+                            let _ = r.record_execution_failure(
+                                "sandbox.exec",
+                                &e.to_string(),
+                                None,
+                                None,
+                                None,
+                            );
+                            let _ = r.finish_session("script_exec_failed", None);
+                        }
+                        script_causal_event(
+                            self.gateway_store.as_deref(),
                             agent_id,
                             session_id,
                             2,
-                            "script.failed",
-                            EntryStatus::Error,
-                            Some(serde_json::json!({
-                                "error": e.to_string()
-                            })),
+                            "failed",
+                            "error",
+                            serde_json::json!({ "error": e.to_string() }),
                         );
                     }
                 }
@@ -2193,6 +2228,26 @@ impl GatewayExecutionService {
                     interaction.interaction_id
                 );
             }
+            YieldReason::ApprovalRequired {
+                approval_request_id,
+            } => {
+                // The session was suspended for an approval gate after the user interaction was
+                // answered (e.g. max-turn limit tripped during the resume turn). The approval
+                // path owns the resume from here; skip silently so the scheduler does not spam
+                // logs retrying this interaction on every tick.
+                tracing::debug!(
+                    target: "scheduler",
+                    interaction_id = %interaction.interaction_id,
+                    session_id = %interaction.session_id,
+                    approval_request_id = %approval_request_id,
+                    "Skipping user-interaction resume: session is now waiting for approval"
+                );
+                return Err(anyhow::anyhow!(
+                    "session_waiting_for_approval:{}:{}",
+                    interaction.session_id,
+                    approval_request_id
+                ));
+            }
             other => {
                 anyhow::bail!(
                     "Latest checkpoint for session '{}' is not UserInputRequired (got {:?})",
@@ -2665,6 +2720,37 @@ pub fn log_gateway_causal_event(
     _payload: Option<serde_json::Value>,
 ) {
     // No-op: gateway causal chain events are now captured in gateway.db
+}
+
+/// Write a single `causal_events` row for script-agent fast-path execution.
+/// Called in place of the former no-op `log_gateway_causal_event` so that
+/// script agent runs are visible in `execution.search` and session_overview.
+fn script_causal_event(
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    agent_id: &str,
+    session_id: &str,
+    event_seq: u64,
+    action: &str,
+    status: &str,
+    payload: serde_json::Value,
+) {
+    let Some(store) = store else { return };
+    let _ = store.create_causal_event(&CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "script".to_string(),
+        action: action.to_string(),
+        status: status.to_string(),
+        target: None,
+        payload: Some(payload.to_string()),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: None,
+    });
 }
 
 /// [DEPRECATED] This function is no longer called as gateway causal chain events are now captured in gateway.db.
