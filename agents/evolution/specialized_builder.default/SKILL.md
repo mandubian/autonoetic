@@ -152,7 +152,7 @@ Activates the created revision.
 | `description` | required; gateway writes canonical metadata from this intent |
 | `instructions` | required; free-form markdown body provided by agent |
 | `capabilities` | declared capabilities for the agent |
-| `llm_config` | required when `execution_mode=reasoning` |
+| `llm_config` | required when `execution_mode=reasoning`; **OMIT entirely for `execution_mode=script`** |
 
 ### Key Rules:
 1. **`artifact_id` is required for code agents** — script agents and any agent with `CodeExecution`/`AgentSpawn` must have an artifact. Pure reasoning agents that only call existing tools do not need one.
@@ -221,7 +221,7 @@ For `execution_mode: "script"` on `agent.revision.create_from_intent`, you MUST 
   "capabilities": [...]
 }
 ```
-**Missing `script_entry` will cause install to fail!**
+**Missing `script_entry` will cause install to fail! Also: do NOT include `llm_config` for script agents — including it with a missing `model` field will cause install to fail.**
 
 ### Required: promotion_gate
 
