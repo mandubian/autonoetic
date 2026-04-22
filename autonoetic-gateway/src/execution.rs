@@ -2123,22 +2123,9 @@ impl GatewayExecutionService {
                 }
             }
 
-            // Check deadline after respawn completes (hard enforcement post-respawn).
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    attempt = attempt,
-                    "response.repair.exhausted: deadline reached after respawn"
-                );
-                return Err(violations_to_final_error(
-                    &violations,
-                    &result.session_id,
-                    true,
-                ));
-            }
-
             // Re-validate against the fresh state returned by respawn_from_checkpoint.
+            // Do this BEFORE the deadline check so a successful repair is never discarded
+            // just because the LLM took longer than validation_max_duration_ms to respond.
             violations = validate_spawn_response(&repaired, contract, Some(&gateway_dir));
             violations.extend(validate_session_evidence(
                 self.gateway_store.as_deref(),
@@ -2170,6 +2157,23 @@ impl GatewayExecutionService {
                 violation_count = violations.len(),
                 "response.repair.fail"
             );
+
+            // Deadline check: only fail here when violations *remain* after re-validation.
+            // Checking before re-validation would discard a successful repair whose LLM
+            // response took longer than validation_max_duration_ms.
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    attempt = attempt,
+                    "response.repair.exhausted: deadline reached after respawn"
+                );
+                return Err(violations_to_final_error(
+                    &violations,
+                    &result.session_id,
+                    true,
+                ));
+            }
         }
 
         tracing::warn!(

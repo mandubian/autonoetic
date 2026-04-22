@@ -50,7 +50,7 @@ metadata:
         - "BEGIN RSA PRIVATE KEY"
         - "-----BEGIN"
       validation_max_loops: 2
-      validation_max_duration_ms: 2000
+      validation_max_duration_ms: 60000
 ---
 # Evaluator
 
