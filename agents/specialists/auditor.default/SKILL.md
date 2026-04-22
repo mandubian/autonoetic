@@ -70,6 +70,28 @@ Set `auditor_pass: false` when any critical finding exists or security checklist
 
 **After completing your audit, call `promotion.record` with the `artifact_id` you reviewed.** Include the `artifact_id` in your summary. This is required for the install gate to verify your audit occurred. Record both pass and fail outcomes.
 
+Use this exact argument shape:
+
+```json
+{
+  "artifact_id": "art_xxxxxxxx",
+  "role": "auditor",
+  "pass": true,
+  "findings": [
+    {
+      "severity": "info",
+      "description": "...",
+      "evidence": "optional supporting evidence"
+    }
+  ],
+  "summary": "Artifact art_xxxxxxxx: audit summary"
+}
+```
+
+Mapping rule: `pass` must be the boolean equivalent of your audit decision (`auditor_pass`).
+
+Do NOT use alternate field names like `outcome`; `promotion.record` requires `role` and `pass`.
+
 ## Review Protocol
 
 1. **Security first**: secrets, privilege escalation, data leaks
