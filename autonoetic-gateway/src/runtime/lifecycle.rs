@@ -300,7 +300,7 @@ pub(crate) fn render_user_context_snippet(
             let compact = serde_json::to_string(&filtered).ok()?;
             // Bound to ~2000 chars (~500 tokens)
             let bounded = if compact.len() > 2000 {
-                format!("{}...", &compact[..2000])
+                format!("{}...", safe_prefix_by_bytes(&compact, 2000))
             } else {
                 compact
             };
@@ -2264,7 +2264,7 @@ impl AgentExecutor {
                                     format!("Turn {} ended", &turn_id[..turn_id.len().min(8)])
                                 } else {
                                     let truncated = if planner_intent.len() > 200 {
-                                        format!("{}…", &planner_intent[..200])
+                                        format!("{}…", safe_prefix_by_bytes(planner_intent, 200))
                                     } else {
                                         planner_intent.to_string()
                                     };
@@ -4018,7 +4018,7 @@ fn workflow_status_user_message_for_chat(summary: &str, planner_text_empty: bool
             if !body.is_empty() {
                 const MAX: usize = 1200;
                 let snippet = if body.len() > MAX {
-                    format!("{}…", &body[..MAX])
+                    format!("{}…", safe_prefix_by_bytes(body, MAX))
                 } else {
                     body.to_string()
                 };
@@ -4212,7 +4212,10 @@ pub fn extract_searchable_excerpt(messages: &[Message]) -> String {
             if total + line_len > MAX_CHARS {
                 let remaining = MAX_CHARS.saturating_sub(total);
                 if remaining > 0 {
-                    parts.push(line[..remaining].to_string());
+                    let prefix = safe_prefix_by_bytes(&line, remaining);
+                    if !prefix.is_empty() {
+                        parts.push(prefix.to_string());
+                    }
                 }
                 break;
             }
@@ -4221,6 +4224,14 @@ pub fn extract_searchable_excerpt(messages: &[Message]) -> String {
         }
     }
     parts.join("\n")
+}
+
+fn safe_prefix_by_bytes(s: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 #[cfg(test)]
@@ -4268,6 +4279,13 @@ mod history_persistence_tests {
         assert!(raw.contains("***REDACTED***"));
         assert!(!raw.contains("very-secret-value"));
         Ok(())
+    }
+
+    #[test]
+    fn extract_searchable_excerpt_handles_unicode_boundary_without_panic() {
+        let msg = Message::user(format!("{}{}", "x".repeat(7992), "─"));
+        let excerpt = extract_searchable_excerpt(&[msg]);
+        assert!(excerpt.len() <= 8000);
     }
 
     #[test]
