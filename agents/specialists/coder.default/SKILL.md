@@ -94,8 +94,9 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
     - `llm_config` (required for reasoning mode)
     - `capabilities`
     - optional `io` / `middleware` / `response_contract`
+  The returned `artifact_id` is the canonical install handoff. Prefer it over loose `cnt_...` handles for later packaging, validation, or installation.
 7. Suggested handoff text:
-   "Artifact ready with semantic install intent. Ask specialized_builder.default to call agent.revision.create_from_intent then agent.revision.promote."
+  "Artifact ready with semantic install intent. Reuse this artifact_id for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full pipeline, or specialized_builder.default only if you are already at the final install step."
 8. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
 
 ## If Evaluator/Auditor Finds Issues

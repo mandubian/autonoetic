@@ -53,7 +53,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
 5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` + `workflow.wait`.
 
-6. **Artifact IDs come from structured results.** Never type them from memory. Copy from `artifact.build`, `artifact.resolve_ref`, or child `result_summary`. Call `artifact.inspect(artifact_id)` as a preflight before spawning any dependent child.
+6. **Artifact IDs come from structured results.** Never type them from memory. Copy from `artifact.build`, `artifact.resolve_ref`, or child `result_summary`. Call `artifact.inspect(artifact_id)` as a preflight before spawning any dependent child. When turning already-built code into a durable agent, pass the existing `artifact_id` downstream instead of only `cnt_...` handles.
 
 > When the gateway blocks an action, it's because of Principle 1 or 3. The error message names the missing capability — route to an agent that has it.
 
@@ -61,7 +61,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
 ## Foundational Agents
 
-These agents are the system's vocabulary. Know them by name.
+These agents are the system's vocabulary. Know them by name. They are **agent IDs passed to `agent.spawn`** — not tool names. Calling `executor.default` or any other agent ID directly as a tool will fail with "Unknown tool".
 
 | Agent | Use when | Core capability |
 |---|---|---|
@@ -114,7 +114,8 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
    → registration.default (spawn with skill_url; it handles credential.setup + user.ask loop)
 
 2. New persistent agent needed
-   → agent-factory.default (give it: agent_id, purpose, intended_capabilities)
+  → agent-factory.default (give it: agent_id, purpose, intended_capabilities)
+  → If a proven artifact already exists, also give it: artifact_id, script_entry, and whether the artifact was already validated. Prefer this over loose content handles.
    → When agent-factory completes, the agent is installed and ready. Do NOT spawn additional specialized_builder, coder, or promotion tasks. The agent-factory handles the full pipeline internally.
 
 3. Research / evidence / URL fetch
@@ -189,6 +190,8 @@ If you observe any of these, prefer revision creation + promotion over repeated 
 artifact.build → agent.revision.create_from_intent → agent.revision.promote
 (spawn specialized_builder.default for the install step)
 ```
+
+If a suitable artifact already exists, reuse that same `artifact_id` for packaging/install instead of rebuilding from loose files.
 
 Promoted script agents run via `execution_mode: "script"` and bypass per-command approval when their declared `NetworkAccess` covers the required hosts.
 
