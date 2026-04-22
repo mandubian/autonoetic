@@ -292,3 +292,19 @@ For promotion-gate delegations, add:
 ```json
 { "promotion_role": "evaluator", "promotion_artifact_id": "art_xxx", "require_promotion_record": true }
 ```
+
+---
+
+## Delegating to Script Agents
+
+When calling a script agent (an agent installed with `execution_mode: "script"`), the `message` you pass to `agent.spawn` is delivered verbatim as the `AUTONOETIC_INPUT` env var inside the script. The script reads this env var, not `sys.argv`.
+
+**If the agent declares `io.accepts` with a JSON schema**, format your `message` as JSON matching that schema:
+
+```json
+agent.spawn("weather-retriever", message="{\"location\": \"Paris\", \"date\": \"2026-05-01\"}")
+```
+
+**If no `io.accepts` is declared**, pass the full task description as plain text — the script receives it as-is.
+
+Do NOT rely on the gateway splitting a free-text message into separate argv tokens — it does not.
