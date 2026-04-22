@@ -43,6 +43,7 @@ const CHAT_APPROVAL_FIELD_MAX_CHARS: usize = 16_384;
 
 /// Status bar preview of `latest_signal` (first line); main transcript shows full messages.
 const STATUS_BAR_EVENT_PREVIEW_CHARS: usize = 160;
+const RECONNECT_NOTICE_BASE_ATTEMPTS: u32 = 3;
 
 /// If `handle_chat` enables raw mode / alternate screen then exits early (missing env, I/O error,
 /// `run_loop` failure), the tty stays raw with echo off unless we restore it—keyboard input looks
@@ -1333,6 +1334,9 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         ))
     });
 
+    let gateway_log_dir = gateway_dir.join("logs");
+    let mut reconnect_attempts: u32 = 0;
+
     if let Some(ref store) = gateway_store {
         if let Ok(snapshot) = poll_session_snapshot(
             config.as_ref(),
@@ -1367,9 +1371,27 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     loop {
         // Connect
         let stream = match TcpStream::connect(&gateway_addr).await {
-            Ok(s) => s,
+            Ok(s) => {
+                reconnect_attempts = 0;
+                s
+            }
             Err(e) => {
+                reconnect_attempts = reconnect_attempts.saturating_add(1);
                 tracing::debug!(target: "chat", error = %e, "Gateway connection failed, reconnecting");
+                if !app.pending.is_empty()
+                    && (reconnect_attempts == RECONNECT_NOTICE_BASE_ATTEMPTS
+                        || reconnect_attempts % 10 == 0)
+                {
+                    app.add_message(
+                        MessageRole::System,
+                        format!(
+                            "Gateway is unreachable (attempt {}). {} pending request(s) may be stalled if the gateway crashed. Check logs under {} and restart with: autonoetic gateway start",
+                            reconnect_attempts,
+                            app.pending.len(),
+                            gateway_log_dir.display(),
+                        ),
+                    );
+                }
                 terminal.draw(|f| draw(f, &app))?;
 
                 let reconnect_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -1409,10 +1431,25 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             break; // User quit explicitly
         }
 
+        reconnect_attempts = reconnect_attempts.saturating_add(1);
+
         app.add_message(
             MessageRole::System,
             "Gateway disconnected, reconnecting in 3s...".to_string(),
         );
+        if !app.pending.is_empty()
+            && (reconnect_attempts == RECONNECT_NOTICE_BASE_ATTEMPTS
+                || reconnect_attempts % 10 == 0)
+        {
+            app.add_message(
+                MessageRole::System,
+                format!(
+                    "Connection dropped with {} pending request(s). If this repeats, inspect gateway logs under {} for panic traces.",
+                    app.pending.len(),
+                    gateway_log_dir.display(),
+                ),
+            );
+        }
         terminal.draw(|f| draw(f, &app))?;
 
         // Poll with short intervals so Ctrl+C is responsive during reconnect wait

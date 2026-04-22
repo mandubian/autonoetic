@@ -551,12 +551,23 @@ async fn resume_answered_standalone_interactions(
                 );
             }
             Err(e) => {
-                tracing::warn!(
-                    target: "scheduler",
-                    interaction_id = %interaction.interaction_id,
-                    error = %e,
-                    "Failed to resume standalone session"
-                );
+                let msg = e.to_string();
+                if msg.starts_with("session_waiting_for_approval:") {
+                    // Session moved to an ApprovalRequired checkpoint during the resume turn.
+                    // The approval path owns the next resume; stop retrying this interaction.
+                    tracing::debug!(
+                        target: "scheduler",
+                        interaction_id = %interaction.interaction_id,
+                        "Standalone interaction deferred: session is now waiting for approval"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "scheduler",
+                        interaction_id = %interaction.interaction_id,
+                        error = %e,
+                        "Failed to resume standalone session"
+                    );
+                }
             }
         }
     }

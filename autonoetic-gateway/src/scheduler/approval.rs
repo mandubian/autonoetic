@@ -486,20 +486,21 @@ fn resume_session_after_approval(
     decision: &ApprovalDecision,
     hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<()> {
-    // Resume for agent_install and sandbox_exec actions - both have a caller waiting
+    // Resume for actions that have a suspended session waiting at an ApprovalRequired checkpoint.
     let is_supported_action = matches!(
         &decision.action,
         autonoetic_types::background::ScheduledAction::AgentInstall { .. }
             | autonoetic_types::background::ScheduledAction::SandboxExec { .. }
             | autonoetic_types::background::ScheduledAction::SessionEscalate { .. }
+            | autonoetic_types::background::ScheduledAction::SessionContinue { .. }
     );
 
     if !is_supported_action {
-        tracing::warn!(
+        tracing::debug!(
             target: "approval",
             request_id = %decision.request_id,
-            action = ?std::mem::discriminant(&decision.action),
-            "Unsupported action type for auto-execute"
+            action = ?decision.action.kind(),
+            "No auto-resume needed for this action type"
         );
         return Ok(());
     }
@@ -578,6 +579,23 @@ fn resume_session_after_approval(
                 ApprovalStatus::Cancelled => {
                     format!("escalation_cancelled:{}:cancelled", decision.request_id)
                 }
+            };
+            (decision.agent_id.clone(), msg)
+        }
+        autonoetic_types::background::ScheduledAction::SessionContinue { .. } => {
+            let msg = match decision.status {
+                ApprovalStatus::Approved => format!(
+                    "session_continue_approved:{}:approved",
+                    decision.request_id
+                ),
+                ApprovalStatus::Rejected => format!(
+                    "session_continue_rejected:{}:rejected",
+                    decision.request_id
+                ),
+                ApprovalStatus::Cancelled => format!(
+                    "session_continue_cancelled:{}:cancelled",
+                    decision.request_id
+                ),
             };
             (decision.agent_id.clone(), msg)
         }
