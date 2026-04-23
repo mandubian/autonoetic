@@ -18,9 +18,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::common::{
     default_terminal_channel_id, default_terminal_sender_id, terminal_channel_envelope,
@@ -300,14 +301,37 @@ impl App {
         }
     }
 
-    fn content_line_count(&self) -> usize {
+    fn content_line_count(&self, content_width: u16) -> usize {
+        let content_width = content_width.max(1) as usize;
         let mut count = 0usize;
         for msg in &self.messages {
-            count = count.saturating_add(msg.content.lines().count());
+            let icon = match msg.role {
+                MessageRole::User => "> ",
+                MessageRole::Assistant => "🤖 ",
+                MessageRole::System => "ℹ ",
+                MessageRole::Signal => "🔔 ",
+                MessageRole::SignalLow => "  ",
+                MessageRole::AgentOutput => "📝 ",
+            };
+
+            for (i, text_line) in msg.content.lines().enumerate() {
+                let prefix = if i == 0 { icon } else { "  " };
+                count = count.saturating_add(wrapped_visual_line_count(
+                    prefix,
+                    text_line,
+                    content_width,
+                ));
+            }
             count = count.saturating_add(1);
         }
         if !self.pending.is_empty() {
-            count = count.saturating_add(1);
+            let pending_text = format!(
+                "{} Working... ({} pending, {}s)",
+                self.spinner(),
+                self.pending.len(),
+                self.oldest_secs()
+            );
+            count = count.saturating_add(wrapped_visual_line_count("", &pending_text, content_width));
         }
         count
     }
@@ -1139,6 +1163,7 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let p = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: false })
         .scroll((app.effective_scroll_offset() as u16, 0))
         .block(
             Block::default()
@@ -1146,6 +1171,22 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
     f.render_widget(p, area);
+}
+
+fn wrapped_visual_line_count(prefix: &str, text: &str, content_width: usize) -> usize {
+    if content_width == 0 {
+        return 0;
+    }
+
+    let prefix_width = UnicodeWidthStr::width(prefix).min(content_width.saturating_sub(1));
+    let available_width = content_width.saturating_sub(prefix_width).max(1);
+    let text_width = UnicodeWidthStr::width(text);
+
+    if text_width == 0 {
+        1
+    } else {
+        text_width.div_ceil(available_width)
+    }
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
@@ -1496,7 +1537,10 @@ async fn run_loop<B: ratatui::backend::Backend>(
         if needs_redraw {
             let area = terminal.size()?;
             let messages_height = area.height.saturating_sub(5) as usize;
-            app.last_max_scroll_offset = app.content_line_count().saturating_sub(messages_height);
+            let messages_content_width = area.width.saturating_sub(1);
+            app.last_max_scroll_offset = app
+                .content_line_count(messages_content_width)
+                .saturating_sub(messages_height);
             if app.follow_output {
                 app.scroll_offset = app.last_max_scroll_offset;
             } else {
