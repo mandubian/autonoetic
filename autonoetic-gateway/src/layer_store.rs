@@ -115,6 +115,7 @@ impl LayerStore {
         source_dir: &Path,
         name: &str,
         mount_path: &str,
+        approval_scope: Option<autonoetic_types::layer::LayerApprovalScope>,
     ) -> anyhow::Result<CapturedLayer> {
         let source_dir = source_dir.to_path_buf();
         let name = name.to_string();
@@ -180,10 +181,12 @@ impl LayerStore {
         // Create and persist manifest
         let manifest = LayerManifest {
             layer_id: layer_id.clone(),
+            name: name.clone(),
             digest: digest.clone(),
             file_count,
             size_bytes,
             created_at: chrono::Utc::now().to_rfc3339(),
+            approval_scope: approval_scope.clone(),
         };
         let manifest_path = layer_dir.join(MANIFEST_FILENAME);
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -212,6 +215,7 @@ impl LayerStore {
             digest,
             file_count,
             size_bytes,
+            approval_scope,
         })
     }
 
@@ -229,6 +233,7 @@ impl LayerStore {
             digest: manifest.digest,
             file_count: manifest.file_count,
             size_bytes: manifest.size_bytes,
+            approval_scope: manifest.approval_scope,
         })
     }
 
@@ -383,7 +388,7 @@ mod tests {
         fs::write(source.join("b.txt"), b"world").unwrap();
 
         let captured = store
-            .create_from_dir(&source, "test-deps", "/tmp/deps")
+            .create_from_dir(&source, "test-deps", "/tmp/deps", None)
             .unwrap();
 
         assert!(captured.layer_id.starts_with("layer_"));
@@ -414,8 +419,8 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("file.txt"), b"same content").unwrap();
 
-        let captured1 = store.create_from_dir(&source, "deps1", "/tmp/d1").unwrap();
-        let captured2 = store.create_from_dir(&source, "deps2", "/tmp/d2").unwrap();
+        let captured1 = store.create_from_dir(&source, "deps1", "/tmp/d1", None).unwrap();
+        let captured2 = store.create_from_dir(&source, "deps2", "/tmp/d2", None).unwrap();
 
         // Same content → same layer_id
         assert_eq!(captured1.layer_id, captured2.layer_id);
@@ -436,7 +441,7 @@ mod tests {
         fs::write(source.join("a.txt"), b"hello").unwrap();
         fs::write(source.join("b.txt"), b"world").unwrap();
 
-        let captured = store.create_from_dir(&source, "test", "/tmp/deps").unwrap();
+        let captured = store.create_from_dir(&source, "test", "/tmp/deps", None).unwrap();
 
         let extract_dir = temp.path().join("extract");
         fs::create_dir_all(&extract_dir).unwrap();
@@ -461,9 +466,7 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("file.txt"), b"content").unwrap();
 
-        let captured = store.create_from_dir(&source, "test", "/tmp/deps").unwrap();
-
-        // Tamper with the archive
+        let captured = store.create_from_dir(&source, "test", "/tmp/deps", None).unwrap();
         let archive_path = store
             .layers_dir
             .join(&captured.layer_id)
@@ -488,7 +491,7 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("a.txt"), b"content").unwrap();
 
-        let captured = store.create_from_dir(&source, "deps", "/tmp/deps").unwrap();
+        let captured = store.create_from_dir(&source, "deps", "/tmp/deps", None).unwrap();
 
         let artifact_layers = vec![ArtifactLayer {
             layer_id: captured.layer_id.clone(),

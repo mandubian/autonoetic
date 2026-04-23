@@ -49,7 +49,7 @@ fn test_artifact_build_with_layers() {
     .unwrap();
 
     let captured_layer = layer_store
-        .create_from_dir(&layer_dir, "python-deps", "/opt/venv")
+        .create_from_dir(&layer_dir, "python-deps", "/opt/venv", None)
         .unwrap();
 
     // Build artifact with layers
@@ -145,7 +145,7 @@ fn test_artifact_with_different_layers_has_different_id() {
     fs::create_dir_all(layer1_dir.join("lib/httpx")).unwrap();
     fs::write(layer1_dir.join("lib/httpx/__init__.py"), b"# httpx v1").unwrap();
     let captured1 = layer_store
-        .create_from_dir(&layer1_dir, "python-deps", "/opt/venv")
+        .create_from_dir(&layer1_dir, "python-deps", "/opt/venv", None)
         .unwrap();
 
     // Build artifact with layer 1
@@ -164,7 +164,7 @@ fn test_artifact_with_different_layers_has_different_id() {
     fs::create_dir_all(layer2_dir.join("lib/httpx")).unwrap();
     fs::write(layer2_dir.join("lib/httpx/__init__.py"), b"# httpx v2").unwrap();
     let captured2 = layer_store
-        .create_from_dir(&layer2_dir, "python-deps", "/opt/venv")
+        .create_from_dir(&layer2_dir, "python-deps", "/opt/venv", None)
         .unwrap();
 
     // Build artifact with layer 2

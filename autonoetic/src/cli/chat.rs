@@ -2112,6 +2112,22 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
             }
             v
         }
+        ScheduledAction::LayerMount { layers, command } => {
+            let mut v = vec![
+                "type: layer_mount".to_string(),
+                format!("  command: {}", clamp_chat_field(command)),
+                format!("  layers requiring approval: {}", layers.len()),
+            ];
+            for l in layers {
+                v.push(format!(
+                    "  - {} (source: {}) unapproved hosts: {}",
+                    clamp_chat_field(&l.name),
+                    clamp_chat_field(&l.source),
+                    l.unapproved_delta.join(", ")
+                ));
+            }
+            v
+        }
     }
 }
 
