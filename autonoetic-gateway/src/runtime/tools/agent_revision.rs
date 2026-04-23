@@ -383,6 +383,7 @@ fn expected_locked_layers(bundle: &ArtifactBundle) -> Vec<LockedLayerMount> {
             layer_id: layer.layer_id.clone(),
             digest: layer.digest.clone(),
             mount_path: layer.mount_path.clone(),
+            approval_scope: None,
         })
         .collect();
     layers.sort_by(|a, b| {
@@ -783,17 +784,19 @@ impl NativeTool for AgentRevisionCreateTool {
             }
 
             let (agent_deps, agent_arts) = parse_agent_owned_lock_sections_strict(lock_value)?;
-            let scaffolded = crate::runtime::install_contract::scaffold_runtime_lock(
+            let scaffolded = crate::runtime::install_contract::scaffold_runtime_lock_with_scopes(
                 Some(agent_deps),
                 Some(agent_arts),
                 &artifact_layers_from_bundle(&bundle),
+                Some(gateway_dir),
             )?;
             scaffolded
         } else {
-            crate::runtime::install_contract::scaffold_runtime_lock(
+            crate::runtime::install_contract::scaffold_runtime_lock_with_scopes(
                 None,
                 None,
                 &artifact_layers_from_bundle(&bundle),
+                Some(gateway_dir),
             )?
         };
 
@@ -1118,7 +1121,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         let lock_rel_path = target_manifest.runtime.runtime_lock.clone();
         validate_relative_agent_path(&lock_rel_path)?;
         let parsed_lock =
-            crate::runtime::install_contract::scaffold_runtime_lock(None, None, &artifact_layers)?;
+            crate::runtime::install_contract::scaffold_runtime_lock_with_scopes(None, None, &artifact_layers, Some(gateway_dir))?;
 
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),

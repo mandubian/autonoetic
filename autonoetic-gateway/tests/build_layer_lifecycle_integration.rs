@@ -62,7 +62,7 @@ if __name__ == "__main__":
     .unwrap();
 
     let captured_layer = layer_store
-        .create_from_dir(&venv_dir, "python-deps", "/opt/venv")
+        .create_from_dir(&venv_dir, "python-deps", "/opt/venv", None)
         .unwrap();
 
     println!(

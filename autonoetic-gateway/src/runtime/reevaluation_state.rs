@@ -132,6 +132,9 @@ pub fn execute_scheduled_action(
         ScheduledAction::SessionEscalate { .. } => anyhow::bail!(
             "SessionEscalate is not directly executable; it only gates session continuation by operator approval"
         ),
+        ScheduledAction::LayerMount { .. } => anyhow::bail!(
+            "LayerMount is not directly executable; it only gates layer mounting by operator approval"
+        ),
     }
 }
 
