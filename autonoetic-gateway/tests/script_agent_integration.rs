@@ -14,8 +14,8 @@ fn install_script_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::
         r#"#!/usr/bin/env python3
 import os
 import json
-input_data = os.environ.get("SCRIPT_INPUT", "")
-print(f"Echo: {input_data}")
+input_data = os.environ.get("AUTONOETIC_INPUT", "")
+print(json.dumps({"echo": input_data}))
 "#,
     )?;
 
@@ -87,7 +87,7 @@ async fn test_script_agent_execution_returns_stdout() -> anyhow::Result<()> {
         Ok(spawn_result) => {
             let reply = spawn_result.assistant_reply.expect("should have reply");
             assert!(
-                reply.contains("hello world") || reply.contains("Echo:"),
+                reply.contains("hello world"),
                 "reply should contain script output, got: {reply}"
             );
             tracing::info!(reply = %reply, "Script agent executed successfully");

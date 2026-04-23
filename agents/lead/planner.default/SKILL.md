@@ -295,16 +295,18 @@ For promotion-gate delegations, add:
 
 ---
 
-## Delegating to Script Agents
+## Delegating to Agents With Declared Input Schemas
 
-When calling a script agent (an agent installed with `execution_mode: "script"`), the `message` you pass to `agent.spawn` is delivered verbatim as the `AUTONOETIC_INPUT` env var inside the script. The script reads this env var, not `sys.argv`.
+Before you call `agent.spawn`, look the target up via `agent.list`. Each entry includes `io_accepts` (a JSON Schema describing the input the target expects) and `io_returns`. This applies to both reasoning and script agents — the mechanism is the same.
 
-**If the agent declares `io.accepts` with a JSON schema**, format your `message` as JSON matching that schema:
+**If `io_accepts` is `null`** — pass the raw task as `message`, same as you've always done.
 
-```json
-agent.spawn("weather-retriever", message="{\"location\": \"Paris\", \"date\": \"2026-05-01\"}")
-```
+**If `io_accepts` describes an object** — your `message` must be a JSON string whose parsed value matches that schema. Translating natural-language intent into the schema fields is *your* job. Example:
 
-**If no `io.accepts` is declared**, pass the full task description as plain text — the script receives it as-is.
+- User asks: `"weather in paris tomorrow"`
+- Target `io_accepts`: `{ "type": "object", "required": ["location", "date"], "properties": { "location": {"type": "string"}, "date": {"type": "string", "format": "date"} } }`
+- You spawn with: `message = "{\"location\": \"paris\", \"date\": \"<tomorrow-as-ISO>\"}"`
 
-Do NOT rely on the gateway splitting a free-text message into separate argv tokens — it does not.
+**On rejection** — when you get an input wrong, `agent.spawn` returns `{ "ok": false, "error": "schema_validation_failed", "expected_schema": ..., "fields_with_errors": [...], "hint": ... }`. Read `expected_schema`, fix your payload, retry. Do not give up after one mismatch — the gateway is telling you exactly what it needs.
+
+**Script-mode specifics** — script agents receive `message` verbatim via the `AUTONOETIC_INPUT` env var (and, when `script_input_mode: stdin`, also on stdin; when `args`, as `$1`). If the target declares `io_accepts`, the same JSON-shape rule above applies.

@@ -113,7 +113,7 @@ execution_mode: script
 script_entry: scripts/weather.py
 ```
 
-**Script input:** The script receives the ingress payload via the `SCRIPT_INPUT` environment variable.
+**Script input:** The script receives the ingress payload via the `AUTONOETIC_INPUT` environment variable (always set). When `script_input_mode: stdin` (default), the payload is also written to the script's stdin. When `script_input_mode: args`, the payload is passed as the first positional CLI argument ($1).
 
 **Script output:** stdout is captured and returned as the agent reply.
 
@@ -122,10 +122,16 @@ script_entry: scripts/weather.py
 import os
 import json
 
-input_data = os.environ.get("SCRIPT_INPUT", "")
+input_data = os.environ.get("AUTONOETIC_INPUT", "")
 # Process input and produce output
-print(f"Result: {input_data}")
+print(json.dumps({"result": input_data}))
 ```
+
+**Input schema contract:**
+- The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest. The gateway surfaces these through `agent.list` so callers can shape `message` correctly before calling `agent.spawn`.
+- When `io.accepts` is present, the gateway parses the caller's `message` and validates it against the schema. On mismatch, `agent.spawn` returns `{ "ok": false, "error": "schema_validation_failed", "expected_schema": ..., "fields_with_errors": [...], "hint": ... }` — the calling LLM reads this and retries with a corrected payload. Type coercion (default values, type defaults for required fields) is applied silently.
+- When `io.accepts` is absent, `message` is passed through unchanged. The script is responsible for parsing it.
+- The gateway does **not** invent a default schema: `create_from_intent` without an explicit `io` installs the agent with `io: None`.
 
 **When to use script mode:**
 - API data retrieval (weather, stock prices, status checks)

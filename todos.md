@@ -6,6 +6,16 @@ Memory and skills: injection / abuse checks
 count tokens and try to see if we can reduce the burden
 
 
+Schema enforcer recognizes only per-property `required: true`, not JSON-Schema
+object-level `required: [...]`. Fix `DeterministicCoercionEnforcer::enforce_impl`
+in autonoetic-types/src/schema_enforcement.rs so agent.spawn's repair loop
+triggers for standard schemas. While there: validate property types (currently
+`{"task": 123}` passes a string schema), flag unexpected extra fields against
+additionalProperties:false, and consider swapping in a real JSON-Schema crate.
+See review discussion in agent.rs `spawn_schema_tests` for the behaviors the
+helper is already designed to surface once the enforcer reports them.
+
+
 2026-03-26T00:04:09.657195Z  INFO spawn_agent_once{agent_id="specialized_builder.default" session_id="demo-session-1/specialized_builder.default-5c851875"}: autonoetic.llm: llm exchange agent_id=specialized_builder.default session_id=demo-session-1/specialized_builder.default-5c851875 model=minimax/minimax-m2.7 input_tokens=9659 output_tokens=491 input_context_pct=Some(4.7163086) context_window_tokens=Some(204800)
 2026-03-26T00:04:09.665264Z  INFO spawn_agent_once{agent_id="specialized_builder.default" session_id="demo-session-1/specialized_builder.default-5c851875"}: continuation: Turn suspended at approval boundary; continuation saved agent_id=specialized_builder.default session_id=demo-session-1/specialized_builder.default-5c851875 approval_request_id=apr-a554a84c
 2026-03-26T00:04:09.667212Z  WARN workflow: Failed to persist task completion status error=task 'wf-7dc5fdf4' not in workflow 'task-d5febbda' workflow_id=wf-7dc5fdf4 task_id=task-d5febbda

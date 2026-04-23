@@ -1156,6 +1156,92 @@ fn test_revision_create_from_intent_materializes_canonical_skill_and_lock() {
 }
 
 #[test]
+fn test_revision_create_from_intent_script_mode_without_io_leaves_io_none() {
+    // The gateway must not silently inject a default io schema when the author
+    // omits `io` for a script agent. The shape of the input is the author's call.
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_gateway::runtime::content_store::ContentStore;
+    use autonoetic_types::artifact::ArtifactKind;
+
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let session_id = "intent-script-session";
+
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+    // A minimal script as the bundled entrypoint.
+    let script = b"#!/usr/bin/env python3\nimport os\nprint(os.environ.get('AUTONOETIC_INPUT',''))\n";
+    let handle = content_store.write(script).unwrap();
+    content_store
+        .register_name(session_id, "scripts/echo.py", &handle)
+        .unwrap();
+    let bundle = artifact_store
+        .build_with_kind(
+            &["scripts/echo.py".to_string()],
+            Some(&["scripts/echo.py".to_string()]),
+            None,
+            ArtifactKind::AgentBundle,
+            session_id,
+        )
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["script.plain*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateFromIntentTool;
+    let args = json!({
+        "agent_id": "script.plain",
+        "artifact_id": bundle.artifact_id,
+        "instructions": "# Plain script agent\n\nEchoes AUTONOETIC_INPUT.",
+        "description": "Script agent with no declared io",
+        "capabilities": [],
+        "execution_mode": "script",
+        "script_entry": "scripts/echo.py",
+        // io intentionally omitted
+    });
+
+    let out = tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &args.to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["ok"], true, "create_from_intent should succeed: {parsed:?}");
+    let revision_id = parsed["revision_id"].as_str().unwrap();
+
+    let revision_dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join("script.plain")
+        .join(revision_id);
+    let skill_text = std::fs::read_to_string(revision_dir.join("SKILL.md")).unwrap();
+    let (parsed_manifest, _body) =
+        autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_text).unwrap();
+
+    assert!(
+        parsed_manifest.io.is_none(),
+        "script agent created without io must install with io=None; got {:?}",
+        parsed_manifest.io
+    );
+    assert!(matches!(
+        parsed_manifest.execution_mode,
+        autonoetic_types::agent::ExecutionMode::Script
+    ));
+}
+
+#[test]
 fn test_revision_create_accepts_agentskills_compatible_skill_bundle() {
     use autonoetic_gateway::artifact_store::ArtifactStore;
     use autonoetic_gateway::runtime::content_store::ContentStore;

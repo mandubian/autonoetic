@@ -516,10 +516,17 @@ script_entry: "scripts/main.py"  # Must exist and be executable
 ```
 
 **Script interface:**
-- Reads JSON from stdin
-- Writes JSON to stdout
-- Receives input via `SCRIPT_INPUT` env var
+- Receives input via `AUTONOETIC_INPUT` env var (always set, regardless of `script_input_mode`)
+- When `script_input_mode: stdin` (default), the payload is also written to stdin
+- When `script_input_mode: args`, the payload is passed as the first positional CLI argument ($1)
+- Writes JSON to stdout (must match `io.returns` schema if declared)
 - Has access to `AGENT_DIR` env var
+
+**Input schema contract:**
+- The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest to describe the input the script expects. The gateway exposes this schema through `agent.describe` so callers (including the planner) can translate natural-language intent into matching fields before calling `agent.spawn`.
+- When `io.accepts` is present, the gateway validates the caller's `message` at spawn time. On mismatch the call is rejected with a structured tool error that includes `expected_schema`, per-field errors, and a repair hint — the calling LLM reads this and retries with a corrected payload.
+- When `io.accepts` is absent, the `message` is passed through unchanged. The author is responsible for parsing it inside the script.
+- There is no auto-generated default schema; the shape of the input is entirely the author's choice.
 
 ### Reasoning Agent Requirements
 

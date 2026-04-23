@@ -745,7 +745,10 @@ impl GatewayExecutionService {
             let loaded =
                 repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?;
 
-            // Validate spawn input against target agent's accepts schema (informational only)
+            // Validate spawn input against target agent's accepts schema (observational).
+            // Hard enforcement + structured rejection happens earlier in the agent.spawn
+            // tool entry (runtime/tools/agent.rs). This second pass just records a causal
+            // breadcrumb for callers that bypassed the tool entry path.
             if let Some(ref io_schema) = loaded.manifest.io {
                 if let Some(ref accepts) = io_schema.accepts {
                     let validation = validate_against_schema(message, accepts);

@@ -864,7 +864,10 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                         "type": "array",
                         "description": "Each item is a tagged Capability object, e.g. {\"type\":\"NetworkAccess\",\"hosts\":[\"*\"]} (not scopes); {\"type\":\"ReadAccess\",\"scopes\":[\"*\"]}; or a string shorthand for simple caps: \"ReadAccess\", \"NetworkAccess\", \"CodeExecution\". AgentSpawn and BackgroundReevaluation must be full objects."
                     },
-                    "io": { "type": "object" },
+                    "io": {
+                        "type": "object",
+                        "description": "I/O schema contract. For script agents, declare accepts (input JSON schema) and returns (output JSON schema) so callers know how to format messages. Example: {\"accepts\":{\"type\":\"object\",\"required\":[\"task\"],\"properties\":{\"task\":{\"type\":\"string\"}}},\"returns\":{\"type\":\"object\"}}"
+                    },
                     "middleware": { "type": "object" },
                     "response_contract": { "type": "object" },
                     "base_revision_id": { "type": "string" },

@@ -154,12 +154,19 @@ impl NativeTool for AgentSpawnTool {
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
-        let args: SpawnAgentArgs = serde_json::from_str(arguments_json)
+        let mut args: SpawnAgentArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
         validate_agent_id(&args.agent_id)?;
         anyhow::ensure!(!args.message.trim().is_empty(), "message must not be empty");
 
-        // Schema enforcement hook
+        // Schema enforcement hook.
+        //
+        // The target agent's `io.accepts` describes the shape of `message` itself
+        // (the content the child will process) — not a wrapper of the spawn call.
+        // We parse `message` as JSON and enforce the schema against the parsed
+        // value. On mismatch we return a structured tool result (`ok: false`)
+        // containing `expected_schema`, per-field errors, and a repair hint so
+        // the calling LLM can re-map and retry.
         let default_enforcement_config = SchemaEnforcementConfig::default();
         let enforcement_config = config
             .map(|c| &c.schema_enforcement)
@@ -179,33 +186,29 @@ impl NativeTool for AgentSpawnTool {
                         {
                             if let Some(io) = &target_manifest.io {
                                 if let Some(accepts) = &io.accepts {
-                                    let enforcer = default_enforcer();
-                                    let payload = serde_json::json!({
-                                        "message": args.message,
-                                        "context": args.context,
-                                        "metadata": args.metadata,
-                                        "session_id": args.session_id,
-                                    });
-
-                                    match enforcer.enforce(&payload, accepts) {
-                                        EnforcementResult::Reject(details) => {
-                                            return Err(anyhow::anyhow!(
-                                                "Schema validation failed: {}. Hint: {}",
-                                                details.reason,
-                                                details.hint.unwrap_or_default()
-                                            ));
-                                        }
-                                        EnforcementResult::Coerced(details) => {
+                                    match enforce_spawn_message_schema(
+                                        &args.agent_id,
+                                        &args.message,
+                                        accepts,
+                                    ) {
+                                        SpawnSchemaOutcome::Pass => {}
+                                        SpawnSchemaOutcome::Coerced {
+                                            new_message,
+                                            transformations,
+                                        } => {
                                             if enforcement_config.audit {
                                                 tracing::info!(
                                                     target: "schema_enforcement",
                                                     agent_id = %args.agent_id,
-                                                    transformations = ?details.transformations,
+                                                    transformations = ?transformations,
                                                     "Schema enforcement: payload coerced"
                                                 );
                                             }
+                                            args.message = new_message;
                                         }
-                                        EnforcementResult::Pass => {}
+                                        SpawnSchemaOutcome::Reject(body) => {
+                                            return Ok(body);
+                                        }
                                     }
                                 }
                             }
@@ -769,7 +772,7 @@ impl NativeTool for AgentListTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Enumerate installed agents with their metadata. Returns a plain directory of agents — no semantic scoring. Use this to discover what agents are available before deciding which to spawn or what needs to be built.".to_string(),
+            description: "Enumerate installed agents with their metadata. Each entry includes agent_id, description, capabilities, execution_mode, script_input_mode (for script agents), and the io_accepts / io_returns JSON schemas when declared. Use io_accepts to shape the `message` you pass to agent.spawn: for targets that declare an object schema, emit `message` as a JSON string whose parsed value matches it. Returns a plain directory — no semantic scoring.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -864,11 +867,35 @@ impl NativeTool for AgentListTool {
                     autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
                     autonoetic_types::agent::ExecutionMode::Script => "script",
                 };
+                // Surface the I/O schema so callers (notably the planner) can map
+                // natural-language intent into the shape the target expects before
+                // calling agent.spawn.
+                let io_accepts = agent
+                    .manifest
+                    .io
+                    .as_ref()
+                    .and_then(|io| io.accepts.clone());
+                let io_returns = agent
+                    .manifest
+                    .io
+                    .as_ref()
+                    .and_then(|io| io.returns.clone());
+                let script_input_mode = matches!(
+                    agent.manifest.execution_mode,
+                    autonoetic_types::agent::ExecutionMode::Script
+                )
+                .then(|| match agent.manifest.script_input_mode {
+                    autonoetic_types::agent::ScriptInputMode::Stdin => "stdin",
+                    autonoetic_types::agent::ScriptInputMode::Args => "args",
+                });
                 serde_json::json!({
                     "agent_id": agent.id(),
                     "description": agent.manifest.agent.description,
                     "capabilities": cap_types,
                     "execution_mode": mode,
+                    "script_input_mode": script_input_mode,
+                    "io_accepts": io_accepts,
+                    "io_returns": io_returns,
                 })
             })
             .collect();
@@ -1077,4 +1104,174 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(AgentDiscoverTool));
     registry.register(Box::new(AgentListTool));
     registry.register(Box::new(AgentMessageTool));
+}
+
+/// Outcome of enforcing the target agent's `io.accepts` schema on a spawn message.
+pub(crate) enum SpawnSchemaOutcome {
+    /// Message matches the schema — proceed unchanged.
+    Pass,
+    /// The enforcer coerced the payload (filled defaults, etc.). The caller should
+    /// use `new_message` downstream instead of the original.
+    Coerced {
+        new_message: String,
+        transformations: Vec<autonoetic_types::schema_enforcement::Transformation>,
+    },
+    /// Message does not match the schema. `body` is a JSON string that should be
+    /// returned as the tool result so the calling LLM can read `expected_schema`,
+    /// `fields_with_errors`, and `hint` and repair.
+    Reject(String),
+}
+
+/// Validate (and optionally coerce) a spawn `message` against a target's `io.accepts`.
+///
+/// The schema describes the shape of `message` itself — the content the child will
+/// process. For object schemas we parse `message` as JSON and validate the parsed
+/// value; for string schemas we use `message` directly. Parse failures produce a
+/// structured rejection, not a bail.
+pub(crate) fn enforce_spawn_message_schema(
+    agent_id: &str,
+    message: &str,
+    accepts: &serde_json::Value,
+) -> SpawnSchemaOutcome {
+    let schema_top_type = accepts.get("type").and_then(|t| t.as_str());
+    let expects_string = schema_top_type == Some("string");
+
+    let payload: serde_json::Value = if expects_string {
+        serde_json::Value::String(message.to_string())
+    } else {
+        match serde_json::from_str::<serde_json::Value>(message) {
+            Ok(v) => v,
+            Err(parse_err) => {
+                return SpawnSchemaOutcome::Reject(
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "schema_validation_failed",
+                        "agent_id": agent_id,
+                        "reason": format!("message is not valid JSON: {}", parse_err),
+                        "expected_schema": accepts,
+                        "hint": "Target agent declares io.accepts. Send `message` as a JSON string whose parsed value matches expected_schema, then retry.",
+                    })
+                    .to_string(),
+                );
+            }
+        }
+    };
+
+    let enforcer = default_enforcer();
+    match enforcer.enforce(&payload, accepts) {
+        EnforcementResult::Pass => SpawnSchemaOutcome::Pass,
+        EnforcementResult::Coerced(details) => {
+            let new_message = if expects_string {
+                details
+                    .final_payload
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| message.to_string())
+            } else {
+                details.final_payload.to_string()
+            };
+            SpawnSchemaOutcome::Coerced {
+                new_message,
+                transformations: details.transformations,
+            }
+        }
+        EnforcementResult::Reject(details) => SpawnSchemaOutcome::Reject(
+            serde_json::json!({
+                "ok": false,
+                "error": "schema_validation_failed",
+                "agent_id": agent_id,
+                "reason": details.reason,
+                "expected_schema": accepts,
+                "fields_with_errors": details.fields_with_errors,
+                "hint": details.hint.unwrap_or_else(|| {
+                    "Re-map `message` to match expected_schema and retry.".to_string()
+                }),
+            })
+            .to_string(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod spawn_schema_tests {
+    use super::*;
+
+    fn object_schema_with_required() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["location", "date"],
+            "properties": {
+                "location": { "type": "string" },
+                "date":     { "type": "string" }
+            }
+        })
+    }
+
+    #[test]
+    fn pass_when_message_matches_object_schema() {
+        let schema = object_schema_with_required();
+        let message = r#"{"location":"paris","date":"2026-04-24"}"#;
+        let outcome = enforce_spawn_message_schema("weather", message, &schema);
+        assert!(matches!(outcome, SpawnSchemaOutcome::Pass));
+    }
+
+    #[test]
+    fn reject_plain_text_when_schema_expects_object() {
+        let schema = object_schema_with_required();
+        let outcome =
+            enforce_spawn_message_schema("weather", "weather in paris tomorrow", &schema);
+        let body = match outcome {
+            SpawnSchemaOutcome::Reject(b) => b,
+            _ => panic!("expected Reject, got other"),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"], "schema_validation_failed");
+        assert_eq!(parsed["agent_id"], "weather");
+        assert!(
+            parsed["expected_schema"].is_object(),
+            "expected_schema must be surfaced so caller can repair"
+        );
+        assert!(parsed["hint"].is_string());
+    }
+
+    #[test]
+    fn reject_body_is_parseable_and_surfaces_repair_fields() {
+        // Drive the enforcer into the error path via a per-property `required: true`
+        // flag with a non-defaultable type, which is what DeterministicCoercionEnforcer
+        // actually recognizes today.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "weird_field": { "type": "custom-type", "required": true }
+            }
+        });
+        let outcome = enforce_spawn_message_schema("target", r#"{}"#, &schema);
+        let body = match outcome {
+            SpawnSchemaOutcome::Reject(b) => b,
+            _ => panic!("expected Reject"),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"], "schema_validation_failed");
+        assert_eq!(parsed["agent_id"], "target");
+        let fields = parsed["fields_with_errors"]
+            .as_array()
+            .expect("fields_with_errors array present");
+        assert!(
+            fields
+                .iter()
+                .any(|f| f["field_path"].as_str() == Some("weird_field")),
+            "missing field should be reported; got: {fields:?}"
+        );
+        assert!(parsed["expected_schema"].is_object());
+        assert!(parsed["hint"].is_string());
+    }
+
+    #[test]
+    fn passthrough_when_schema_is_string_type() {
+        let schema = serde_json::json!({ "type": "string" });
+        let outcome = enforce_spawn_message_schema("x", "just some text", &schema);
+        assert!(matches!(outcome, SpawnSchemaOutcome::Pass));
+    }
 }
