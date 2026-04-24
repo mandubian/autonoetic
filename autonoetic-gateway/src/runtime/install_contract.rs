@@ -88,6 +88,17 @@ pub fn scaffold_runtime_lock(
     agent_artifacts: Option<Vec<LockedArtifact>>,
     artifact_layers: &[ArtifactLayer],
 ) -> anyhow::Result<RuntimeLock> {
+    scaffold_runtime_lock_with_scopes(agent_dependencies, agent_artifacts, artifact_layers, None)
+}
+
+/// Like `scaffold_runtime_lock` but also populates `approval_scope` on each layer
+/// by reading the layer manifests from the given gateway directory.
+pub fn scaffold_runtime_lock_with_scopes(
+    agent_dependencies: Option<Vec<LockedDependencySet>>,
+    agent_artifacts: Option<Vec<LockedArtifact>>,
+    artifact_layers: &[ArtifactLayer],
+    gateway_dir: Option<&std::path::Path>,
+) -> anyhow::Result<RuntimeLock> {
     Ok(RuntimeLock {
         gateway: LockedGateway {
             artifact: default_gateway_artifact(),
@@ -107,12 +118,42 @@ pub fn scaffold_runtime_lock(
         artifacts: agent_artifacts.unwrap_or_default(),
         layers: artifact_layers
             .iter()
-            .map(|l| LockedLayerMount {
-                layer_id: l.layer_id.clone(),
-                digest: l.digest.clone(),
-                mount_path: l.mount_path.clone(),
+            .map(|l| -> anyhow::Result<LockedLayerMount> {
+                let approval_scope = match gateway_dir {
+                    Some(gw_dir) => {
+                        let manifest_path = gw_dir
+                            .join("layers")
+                            .join(&l.layer_id)
+                            .join("manifest.json");
+                        let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to read layer manifest for layer '{}' at '{}': {}",
+                                l.layer_id,
+                                manifest_path.display(),
+                                e
+                            )
+                        })?;
+                        let manifest: autonoetic_types::layer::LayerManifest =
+                            serde_json::from_str(&content).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "failed to parse layer manifest for layer '{}' at '{}': {}",
+                                    l.layer_id,
+                                    manifest_path.display(),
+                                    e
+                                )
+                            })?;
+                        manifest.approval_scope
+                    }
+                    None => None,
+                };
+                Ok(LockedLayerMount {
+                    layer_id: l.layer_id.clone(),
+                    digest: l.digest.clone(),
+                    mount_path: l.mount_path.clone(),
+                    approval_scope,
+                })
             })
-            .collect(),
+            .collect::<anyhow::Result<Vec<_>>>()?,
     })
 }
 

@@ -10,8 +10,11 @@ use crate::runtime::tools::{
 };
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
 use autonoetic_types::agent::AgentManifest;
-use autonoetic_types::background::{ApprovalDecision, ApprovalRequest, ScheduledAction};
+use autonoetic_types::background::{
+    ApprovalDecision, ApprovalRequest, LayerMountScopeInfo, ScheduledAction,
+};
 use autonoetic_types::capability::Capability;
+use autonoetic_types::layer::LayerApprovalScope;
 use autonoetic_types::runtime_lock::LockedLayerMount;
 use autonoetic_types::tool_error::tagged;
 use secrecy::ExposeSecret;
@@ -450,6 +453,122 @@ pub fn approved_requests_cover_targets(
     })
 }
 
+fn layer_mount_approval_covers_scope_issues(
+    approved_layers: &[LayerMountScopeInfo],
+    current_issues: &[LayerMountScopeInfo],
+) -> bool {
+    current_issues.iter().all(|issue| {
+        approved_layers.iter().any(|approved| {
+            approved.layer_id == issue.layer_id
+                && approved.digest == issue.digest
+                && approved.mount_path == issue.mount_path
+                && approved.source == issue.source
+                && issue
+                    .build_time_approved_hosts
+                    .iter()
+                    .all(|host| approved.build_time_approved_hosts.contains(host))
+                && issue
+                    .unapproved_delta
+                    .iter()
+                    .all(|host| approved.unapproved_delta.contains(host))
+        })
+    })
+}
+
+/// Reads the approval scope (and human-readable name) for a layer from its manifest on disk.
+/// Returns `(scope, name)` where `name` is the friendly layer name stored at capture time.
+fn load_layer_manifest_info(
+    gateway_dir: &Path,
+    layer_id: &str,
+) -> anyhow::Result<(Option<LayerApprovalScope>, String)> {
+    let manifest_path = gateway_dir
+        .join("layers")
+        .join(layer_id)
+        .join("manifest.json");
+    let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read layer manifest for layer '{}' at '{}': {}",
+            layer_id,
+            manifest_path.display(),
+            e
+        )
+    })?;
+    let manifest: autonoetic_types::layer::LayerManifest =
+        serde_json::from_str(&content).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse layer manifest for layer '{}' at '{}': {}",
+                layer_id,
+                manifest_path.display(),
+                e
+            )
+        })?;
+    let name = if manifest.name.is_empty() {
+        layer_id.to_string()
+    } else {
+        manifest.name
+    };
+    Ok((manifest.approval_scope, name))
+}
+
+/// Information about a single layer needed for scope checking.
+/// Captures immutable layer identity plus caller-provided context (name, source).
+struct LayerScopeCheckInfo {
+    layer_id: String,
+    /// Caller-provided name (from artifact bundle or same as layer_id for runtime.lock)
+    name: String,
+    mount_path: String,
+    digest: String,
+    /// Where this layer is used: "artifact:<id>" or "runtime.lock"
+    source: String,
+}
+
+/// For each layer, returns a `LayerMountScopeInfo` if the layer's build-time approved
+/// hosts are not fully covered by `session_grants`.
+/// Layers without an `approval_scope` (legacy or network-free) are skipped.
+fn collect_layer_scope_issues(
+    layers: &[LayerScopeCheckInfo],
+    gateway_dir: &Path,
+    session_grants: &[String],
+) -> anyhow::Result<Vec<LayerMountScopeInfo>> {
+    let granted: std::collections::HashSet<&str> =
+        session_grants.iter().map(|s| s.as_str()).collect();
+    let mut issues = Vec::new();
+    for layer_info in layers {
+        let (scope_opt, manifest_name) =
+            load_layer_manifest_info(gateway_dir, &layer_info.layer_id)?;
+        let Some(scope) = scope_opt else {
+            continue;
+        };
+        if scope.approved_hosts.is_empty() {
+            continue;
+        }
+        let unapproved: Vec<String> = scope
+            .approved_hosts
+            .iter()
+            .filter(|h| !granted.contains(h.as_str()))
+            .cloned()
+            .collect();
+        if !unapproved.is_empty() {
+            // Prefer the manifest name (captured at build time) over the caller-provided name.
+            let display_name = if manifest_name != layer_info.layer_id {
+                manifest_name
+            } else {
+                layer_info.name.clone()
+            };
+            issues.push(LayerMountScopeInfo {
+                layer_id: layer_info.layer_id.clone(),
+                digest: layer_info.digest.clone(),
+                name: display_name,
+                mount_path: layer_info.mount_path.clone(),
+                build_time_approved_hosts: scope.approved_hosts.clone(),
+                unapproved_delta: unapproved,
+                source: layer_info.source.clone(),
+            });
+        }
+    }
+    Ok(issues)
+}
+
 impl NativeTool for SandboxExecTool {
     fn name(&self) -> &'static str {
         "sandbox.exec"
@@ -543,6 +662,8 @@ impl NativeTool for SandboxExecTool {
         );
 
         let mut approval_validated_for_command = false;
+        let mut layer_mount_approved = false;
+        let mut approved_layer_mount_layers: Option<Vec<LayerMountScopeInfo>> = None;
         let mut effective_command = args.command.clone();
         if let Some(approval_ref) = args.approval_ref.as_ref() {
             if let Some(store) = &gateway_store {
@@ -621,9 +742,34 @@ impl NativeTool for SandboxExecTool {
                                 }
                             }
                         }
+                        ScheduledAction::LayerMount {
+                            command: approved_cmd,
+                            layers,
+                        } => {
+                            // LayerMount approval is tied to both the specific layer scope AND the command.
+                            // Verify the incoming command matches what was originally approved.
+                            if &args.command != approved_cmd {
+                                return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                                    "approval_ref '{}' was approved for command {:?}, but received {:?}. \
+                                     Layer mount approvals are command-specific to prevent scope bypass.",
+                                    approval_ref,
+                                    approved_cmd,
+                                    args.command
+                                ))
+                                .into());
+                            }
+                            tracing::info!(
+                                target: "sandbox.exec",
+                                approval_ref = %approval_ref,
+                                "Proceeding with approved layer mount (command and scope match approval)"
+                            );
+                            approval_validated_for_command = true;
+                            layer_mount_approved = true;
+                            approved_layer_mount_layers = Some(layers.clone());
+                        }
                         _ => {
                             return Err(tagged::Tagged::validation(anyhow::anyhow!(
-                                "approval_ref '{}' does not reference a sandbox.exec action",
+                                "approval_ref '{}' does not reference a sandbox.exec or layer_mount action",
                                 approval_ref
                             ))
                             .into());
@@ -1250,6 +1396,218 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
         };
         let runtime_lock_layers: Vec<LockedLayerMount> =
             parsed_lock.map(|lock| lock.layers).unwrap_or_default();
+
+        // ── Layer approval scope check ─────────────────────────────────────────────
+        // Before mounting any layer, verify that the current session's approval grants
+        // cover all hosts the layer was built with. A layer carrying NetworkAccess to
+        // pypi.org must not be silently mounted into a session that never approved pypi.org.
+        // Agents with NetworkAccess capability (already gated by operator at install) skip
+        // this check — they implicitly approve any layer scope.
+        if !agent_has_network_access {
+            if let Some(gw_dir) = gateway_dir {
+                // Gather session grants for scope subsumption check.
+                let session_grants: Vec<String> = if let Some(store) = &gateway_store {
+                    let sid = session_id.unwrap_or("");
+                    let root = crate::runtime::content_store::root_session_id(sid);
+                    store.get_session_grants(&root).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Resolve the effective artifact_id early for the scope check.
+                let effective_artifact_id_for_scope = args
+                    .artifact_id
+                    .as_ref()
+                    .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
+
+                // Collect layers (artifact + runtime.lock) for scope checking.
+                let mut scope_layers: Vec<LayerScopeCheckInfo> = Vec::new();
+
+                // Artifact layers.
+                if let Some(artifact_id) = effective_artifact_id_for_scope {
+                    if let Ok(artifact_store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
+                        if let Ok(bundle) = artifact_store.inspect(artifact_id) {
+                            for l in &bundle.layers {
+                                scope_layers.push(LayerScopeCheckInfo {
+                                    layer_id: l.layer_id.clone(),
+                                    name: l.name.clone(),
+                                    mount_path: l.mount_path.clone(),
+                                    digest: l.digest.clone(),
+                                    source: format!("artifact:{}", artifact_id),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Runtime.lock layers.
+                for l in &runtime_lock_layers {
+                    scope_layers.push(LayerScopeCheckInfo {
+                        layer_id: l.layer_id.clone(),
+                        name: l.layer_id.clone(), // name not stored in LockedLayerMount; use layer_id
+                        mount_path: l.mount_path.clone(),
+                        digest: l.digest.clone(),
+                        source: "runtime.lock".to_string(),
+                    });
+                }
+
+                let scope_issues =
+                    collect_layer_scope_issues(&scope_layers, gw_dir, &session_grants)?;
+
+                if !scope_issues.is_empty() {
+                    if layer_mount_approved {
+                        let approved_layers = approved_layer_mount_layers.as_deref().unwrap_or(&[]);
+                        if !layer_mount_approval_covers_scope_issues(
+                            approved_layers,
+                            &scope_issues,
+                        ) {
+                            return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                                "approval_ref '{}' does not cover the currently requested layer scope; retry without approval_ref to request approval for the new layers or hosts",
+                                args.approval_ref.as_deref().unwrap_or("")
+                            ))
+                            .into());
+                        }
+                        tracing::info!(
+                            target: "sandbox.exec",
+                            layer_count = scope_issues.len(),
+                            "Approved LayerMount still covers current layer scope"
+                        );
+                    } else {
+                    tracing::warn!(
+                        target: "sandbox.exec",
+                        agent_id = %manifest.agent.id,
+                        issue_count = scope_issues.len(),
+                        "Layer mount approval required: build-time scope not covered by session grants"
+                    );
+
+                    if let Some(cfg) = config {
+                        let request_id =
+                            format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                        let summary = format!(
+                            "Layer mount approval: {} layer(s) with unapproved build-time hosts",
+                            scope_issues.len()
+                        );
+                        let action = ScheduledAction::LayerMount {
+                            layers: scope_issues.clone(),
+                            command: effective_command.clone(),
+                        };
+                        let approval_workflow_id = {
+                            let sid = session_id.unwrap_or("");
+                            let root = crate::runtime::content_store::root_session_id(sid);
+                            crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+                                .ok()
+                                .flatten()
+                        };
+                        let sid = session_id.unwrap_or("");
+                        let root_session_id =
+                            crate::runtime::content_store::root_session_id(sid);
+                        let all_unapproved: Vec<String> = scope_issues
+                            .iter()
+                            .flat_map(|i| i.unapproved_delta.iter().cloned())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
+                        let request = autonoetic_types::background::ApprovalRequest {
+                            request_id: request_id.clone(),
+                            agent_id: manifest.agent.id.clone(),
+                            session_id: sid.to_string(),
+                            root_session_id: Some(root_session_id.to_string()),
+                            action: action.clone(),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            status: None,
+                            decided_at: None,
+                            decided_by: None,
+                            reason: Some(format!(
+                                "Layer mount scope check: {} layer(s) were captured with network access to hosts [{}] not yet approved in this session.",
+                                scope_issues.len(),
+                                all_unapproved.join(", ")
+                            )),
+                            evidence_ref: None,
+                            workflow_id: approval_workflow_id.clone(),
+                            decision_reason: None,
+                            approval_level:
+                                crate::scheduler::approval::resolve_approval_level(
+                                    cfg, &action,
+                                ),
+                            task_id: match (&approval_workflow_id, session_id) {
+                                (Some(wf_id), Some(sid)) => {
+                                    crate::scheduler::resolve_task_id_for_session(
+                                        cfg, None, wf_id, sid,
+                                    )
+                                    .ok()
+                                    .flatten()
+                                }
+                                _ => None,
+                            },
+                        };
+                        if let Some(store) = &gateway_store {
+                            store.create_approval(&request).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to persist layer mount approval request '{}': {}",
+                                    request_id,
+                                    e
+                                )
+                            })?;
+                        } else {
+                            anyhow::bail!(
+                                "GatewayStore missing; cannot persist layer mount approval request '{}'",
+                                request_id
+                            );
+                        }
+                        let approval = build_approval_details(
+                            &request,
+                            "layer_mount",
+                            summary.clone(),
+                            "approval_ref",
+                            serde_json::json!({
+                                "layers": scope_issues.iter().map(|i| serde_json::json!({
+                                    "layer_id": i.layer_id,
+                                    "name": i.name,
+                                    "mount_path": i.mount_path,
+                                    "source": i.source,
+                                    "build_time_approved_hosts": i.build_time_approved_hosts,
+                                    "unapproved_delta": i.unapproved_delta,
+                                })).collect::<Vec<_>>(),
+                                "command": effective_command,
+                            }),
+                        );
+                        return serde_json::to_string(&serde_json::json!({
+                            "ok": false,
+                            "exit_code": null,
+                            "stdout": "",
+                            "stderr": format!(
+                                "Layer mount approval required: {} layer(s) were captured with network access to hosts [{}] not yet approved in this session. Retry with approval_ref after operator approves.",
+                                scope_issues.len(),
+                                all_unapproved.join(", ")
+                            ),
+                            "approval_required": true,
+                            "layer_mount_approval_required": true,
+                            "request_id": request_id,
+                            "suspended": true,
+                            "message": format!(
+                                "Execution suspended pending layer mount approval ({}). Retry sandbox.exec with approval_ref after operator approves.",
+                                request_id
+                            ),
+                            "approval": approval
+                        }))
+                        .map_err(Into::into);
+                    }
+
+                    // No config available — fail closed rather than silently bypassing the gate.
+                    // Layer scope violations must be explicitly approved; a misconfigured gateway
+                    // should not silently allow untrusted supply-chain content to run.
+                    return Err(anyhow::anyhow!(
+                        "Layer mount approval required: {} layer(s) have build-time scope not covered by \
+                         session grants, but GatewayConfig is not available to enforce approvals. \
+                         Approvals cannot be bypass-able via misconfiguration.",
+                        scope_issues.len()
+                    ));
+                    }
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
         let driver = SandboxDriverKind::parse(&manifest.runtime.sandbox)?;
         let agent_dir_str = agent_dir
             .to_str()
@@ -1499,6 +1857,24 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
         if let Some(ref capture_paths) = args.capture_paths {
             if !capture_paths.is_empty() {
                 if let Some(gw_dir) = gateway_dir {
+                    // Build the approval scope to record in each captured layer.
+                    // `approved_hosts` is populated from the static analysis of the build command.
+                    // Because `share_net` was true, the operator explicitly approved network
+                    // access to these hosts for this session — detected patterns == build-time
+                    // approved hosts. Future sessions mounting this layer will need the same
+                    // approval. Layers built without network access get None (no scope gate).
+                    let capture_approval_scope: Option<LayerApprovalScope> =
+                        if overrides.share_net {
+                            let detected = normalize_targets(&remote_analysis.detected_patterns);
+                            Some(LayerApprovalScope {
+                                approved_hosts: detected,
+                                built_by_agent_id: manifest.agent.id.clone(),
+                                captured_at: chrono::Utc::now().to_rfc3339(),
+                            })
+                        } else {
+                            None
+                        };
+
                     match crate::layer_store::LayerStore::new(gw_dir, Default::default()) {
                         Ok(layer_store) => {
                             let mut captured_layers = Vec::new();
@@ -1519,6 +1895,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                                         &host_path,
                                         &cap.path,
                                         &cap.mount_as,
+                                        capture_approval_scope.clone(),
                                     ) {
                                         Ok(layer) => {
                                             tracing::info!(
@@ -1526,6 +1903,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                                                 path = %cap.path,
                                                 mount_as = %cap.mount_as,
                                                 layer_id = %layer.layer_id,
+                                                has_scope = layer.approval_scope.is_some(),
                                                 "Captured sandbox path as layer"
                                             );
                                             captured_layers.push(serde_json::json!({
@@ -1535,6 +1913,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                                                 "digest": layer.digest,
                                                 "file_count": layer.file_count,
                                                 "size_bytes": layer.size_bytes,
+                                                "approval_scope": layer.approval_scope,
                                             }));
                                         }
                                         Err(e) => {
