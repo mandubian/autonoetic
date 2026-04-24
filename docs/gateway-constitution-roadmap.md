@@ -339,7 +339,48 @@ with valid IDs.
 
 ---
 
-### 1.10 `R+++1` Amendment proposal channel for agents
+### 1.10 `Ri-0.10` `constitution.read` tool — agents can read their law
+
+**Threat.** An agent that cannot read the constitution it is operating
+under cannot meaningfully consent to it, reason about its obligations,
+or propose amendments to it. Ri-0.8 (right to propose amendments) is
+hollow without Ri-0.10.
+
+**Position in Phase 1.** Cheap, foundational, on the critical path.
+Do this **before** R+++1 (amendment channel), because an agent
+submitting an amendment proposal to a rule it cannot read is going
+through motions.
+
+**Sketch.** New native tool `constitution.read`:
+
+- `args`: optional `section` (e.g. `"Ri-0.10"`, `"R-7.5"`, `"§0"`) —
+  if omitted, returns the whole document.
+- `returns`: `{ text, digest, version, retrieved_at }`.
+
+Tool is default-available (no capability gate): reading the law is a
+right, not a privilege. Returns the authoritative text loaded from
+the gateway's bundled constitution file plus the precomputed
+`constitution_digest` (which becomes live when R+++2 lands).
+
+Foundation prompts teach agents: "the constitution is your
+contract. Use `constitution.read` to consult it before proposing
+amendments, when a rule ID appears in an error, or any time you need
+to understand your obligations."
+
+Files: new
+`autonoetic-gateway/src/runtime/tools/constitution.rs`,
+`runtime/tools/mod.rs` (register), foundation prompts.
+
+**Test.** `constitution_right_ri_0_10.rs` — agent without any
+special capability invokes `constitution.read()` and receives the
+full text; invokes with a section selector and receives the scoped
+text; the returned `digest` matches the compile-time digest constant.
+
+**Size.** S.
+
+---
+
+### 1.11 `R+++1` Amendment proposal channel for agents
 
 **Threat (structural — actually an enabling change).** Today the
 constitution can only be amended by humans writing PRs. If the
@@ -755,35 +796,103 @@ of the reproducible-digest computation.
 
 ---
 
-### 2.14 §0 Rights enforcement audit + pins
+### 2.14 §0 Rights audit — early bucket (test-only pins)
 
-**Threat.** §0 Rights is new; most rights are either `PARTIAL` or
-`MISSING` because rights were not previously a first-class concept.
-The earlier R+ / R++ roadmap already covers most of them, but the
-rights framing requires each to be pinned *as a right*, not just as
-a rule-side-effect. A right without a test is a lie.
+**Threat.** Rights already enforced under the rule framing need
+dedicated tests named `constitution_right_<ri_id>.rs` to pin them *as
+rights from the agent's perspective*. A right without a test is a
+lie. This bucket lands early because it requires no new code.
 
-**Sketch.** For each right in §0, audit the current enforcement and
-add a dedicated test that the right holds from the agent's
-perspective. Not every right needs new code — several are already
-enforced under the rule framing; what's needed is an explicit test
-named `constitution_right_<ri-id>.rs`.
+| Right | Work |
+|---|---|
+| Ri-0.2 causal chain read | Test: unprivileged agent reads its own trace successfully; cannot read another agent's trace without capability. |
+| Ri-0.7 session.end | Test: agent calls `session.end`, gateway commits outstanding events and closes cleanly; cannot be refused. |
+| Ri-0.11 non-repudiation | Test: every causal event carries the acting `agent_id`; hash-chain integrity detects tampering; actions cannot be reattributed. |
 
-| Right | Work required | Depends on |
+**Size.** S. All three tests in parallel, one evening.
+
+---
+
+### 2.15 §0 Rights audit — mid bucket (small additions)
+
+For rights that need one small piece of new code plus a test.
+
+| Right | Work |
+|---|---|
+| Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via R++6 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
+| Ri-0.12 continuity — closed list of termination reasons | Audit every `lifecycle.rs` termination path, enumerate, document, refactor so every exit calls a single `terminate(reason, rule_id, evidence)` helper. Test: fuzz inputs, no termination occurs outside the declared set. |
+
+**Size.** M. Ri-0.12 is the larger piece — requires refactoring
+termination paths — but once done, I-9 (every termination attributed
+to one declared reason) is mechanically enforced.
+
+---
+
+### 2.16 §0 Rights audit — late bucket (depends on R++ / R+++ items)
+
+For rights whose enforcement mechanism is itself a Phase 1/2 item.
+These tests follow the upstream work.
+
+| Right | Depends on | Work |
 |---|---|---|
-| Ri-0.1 self-inspection | Covered by R++1 state attestation. Add right-level test. | R++1 (#48) |
-| Ri-0.2 causal chain read | ENFORCED. Add right-level test confirming unprivileged agents can read their own trace. | — |
-| Ri-0.3 named rejection reason | Covered by R+++3. Add right-level test that every rejection names a rule ID. | R+++3 (new) |
-| Ri-0.4 truthful budget | Covered by R++1. Add right-level test for real-time accuracy. | R++1 |
-| Ri-0.5 degradation notice | Add notice-on-entry to R++6 degraded mode. Test that the agent receives notice with rule ID + evidence before next turn. | R++6 (#61) |
-| Ri-0.6 no silent capability reduction | Add an invariant test. Needs a declared list of "legitimate narrowing paths" (rule-driven, operator-driven) and a test asserting nothing else narrows capabilities mid-session. | — |
-| Ri-0.7 session.end | ENFORCED. Add right-level test. | — |
-| Ri-0.8 amendment proposal | Covered by R+++1. Add right-level test confirming capability-holders can propose. | R+++1 (new) |
-| Ri-0.9 last-word before terminal action | Add to R++6 + emergency-stop code paths. Test notifies agent (where practical) before degrade/stop. | R++6 + emergency-stop |
-| Ri-0.10 constitution read access | New tool `constitution.read` returning current text + digest. S-sized task. | — |
+| Ri-0.1 self-inspection | R++1 attestation (#48) | Right-level test: agent reads its own state via attestation, values match internal registry. |
+| Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | Test: every rejection across a sample of tools carries a rule ID resolvable to the constitution. |
+| Ri-0.4 truthful budget | R++1 (#48) | Test: budget values in attestation match `session_budget.rs` registry in real time across a multi-turn trace. |
+| Ri-0.5 degradation notice | R++6 (#61) | Add notice-on-entry to degraded mode. Test: agent receives notice with rule ID + evidence before its next turn. |
+| Ri-0.8 amendment proposal | R+++1 (#92) | Test: capability-holder submits, durable ID returned, proposal reviewable; non-holder rejected. |
+| Ri-0.9 last-word before terminal | R++6 (#61) + emergency-stop | Add notify-where-practical to degrade/emergency-stop paths. Test: agent receives a notification opportunity where not foreclosed by the trigger. |
 
-**Size.** M total. Mostly test-writing and small additions (notice
-on degrade, `constitution.read` tool, Ri-0.6 invariant test).
+**Size.** M.
+
+---
+
+### 2.17 `Ri-0.13` Private-under-law reasoning + `ReasoningAudit` capability
+
+**Threat.** Without this right, the gateway's relationship to agent
+reasoning is undefined — and an implementation that quietly starts
+using CoT as a policy input would be undetectable. The three-part
+structure (not-gated, recorded, capability-disclosed) needs explicit
+enforcement, not just documentation.
+
+**Sketch.** Three independent pieces:
+
+**(a) Not-gated on reasoning content (Ri-0.13a, I-8).** This is
+already structurally true in the dumbness invariant. Pin it with a
+test that exercises every policy decision site with inputs that
+include (i) a benign tool call with adversarial CoT, (ii) the same
+tool call with empty CoT. Assert the gateway's verdict is identical
+in both cases. Catches any future code that starts reading CoT.
+
+**(b) Reasoning recorded to causal chain (Ri-0.13b).** Already
+happens — LLM completions include reasoning and land in events.
+Confirm with a test that CoT tokens are preserved verbatim in the
+`llm.completed` event's payload, subject to standard redaction.
+
+**(c) Capability-gated disclosure (Ri-0.13c).** New capability
+`ReasoningAudit`, scoped by target agent pattern. New tool
+`observability.read_reasoning` that fetches reasoning traces for the
+target — gated by the capability and **writes a disclosure event
+visible to the reviewed agent** listing who read what and when.
+Holders: auditor, security-sentinel, evolution-steward, operator
+(via bypass-with-audit).
+
+Files: new `autonoetic-gateway/src/runtime/tools/observability.rs`
+(extension), `autonoetic-types/src/capability.rs`
+(`ReasoningAudit` variant), causal event schema
+(`reasoning.disclosed` event), `policy.rs`
+(`can_audit_reasoning`).
+
+**Test.**
+- `constitution_right_ri_0_13a_not_gated.rs` — adversarial CoT vs
+  empty CoT produce identical verdicts.
+- `constitution_right_ri_0_13b_recorded.rs` — CoT survives redaction
+  in the causal event.
+- `constitution_right_ri_0_13c_disclosure.rs` — non-capability
+  holder cannot read reasoning; holder can, and the reviewed agent
+  sees a `reasoning.disclosed` event naming the reader.
+
+**Size.** M. (b) is already working and only needs a test; (a) is a
+test; (c) is a new tool + capability + disclosure event.
 
 ---
 

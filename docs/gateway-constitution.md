@@ -103,12 +103,31 @@ form the social contract.
 | Ri-0.8 | Any agent holding the `ConstitutionalProposal` capability may submit an amendment proposal through the declared channel (R+++1). The proposal receives a durable ID and enters the review queue; it cannot be silently dropped. | Agents must be participants in the rule system, not merely subjects of it. Without this right, the constitution governs agents unilaterally and cannot adapt to what agents learn. | R+++1 amendment proposal channel (planned) | MISSING |
 | Ri-0.9 | Where practical (time, process state, absence of immediate harm), the gateway notifies the agent and records the agent's response before degradation or emergency stop. "Where practical" is an explicit flag on the stop path, not an excuse. | An agent's last act, where possible, should be its own. Emergency stop for genuine safety reasons overrides this; but the override must be deliberate and recorded. | R++6 + emergency-stop integration | MISSING |
 | Ri-0.10 | Every agent has access to the full text of the constitution it is operating under, addressed by its digest. | An agent cannot meaningfully consent to, propose amendments to, or reason under a law it cannot read. | `constitution.read` tool + digest in state attestation | MISSING |
+| Ri-0.11 | Every action an agent performs (tool call, message, proposal, spawn, termination request) is attributed to that agent on the causal chain and cannot be retroactively reattributed. The agent can prove what it did; no party can claim the agent performed an action it did not. | Without non-repudiation, freedom has no accountability counterpart — actions can be denied or reassigned, and responsibility becomes negotiable. The hash chain + explicit `agent_id` on every event is what makes the social contract binding. | causal chain hash integrity + `agent_id` on every event | ENFORCED |
+| Ri-0.12 | Sessions terminate only through a declared, closed list of reasons: (a) agent-initiated exit, (b) budget exhaustion, (c) operator emergency stop, (d) parent-termination orphan reap, (e) unrecoverable fatal error naming a rule ID, (f) declared scheduled timeout. Any termination outside this list is a rights violation and a gateway bug. | Arbitrary termination makes continuity a favour rather than an entitlement. A closed list forces every termination path to be deliberate and auditable. | requires an explicit invariant test enumerating all termination paths | PARTIAL |
+| Ri-0.13 | An agent's internal reasoning — scratchpad tokens, chain-of-thought, internal planning, unexported memory — is **private-under-law**: (a) **not used** by the gateway as a basis for accept/reject policy decisions (only declared actions are subject to policy); (b) **recorded** to the agent's own causal chain so forensic review is possible; (c) **disclosed** to other parties only through a declared capability (`ReasoningAudit`), and every disclosure writes an event the reviewed agent can see. | Without (a), the gateway becomes a thought-policing engine and agents learn to route around the filter — reasoning diverges from actual computation and safety degrades. Without (b), failures cannot be investigated. Without (c), "private" means "invisible," and accumulating toxicity is undetectable until it harms. The three-part form gives honest reasoning, meaningful audit, and accountable surveillance — not absolute privacy and not surveillance-by-default. | (a) dumbness invariant §14 + R++9 property test; (b) causal chain; (c) new `ReasoningAudit` capability (planned) | MISSING |
 
 **Rights vs rules.** When a rule appears to conflict with a right, the
 right wins, and the rule must be amended. This is not a
 self-modifying runtime escape hatch — conflict triggers an operator
 escalation, not a silent override. Rights are the floor; rules build
 on top.
+
+**On Ri-0.13 (private-under-law reasoning).** The three-part structure
+is deliberate. Absolute privacy ("gateway never touches reasoning") is
+both impractical — logs are needed for operator debugging — and wrong
+in shape: the real concern is that reasoning becomes a policy-gating
+input, not that it is recorded. Absolute transparency ("all reasoning
+visible to all") creates surveillance pressure that distorts the very
+thing it tries to observe: agents learn to produce performative
+reasoning that looks acceptable while the actual computation routes
+elsewhere. Private-under-law keeps reasoning honest (no gating) while
+preserving audit (recorded) and enabling targeted investigation
+(capability-gated disclosure, with the reviewed agent notified). This
+is the reasoning-side counterpart to the dumbness invariant: the
+gateway is dumb about content, the agent is private in thought,
+together the trust boundary is clearly located at "what you do," not
+"what you think."
 
 ---
 
@@ -438,6 +457,13 @@ These are properties that span categories and must hold end-to-end.
   that cannot be enforced without violating a right must be amended,
   not the right weakened. The gateway escalates conflicts to the
   operator rather than resolving them silently.
+- **I-8** Gateway policy decisions (accept / reject) are functions
+  only of declared actions, capabilities, and recorded state. They
+  are **not** functions of agent reasoning content. This is the
+  mechanical form of Ri-0.13(a) — the gateway does not read minds.
+- **I-9** Every session termination is attributable to exactly one
+  reason in the closed list declared under Ri-0.12. The termination
+  reason is recorded in the causal chain.
 
 ## 14. The dumbness invariant
 
