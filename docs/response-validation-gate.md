@@ -4,6 +4,8 @@ Autonoetic can validate an agent's final response after execution and before ret
 
 When a response contract is declared, the gateway validates the produced `SpawnResult`. If validation fails and repair is enabled, the gateway gives the same agent a bounded chance to repair the actual outputs and try again.
 
+When no explicit `response_contract.output_schema` is supplied, manifest `io.returns` is treated as the gateway-owned default output schema for the final reply. That keeps output-shape ownership in the gateway instead of leaving it as advisory SKILL prose.
+
 ## What The Gateway Validates
 
 The response contract is declared as `metadata.autonoetic.response_contract` and currently supports these fields:
@@ -36,7 +38,7 @@ Validation uses authoritative runtime state, not natural-language assertions:
 - `max_artifacts`: limits the number of returned files.
 - `max_total_size_mb`: sums authoritative byte sizes for returned content handles from the content store.
 - `max_reply_length_chars`: validates the final reply string length.
-- `output_schema`: validates the final reply text when it is JSON.
+- `output_schema`: validates the final reply text when it is JSON. This may come from an explicit response contract or from manifest `io.returns` when no explicit output schema overrides it.
 - `prohibited_text_patterns`: rejects replies that match forbidden regex patterns.
 - `min_artifact_builds`: checks durable execution-trace evidence for successful `artifact.build` calls in the current session branch.
 
