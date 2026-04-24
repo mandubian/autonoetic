@@ -70,6 +70,18 @@ impl GatewayStore {
         Ok(Some(memory_object_from_row(&row)?))
     }
 
+    pub fn memory_get(&self, memory_id: &str) -> Result<Option<MemoryObject>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM memories WHERE memory_id = ?1 AND quarantine_reason IS NULL",
+        )?;
+        let mut rows = stmt.query(params![memory_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(memory_object_from_row(&row)?))
+    }
+
     pub fn memory_list_ids_for_scope(
         &self,
         scope: &str,

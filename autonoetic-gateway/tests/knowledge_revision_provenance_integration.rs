@@ -343,3 +343,21 @@ fn test_quarantine_dedup_no_double_quarantine() {
         Some("already_quarantined")
     );
 }
+
+#[test]
+fn test_memory_get_excludes_quarantined() {
+    let tmp = tempdir().unwrap();
+    let gw = make_gateway_dir(&tmp);
+    let store = GatewayStore::open(&gw).unwrap();
+
+    let mem_normal = make_memory("get_ok", "s", "a", Some("rev_ok"));
+    store.memory_upsert(&mem_normal).unwrap();
+
+    let mut mem_quarantined = make_memory("get_bad", "s", "a", Some("rev_bad"));
+    mem_quarantined.quarantine_reason = Some("quarantined".to_string());
+    store.memory_upsert(&mem_quarantined).unwrap();
+
+    assert!(store.memory_get("get_ok").unwrap().is_some());
+    assert!(store.memory_get("get_bad").unwrap().is_none());
+    assert!(store.memory_get_unrestricted("get_bad").unwrap().is_some());
+}
