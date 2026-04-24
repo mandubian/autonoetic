@@ -1,5 +1,6 @@
 //! Runtime Lock types — the pinned execution closure for reproducible resolution.
 
+use crate::layer::LayerApprovalScope;
 use serde::{Deserialize, Serialize};
 
 /// A pinned artifact reference inside the runtime lock.
@@ -55,6 +56,10 @@ pub struct LockedLayerMount {
     pub digest: String,
     /// Mount path inside the sandbox.
     pub mount_path: String,
+    /// Approval scope recorded at layer capture time.
+    /// None for layers built before this feature was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_scope: Option<LayerApprovalScope>,
 }
 
 /// The complete `runtime.lock` file.

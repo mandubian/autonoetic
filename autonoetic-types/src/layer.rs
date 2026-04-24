@@ -7,11 +7,34 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Approval scope recorded at layer capture time.
+///
+/// Describes what network access was approved when this layer was built.
+/// Used at mount time to verify the current session's approval scope covers
+/// the layer's build-time approved hosts before mounting it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct LayerApprovalScope {
+    /// Hosts that were detected and statically analyzed when this layer was captured.
+    /// These represent the operator-approved hosts for the build session.
+    /// Empty list means network was enabled during build but no external hosts were detected
+    /// (conservative: treated as requiring no additional approval at mount time).
+    /// See `LayerManifest.approval_scope` for the complete scope record.
+    pub approved_hosts: Vec<String>,
+    /// Agent ID that built this layer.
+    pub built_by_agent_id: String,
+    /// ISO 8601 timestamp when the layer was captured.
+    pub captured_at: String,
+}
+
 /// A layer manifest stored alongside the compressed archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerManifest {
     /// Short layer ID (e.g., "layer_a1b2c3d4")
     pub layer_id: String,
+    /// Human-readable name given at capture time (e.g., "python-deps", "node_modules").
+    /// Stored so approval messages can show a friendly name rather than a bare ID.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// SHA-256 digest of the compressed archive contents
     pub digest: String,
     /// Number of files in the layer
@@ -20,6 +43,10 @@ pub struct LayerManifest {
     pub size_bytes: u64,
     /// ISO 8601 creation timestamp
     pub created_at: String,
+    /// Approval scope recorded at capture time.
+    /// None for layers built before this feature was added (treated as no network scope).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_scope: Option<LayerApprovalScope>,
 }
 
 /// A reference to a layer within an artifact manifest.
@@ -52,4 +79,7 @@ pub struct CapturedLayer {
     pub file_count: usize,
     /// Uncompressed size in bytes
     pub size_bytes: u64,
+    /// Approval scope recorded at capture time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_scope: Option<LayerApprovalScope>,
 }

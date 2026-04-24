@@ -52,6 +52,26 @@ pub struct ScheduledActionDependencies {
     pub packages: Vec<String>,
 }
 
+/// Describes a single layer whose build-time approval scope exceeds the current session's grants.
+/// Used in `ScheduledAction::LayerMount` approval requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LayerMountScopeInfo {
+    /// Layer identifier.
+    pub layer_id: String,
+    /// Content digest of the layer archive.
+    pub digest: String,
+    /// Human-readable layer name.
+    pub name: String,
+    /// Mount path inside the sandbox.
+    pub mount_path: String,
+    /// All hosts that were approved when this layer was captured.
+    pub build_time_approved_hosts: Vec<String>,
+    /// Hosts in `build_time_approved_hosts` not currently covered by this session's grants.
+    pub unapproved_delta: Vec<String>,
+    /// Where this layer comes from: "artifact:<artifact_id>" or "runtime.lock".
+    pub source: String,
+}
+
 /// Actions that can be stored in reevaluation state and executed by the background scheduler,
 /// or used as the *subject* of an approval request (ApprovalRequest/ApprovalDecision).
 ///
@@ -156,6 +176,16 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+    /// Approval subject only: sandbox.exec is about to mount layers whose build-time
+    /// network scope is not covered by the current session's approval grants.
+    /// Not executed by the scheduler; once approved, the caller retries sandbox.exec
+    /// with this approval_ref — the approved LayerMount ref also authorises execution.
+    LayerMount {
+        /// Layers that require approval, with their build-time scope delta.
+        layers: Vec<LayerMountScopeInfo>,
+        /// The sandbox command this mount is for (context only).
+        command: String,
+    },
 }
 
 impl ScheduledAction {
@@ -169,6 +199,7 @@ impl ScheduledAction {
                 | Self::SessionContinue { .. }
                 | Self::ProfileShare { .. }
                 | Self::SessionEscalate { .. }
+                | Self::LayerMount { .. }
         )
     }
 
@@ -185,7 +216,8 @@ impl ScheduledAction {
             | Self::CredentialRequest { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
-            | Self::SessionEscalate { .. } => true,
+            | Self::SessionEscalate { .. }
+            | Self::LayerMount { .. } => true,
         }
     }
 
@@ -199,6 +231,7 @@ impl ScheduledAction {
             Self::SessionContinue { .. } => "session_continue",
             Self::ProfileShare { .. } => "profile_share",
             Self::SessionEscalate { .. } => "session_escalate",
+            Self::LayerMount { .. } => "layer_mount",
         }
     }
 
@@ -211,7 +244,8 @@ impl ScheduledAction {
             | Self::CredentialRequest { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
-            | Self::SessionEscalate { .. } => None,
+            | Self::SessionEscalate { .. }
+            | Self::LayerMount { .. } => None,
         }
     }
 
@@ -228,7 +262,8 @@ impl ScheduledAction {
             | Self::CredentialRequest { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
-            | Self::SessionEscalate { .. } => {}
+            | Self::SessionEscalate { .. }
+            | Self::LayerMount { .. } => {}
         }
         self
     }

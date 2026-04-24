@@ -1647,7 +1647,7 @@ fn test_changing_pinned_layer_mounts_changes_revision_identity() {
     std::fs::create_dir_all(layer_src.join("pkg")).unwrap();
     std::fs::write(layer_src.join("pkg/__init__.py"), b"# package").unwrap();
     let captured = layer_store
-        .create_from_dir(&layer_src, "deps", "/opt/deps")
+        .create_from_dir(&layer_src, "deps", "/opt/deps", None)
         .unwrap();
 
     let skill_md = r#"---
