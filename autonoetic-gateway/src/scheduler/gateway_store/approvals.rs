@@ -221,9 +221,15 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         for host in hosts {
             conn.execute(
-                "INSERT OR IGNORE INTO session_approval_grants
+                "INSERT INTO session_approval_grants
                  (root_session_id, agent_id, host, granted_by, granted_at, source_approval_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(root_session_id, agent_id, host) DO UPDATE SET
+                     granted_by = excluded.granted_by,
+                     granted_at = excluded.granted_at,
+                     source_approval_id = excluded.source_approval_id,
+                     revoked_at = NULL,
+                     revoked_reason = NULL",
                 params![
                     root_session_id,
                     agent_id,

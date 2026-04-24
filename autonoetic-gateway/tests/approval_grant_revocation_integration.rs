@@ -136,3 +136,29 @@ fn test_revoke_nonexistent_host_is_noop() {
 
     assert_eq!(store.get_session_grants("root-6").unwrap(), vec!["exists.io"]);
 }
+
+#[test]
+fn test_revoke_then_reapprove_restores_coverage() {
+    let tmp = tempdir().unwrap();
+    let gw = make_gateway_dir(&tmp);
+    let store = GatewayStore::open(&gw).unwrap();
+
+    seed_grant(&store, "root-7", "agent-h", "regranted.io");
+
+    assert!(store
+        .session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+
+    store
+        .revoke_session_grants("root-7", Some("regranted.io"), "temp revoke")
+        .unwrap();
+
+    assert!(store.get_session_grants("root-7").unwrap().is_empty());
+    assert!(!store
+        .session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+
+    seed_grant(&store, "root-7", "agent-h", "regranted.io");
+
+    assert_eq!(store.get_session_grants("root-7").unwrap(), vec!["regranted.io"]);
+    assert!(store
+        .session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+}
