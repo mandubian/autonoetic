@@ -111,6 +111,7 @@ impl NativeTool for KnowledgeStoreTool {
         #[derive(Deserialize)]
         struct Args {
             id: String,
+            #[serde(deserialize_with = "crate::runtime::tools::deserialize_string_lenient")]
             content: String,
             #[serde(default = "default_scope")]
             scope: String,

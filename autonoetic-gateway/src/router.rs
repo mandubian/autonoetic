@@ -929,6 +929,7 @@ impl JsonRpcRouter {
 #[derive(Debug, Deserialize)]
 struct AgentSpawnParams {
     agent_id: String,
+    #[serde(deserialize_with = "crate::runtime::tools::deserialize_string_lenient")]
     message: String,
     #[serde(default)]
     metadata: Option<serde_json::Value>,

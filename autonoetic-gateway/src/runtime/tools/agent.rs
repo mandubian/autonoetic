@@ -19,6 +19,7 @@ use std::time::Duration;
 #[derive(Debug, Deserialize)]
 struct SpawnAgentArgs {
     agent_id: String,
+    #[serde(deserialize_with = "crate::runtime::tools::deserialize_string_lenient")]
     message: String,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
@@ -33,7 +34,7 @@ struct SpawnAgentArgs {
     /// When true, enqueue the task for async execution and return immediately with task_id.
     /// The scheduler will execute the child agent in the background.
     /// Use workflow.wait to check task status.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::runtime::tools::deserialize_bool_lenient")]
     r#async: bool,
     /// Join group name. Tasks in the same join group are awaited together by the planner.
     #[serde(default)]

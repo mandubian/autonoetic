@@ -556,6 +556,67 @@ where
     }
 }
 
+/// Accept a string or any JSON value; if given an object/array/number/bool,
+/// serialize it back to a JSON string so downstream code always sees `String`.
+///
+/// Useful for fields like `agent.spawn.message` or `knowledge.store.content`
+/// where weak function-callers pass structured data as raw objects.
+pub fn deserialize_string_lenient<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Null => Err(Error::custom("expected string, got null")),
+        other => Ok(other.to_string()),
+    }
+}
+
+/// Accept a boolean, integer, or common string representations of truthiness.
+pub fn deserialize_bool_lenient<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Bool(b) => Ok(b),
+        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Ok(true),
+            "false" | "0" | "no" | "off" | "" => Ok(false),
+            _ => Err(Error::custom(format!("invalid boolean string: {}", s))),
+        },
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(|v| v != 0)
+            .ok_or_else(|| Error::custom("expected integer 0 or 1")),
+        serde_json::Value::Null => Ok(false),
+        _ => Err(Error::custom("expected boolean, string, or number")),
+    }
+}
+
+/// Accept an integer or a string that parses as an integer.
+pub fn deserialize_usize_lenient<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .map(|v| v as usize)
+            .ok_or_else(|| Error::custom("expected positive integer")),
+        serde_json::Value::String(s) => s
+            .trim()
+            .parse::<usize>()
+            .map_err(|e| Error::custom(format!("expected integer string: {e}"))),
+        _ => Err(Error::custom("expected integer or string integer")),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct CapturePath {
     pub path: String,
@@ -1054,5 +1115,126 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let plan = dependency_plan_from_args_or_lock(&manifest, temp_dir.path(), None).unwrap();
         assert!(plan.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_string_lenient_from_string() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(deserialize_with = "deserialize_string_lenient")]
+            message: String,
+        }
+        let args: Args = serde_json::from_str(r#"{"message": "hello"}"#).unwrap();
+        assert_eq!(args.message, "hello");
+    }
+
+    #[test]
+    fn test_deserialize_string_lenient_from_object() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(deserialize_with = "deserialize_string_lenient")]
+            message: String,
+        }
+        let args: Args = serde_json::from_str(r#"{"message": {"location": "Paris"}}"#).unwrap();
+        assert_eq!(args.message, r#"{"location":"Paris"}"#);
+    }
+
+    #[test]
+    fn test_deserialize_string_lenient_from_array() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(deserialize_with = "deserialize_string_lenient")]
+            message: String,
+        }
+        let args: Args = serde_json::from_str(r#"{"message": [1, 2, 3]}"#).unwrap();
+        assert_eq!(args.message, "[1,2,3]");
+    }
+
+    #[test]
+    fn test_deserialize_string_lenient_from_number() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(deserialize_with = "deserialize_string_lenient")]
+            message: String,
+        }
+        let args: Args = serde_json::from_str(r#"{"message": 42}"#).unwrap();
+        assert_eq!(args.message, "42");
+    }
+
+    #[test]
+    fn test_deserialize_bool_lenient_from_bool() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_bool_lenient")]
+            flag: bool,
+        }
+        let args: Args = serde_json::from_str(r#"{"flag": true}"#).unwrap();
+        assert!(args.flag);
+    }
+
+    #[test]
+    fn test_deserialize_bool_lenient_from_string_true() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_bool_lenient")]
+            flag: bool,
+        }
+        let args: Args = serde_json::from_str(r#"{"flag": "true"}"#).unwrap();
+        assert!(args.flag);
+    }
+
+    #[test]
+    fn test_deserialize_bool_lenient_from_string_one() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_bool_lenient")]
+            flag: bool,
+        }
+        let args: Args = serde_json::from_str(r#"{"flag": "1"}"#).unwrap();
+        assert!(args.flag);
+    }
+
+    #[test]
+    fn test_deserialize_bool_lenient_from_number() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_bool_lenient")]
+            flag: bool,
+        }
+        let args: Args = serde_json::from_str(r#"{"flag": 1}"#).unwrap();
+        assert!(args.flag);
+    }
+
+    #[test]
+    fn test_deserialize_bool_lenient_from_null_defaults_false() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_bool_lenient")]
+            flag: bool,
+        }
+        let args: Args = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(!args.flag);
+    }
+
+    #[test]
+    fn test_deserialize_usize_lenient_from_number() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_usize_lenient")]
+            limit: usize,
+        }
+        let args: Args = serde_json::from_str(r#"{"limit": 3000}"#).unwrap();
+        assert_eq!(args.limit, 3000);
+    }
+
+    #[test]
+    fn test_deserialize_usize_lenient_from_string() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_usize_lenient")]
+            limit: usize,
+        }
+        let args: Args = serde_json::from_str(r#"{"limit": "3000"}"#).unwrap();
+        assert_eq!(args.limit, 3000);
     }
 }
