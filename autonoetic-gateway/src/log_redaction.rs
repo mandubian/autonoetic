@@ -178,24 +178,24 @@ mod tests {
     #[test]
     fn test_redacts_api_key_assignment_in_json_string_value() {
         let input =
-            r#"{"command":"export OPENWEATHER_API_KEY=TEST_PLACEHOLDER_DO_NOT_USE_XXXX && python3 /tmp/weather.py"}"#;
+            r#"{"command":"export OPENWEATHER_API_KEY=testplaceholder_not_a_real_key_0000 && python3 /tmp/weather.py"}"#;
         let out = redact_text_for_logs(input);
         assert!(out.contains("OPENWEATHER_API_KEY=***REDACTED***"));
-        assert!(!out.contains("TEST_PLACEHOLDER_DO_NOT_USE_XXXX"));
+        assert!(!out.contains("testplaceholder_not_a_real_key_0000"));
     }
 
     #[test]
     fn test_redacts_api_key_in_query_string() {
-        let input = "http://api.openweathermap.org/data/2.5/weather?appid=TEST_PLACEHOLDER_DO_NOT_USE_XXXX&q=Paris";
+        let input = "http://api.openweathermap.org/data/2.5/weather?appid=testplaceholder_not_a_real_key_0000&q=Paris";
         let out = redact_text_for_logs(input);
         assert!(out.contains("appid=***REDACTED***"));
-        assert!(!out.contains("TEST_PLACEHOLDER_DO_NOT_USE_XXXX"));
+        assert!(!out.contains("testplaceholder_not_a_real_key_0000"));
     }
 
     #[test]
     fn test_detects_secret_like_value() {
         assert!(super::looks_like_secret_value(
-            "OPENWEATHER_API_KEY=TEST_PLACEHOLDER_DO_NOT_USE_XXXX"
+            "OPENWEATHER_API_KEY=testplaceholder_not_a_real_key_0000"
         ));
     }
 
