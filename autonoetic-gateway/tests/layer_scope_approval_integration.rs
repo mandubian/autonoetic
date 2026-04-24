@@ -15,7 +15,7 @@ use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::layer::LayerApprovalScope;
+use autonoetic_types::layer::{CapturedLayer, LayerApprovalScope};
 use autonoetic_types::runtime_lock::{
     LockedGateway, LockedLayerMount, LockedSandbox, LockedSdk, RuntimeLock,
 };
@@ -71,21 +71,22 @@ fn test_manifest_with_network() -> AgentManifest {
 }
 
 /// Create a layer in the store and write a runtime.lock that references it.
-fn setup_layer_with_scope(
+fn create_layer_with_scope(
     gw_dir: &std::path::Path,
-    agent_dir: &std::path::Path,
     scope: Option<LayerApprovalScope>,
-) -> String {
+) -> CapturedLayer {
     let tmp = tempdir().unwrap();
     let src = tmp.path().join("layer_src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("file.txt"), b"dependency").unwrap();
 
     let store = LayerStore::new(gw_dir, LayerLimits::default()).unwrap();
-    let captured = store
+    store
         .create_from_dir(&src, "test-deps", "/opt/deps", scope)
-        .unwrap();
+        .unwrap()
+}
 
+fn write_runtime_lock(agent_dir: &std::path::Path, layers: Vec<LockedLayerMount>) {
     let lock = RuntimeLock {
         gateway: LockedGateway {
             artifact: "marketplace://gateway/autonoetic-gateway".to_string(),
@@ -99,16 +100,28 @@ fn setup_layer_with_scope(
         sandbox: LockedSandbox { backend: "bubblewrap".to_string() },
         dependencies: vec![],
         artifacts: vec![],
-        layers: vec![LockedLayerMount {
+        layers,
+    };
+    let lock_yaml = serde_yaml::to_string(&lock).unwrap();
+    std::fs::write(agent_dir.join("runtime.lock"), lock_yaml).unwrap();
+}
+
+/// Create a layer in the store and write a runtime.lock that references it.
+fn setup_layer_with_scope(
+    gw_dir: &std::path::Path,
+    agent_dir: &std::path::Path,
+    scope: Option<LayerApprovalScope>,
+) -> String {
+    let captured = create_layer_with_scope(gw_dir, scope);
+    write_runtime_lock(
+        agent_dir,
+        vec![LockedLayerMount {
             layer_id: captured.layer_id.clone(),
             digest: captured.digest.clone(),
             mount_path: "/opt/deps".to_string(),
             approval_scope: captured.approval_scope.clone(),
         }],
-    };
-    let lock_yaml = serde_yaml::to_string(&lock).unwrap();
-    std::fs::write(agent_dir.join("runtime.lock"), lock_yaml).unwrap();
-
+    );
     captured.layer_id
 }
 
@@ -321,4 +334,168 @@ fn test_layer_mount_approval_ref_clears_scope_gate() {
             );
         }
     }
+}
+
+#[test]
+fn test_layer_mount_approval_ref_rejected_for_different_root_session() {
+    let td = tempdir().unwrap();
+    let gw_dir = td.path().join(".gateway");
+    std::fs::create_dir_all(&gw_dir).unwrap();
+    let agent_dir = td.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let scope = LayerApprovalScope {
+        approved_hosts: vec!["pypi.org".to_string()],
+        built_by_agent_id: "packager.default".to_string(),
+        captured_at: "2026-04-01T00:00:00Z".to_string(),
+    };
+    setup_layer_with_scope(&gw_dir, &agent_dir, Some(scope));
+
+    let manifest = test_manifest_no_network();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let store = Arc::new(GatewayStore::open(&gw_dir).unwrap());
+    let config = GatewayConfig::default();
+
+    let arguments = serde_json::json!({ "command": "echo 'go'" });
+    let r1 = registry.execute(
+        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+    );
+    let resp1: serde_json::Value = serde_json::from_str(&r1.unwrap()).unwrap();
+    let request_id = resp1["request_id"].as_str().unwrap().to_string();
+
+    store.record_decision(
+        &request_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None,
+    ).unwrap();
+
+    let arguments_with_ref = serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
+    let r2 = registry.execute(
+        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        &arguments_with_ref.to_string(), Some("sess_other"), None, Some(&config), Some(store.clone()), None,
+    );
+
+    let err = r2.expect_err("approval_ref should be rejected in a different root session");
+    assert!(
+        err.to_string().contains("root session"),
+        "error should mention root session mismatch: {err}"
+    );
+}
+
+#[test]
+fn test_layer_mount_approval_ref_rejected_for_new_layer_scope() {
+    let td = tempdir().unwrap();
+    let gw_dir = td.path().join(".gateway");
+    std::fs::create_dir_all(&gw_dir).unwrap();
+    let agent_dir = td.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let first_scope = LayerApprovalScope {
+        approved_hosts: vec!["pypi.org".to_string()],
+        built_by_agent_id: "packager.default".to_string(),
+        captured_at: "2026-04-01T00:00:00Z".to_string(),
+    };
+    let first_layer = create_layer_with_scope(&gw_dir, Some(first_scope));
+    write_runtime_lock(
+        &agent_dir,
+        vec![LockedLayerMount {
+            layer_id: first_layer.layer_id.clone(),
+            digest: first_layer.digest.clone(),
+            mount_path: "/opt/deps".to_string(),
+            approval_scope: first_layer.approval_scope.clone(),
+        }],
+    );
+
+    let manifest = test_manifest_no_network();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let store = Arc::new(GatewayStore::open(&gw_dir).unwrap());
+    let config = GatewayConfig::default();
+
+    let arguments = serde_json::json!({ "command": "echo 'go'" });
+    let r1 = registry.execute(
+        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+    );
+    let resp1: serde_json::Value = serde_json::from_str(&r1.unwrap()).unwrap();
+    let request_id = resp1["request_id"].as_str().unwrap().to_string();
+
+    store.record_decision(
+        &request_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None,
+    ).unwrap();
+
+    let second_scope = LayerApprovalScope {
+        approved_hosts: vec!["crates.io".to_string()],
+        built_by_agent_id: "packager.default".to_string(),
+        captured_at: "2026-04-01T00:00:00Z".to_string(),
+    };
+    let second_layer = create_layer_with_scope(&gw_dir, Some(second_scope));
+    write_runtime_lock(
+        &agent_dir,
+        vec![
+            LockedLayerMount {
+                layer_id: first_layer.layer_id.clone(),
+                digest: first_layer.digest.clone(),
+                mount_path: "/opt/deps".to_string(),
+                approval_scope: first_layer.approval_scope.clone(),
+            },
+            LockedLayerMount {
+                layer_id: second_layer.layer_id.clone(),
+                digest: second_layer.digest.clone(),
+                mount_path: "/opt/extra-deps".to_string(),
+                approval_scope: second_layer.approval_scope.clone(),
+            },
+        ],
+    );
+
+    let arguments_with_ref = serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
+    let r2 = registry.execute(
+        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        &arguments_with_ref.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+    );
+
+    let err = r2.expect_err("approval_ref should not cover newly added layers or hosts");
+    assert!(
+        err.to_string().contains("does not cover the currently requested layer scope"),
+        "error should mention uncovered layer scope: {err}"
+    );
+}
+
+#[test]
+fn test_corrupt_layer_manifest_blocks_execution() {
+    let td = tempdir().unwrap();
+    let gw_dir = td.path().join(".gateway");
+    std::fs::create_dir_all(&gw_dir).unwrap();
+    let agent_dir = td.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let scope = LayerApprovalScope {
+        approved_hosts: vec!["pypi.org".to_string()],
+        built_by_agent_id: "packager.default".to_string(),
+        captured_at: "2026-04-01T00:00:00Z".to_string(),
+    };
+    let layer_id = setup_layer_with_scope(&gw_dir, &agent_dir, Some(scope));
+    std::fs::write(
+        gw_dir.join("layers").join(&layer_id).join("manifest.json"),
+        "{not valid json",
+    )
+    .unwrap();
+
+    let manifest = test_manifest_no_network();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let store = Arc::new(GatewayStore::open(&gw_dir).unwrap());
+    let config = GatewayConfig::default();
+
+    let arguments = serde_json::json!({ "command": "echo 'go'" });
+    let result = registry.execute(
+        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+    );
+
+    let err = result.expect_err("corrupt manifest should fail closed");
+    assert!(
+        err.to_string().contains("failed to parse layer manifest"),
+        "error should mention manifest parsing failure: {err}"
+    );
 }
