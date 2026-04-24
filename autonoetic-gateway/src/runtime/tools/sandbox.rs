@@ -453,25 +453,61 @@ pub fn approved_requests_cover_targets(
     })
 }
 
+fn layer_mount_approval_covers_scope_issues(
+    approved_layers: &[LayerMountScopeInfo],
+    current_issues: &[LayerMountScopeInfo],
+) -> bool {
+    current_issues.iter().all(|issue| {
+        approved_layers.iter().any(|approved| {
+            approved.layer_id == issue.layer_id
+                && approved.digest == issue.digest
+                && approved.mount_path == issue.mount_path
+                && approved.source == issue.source
+                && issue
+                    .build_time_approved_hosts
+                    .iter()
+                    .all(|host| approved.build_time_approved_hosts.contains(host))
+                && issue
+                    .unapproved_delta
+                    .iter()
+                    .all(|host| approved.unapproved_delta.contains(host))
+        })
+    })
+}
+
 /// Reads the approval scope (and human-readable name) for a layer from its manifest on disk.
 /// Returns `(scope, name)` where `name` is the friendly layer name stored at capture time.
 fn load_layer_manifest_info(
     gateway_dir: &Path,
     layer_id: &str,
-) -> Option<(Option<LayerApprovalScope>, String)> {
+) -> anyhow::Result<(Option<LayerApprovalScope>, String)> {
     let manifest_path = gateway_dir
         .join("layers")
         .join(layer_id)
         .join("manifest.json");
-    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read layer manifest for layer '{}' at '{}': {}",
+            layer_id,
+            manifest_path.display(),
+            e
+        )
+    })?;
     let manifest: autonoetic_types::layer::LayerManifest =
-        serde_json::from_str(&content).ok()?;
+        serde_json::from_str(&content).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse layer manifest for layer '{}' at '{}': {}",
+                layer_id,
+                manifest_path.display(),
+                e
+            )
+        })?;
     let name = if manifest.name.is_empty() {
         layer_id.to_string()
     } else {
         manifest.name
     };
-    Some((manifest.approval_scope, name))
+    Ok((manifest.approval_scope, name))
 }
 
 /// Information about a single layer needed for scope checking.
@@ -493,16 +529,13 @@ fn collect_layer_scope_issues(
     layers: &[LayerScopeCheckInfo],
     gateway_dir: &Path,
     session_grants: &[String],
-) -> Vec<LayerMountScopeInfo> {
+) -> anyhow::Result<Vec<LayerMountScopeInfo>> {
     let granted: std::collections::HashSet<&str> =
         session_grants.iter().map(|s| s.as_str()).collect();
     let mut issues = Vec::new();
     for layer_info in layers {
-        let Some((scope_opt, manifest_name)) =
-            load_layer_manifest_info(gateway_dir, &layer_info.layer_id)
-        else {
-            continue;
-        };
+        let (scope_opt, manifest_name) =
+            load_layer_manifest_info(gateway_dir, &layer_info.layer_id)?;
         let Some(scope) = scope_opt else {
             continue;
         };
@@ -533,7 +566,7 @@ fn collect_layer_scope_issues(
             });
         }
     }
-    issues
+    Ok(issues)
 }
 
 impl NativeTool for SandboxExecTool {
@@ -630,6 +663,7 @@ impl NativeTool for SandboxExecTool {
 
         let mut approval_validated_for_command = false;
         let mut layer_mount_approved = false;
+        let mut approved_layer_mount_layers: Option<Vec<LayerMountScopeInfo>> = None;
         let mut effective_command = args.command.clone();
         if let Some(approval_ref) = args.approval_ref.as_ref() {
             if let Some(store) = &gateway_store {
@@ -708,7 +742,10 @@ impl NativeTool for SandboxExecTool {
                                 }
                             }
                         }
-                        ScheduledAction::LayerMount { command: approved_cmd, .. } => {
+                        ScheduledAction::LayerMount {
+                            command: approved_cmd,
+                            layers,
+                        } => {
                             // LayerMount approval is tied to both the specific layer scope AND the command.
                             // Verify the incoming command matches what was originally approved.
                             if &args.command != approved_cmd {
@@ -728,6 +765,7 @@ impl NativeTool for SandboxExecTool {
                             );
                             approval_validated_for_command = true;
                             layer_mount_approved = true;
+                            approved_layer_mount_layers = Some(layers.clone());
                         }
                         _ => {
                             return Err(tagged::Tagged::validation(anyhow::anyhow!(
@@ -1365,7 +1403,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
         // pypi.org must not be silently mounted into a session that never approved pypi.org.
         // Agents with NetworkAccess capability (already gated by operator at install) skip
         // this check — they implicitly approve any layer scope.
-        if !layer_mount_approved && !agent_has_network_access {
+        if !agent_has_network_access {
             if let Some(gw_dir) = gateway_dir {
                 // Gather session grants for scope subsumption check.
                 let session_grants: Vec<String> = if let Some(store) = &gateway_store {
@@ -1377,7 +1415,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 };
 
                 // Resolve the effective artifact_id early for the scope check.
-                let scope_artifact_id = args
+                let effective_artifact_id_for_scope = args
                     .artifact_id
                     .as_ref()
                     .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
@@ -1386,7 +1424,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 let mut scope_layers: Vec<LayerScopeCheckInfo> = Vec::new();
 
                 // Artifact layers.
-                if let Some(artifact_id) = scope_artifact_id {
+                if let Some(artifact_id) = effective_artifact_id_for_scope {
                     if let Ok(artifact_store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
                         if let Ok(bundle) = artifact_store.inspect(artifact_id) {
                             for l in &bundle.layers {
@@ -1414,9 +1452,27 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                 }
 
                 let scope_issues =
-                    collect_layer_scope_issues(&scope_layers, gw_dir, &session_grants);
+                    collect_layer_scope_issues(&scope_layers, gw_dir, &session_grants)?;
 
                 if !scope_issues.is_empty() {
+                    if layer_mount_approved {
+                        let approved_layers = approved_layer_mount_layers.as_deref().unwrap_or(&[]);
+                        if !layer_mount_approval_covers_scope_issues(
+                            approved_layers,
+                            &scope_issues,
+                        ) {
+                            return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                                "approval_ref '{}' does not cover the currently requested layer scope; retry without approval_ref to request approval for the new layers or hosts",
+                                args.approval_ref.as_deref().unwrap_or("")
+                            ))
+                            .into());
+                        }
+                        tracing::info!(
+                            target: "sandbox.exec",
+                            layer_count = scope_issues.len(),
+                            "Approved LayerMount still covers current layer scope"
+                        );
+                    } else {
                     tracing::warn!(
                         target: "sandbox.exec",
                         agent_id = %manifest.agent.id,
@@ -1546,6 +1602,7 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                          Approvals cannot be bypass-able via misconfiguration.",
                         scope_issues.len()
                     ));
+                    }
                 }
             }
         }
