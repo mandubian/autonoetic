@@ -118,25 +118,42 @@ pub fn scaffold_runtime_lock_with_scopes(
         artifacts: agent_artifacts.unwrap_or_default(),
         layers: artifact_layers
             .iter()
-            .map(|l| {
-                let approval_scope = gateway_dir.and_then(|gw_dir| {
-                    let manifest_path = gw_dir
-                        .join("layers")
-                        .join(&l.layer_id)
-                        .join("manifest.json");
-                    let content = std::fs::read_to_string(&manifest_path).ok()?;
-                    let manifest: autonoetic_types::layer::LayerManifest =
-                        serde_json::from_str(&content).ok()?;
-                    manifest.approval_scope
-                });
-                LockedLayerMount {
+            .map(|l| -> anyhow::Result<LockedLayerMount> {
+                let approval_scope = match gateway_dir {
+                    Some(gw_dir) => {
+                        let manifest_path = gw_dir
+                            .join("layers")
+                            .join(&l.layer_id)
+                            .join("manifest.json");
+                        let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to read layer manifest for layer '{}' at '{}': {}",
+                                l.layer_id,
+                                manifest_path.display(),
+                                e
+                            )
+                        })?;
+                        let manifest: autonoetic_types::layer::LayerManifest =
+                            serde_json::from_str(&content).map_err(|e| {
+                                anyhow::anyhow!(
+                                    "failed to parse layer manifest for layer '{}' at '{}': {}",
+                                    l.layer_id,
+                                    manifest_path.display(),
+                                    e
+                                )
+                            })?;
+                        manifest.approval_scope
+                    }
+                    None => None,
+                };
+                Ok(LockedLayerMount {
                     layer_id: l.layer_id.clone(),
                     digest: l.digest.clone(),
                     mount_path: l.mount_path.clone(),
                     approval_scope,
-                }
+                })
             })
-            .collect(),
+            .collect::<anyhow::Result<Vec<_>>>()?,
     })
 }
 
