@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
 /// Ensures `close_session` runs when `execute_with_history` fails so session report / digest finalize.
@@ -1760,32 +1761,46 @@ impl GatewayExecutionService {
         // Response validation gate: check the result against the response contract declared
         // in spawn metadata; run bounded repair loop when repair_enabled is set.
         // Fallback: when the caller supplies no metadata contract, use the contract declared
-        // in the agent's own SKILL.md frontmatter (loaded via AgentRepository).
+        // in the agent's own SKILL.md frontmatter. If neither provides an output schema,
+        // manifest `io.returns` becomes the default output_schema for the final reply.
         // Validation is skipped for suspended sessions (they haven't finished producing output).
-        if self.config.response_validation.enabled
-            && result.suspended_for_approval.is_none()
+        let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+        let manifest_loaded = {
+            let repo = AgentRepository::from_config(&self.config);
+            repo.get_sync_from_store(agent_id, &gateway_dir, self.gateway_store.as_deref())
+                .ok()
+                .map(|loaded| loaded.manifest)
+        };
+        let manifest_returns_schema = manifest_loaded
+            .as_ref()
+            .and_then(|manifest| manifest.io.as_ref())
+            .and_then(|io| io.returns.clone());
+        let metadata_has_output_schema = metadata
+            .and_then(|value| value.get("response_contract"))
+            .and_then(|value| value.get("output_schema"))
+            .is_some();
+        let manifest_contract_has_output_schema = manifest_loaded
+            .as_ref()
+            .and_then(|manifest| manifest.response_contract.as_ref())
+            .and_then(|value| value.get("output_schema"))
+            .is_some();
+        let enforcing_manifest_returns = manifest_returns_schema.is_some()
+            && !metadata_has_output_schema
+            && !manifest_contract_has_output_schema;
+
+        if result.suspended_for_approval.is_none()
             && !result.suspended_for_user_input
+            && (self.config.response_validation.enabled || enforcing_manifest_returns)
         {
-            // Resolve effective contract: caller-supplied metadata first, then manifest default.
-            let manifest_contract: Option<serde_json::Value> =
-                if metadata.and_then(|m| m.get("response_contract")).is_none() {
-                    let repo = AgentRepository::from_config(&self.config);
-                    let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-                    repo.get_sync_from_store(agent_id, &gateway_dir, self.gateway_store.as_deref())
-                        .ok()
-                        .and_then(|loaded| loaded.manifest.response_contract)
-                } else {
-                    None
-                };
-            let effective_metadata: Option<serde_json::Value> = if manifest_contract.is_some() {
-                Some(serde_json::json!({ "response_contract": manifest_contract }))
-            } else {
-                None
-            };
+            let effective_metadata = build_effective_response_contract_metadata(
+                metadata,
+                manifest_loaded.as_ref(),
+            );
             let metadata_ref: Option<&serde_json::Value> = effective_metadata.as_ref().or(metadata);
             match crate::runtime::response_validation::parse_response_contract(metadata_ref) {
                 Ok(Some(contract)) => {
-                    result = self
+                    let validation_session_id = result.session_id.clone();
+                    match self
                         .validate_and_maybe_repair(
                             agent_id,
                             result,
@@ -1794,7 +1809,54 @@ impl GatewayExecutionService {
                             workflow_id,
                             task_id,
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(validated) => {
+                            if enforcing_manifest_returns {
+                                if let Some(expected_schema) = manifest_returns_schema.as_ref() {
+                                    log_contract_enforcement_event_to_gateway(
+                                        self.gateway_store.as_deref(),
+                                        agent_id,
+                                        &validated.session_id,
+                                        "io.returns",
+                                        EntryStatus::Success,
+                                        source_agent_id,
+                                        serde_json::json!({
+                                            "contract": "io.returns",
+                                            "result": "pass",
+                                            "expected_schema": expected_schema,
+                                            "source_agent_id": source_agent_id,
+                                            "enforcer": "response_validation"
+                                        }),
+                                    );
+                                }
+                            }
+                            result = validated;
+                        }
+                        Err(error) => {
+                            if enforcing_manifest_returns {
+                                if let Some(expected_schema) = manifest_returns_schema.as_ref() {
+                                    log_contract_enforcement_event_to_gateway(
+                                        self.gateway_store.as_deref(),
+                                        agent_id,
+                                        &validation_session_id,
+                                        "io.returns",
+                                        EntryStatus::Denied,
+                                        source_agent_id,
+                                        serde_json::json!({
+                                            "contract": "io.returns",
+                                            "result": "rejected",
+                                            "expected_schema": expected_schema,
+                                            "source_agent_id": source_agent_id,
+                                            "reason": error.to_string(),
+                                            "enforcer": "response_validation"
+                                        }),
+                                    );
+                                }
+                            }
+                            return Err(error);
+                        }
+                    }
                 }
                 Ok(None) => {} // no contract in metadata — skip validation
                 Err(e) => {
@@ -2683,6 +2745,108 @@ fn log_input_schema_validation_to_gateway(
 ) -> anyhow::Result<()> {
     // No-op: gateway causal chain events are now captured in gateway.db
     Ok(())
+}
+
+fn build_effective_response_contract_metadata(
+    metadata: Option<&serde_json::Value>,
+    manifest: Option<&AgentManifest>,
+) -> Option<serde_json::Value> {
+    let manifest_contract = manifest.and_then(|loaded| loaded.response_contract.clone());
+    let manifest_returns_schema = manifest
+        .and_then(|loaded| loaded.io.as_ref())
+        .and_then(|io| io.returns.clone());
+
+    let mut response_contract = metadata
+        .and_then(|value| value.get("response_contract"))
+        .cloned()
+        .or(manifest_contract)
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        });
+
+    match (response_contract.as_mut(), manifest_returns_schema) {
+        (Some(contract), Some(schema)) => {
+            contract
+                .entry("output_schema".to_string())
+                .or_insert(schema);
+        }
+        (Some(_), None) => {}
+        (None, Some(schema)) => {
+            let mut contract = serde_json::Map::new();
+            contract.insert("output_schema".to_string(), schema);
+            response_contract = Some(contract);
+        }
+        (None, None) => return metadata.cloned(),
+    }
+
+    let mut effective = metadata.cloned().unwrap_or_else(|| serde_json::json!({}));
+    if !effective.is_object() {
+        effective = serde_json::json!({});
+    }
+    if let Some(contract) = response_contract {
+        if let Some(object) = effective.as_object_mut() {
+            object.insert(
+                "response_contract".to_string(),
+                serde_json::Value::Object(contract),
+            );
+            return Some(effective);
+        }
+    }
+    None
+}
+
+fn contract_event_seq() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn log_contract_enforcement_event_to_gateway(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    agent_id: &str,
+    session_id: &str,
+    action: &str,
+    status: EntryStatus,
+    target_agent_id: Option<&str>,
+    payload: serde_json::Value,
+) {
+    let Some(store) = gateway_store else {
+        return;
+    };
+
+    let payload_str = serde_json::to_string(&payload).ok();
+    let reason = payload
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+
+    if let Err(error) = store.create_causal_event(&CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq: contract_event_seq(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "contract".to_string(),
+        action: action.to_string(),
+        status: status.to_string(),
+        target: target_agent_id.map(ToOwned::to_owned),
+        payload: payload_str,
+        payload_ref: None,
+        evidence_ref: None,
+        reason,
+    }) {
+        tracing::warn!(
+            target: "response_validation",
+            error = %error,
+            action = action,
+            agent_id = agent_id,
+            session_id = session_id,
+            "Failed to persist contract enforcement event"
+        );
+    }
 }
 
 pub fn gateway_actor_id() -> String {

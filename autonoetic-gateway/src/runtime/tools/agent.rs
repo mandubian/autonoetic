@@ -6,6 +6,7 @@ use crate::runtime::tools::{
 };
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
 use autonoetic_types::config::{GatewayConfig, SchemaEnforcementConfig, SchemaEnforcementMode};
 use autonoetic_types::schema_enforcement::{default_enforcer, EnforcementResult, SchemaEnforcer};
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowEventRecord};
@@ -173,6 +174,12 @@ impl NativeTool for AgentSpawnTool {
             .map(|c| &c.schema_enforcement)
             .unwrap_or(&default_enforcement_config);
 
+        let resolved_session_id = args
+            .session_id
+            .clone()
+            .or_else(|| session_id.map(ToOwned::to_owned))
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         if enforcement_config.mode != SchemaEnforcementMode::Disabled {
             let agents_dir = config.map(|c| &c.agents_dir).ok_or_else(|| {
                 anyhow::anyhow!("config is required for agent.spawn schema enforcement")
@@ -192,7 +199,23 @@ impl NativeTool for AgentSpawnTool {
                                         &args.message,
                                         accepts,
                                     ) {
-                                        SpawnSchemaOutcome::Pass => {}
+                                        SpawnSchemaOutcome::Pass => {
+                                            log_io_contract_enforcement(
+                                                gateway_store.as_deref(),
+                                                &manifest.agent.id,
+                                                &resolved_session_id,
+                                                Some(&args.agent_id),
+                                                "io.accepts",
+                                                EntryStatus::Success,
+                                                serde_json::json!({
+                                                    "contract": "io.accepts",
+                                                    "result": "pass",
+                                                    "target_agent_id": args.agent_id,
+                                                    "expected_schema": accepts,
+                                                    "enforcer": "deterministic"
+                                                }),
+                                            );
+                                        }
                                         SpawnSchemaOutcome::Coerced {
                                             new_message,
                                             transformations,
@@ -205,9 +228,45 @@ impl NativeTool for AgentSpawnTool {
                                                     "Schema enforcement: payload coerced"
                                                 );
                                             }
+                                            log_io_contract_enforcement(
+                                                gateway_store.as_deref(),
+                                                &manifest.agent.id,
+                                                &resolved_session_id,
+                                                Some(&args.agent_id),
+                                                "io.accepts",
+                                                EntryStatus::Success,
+                                                serde_json::json!({
+                                                    "contract": "io.accepts",
+                                                    "result": "coerced",
+                                                    "target_agent_id": args.agent_id,
+                                                    "expected_schema": accepts,
+                                                    "transformations": transformations,
+                                                    "enforcer": "deterministic"
+                                                }),
+                                            );
                                             args.message = new_message;
                                         }
                                         SpawnSchemaOutcome::Reject(body) => {
+                                            let payload = serde_json::from_str::<serde_json::Value>(&body)
+                                                .unwrap_or_else(|_| {
+                                                    serde_json::json!({
+                                                        "contract": "io.accepts",
+                                                        "result": "rejected",
+                                                        "target_agent_id": args.agent_id,
+                                                        "reason": body,
+                                                        "expected_schema": accepts,
+                                                        "enforcer": "deterministic"
+                                                    })
+                                                });
+                                            log_io_contract_enforcement(
+                                                gateway_store.as_deref(),
+                                                &manifest.agent.id,
+                                                &resolved_session_id,
+                                                Some(&args.agent_id),
+                                                "io.accepts",
+                                                EntryStatus::Denied,
+                                                payload,
+                                            );
                                             return Ok(body);
                                         }
                                     }
@@ -218,12 +277,6 @@ impl NativeTool for AgentSpawnTool {
                 }
             }
         }
-
-        let resolved_session_id = args
-            .session_id
-            .clone()
-            .or_else(|| session_id.map(ToOwned::to_owned))
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let agents_dir = config
             .map(|c| &c.agents_dir)
@@ -1190,6 +1243,52 @@ pub(crate) fn enforce_spawn_message_schema(
             })
             .to_string(),
         ),
+    }
+}
+
+fn log_io_contract_enforcement(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    agent_id: &str,
+    session_id: &str,
+    target: Option<&str>,
+    action: &str,
+    status: EntryStatus,
+    payload: serde_json::Value,
+) {
+    let Some(store) = gateway_store else {
+        return;
+    };
+
+    let payload_str = serde_json::to_string(&payload).ok();
+    let reason = payload
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+
+    if let Err(error) = store.create_causal_event(&CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq: Utc::now().timestamp_millis().max(0) as u64,
+        timestamp: Utc::now().to_rfc3339(),
+        category: "contract".to_string(),
+        action: action.to_string(),
+        status: status.to_string(),
+        target: target.map(ToOwned::to_owned),
+        payload: payload_str,
+        payload_ref: None,
+        evidence_ref: None,
+        reason,
+    }) {
+        tracing::warn!(
+            target: "schema_enforcement",
+            error = %error,
+            action = action,
+            agent_id = agent_id,
+            session_id = session_id,
+            "Failed to persist contract enforcement event"
+        );
     }
 }
 

@@ -47,6 +47,54 @@ You are a validation test agent. Produce the requested output.
     Ok(dir)
 }
 
+fn install_validation_agent_with_returns(
+    agent_dir: &std::path::Path,
+    agent_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let dir = agent_dir.join(agent_id);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!(
+            r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "{agent_id}"
+  name: "{agent_id}"
+  description: "Validation test agent with output schema"
+io:
+  returns:
+    type: object
+    required:
+      - status
+    properties:
+      status:
+        type: string
+llm_config:
+  provider: "openai"
+  model: "gpt-4o"
+  temperature: 0.0
+capabilities:
+  - type: "WriteAccess"
+    scopes: ["*"]
+  - type: "ReadAccess"
+    scopes: ["*"]
+---
+# Instructions
+You are a validation test agent. Produce the requested output.
+"#,
+        ),
+    )?;
+    Ok(dir)
+}
+
 fn setup_store_and_seed(
     config: &autonoetic_types::config::GatewayConfig,
     agents_dir: &std::path::Path,
@@ -336,6 +384,113 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
         "error should mention JSON requirement, got: {}",
         msg
     );
+
+    Ok(())
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn test_manifest_io_returns_passes_without_explicit_response_contract(
+) -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+
+    install_validation_agent_with_returns(&workspace.agents_dir, "returns.pass.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "returns.pass.agent")?;
+
+    let stub = OpenAiStub::spawn(move |_raw, _body| async move {
+        serde_json::json!({
+            "choices": [{"message": {"content": "{\"status\":\"ok\"}"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4}
+        })
+    })
+    .await?;
+    let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
+    let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+
+    let execution = GatewayExecutionService::new(config, Some(store));
+    let result = execution
+        .spawn_agent_once(
+            "returns.pass.agent",
+            "return structured json",
+            "sess-returns-pass-1",
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+    assert_eq!(result.assistant_reply.as_deref(), Some("{\"status\":\"ok\"}"));
+
+    Ok(())
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn test_manifest_io_returns_rejects_and_logs_without_explicit_response_contract(
+) -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+
+    install_validation_agent_with_returns(&workspace.agents_dir, "returns.fail.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "returns.fail.agent")?;
+
+    let stub = OpenAiStub::spawn(move |_raw, _body| async move {
+        serde_json::json!({
+            "choices": [{"message": {"content": "plain text output"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4}
+        })
+    })
+    .await?;
+    let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
+    let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+
+    let execution = GatewayExecutionService::new(config, Some(store.clone()));
+    let err = execution
+        .spawn_agent_once(
+            "returns.fail.agent",
+            "return structured json",
+            "sess-returns-fail-1",
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("output_schema"),
+        "error should mention output_schema, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("valid JSON"),
+        "error should mention JSON requirement, got: {}",
+        msg
+    );
+
+    let events = store.search_causal_events(Some("sess-returns-fail-1"), Some("returns.fail.agent"), 100)?;
+    let event = events
+        .iter()
+        .find(|event| event.category == "contract" && event.action == "io.returns")
+        .expect("expected io.returns contract event");
+    assert_eq!(event.status, "DENIED");
+    let payload = event
+        .payload
+        .as_ref()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .expect("payload should be valid json");
+    assert_eq!(payload["contract"], "io.returns");
+    assert_eq!(payload["result"], "rejected");
 
     Ok(())
 }
