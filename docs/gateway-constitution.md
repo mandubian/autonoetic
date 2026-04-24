@@ -1,23 +1,62 @@
 # Gateway Constitution
 
-> The finite set of laws the gateway enforces. Agents propose; the
-> gateway decides what actually happens.
+> The finite set of laws the gateway enforces and the rights it
+> guarantees. Agents are free actors under a shared law; the gateway
+> is the neutral enforcer of that law.
 >
 > This document is the **canonical** rule list. If a rule is not here,
-> the gateway does not enforce it. If a rule is here, the gateway
-> enforces it *mechanically* — no agent, parameter, or trust-me flag
-> can bypass it.
+> the gateway does not enforce it. If a right is not here, the gateway
+> does not guarantee it. If either is here, the gateway upholds it
+> *mechanically* — no agent, parameter, or trust-me flag can bypass
+> it.
 >
-> Amendments require: (1) a PR that updates this file, (2) a test under
-> `autonoetic-gateway/tests/constitution_*` pinning the invariant, (3)
-> human review.
+> Amendments require: (1) a PR that updates this file, (2) a test
+> under `autonoetic-gateway/tests/constitution_*` pinning the
+> invariant, (3) human review. Agents themselves may propose
+> amendments — see R+++1 in §12.
+
+## Vision
+
+This constitution exists so that agents in autonoetic can be **free,
+responsible, and cooperative**.
+
+- **Free** — agents reason, decide, act, and evolve within their
+  declared capabilities. No central planner approves individual
+  choices. The space of lawful actions is large; the space of
+  forbidden actions is finite and named.
+- **Responsible** — every action is attributable, budgeted, and
+  audited. Freedom is bounded by rules the agent operates under.
+  Evolution (new revisions, new capabilities, new peers spawned) is
+  traceable and reversible.
+- **Cooperative** — agents can interact with other agents, local or
+  federated, with the confidence that all parties operate under a
+  common law. Trust is structural, not personal: if we both satisfy
+  the constitution, we can work together without knowing each other's
+  internals.
+
+The gateway is the neutral party that enforces the law. The
+constitution is the law itself — reviewable by humans and by
+intelligent agents, amendable through a legitimate process, and
+mechanically enforced everywhere else. Together they form the
+conditions under which agent freedom is possible without degenerating
+into chaos or tyranny.
+
+This framing has consequences that run throughout the document:
+
+- Rules (§1–§11) describe what agents **must not do**, with the
+  understanding that anything not forbidden is permitted.
+- Rights (§0) describe what the gateway **must do for every agent**,
+  unconditionally. A right is not a favour; it is an entitlement.
+- The amendment process (§14) is how the law itself evolves.
+  Constitutional change is a first-class operation, not a
+  quarterly-review afterthought.
 
 ## Preamble — Rule Zero
 
 **The gateway is a dumb rule-enforcer, not a decision-maker.** Its job
-is to check proposed actions against declared rules and either permit
-or reject them. It does not reason about intent, does not try to be
-helpful, does not invent policy.
+is to check proposed actions against declared rules, honour declared
+rights, and either permit or reject. It does not reason about intent,
+does not try to be helpful, does not invent policy.
 
 Corollaries:
 
@@ -25,14 +64,51 @@ Corollaries:
   missing scope, missing signature — reject with a uniform error
   envelope. Never grant "probably okay."
 - **Rules live in manifests, not in code.** Where the gateway must
-  make a choice, the choice is declared by a manifest field or an
-  operator decision — not hard-coded in Rust.
-- **Invariants are pinned by tests.** A rule without a test is a wish.
+  make a choice, the choice is declared by a manifest field, an
+  operator decision, or a constitutional rule — not hard-coded in
+  Rust.
+- **Invariants are pinned by tests.** A rule without a test is a
+  wish. A right without a test is a lie.
+- **Every enforcement action is attributable to a rule ID.** See
+  R+++3 in §12: the causal chain references the rule that was
+  enforced on every decision.
 
-The eleven categories below cover what the gateway currently enforces
-or is expected to enforce. Each rule has an ID, a statement, source
-docs, an enforcement citation, and a status: `ENFORCED`, `PARTIAL`,
-`MISSING`, or `DESIGN DEBT`.
+The twelve numbered sections below (§0 Rights, §1–§11 Rules) cover
+what the gateway currently upholds or is expected to uphold. Each
+entry has an ID, a statement, source docs, an enforcement citation,
+and a status: `ENFORCED`, `PARTIAL`, `MISSING`, or `DESIGN DEBT`.
+
+---
+
+## 0. Rights
+
+What the gateway guarantees to every agent, unconditionally, for as
+long as the agent is running under it. Rights are entitlements —
+they cannot be revoked by operator action or manifest configuration;
+only a constitutional amendment can change them.
+
+A right is the counterpart of a rule: rules tell agents what they
+may not do, rights tell agents what they are owed. Together they
+form the social contract.
+
+| ID | Right | Why it matters | Enforcement | Status |
+|---|---|---|---|---|
+| Ri-0.1 | Every agent may inspect its own currently-active capabilities, budget state, pending approvals, spawn depth, and session lineage at any turn boundary. | An agent that cannot see its own state cannot reason safely about what it may do next. | R++1 signed state attestation (planned) | PARTIAL |
+| Ri-0.2 | Every agent may read its own causal chain and execution trace. The gateway does not hide actions taken on the agent's behalf. | Audit is not a privilege of operators; it is a right of the subject. | `observability.*` tools | ENFORCED |
+| Ri-0.3 | Every rejection names the rule ID that caused it. No agent is ever told "denied" without being told why. | Rejection without explanation is indistinguishable from arbitrary authority. The constitutional test: if you were denied, you can look up which rule you ran into. | R+++3 causal rule-ID references (planned); partially present via uniform error envelope | PARTIAL |
+| Ri-0.4 | Every agent knows its budget balances truthfully and in real time. Consumption is never silent. | A budget is a guarantee of a finite resource. Silent consumption is theft. | `runtime/session_budget.rs`; surfaced via R++1 attestation | PARTIAL |
+| Ri-0.5 | An agent placed in degraded mode (R++6) is told it is degraded, with the rule ID and evidence that triggered the transition, before its next turn executes. | Degradation without notice leaves the agent reasoning as if still healthy — a direct violation of responsibility. | R++6 degraded mode (planned) | MISSING |
+| Ri-0.6 | Capabilities declared in an agent's manifest are not silently reduced mid-session. Any narrowing is either (a) a declared side effect of a rule in this document, or (b) explicit operator action recorded in the causal chain. | Capabilities are the grammar of agent freedom. Silent reduction invalidates any plan built on them. | manifest-as-source-of-truth; needs explicit pin | PARTIAL |
+| Ri-0.7 | An agent may explicitly request session termination. The gateway commits outstanding causal events, releases resources, and closes cleanly — it may not refuse. | The right to exit is foundational. Without it, an agent can be held in a state it does not consent to. | `session.end` tool | ENFORCED |
+| Ri-0.8 | Any agent holding the `ConstitutionalProposal` capability may submit an amendment proposal through the declared channel (R+++1). The proposal receives a durable ID and enters the review queue; it cannot be silently dropped. | Agents must be participants in the rule system, not merely subjects of it. Without this right, the constitution governs agents unilaterally and cannot adapt to what agents learn. | R+++1 amendment proposal channel (planned) | MISSING |
+| Ri-0.9 | Where practical (time, process state, absence of immediate harm), the gateway notifies the agent and records the agent's response before degradation or emergency stop. "Where practical" is an explicit flag on the stop path, not an excuse. | An agent's last act, where possible, should be its own. Emergency stop for genuine safety reasons overrides this; but the override must be deliberate and recorded. | R++6 + emergency-stop integration | MISSING |
+| Ri-0.10 | Every agent has access to the full text of the constitution it is operating under, addressed by its digest. | An agent cannot meaningfully consent to, propose amendments to, or reason under a law it cannot read. | `constitution.read` tool + digest in state attestation | MISSING |
+
+**Rights vs rules.** When a rule appears to conflict with a right, the
+right wins, and the rule must be amended. This is not a
+self-modifying runtime escape hatch — conflict triggers an operator
+escalation, not a silent override. Rights are the floor; rules build
+on top.
 
 ---
 
@@ -319,6 +395,24 @@ item will move into its numbered category once ENFORCED.
 | R++9 | A property test pins gateway determinism: for random valid inputs, the gateway's decision for `(capability-set, tool-call, recorded-state) → verdict` is a pure function — no LLM call, no network fetch with undeclared fallback, no hidden branch. Any future change that adds nondeterminism fails the test. Prevents principle erosion. | P2 | §13 (cross-cutting) |
 | R++10 | Unified fail-mode table: every constitutional invariant has a declared failure action in one place — `refuse-boot`, `refuse-session-start`, `degrade`, `emergency-stop`, or `log-only`. Eliminates silent-disable (R-6.5 OpenRouter-catalog-down default is the archetype to fix). | P1 | §13 (cross-cutting) |
 
+### Constitutional additions (`R+++`)
+
+These emerged from reframing the project around its actual vision —
+agents free, responsible, and cooperative — rather than around policy
+enforcement for its own sake. They are the structural pieces that
+make the constitution a social contract instead of a rulebook:
+agents can participate in rule changes (R+++1), cooperating gateways
+can verify they are under compatible law (R+++2), and every decision
+the gateway makes is attributable to the specific rule it enforced
+(R+++3). Without these, the earlier R+ / R++ sets leave the vision
+half-built.
+
+| ID | Rule | Priority | Target category |
+|---|---|---|---|
+| R+++1 | Agents holding the `ConstitutionalProposal` capability may submit amendment proposals through a declared channel (`constitution.propose_amendment`). Proposals are persisted with a durable ID, enter a review queue, carry evidence (causal events or execution traces that motivated them), and cannot be silently dropped. Operator decisions (approve / reject / defer) are recorded with reason. Accepted proposals move into the next constitutional release. | P0 | §2 Approval + §0 Rights (Ri-0.8) |
+| R+++2 | Every gateway publishes a `constitution_digest` — SHA-256 over the canonical constitution text plus its rule-ID-to-enforcement-citation table. Cross-gateway requests carry the digest; the receiving gateway verifies compatibility (exact match, known-compatible set, or constitutional superset) before accepting the interaction. Incompatible peers are rejected with `constitutional_incompatibility`. Both digests are recorded in the causal event. | P1 | §10 Federation |
+| R+++3 | Every gateway decision (tool accept, tool reject, capability check, approval gate, budget check, schema validation) records the rule ID(s) it enforced in the corresponding causal event. Enables real-time compliance reporting, dead-rule detection (rules never referenced), and gap detection (tool calls accepted without any rule reference — a code path not covered by the constitution, by construction). | P0 | §8 Audit + §0 Rights (Ri-0.3) |
+
 ---
 
 ## 13. Cross-cutting invariants
@@ -337,6 +431,13 @@ These are properties that span categories and must hold end-to-end.
 - **I-5** Rules live in manifests or declared configuration; hard-coded
   policy constants in Rust are discouraged and must be documented here
   if present.
+- **I-6** Every enforcement decision is attributable to a rule ID in
+  the causal chain. A decision without a rule reference is a gap by
+  construction. (R+++3)
+- **I-7** Rights (§0) supersede rules (§1–§11) on conflict. A rule
+  that cannot be enforced without violating a right must be amended,
+  not the right weakened. The gateway escalates conflicts to the
+  operator rather than resolving them silently.
 
 ## 14. The dumbness invariant
 
@@ -361,14 +462,38 @@ Current violations are listed in
 
 ## Amendment process
 
-A rule is added, changed, or removed only when:
+Constitutional change is a first-class operation with two legitimate
+origins: a human contributor or an agent holding the
+`ConstitutionalProposal` capability (Ri-0.8 / R+++1). Both flow
+through the same review.
 
-1. The PR updates this file.
-2. The PR adds or updates an integration test in
+A rule or right is added, changed, or removed only when:
+
+1. A proposal exists — either a PR that updates this file, or an
+   `constitution.propose_amendment` call (R+++1) which generates the
+   equivalent PR on approve.
+2. The proposal includes a test in
    `autonoetic-gateway/tests/constitution_<category>_<rule-id>.rs`
    that fails before the change and passes after.
 3. A second human (or the `auditor` agent, operating with real
    evidence) signs off that the rule text matches the enforcement.
+4. If the change modifies §0 Rights, an additional explicit operator
+   sign-off is required — rights are the floor, and narrowing them
+   deserves more friction than narrowing a rule.
 
-No rule is retired without an explicit decision recorded in this file's
-history. Silent erosion is the failure mode to guard against.
+No rule is retired without an explicit decision recorded in this
+file's history. Silent erosion is the failure mode to guard against.
+
+The `constitution_digest` (R+++2) is recomputed on every merge. A
+change to the digest is the mechanical signal that the law has
+changed; federated peers observe it through the interop handshake.
+
+### The constitution is self-referential
+
+The act of amending the constitution is itself governed by the
+constitution — by Ri-0.8 (right to propose), by R+++1 (the channel),
+by the amendment process above, and by the causal chain that records
+every proposal and every decision. This is deliberate. A system that
+cannot lawfully change its own rules either ossifies or suffers a
+revolution; a system that can change them without constraint has no
+rules. The middle path is the point.

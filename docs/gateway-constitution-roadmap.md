@@ -293,6 +293,113 @@ verbatim.
 
 ---
 
+### 1.9 `R+++3` Rule-ID references in every causal event
+
+**Threat (structural).** The gateway decides things; the causal chain
+records *that* it decided; it does not record *which rule* the decision
+was made under. This gap has three consequences: (a) operators and
+auditors cannot answer "which rule rejected this call?" without reading
+code; (b) rules that are never referenced in a year of causal events
+may be dead code, but there is no way to detect that; (c) a tool call
+accepted without referencing any rule is a code path not covered by
+the constitution, but we cannot detect those either. This is also the
+mechanical back-stop for the dumbness invariant: no ID = no rule =
+the gateway just did something of its own volition.
+
+This is also Ri-0.3's enforcement mechanism — every rejection names
+the rule that caused it, not just a generic permission error.
+
+**Sketch.** Add `enforced_rules: Vec<RuleId>` to the causal event
+payload schema. At every decision site (policy engine, approval
+gate, budget check, schema validation, sandbox isolation decision),
+callers pass the rule ID(s) being enforced. A helper
+`enforce_under_rule(rule_id, condition)` makes this ergonomic and
+auditable.
+
+Dead-rule detection: a periodic report queries `causal_events` for
+rule IDs referenced in the last N days and compares against the
+constitution's full rule list. Rules absent from the report are
+flagged for retirement review.
+
+Gap detection: the property test from R++9 checks that every accept
+/ reject in a representative event trace carries a non-empty
+`enforced_rules`.
+
+Files: `autonoetic-gateway/src/causal_chain.rs` (schema),
+`autonoetic-gateway/src/policy.rs` (thread rule IDs through each
+check), every tool under `runtime/tools/` (pass rule IDs into
+emitted events), `runtime/response_validation.rs`.
+
+**Test.** `constitution_audit_rule_id_coverage.rs` — invoke a sample
+of accepts and rejects across tool classes, parse the resulting
+causal events, assert every event has `enforced_rules` non-empty
+with valid IDs.
+
+**Size.** M. Mechanical but touches many sites.
+
+---
+
+### 1.10 `R+++1` Amendment proposal channel for agents
+
+**Threat (structural — actually an enabling change).** Today the
+constitution can only be amended by humans writing PRs. If the
+project's vision is agents free, responsible, *and cooperative*,
+then agents must be able to participate in the rule system, not
+merely be subjects of it. Without a declared channel, agents can
+observe problems (via causal chain queries) but cannot formally
+request change — which means the constitution adapts only at human
+speed, not at the speed the system itself learns.
+
+This is Ri-0.8's enforcement mechanism.
+
+**Sketch.** New tool `constitution.propose_amendment` with args:
+
+- `kind`: `add_rule` | `modify_rule` | `remove_rule` | `add_right` | `modify_right` | `remove_right`
+- `target_id`: rule or right ID (for modify / remove)
+- `proposed_text`: new text (for add / modify)
+- `justification`: free-form, required
+- `evidence`: list of causal event IDs or execution trace IDs the
+  agent cites
+
+Requires a new capability: `ConstitutionalProposal` — high-risk,
+scope-object required. Candidate holders: `auditor`,
+`security-sentinel`, `evolution-steward`, a dedicated
+`constitutional-scribe`. Not a default capability.
+
+Persistence: new `constitutional_proposals` SQLite table with
+columns `(id, proposer_agent_id, kind, target_id, proposed_text,
+justification, evidence_json, status, operator_decision,
+decision_reason, created_at, decided_at, published_in_release)`.
+Status lifecycle: `pending → under_review → (approved | rejected |
+deferred)`.
+
+CLI: `autonoetic constitution proposals list | show | approve |
+reject | defer`, mirroring the approval CLI shape.
+
+Approved proposals are *queued for the next release*; they do not
+immediately modify the constitution. A release applies a batch of
+approved proposals, updates the constitution file, bumps the
+`constitution_digest` (R+++2), and is itself a human-signed
+operation.
+
+Files: new
+`autonoetic-gateway/src/runtime/tools/constitution.rs`, new
+`autonoetic-gateway/src/gateway_store/proposals.rs`, extensions to
+CLI, new capability in `autonoetic-types/src/capability.rs`,
+foundation prompts to teach the tool.
+
+**Test.** `constitution_rights_amendment_proposal.rs` — agent
+without capability cannot invoke the tool; agent with capability
+invokes, proposal persisted with durable ID, operator approves,
+proposal enters queued state, second test verifies queued
+proposals apply at next release.
+
+**Size.** L. New tool surface, new persistence, CLI, capability,
+release mechanics. This is the largest Phase 1 item but
+foundational to the vision.
+
+---
+
 ## Phase 2 — P1 hardening (close next quarter)
 
 ### 2.1 `R+7` + `R+18` Runtime-lock drift check
@@ -589,6 +696,94 @@ sides, assert attestation verifies, tamper with one side's chain,
 assert verification fails.
 
 **Size.** L. Touches the federation protocol surface.
+
+---
+
+### 2.13 `R+++2` Constitution digest + compatibility handshake
+
+**Threat (structural).** For federation to deliver "cooperation under
+shared law," gateways must verify they are operating under
+compatible constitutions before trusting each other's agents.
+Without this, federation is a hope rather than a mechanism: gateway
+A might enforce rules gateway B does not, and a cross-gateway agent
+interaction silently lands in the weaker regime.
+
+**Sketch.** Each gateway publishes a `constitution_digest`:
+
+```
+digest = SHA256(
+  canonical_text(constitution.md)
+  || canonical_json(rule_id_to_enforcement_citation_table)
+  || canonical_json(right_id_to_enforcement_citation_table)
+)
+```
+
+The digest is computed at build time (reproducible: same constitution
+→ same digest) and exposed via `gateway.info`. Cross-gateway
+requests (OFP messages, remote spawns, remote credential requests)
+include the sender's digest.
+
+Compatibility check on the receiving gateway:
+
+1. **Exact match** → trusted peer, proceed.
+2. **Known-compatible set** → the receiving gateway has a declared
+   list of digests it considers equivalent (e.g., minor-version
+   bumps that only added rules). Proceed.
+3. **Constitutional superset** → a policy declaring "I accept peers
+   whose constitution is a strict superset of mine" (the receiving
+   gateway enforces strictly less; the peer enforces everything I
+   do and more). Requires rule-ID-level comparison, not just digest.
+4. **Otherwise** → reject with `constitutional_incompatibility`.
+
+Both digests are embedded in the causal event for the interaction,
+so audit is end-to-end verifiable.
+
+Files: new `autonoetic-gateway/src/constitution_digest.rs`,
+`build.rs` (compute at build time),
+`autonoetic-gateway/src/server/ofp.rs` (attach digest to
+cross-gateway requests), `autonoetic-ofp/` (protocol extension),
+causal event schema.
+
+**Test.** `constitution_federation_digest_handshake.rs` — two
+in-process OFP endpoints with matching digests round-trip
+successfully; mutate one endpoint's digest, assert subsequent
+cross-gateway requests reject with `constitutional_incompatibility`
+and both digests are recorded on both sides.
+
+**Size.** L. Federation protocol extension; needs careful handling
+of the reproducible-digest computation.
+
+---
+
+### 2.14 §0 Rights enforcement audit + pins
+
+**Threat.** §0 Rights is new; most rights are either `PARTIAL` or
+`MISSING` because rights were not previously a first-class concept.
+The earlier R+ / R++ roadmap already covers most of them, but the
+rights framing requires each to be pinned *as a right*, not just as
+a rule-side-effect. A right without a test is a lie.
+
+**Sketch.** For each right in §0, audit the current enforcement and
+add a dedicated test that the right holds from the agent's
+perspective. Not every right needs new code — several are already
+enforced under the rule framing; what's needed is an explicit test
+named `constitution_right_<ri-id>.rs`.
+
+| Right | Work required | Depends on |
+|---|---|---|
+| Ri-0.1 self-inspection | Covered by R++1 state attestation. Add right-level test. | R++1 (#48) |
+| Ri-0.2 causal chain read | ENFORCED. Add right-level test confirming unprivileged agents can read their own trace. | — |
+| Ri-0.3 named rejection reason | Covered by R+++3. Add right-level test that every rejection names a rule ID. | R+++3 (new) |
+| Ri-0.4 truthful budget | Covered by R++1. Add right-level test for real-time accuracy. | R++1 |
+| Ri-0.5 degradation notice | Add notice-on-entry to R++6 degraded mode. Test that the agent receives notice with rule ID + evidence before next turn. | R++6 (#61) |
+| Ri-0.6 no silent capability reduction | Add an invariant test. Needs a declared list of "legitimate narrowing paths" (rule-driven, operator-driven) and a test asserting nothing else narrows capabilities mid-session. | — |
+| Ri-0.7 session.end | ENFORCED. Add right-level test. | — |
+| Ri-0.8 amendment proposal | Covered by R+++1. Add right-level test confirming capability-holders can propose. | R+++1 (new) |
+| Ri-0.9 last-word before terminal action | Add to R++6 + emergency-stop code paths. Test notifies agent (where practical) before degrade/stop. | R++6 + emergency-stop |
+| Ri-0.10 constitution read access | New tool `constitution.read` returning current text + digest. S-sized task. | — |
+
+**Size.** M total. Mostly test-writing and small additions (notice
+on degrade, `constitution.read` tool, Ri-0.6 invariant test).
 
 ---
 
