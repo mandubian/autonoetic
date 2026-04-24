@@ -14,13 +14,11 @@ use serde::{Deserialize, Serialize};
 /// the layer's build-time approved hosts before mounting it.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct LayerApprovalScope {
-    /// Hosts that were detected and accessible when this layer was captured.
-    /// These represent the operator-approved hosts for the build session —
-    /// static analysis detects which hosts the build command accessed, and
-    /// the presence of those hosts in the session's approval grants is what
-    /// makes execution proceed. `None` scope means the layer was built without
-    /// network access; `Some` with an empty list means network ran but no hosts
-    /// were statically detected (conservative: treated as no scope restriction).
+    /// Hosts that were detected and statically analyzed when this layer was captured.
+    /// These represent the operator-approved hosts for the build session.
+    /// Empty list means network was enabled during build but no external hosts were detected
+    /// (conservative: treated as requiring no additional approval at mount time).
+    /// See `LayerManifest.approval_scope` for the complete scope record.
     pub approved_hosts: Vec<String>,
     /// Agent ID that built this layer.
     pub built_by_agent_id: String,

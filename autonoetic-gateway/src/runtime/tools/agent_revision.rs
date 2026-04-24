@@ -383,6 +383,10 @@ fn expected_locked_layers(bundle: &ArtifactBundle) -> Vec<LockedLayerMount> {
             layer_id: layer.layer_id.clone(),
             digest: layer.digest.clone(),
             mount_path: layer.mount_path.clone(),
+            // Set to None for comparison purposes. The actual approval_scope is populated
+            // by scaffold_runtime_lock_with_scopes() when gateway_dir is available.
+            // Here we compare only the immutable layer identity (id + digest + path),
+            // not the scope, because scope is resolved separately.
             approval_scope: None,
         })
         .collect();

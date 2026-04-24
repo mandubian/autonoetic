@@ -474,29 +474,33 @@ fn load_layer_manifest_info(
     Some((manifest.approval_scope, name))
 }
 
+/// Information about a single layer needed for scope checking.
+/// Captures immutable layer identity plus caller-provided context (name, source).
+struct LayerScopeCheckInfo {
+    layer_id: String,
+    /// Caller-provided name (from artifact bundle or same as layer_id for runtime.lock)
+    name: String,
+    mount_path: String,
+    digest: String,
+    /// Where this layer is used: "artifact:<id>" or "runtime.lock"
+    source: String,
+}
+
 /// For each layer, returns a `LayerMountScopeInfo` if the layer's build-time approved
 /// hosts are not fully covered by `session_grants`.
 /// Layers without an `approval_scope` (legacy or network-free) are skipped.
-///
-/// The `name` field in each tuple is the caller-provided name (e.g., from artifact bundle).
-/// For runtime.lock layers where no name is stored in the tuple, pass the layer_id as a
-/// fallback — this function will read the manifest name from disk if available.
 fn collect_layer_scope_issues(
-    layers: &[(
-        /* layer_id */ String,
-        /* name (may be same as layer_id if unknown) */ String,
-        /* mount_path */ String,
-        /* digest */ String,
-        /* source */ String,
-    )],
+    layers: &[LayerScopeCheckInfo],
     gateway_dir: &Path,
     session_grants: &[String],
 ) -> Vec<LayerMountScopeInfo> {
     let granted: std::collections::HashSet<&str> =
         session_grants.iter().map(|s| s.as_str()).collect();
     let mut issues = Vec::new();
-    for (layer_id, caller_name, mount_path, digest, source) in layers {
-        let Some((scope_opt, manifest_name)) = load_layer_manifest_info(gateway_dir, layer_id) else {
+    for layer_info in layers {
+        let Some((scope_opt, manifest_name)) =
+            load_layer_manifest_info(gateway_dir, &layer_info.layer_id)
+        else {
             continue;
         };
         let Some(scope) = scope_opt else {
@@ -513,19 +517,19 @@ fn collect_layer_scope_issues(
             .collect();
         if !unapproved.is_empty() {
             // Prefer the manifest name (captured at build time) over the caller-provided name.
-            let display_name = if manifest_name != *layer_id {
+            let display_name = if manifest_name != layer_info.layer_id {
                 manifest_name
             } else {
-                caller_name.clone()
+                layer_info.name.clone()
             };
             issues.push(LayerMountScopeInfo {
-                layer_id: layer_id.clone(),
-                digest: digest.clone(),
+                layer_id: layer_info.layer_id.clone(),
+                digest: layer_info.digest.clone(),
                 name: display_name,
-                mount_path: mount_path.clone(),
+                mount_path: layer_info.mount_path.clone(),
                 build_time_approved_hosts: scope.approved_hosts.clone(),
                 unapproved_delta: unapproved,
-                source: source.clone(),
+                source: layer_info.source.clone(),
             });
         }
     }
@@ -704,13 +708,23 @@ impl NativeTool for SandboxExecTool {
                                 }
                             }
                         }
-                        ScheduledAction::LayerMount { .. } => {
-                            // A LayerMount approval covers both layer mounting and command execution.
-                            // The approved command is the one the agent originally passed.
+                        ScheduledAction::LayerMount { command: approved_cmd, .. } => {
+                            // LayerMount approval is tied to both the specific layer scope AND the command.
+                            // Verify the incoming command matches what was originally approved.
+                            if &args.command != approved_cmd {
+                                return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                                    "approval_ref '{}' was approved for command {:?}, but received {:?}. \
+                                     Layer mount approvals are command-specific to prevent scope bypass.",
+                                    approval_ref,
+                                    approved_cmd,
+                                    args.command
+                                ))
+                                .into());
+                            }
                             tracing::info!(
                                 target: "sandbox.exec",
                                 approval_ref = %approval_ref,
-                                "Proceeding with approved layer mount (also authorises command execution)"
+                                "Proceeding with approved layer mount (command and scope match approval)"
                             );
                             approval_validated_for_command = true;
                             layer_mount_approved = true;
@@ -1368,21 +1382,21 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                     .as_ref()
                     .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
 
-                // Collect (layer_id, name, mount_path, digest, source) for all layers.
-                let mut scope_layers: Vec<(String, String, String, String, String)> = Vec::new();
+                // Collect layers (artifact + runtime.lock) for scope checking.
+                let mut scope_layers: Vec<LayerScopeCheckInfo> = Vec::new();
 
                 // Artifact layers.
                 if let Some(artifact_id) = scope_artifact_id {
                     if let Ok(artifact_store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
                         if let Ok(bundle) = artifact_store.inspect(artifact_id) {
                             for l in &bundle.layers {
-                                scope_layers.push((
-                                    l.layer_id.clone(),
-                                    l.name.clone(),
-                                    l.mount_path.clone(),
-                                    l.digest.clone(),
-                                    format!("artifact:{}", artifact_id),
-                                ));
+                                scope_layers.push(LayerScopeCheckInfo {
+                                    layer_id: l.layer_id.clone(),
+                                    name: l.name.clone(),
+                                    mount_path: l.mount_path.clone(),
+                                    digest: l.digest.clone(),
+                                    source: format!("artifact:{}", artifact_id),
+                                });
                             }
                         }
                     }
@@ -1390,13 +1404,13 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
 
                 // Runtime.lock layers.
                 for l in &runtime_lock_layers {
-                    scope_layers.push((
-                        l.layer_id.clone(),
-                        l.layer_id.clone(), // name not stored in LockedLayerMount; use layer_id
-                        l.mount_path.clone(),
-                        l.digest.clone(),
-                        "runtime.lock".to_string(),
-                    ));
+                    scope_layers.push(LayerScopeCheckInfo {
+                        layer_id: l.layer_id.clone(),
+                        name: l.layer_id.clone(), // name not stored in LockedLayerMount; use layer_id
+                        mount_path: l.mount_path.clone(),
+                        digest: l.digest.clone(),
+                        source: "runtime.lock".to_string(),
+                    });
                 }
 
                 let scope_issues =
@@ -1523,11 +1537,15 @@ Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass
                         .map_err(Into::into);
                     }
 
-                    // No config — fall through with a warning (non-store environments).
-                    tracing::warn!(
-                        target: "sandbox.exec",
-                        "Layer scope issues found but no GatewayConfig available to create approval request; proceeding without gate"
-                    );
+                    // No config available — fail closed rather than silently bypassing the gate.
+                    // Layer scope violations must be explicitly approved; a misconfigured gateway
+                    // should not silently allow untrusted supply-chain content to run.
+                    return Err(anyhow::anyhow!(
+                        "Layer mount approval required: {} layer(s) have build-time scope not covered by \
+                         session grants, but GatewayConfig is not available to enforce approvals. \
+                         Approvals cannot be bypass-able via misconfiguration.",
+                        scope_issues.len()
+                    ));
                 }
             }
         }
