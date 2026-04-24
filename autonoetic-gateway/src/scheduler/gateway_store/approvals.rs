@@ -221,9 +221,15 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         for host in hosts {
             conn.execute(
-                "INSERT OR IGNORE INTO session_approval_grants
+                "INSERT INTO session_approval_grants
                  (root_session_id, agent_id, host, granted_by, granted_at, source_approval_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(root_session_id, agent_id, host) DO UPDATE SET
+                     granted_by = excluded.granted_by,
+                     granted_at = excluded.granted_at,
+                     source_approval_id = excluded.source_approval_id,
+                     revoked_at = NULL,
+                     revoked_reason = NULL",
                 params![
                     root_session_id,
                     agent_id,
@@ -241,7 +247,7 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT host FROM session_approval_grants
-             WHERE root_session_id = ?1",
+             WHERE root_session_id = ?1 AND revoked_at IS NULL",
         )?;
         let rows = stmt.query_map(params![root_session_id], |row| {
             let host: String = row.get(0)?;
@@ -282,5 +288,28 @@ impl GatewayStore {
             params![root_session_id],
         )?;
         Ok(())
+    }
+
+    pub fn revoke_session_grants(
+        &self,
+        root_session_id: &str,
+        host: Option<&str>,
+        reason: &str,
+    ) -> Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let count = match host {
+            Some(h) => conn.execute(
+                "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2
+                 WHERE root_session_id = ?3 AND host = ?4 AND revoked_at IS NULL",
+                params![&now, reason, root_session_id, h],
+            )?,
+            None => conn.execute(
+                "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2
+                 WHERE root_session_id = ?3 AND revoked_at IS NULL",
+                params![&now, reason, root_session_id],
+            )?,
+        };
+        Ok(count)
     }
 }

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 14;
+const SCHEMA_VERSION_LATEST: i64 = 15;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -497,6 +497,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_credential_refresh_fields_v12(conn)?;
     apply_admin_proposals_v13(conn)?;
     apply_memories_revision_provenance_v14(conn)?;
+    apply_session_grant_revocation_v15(conn)?;
 
     Ok(())
 }
@@ -1048,6 +1049,41 @@ fn apply_memories_revision_provenance_v14(conn: &mut Connection) -> Result<()> {
         params![
             14_i64,
             "memories_revision_provenance",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_session_grant_revocation_v15(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 15 {
+        return Ok(());
+    }
+
+    for col in &["revoked_at", "revoked_reason"] {
+        let col_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_approval_grants') WHERE name = ?1",
+            [col],
+            |row| row.get(0),
+        )?;
+        if col_count == 0 {
+            conn.execute(
+                &format!("ALTER TABLE session_approval_grants ADD COLUMN {col} TEXT"),
+                [],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            15_i64,
+            "session_grant_revocation",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;
