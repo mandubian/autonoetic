@@ -180,13 +180,16 @@ impl NativeTool for KnowledgeStoreTool {
         memory.expires_at = expires_at.clone();
         memory.visibility = visibility;
 
-        if let Some(ref store) = gateway_store {
-            if let Some(sid) = session_id {
-                if let Ok(Some(binding)) = store.get_session_agent_binding(sid) {
-                    memory.revision_id = Some(binding.revision_id.clone());
-                    memory.binding_session_id = Some(binding.session_id.clone());
-                    memory.alias_ref = binding.alias_id.clone();
-                }
+        if let Some(sid) = session_id {
+            let store = gateway_store.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "knowledge.store requires gateway_store to tag revision/binding provenance for session-bound writes"
+                )
+            })?;
+            if let Ok(Some(binding)) = store.get_session_agent_binding(sid) {
+                memory.revision_id = Some(binding.revision_id.clone());
+                memory.binding_session_id = Some(binding.session_id.clone());
+                memory.alias_ref = binding.alias_id.clone();
             }
         }
 
