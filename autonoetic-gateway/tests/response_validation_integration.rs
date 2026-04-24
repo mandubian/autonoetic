@@ -426,6 +426,22 @@ async fn test_manifest_io_returns_passes_without_explicit_response_contract(
 
     assert_eq!(result.assistant_reply.as_deref(), Some("{\"status\":\"ok\"}"));
 
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    let events = store.search_causal_events(Some("sess-returns-pass-1"), Some("returns.pass.agent"), 100)?;
+    let event = events
+        .iter()
+        .find(|event| event.category == "contract" && event.action == "io.returns")
+        .expect("expected io.returns contract event");
+    assert_eq!(event.status, "SUCCESS");
+    let payload = event
+        .payload
+        .as_ref()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .expect("payload should be valid json");
+    assert_eq!(payload["contract"], "io.returns");
+    assert_eq!(payload["result"], "pass");
+
     Ok(())
 }
 

@@ -2751,6 +2751,16 @@ fn build_effective_response_contract_metadata(
     metadata: Option<&serde_json::Value>,
     manifest: Option<&AgentManifest>,
 ) -> Option<serde_json::Value> {
+    // Preserve caller metadata unchanged when response_contract is present but not an object,
+    // so parse_response_contract can surface the invalid contract instead of masking it.
+    if let Some(incoming) = metadata {
+        if let Some(contract_value) = incoming.get("response_contract") {
+            if !contract_value.is_object() {
+                return metadata.cloned();
+            }
+        }
+    }
+
     let manifest_contract = manifest.and_then(|loaded| loaded.response_contract.clone());
     let manifest_returns_schema = manifest
         .and_then(|loaded| loaded.io.as_ref())

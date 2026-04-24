@@ -210,7 +210,7 @@ impl NativeTool for AgentSpawnTool {
                                                 serde_json::json!({
                                                     "contract": "io.accepts",
                                                     "result": "pass",
-                                                    "target_agent_id": args.agent_id,
+                                                    "target_agent_id": &args.agent_id,
                                                     "expected_schema": accepts,
                                                     "enforcer": "deterministic"
                                                 }),
@@ -238,7 +238,7 @@ impl NativeTool for AgentSpawnTool {
                                                 serde_json::json!({
                                                     "contract": "io.accepts",
                                                     "result": "coerced",
-                                                    "target_agent_id": args.agent_id,
+                                                    "target_agent_id": &args.agent_id,
                                                     "expected_schema": accepts,
                                                     "transformations": transformations,
                                                     "enforcer": "deterministic"
@@ -252,8 +252,8 @@ impl NativeTool for AgentSpawnTool {
                                                     serde_json::json!({
                                                         "contract": "io.accepts",
                                                         "result": "rejected",
-                                                        "target_agent_id": args.agent_id,
-                                                        "reason": body,
+                                                        "target_agent_id": &args.agent_id,
+                                                        "reason": &body,
                                                         "expected_schema": accepts,
                                                         "enforcer": "deterministic"
                                                     })
