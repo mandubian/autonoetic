@@ -17,8 +17,9 @@ impl GatewayStore {
             "INSERT OR REPLACE INTO memories (
                 memory_id, scope, owner_agent_id, writer_agent_id, source_type, source_ref,
                 created_at, updated_at, content, content_hash, confidence, tags, lineage,
-                visibility, expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                visibility, expires_at, revision_id, binding_session_id, alias_ref,
+                quarantine_reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &memory.memory_id,
                 &memory.scope,
@@ -35,6 +36,10 @@ impl GatewayStore {
                 lineage_json,
                 serde_json::to_string(&memory.visibility)?,
                 &memory.expires_at,
+                &memory.revision_id,
+                &memory.binding_session_id,
+                &memory.alias_ref,
+                &memory.quarantine_reason,
             ],
         )?;
         tx.execute(
@@ -73,7 +78,7 @@ impl GatewayStore {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         let mut sql = String::from(
-            "SELECT memory_id FROM memories WHERE scope = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
+            "SELECT memory_id FROM memories WHERE scope = ?1 AND (expires_at IS NULL OR expires_at > ?2) AND quarantine_reason IS NULL",
         );
         if content_substr.is_some() {
             sql.push_str(" AND content LIKE ?3");
@@ -131,6 +136,7 @@ impl GatewayStore {
         let sess = reader_session_id.unwrap_or("").to_string();
         let mut sql = String::from("SELECT m.memory_id FROM memories m WHERE m.scope = ?1 ");
         sql.push_str("AND (m.expires_at IS NULL OR m.expires_at > ?2) ");
+        sql.push_str("AND m.quarantine_reason IS NULL ");
         sql.push_str(
             "AND (
                 json_extract(m.visibility, '$.kind') = 'global'
@@ -201,7 +207,7 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT memory_id FROM memories WHERE owner_agent_id = ?1
-             AND (expires_at IS NULL OR expires_at > ?2) ORDER BY created_at DESC",
+             AND (expires_at IS NULL OR expires_at > ?2) AND quarantine_reason IS NULL ORDER BY created_at DESC",
         )?;
         let mut rows = stmt.query(params![owner_agent_id, &now])?;
         let mut out = Vec::new();
@@ -221,6 +227,7 @@ impl GatewayStore {
         const LIST_SCOPES_SQL: &str = r#"
             SELECT DISTINCT scope FROM memories
             WHERE (expires_at IS NULL OR expires_at > ?2)
+              AND quarantine_reason IS NULL
               AND (
                 json_extract(visibility, '$.kind') = 'global'
                 OR json_extract(visibility, '$') = 'global'
@@ -250,5 +257,36 @@ impl GatewayStore {
             scopes.push(row.get(0)?);
         }
         Ok(scopes)
+    }
+
+    pub fn memory_quarantine_by_revision(
+        &self,
+        revision_id: &str,
+        reason: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE memories SET quarantine_reason = ?1 WHERE revision_id = ?2 AND quarantine_reason IS NULL",
+            params![reason, revision_id],
+        )?;
+        Ok(count)
+    }
+
+    pub fn memory_list_quarantined_for_revision(
+        &self,
+        revision_id: &str,
+    ) -> Result<Vec<MemoryObject>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM memories WHERE revision_id = ?1 AND quarantine_reason IS NOT NULL ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![revision_id], |row| {
+            memory_object_from_row(row)
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
     }
 }

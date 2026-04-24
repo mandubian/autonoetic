@@ -575,6 +575,15 @@ impl GatewayStore {
                     "UPDATE agent_revisions SET status = 'Archived' WHERE revision_id = ?1",
                     params![curr],
                 )?;
+
+                let quarantine_reason = format!(
+                    "revision_rollback:{}",
+                    curr
+                );
+                tx.execute(
+                    "UPDATE memories SET quarantine_reason = ?1 WHERE revision_id = ?2 AND quarantine_reason IS NULL",
+                    params![&quarantine_reason, curr],
+                )?;
             }
         }
 
