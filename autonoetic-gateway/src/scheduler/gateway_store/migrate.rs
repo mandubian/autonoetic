@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 13;
+const SCHEMA_VERSION_LATEST: i64 = 14;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -269,13 +269,18 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
             tags TEXT,
             lineage TEXT,
             visibility TEXT NOT NULL DEFAULT 'private',
-            expires_at TEXT
+            expires_at TEXT,
+            revision_id TEXT,
+            binding_session_id TEXT,
+            alias_ref TEXT,
+            quarantine_reason TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
         CREATE INDEX IF NOT EXISTS idx_memories_owner ON memories(owner_agent_id);
         CREATE INDEX IF NOT EXISTS idx_memories_visibility ON memories(visibility);
         CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories(tags);
+        CREATE INDEX IF NOT EXISTS idx_memories_revision_id ON memories(revision_id);
 
         CREATE TABLE IF NOT EXISTS memory_tags (
             memory_id TEXT NOT NULL,
@@ -491,6 +496,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_agent_messages_v11(conn)?;
     apply_credential_refresh_fields_v12(conn)?;
     apply_admin_proposals_v13(conn)?;
+    apply_memories_revision_provenance_v14(conn)?;
 
     Ok(())
 }
@@ -998,6 +1004,52 @@ fn apply_admin_proposals_v13(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![13_i64, "admin_proposals", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_memories_revision_provenance_v14(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 14 {
+        return Ok(());
+    }
+
+    let cols: Vec<&str> = ["revision_id", "binding_session_id", "alias_ref", "quarantine_reason"]
+        .to_vec();
+    for col in &cols {
+        let col_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = ?1",
+            [col],
+            |row| row.get(0),
+        )?;
+        if col_count == 0 {
+            conn.execute(&format!("ALTER TABLE memories ADD COLUMN {col} TEXT"), [])?;
+        }
+    }
+
+    let idx_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_index_list('memories') WHERE name = 'idx_memories_revision_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if idx_count == 0 {
+        conn.execute(
+            "CREATE INDEX idx_memories_revision_id ON memories(revision_id)",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            14_i64,
+            "memories_revision_provenance",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }

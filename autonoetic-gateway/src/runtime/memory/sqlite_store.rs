@@ -29,7 +29,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn get(&self, memory_id: &str) -> Result<Option<MemoryObject>> {
-        self.store.memory_get_unrestricted(memory_id)
+        self.store.memory_get(memory_id)
     }
 
     async fn list_ids_for_scope(

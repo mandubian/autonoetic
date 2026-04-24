@@ -136,6 +136,23 @@ pub struct MemoryObject {
     /// When this memory stops being readable (`None` = never expires). RFC 3339 UTC from the gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+
+    /// Revision ID of the agent that wrote this memory (from session_agent_bindings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+
+    /// Session ID from the binding that was active when this memory was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_session_id: Option<String>,
+
+    /// Alias reference (alias_id) from the binding when this memory was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias_ref: Option<String>,
+
+    /// When non-None, this memory has been quarantined (e.g. by revision rollback).
+    /// The value is a human-readable reason string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_reason: Option<String>,
 }
 
 impl MemoryObject {
@@ -171,6 +188,10 @@ impl MemoryObject {
             lineage: Vec::new(),
             visibility: MemoryVisibility::default(),
             expires_at: None,
+            revision_id: None,
+            binding_session_id: None,
+            alias_ref: None,
+            quarantine_reason: None,
         }
     }
 

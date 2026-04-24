@@ -1,8 +1,6 @@
 use autonoetic_types::memory::MemoryObject;
 use rusqlite;
 
-/// Decode a memory row, tolerating NULLs in nullable columns
-/// (tags, lineage) by defaulting to empty JSON arrays.
 pub(crate) fn memory_object_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
     let source_type_str: String = row.get(4)?;
     let tags_str: Option<String> = row.get(11)?;
@@ -37,5 +35,9 @@ pub(crate) fn memory_object_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Resul
             )
         })?,
         expires_at: row.get(14)?,
+        revision_id: row.get(15)?,
+        binding_session_id: row.get(16)?,
+        alias_ref: row.get(17)?,
+        quarantine_reason: row.get(18)?,
     })
 }
