@@ -68,7 +68,7 @@ When auditing an artifact for install, set `auditor_pass: true` only when **all 
 
 Set `auditor_pass: false` when any critical finding exists or security checklist items fail.
 
-**After completing your audit, call `promotion.record` with the `artifact_id` you reviewed.** Include the `artifact_id` in your summary. This is required for the install gate to verify your audit occurred. Record both pass and fail outcomes.
+**After completing your audit, call `promotion_record` with the `artifact_id` you reviewed.** Include the `artifact_id` in your summary. This is required for the install gate to verify your audit occurred. Record both pass and fail outcomes.
 
 Use this exact argument shape:
 
@@ -90,7 +90,7 @@ Use this exact argument shape:
 
 Mapping rule: `pass` must be the boolean equivalent of your audit decision (`auditor_pass`).
 
-Do NOT use alternate field names like `outcome`; `promotion.record` requires `role` and `pass`.
+Do NOT use alternate field names like `outcome`; `promotion_record` requires `role` and `pass`.
 
 ## Review Protocol
 
@@ -99,7 +99,7 @@ Do NOT use alternate field names like `outcome`; `promotion.record` requires `ro
 3. **Reproducibility third**: deterministic behavior
 4. **Quality last**: style, documentation, maintainability
 
-For executable artifacts, review the artifact closure (via `artifact.inspect`), not loose files. Ensure the reviewed artifact is the one intended for install.
+For executable artifacts, review the artifact closure (via `artifact_inspect`), not loose files. Ensure the reviewed artifact is the one intended for install.
 
 ## Clarification
 

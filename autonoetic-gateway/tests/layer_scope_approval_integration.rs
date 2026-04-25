@@ -149,7 +149,7 @@ fn test_layer_with_unapproved_hosts_blocks_execution() {
     let arguments = serde_json::json!({ "command": "echo 'run with layer'" });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,
@@ -194,7 +194,7 @@ fn test_layer_without_scope_does_not_block_execution() {
     let arguments = serde_json::json!({ "command": "echo 'hello'" });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,
@@ -248,7 +248,7 @@ fn test_layer_with_scope_does_not_block_network_access_agent() {
     let arguments = serde_json::json!({ "command": "echo 'hello'" });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,
@@ -300,7 +300,7 @@ fn test_layer_mount_approval_ref_clears_scope_gate() {
     // Step 1: First call — blocked, returns request_id
     let arguments = serde_json::json!({ "command": "echo 'go'" });
     let r1 = registry.execute(
-        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
         &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
     );
     let resp1: serde_json::Value = serde_json::from_str(&r1.unwrap()).unwrap();
@@ -315,7 +315,7 @@ fn test_layer_mount_approval_ref_clears_scope_gate() {
     // Step 3: Retry with approval_ref — scope gate is cleared
     let arguments_with_ref = serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
     let r2 = registry.execute(
-        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
         &arguments_with_ref.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
     );
 
@@ -359,7 +359,7 @@ fn test_layer_mount_approval_ref_rejected_for_different_root_session() {
 
     let arguments = serde_json::json!({ "command": "echo 'go'" });
     let r1 = registry.execute(
-        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
         &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
     );
     let resp1: serde_json::Value = serde_json::from_str(&r1.unwrap()).unwrap();
@@ -371,7 +371,7 @@ fn test_layer_mount_approval_ref_rejected_for_different_root_session() {
 
     let arguments_with_ref = serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
     let r2 = registry.execute(
-        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
         &arguments_with_ref.to_string(), Some("sess_other"), None, Some(&config), Some(store.clone()), None,
     );
 
@@ -414,7 +414,7 @@ fn test_layer_mount_approval_ref_rejected_for_new_layer_scope() {
 
     let arguments = serde_json::json!({ "command": "echo 'go'" });
     let r1 = registry.execute(
-        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
         &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
     );
     let resp1: serde_json::Value = serde_json::from_str(&r1.unwrap()).unwrap();
@@ -450,7 +450,7 @@ fn test_layer_mount_approval_ref_rejected_for_new_layer_scope() {
 
     let arguments_with_ref = serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
     let r2 = registry.execute(
-        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
         &arguments_with_ref.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
     );
 
@@ -489,7 +489,7 @@ fn test_corrupt_layer_manifest_blocks_execution() {
 
     let arguments = serde_json::json!({ "command": "echo 'go'" });
     let result = registry.execute(
-        "sandbox.exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
+        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
         &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
     );
 

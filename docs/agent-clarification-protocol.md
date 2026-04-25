@@ -63,7 +63,7 @@ No other fields. The LLM only makes one decision: "do I need clarification or no
    c. Combines both: answers what it can, asks user for what it can't
 ```
 
-No new gateway tools needed. The clarification request flows through the existing `agent.spawn` return path — the parent always sees the child's output.
+No new gateway tools needed. The clarification request flows through the existing `agent_spawn` return path — the parent always sees the child's output.
 
 ### Caller Handling
 
@@ -93,7 +93,7 @@ When respawning a child after clarification, include:
 Example:
 
 ```
-agent.spawn("coder.default", message="Build an HTTP endpoint on port 8080.
+agent_spawn("coder.default", message="Build an HTTP endpoint on port 8080.
 Your previous work on the endpoint structure is saved as handle:sha256:abc123.
 Continue from there, adding the port binding.")
 ```

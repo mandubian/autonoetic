@@ -471,7 +471,7 @@ mod tests {
             session_id: "sess-123".to_string(),
             turn_id: Some("turn-001".to_string()),
             timestamp: chrono::Utc::now().to_rfc3339(),
-            tool_name: "sandbox.exec".to_string(),
+            tool_name: "sandbox_exec".to_string(),
             command: Some("pytest tests/".to_string()),
             exit_code: Some(0),
             stdout: Some(large_stdout.clone()),
@@ -494,7 +494,7 @@ mod tests {
             session_id: "sess-123".to_string(),
             turn_id: Some("turn-002".to_string()),
             timestamp: chrono::Utc::now().to_rfc3339(),
-            tool_name: "sandbox.exec".to_string(),
+            tool_name: "sandbox_exec".to_string(),
             command: Some("python script.py".to_string()),
             exit_code: Some(1),
             stdout: Some("Some output".to_string()),
@@ -511,7 +511,7 @@ mod tests {
         store.create_execution_trace(&fail_trace)?;
 
         let traces = store.search_execution_traces(
-            Some("sandbox.exec"),
+            Some("sandbox_exec"),
             Some(true),
             None,
             None,
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(traces[0].exit_code, Some(0));
 
         let fail_traces = store.search_execution_traces(
-            Some("sandbox.exec"),
+            Some("sandbox_exec"),
             Some(false),
             Some("compilation"),
             None,

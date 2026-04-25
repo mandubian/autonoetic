@@ -266,11 +266,11 @@ pub fn validate_promotion_record(
             violations.push(ValidationViolation {
                 rule: "promotion_record_missing".into(),
                 message: format!(
-                    "completed without a matching promotion.record within the session for artifact '{}' (role: {})",
+                    "completed without a matching promotion_record within the session for artifact '{}' (role: {})",
                     promotion_artifact_id, promotion_role
                 ),
                 repair_hint: format!(
-                    "Call promotion.record with artifact_id='{}', role='{}', pass=true (or false if validation failed). Example: promotion.record({{\"artifact_id\": \"{}\", \"role\": \"{}\", \"pass\": true}})",
+                    "Call promotion_record with artifact_id='{}', role='{}', pass=true (or false if validation failed). Example: promotion_record({{\"artifact_id\": \"{}\", \"role\": \"{}\", \"pass\": true}})",
                     promotion_artifact_id, promotion_role, promotion_artifact_id, promotion_role
                 ),
             });
@@ -347,7 +347,7 @@ pub fn validate_session_evidence(
     };
 
     let traces = match store.search_execution_traces(
-        Some("artifact.build"),
+        Some("artifact_build"),
         Some(true),
         None,
         None,
@@ -406,7 +406,7 @@ pub fn build_repair_prompt(
                 "max_reply_length_chars" => "Your text reply is too long; be concise.",
                 "prohibited_text_pattern" => "Your reply contains sensitive data or unsafe content.",
                 "output_schema" => "Your output does not match the required JSON schema.",
-                "promotion_record_missing" => "You forgot to call promotion.record — this is required for artifact promotion gates.",
+                "promotion_record_missing" => "You forgot to call promotion_record — this is required for artifact promotion gates.",
                 "promotion_record_failed" => "The evaluator or auditor rejected the artifact. This cannot be auto-repaired.",
                 _ => "Your output violates a declared constraint.",
             };
@@ -506,8 +506,8 @@ fn build_repair_examples(violations: &[ValidationViolation]) -> String {
             "promotion_record_missing" => {
                 examples.push(
                     "Promotion Record:\n  \
-                     Call promotion.record as a tool (not via sandbox.exec):\n  \
-                     promotion.record({\"artifact_id\": \"<your_artifact_id>\", \"role\": \"evaluator\", \"pass\": true, \"summary\": \"Tests passed\"})"
+                     Call promotion_record as a tool (not via sandbox_exec):\n  \
+                     promotion_record({\"artifact_id\": \"<your_artifact_id>\", \"role\": \"evaluator\", \"pass\": true, \"summary\": \"Tests passed\"})"
                         .to_string()
                 );
             }
@@ -910,7 +910,7 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule, "promotion_record_missing");
         assert!(violations[0].message.contains("art_missing"));
-        assert!(violations[0].repair_hint.contains("promotion.record"));
+        assert!(violations[0].repair_hint.contains("promotion_record"));
     }
 
     #[test]

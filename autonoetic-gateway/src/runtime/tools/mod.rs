@@ -80,7 +80,7 @@ impl ToolTierFilter {
         if self.allowed_tiers.is_empty() {
             return true;
         }
-        if self.always_include_approval_tools && tool_name.starts_with("approval.") {
+        if self.always_include_approval_tools && tool_name.starts_with("approval_") {
             return true;
         }
         self.allows_tier(tool_tier(tool_name))
@@ -93,7 +93,7 @@ impl ToolTierFilter {
         if self.allowed_tiers.is_empty() {
             return true;
         }
-        if self.always_include_approval_tools && tool_name.starts_with("approval.") {
+        if self.always_include_approval_tools && tool_name.starts_with("approval_") {
             return true;
         }
         self.allows_tier(tier)
@@ -827,27 +827,27 @@ mod tests {
     #[test]
     fn test_tool_tier_filter_allows_all_when_empty() {
         let filter = ToolTierFilter::all();
-        assert!(filter.allows("content.write"));
-        assert!(filter.allows("web.search"));
-        assert!(filter.allows("agent.spawn"));
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("web_search"));
+        assert!(filter.allows("agent_spawn"));
     }
 
     #[test]
     fn test_tool_tier_filter_core_only() {
         let filter = ToolTierFilter::core_only();
-        assert!(filter.allows("content.write"));
-        assert!(filter.allows("sandbox.exec"));
-        assert!(!filter.allows("web.search"));
-        assert!(!filter.allows("agent.spawn"));
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("sandbox_exec"));
+        assert!(!filter.allows("web_search"));
+        assert!(!filter.allows("agent_spawn"));
     }
 
     #[test]
     fn test_tool_tier_filter_core_and_workflow() {
         let filter = ToolTierFilter::core_and_workflow();
-        assert!(filter.allows("content.write"));
-        assert!(filter.allows("agent.spawn"));
-        assert!(!filter.allows("web.search"));
-        assert!(!filter.allows("promotion.record"));
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("agent_spawn"));
+        assert!(!filter.allows("web_search"));
+        assert!(!filter.allows("promotion_record"));
     }
 
     #[test]
@@ -864,22 +864,22 @@ mod tests {
             allowed_tiers: vec![ToolTier::Core],
             always_include_approval_tools: true,
         };
-        assert!(!filter.allows("web.search"));
-        assert!(filter.allows("approval.list"));
-        assert!(filter.allows("approval.answer"));
+        assert!(!filter.allows("web_search"));
+        assert!(filter.allows("approval_list"));
+        assert!(filter.allows("approval_answer"));
     }
 
     #[test]
     fn test_tool_tier_filter_core_and_workflow_with_approvals() {
         let filter = ToolTierFilter::core_and_workflow_with_approvals();
-        assert!(filter.allows("content.write"));
-        assert!(filter.allows("sandbox.exec"));
-        assert!(filter.allows("agent.spawn"));
-        assert!(filter.allows("approval.status"));
-        assert!(filter.allows("workflow.state"));
-        assert!(!filter.allows("web.search"));
-        assert!(!filter.allows("promotion.record"));
-        assert!(!filter.allows("agent.revision.create"));
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("sandbox_exec"));
+        assert!(filter.allows("agent_spawn"));
+        assert!(filter.allows("approval_status"));
+        assert!(filter.allows("workflow_state"));
+        assert!(!filter.allows("web_search"));
+        assert!(!filter.allows("promotion_record"));
+        assert!(!filter.allows("agent_revision_create"));
     }
 
     #[test]

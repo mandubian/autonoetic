@@ -166,7 +166,7 @@ includes source and binary SHA (`runtime_lock.rs`, `build.rs`).
 
 ### 9. Agent Install & Provenance
 
-Three-stage activation (`artifact.build → revision.create →
+Three-stage activation (`artifact_build → revision.create →
 revision.promote`) is enforced. Revisions are immutable and
 content-addressed. SKILL.md is parsed and its capabilities extracted.
 External-import detection in
@@ -189,7 +189,7 @@ HTTP bearer auth (`server/http.rs`), shared-secret JSON-RPC auth
 
 ### 11. Inter-Agent Messaging
 
-Peer messaging via `agent.message` is ACL-gated
+Peer messaging via `agent_message` is ACL-gated
 (`policy.rs:554 can_message_agent`). Auto-injection at target session
 turn is enforced. `root_session_id` inheritance is correct.
 
@@ -262,7 +262,7 @@ Secondary:
   first access.
 - **R+9** Redaction-before-write ordering invariant.
 - **R+10** sandbox→gateway SDK-bridge rate and payload-size limits.
-- **R+11** Bundle signature verification at `agent.revision.create`.
+- **R+11** Bundle signature verification at `agent_revision_create`.
 - **R+12** Orphan-child reaper on parent termination.
 - **R+13** Approval grant TTL.
 - **R+14** Deny-by-default on unknown tool names in `can_invoke_tool`.

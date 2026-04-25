@@ -223,7 +223,7 @@ fn test_generated_wrapper_inherits_base_capabilities() {
     });
     let base_manifest = serde_json::json!({
         "capabilities": [
-            { "type": "SandboxFunctions", "allowed": ["web.search"] },
+            { "type": "SandboxFunctions", "allowed": ["web_search"] },
             { "type": "ReadAccess", "scopes": ["*"] }
         ]
     });
@@ -251,7 +251,7 @@ fn test_generated_wrapper_inherits_base_capabilities() {
     assert_eq!(manifest.capabilities.len(), 2);
     assert!(matches!(
         &manifest.capabilities[0],
-        Capability::SandboxFunctions { allowed } if allowed == &vec!["web.search".to_string()]
+        Capability::SandboxFunctions { allowed } if allowed == &vec!["web_search".to_string()]
     ));
     assert!(matches!(
         &manifest.capabilities[1],

@@ -41,7 +41,7 @@ async fn test_coder_content_write_via_tool_calls() {
                 "model": "gpt-4o",
                 "choices": [{
                     "index": 0,
-                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "content.write", "arguments": "{\"name\":\"secret.txt\",\"content\":\"secret_value_123\"}" } }] },
+                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "content_write", "arguments": "{\"name\":\"secret.txt\",\"content\":\"secret_value_123\"}" } }] },
                     "finish_reason": "tool_calls"
                 }],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -148,7 +148,7 @@ async fn test_coder_content_write_via_tool_calls() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
             if value["session_id"].as_str() == Some(session_id) {
                 if value["action"].as_str() == Some("requested")
-                    && value["payload"]["tool_name"].as_str() == Some("content.write")
+                    && value["payload"]["tool_name"].as_str() == Some("content_write")
                 {
                     content_write_count += 1;
                 }
@@ -223,8 +223,8 @@ async fn test_coder_multiple_tool_calls_single_turn() {
                         "role": "assistant",
                         "content": "I'll create the weather script and SKILL.md.",
                         "tool_calls": [
-                            { "id": "call_1", "type": "function", "function": { "name": "content.write", "arguments": "{\"name\":\"weather.py\",\"content\":\"import json\\nprint(json.dumps({\\\"temp\\\": 22}))\\n\"}" } },
-                            { "id": "call_2", "type": "function", "function": { "name": "content.write", "arguments": "{\"name\":\"SKILL.md\",\"content\":\"---\\nname: weather\\ndescription: Weather script\\nscript_entry: weather.py\\n---\\n# Weather Script\\n\"}" } }
+                            { "id": "call_1", "type": "function", "function": { "name": "content_write", "arguments": "{\"name\":\"weather.py\",\"content\":\"import json\\nprint(json.dumps({\\\"temp\\\": 22}))\\n\"}" } },
+                            { "id": "call_2", "type": "function", "function": { "name": "content_write", "arguments": "{\"name\":\"SKILL.md\",\"content\":\"---\\nname: weather\\ndescription: Weather script\\nscript_entry: weather.py\\n---\\n# Weather Script\\n\"}" } }
                         ]
                     },
                     "finish_reason": "tool_calls"
@@ -322,7 +322,7 @@ async fn test_coder_multiple_tool_calls_single_turn() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
             if value["session_id"].as_str() == Some(session_id)
                 && value["action"].as_str() == Some("requested")
-                && value["payload"]["tool_name"].as_str() == Some("content.write")
+                && value["payload"]["tool_name"].as_str() == Some("content_write")
             {
                 content_write_count += 1;
             }

@@ -92,7 +92,7 @@ See `docs/response-validation-gate.md` for implementation details and `docs/iter
 
 ## Revision Promotion Approval
 
-Controls when `agent.revision.promote` requires human approval before proceeding. The gateway gates high-risk promotions (bundles with broad capabilities or detected remote access) the same way it previously gated `agent.install`.
+Controls when `agent_revision_promote` requires human approval before proceeding. The gateway gates high-risk promotions (bundles with broad capabilities or detected remote access) the same way it previously gated `agent.install`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -104,7 +104,7 @@ Controls when `agent.revision.promote` requires human approval before proceeding
 
 ## Schema Enforcement
 
-Validates `agent.spawn` payloads against declared input schemas in agent metadata.
+Validates `agent_spawn` payloads against declared input schemas in agent metadata.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -128,7 +128,7 @@ See `docs/schema-enforcement-hook.md` for details.
 
 ## Code Analysis
 
-Controls how the gateway analyzes agent code during `agent.revision.create` for capabilities and security.
+Controls how the gateway analyzes agent code during `agent_revision_create` for capabilities and security.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -427,7 +427,7 @@ Reactive bindings from gateway events to actions. When an event fires (e.g., ses
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `hooks[].on` | string | required | Event name: `session.closed`, `session.suspended`, `approval.resolved`, `approval.requested`, `workflow.join.satisfied`, `artifact.created`, `agent.promoted`, `emergency_stop` |
-| `hooks[].action` | string | required | Action: `publish_report`, `deliver_signal`, `agent.spawn`, `http.callback` |
+| `hooks[].action` | string | required | Action: `publish_report`, `deliver_signal`, `agent_spawn`, `http.callback` |
 | `hooks[].async` | bool | `false` | If true, the hook runs in a background task without blocking the event |
 | `hooks[].params` | object | `{}` | Action-specific parameters |
 

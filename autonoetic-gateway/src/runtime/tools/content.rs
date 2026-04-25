@@ -16,7 +16,7 @@ pub struct ContentWriteTool;
 
 impl NativeTool for ContentWriteTool {
     fn name(&self) -> &'static str {
-        "content.write"
+        "content_write"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -147,7 +147,7 @@ pub struct ContentReadTool;
 
 impl NativeTool for ContentReadTool {
     fn name(&self) -> &'static str {
-        "content.read"
+        "content_read"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

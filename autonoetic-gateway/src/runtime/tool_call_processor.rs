@@ -84,10 +84,10 @@ fn fix_stringified_values_recursive(val: &mut serde_json::Value) {
 impl<'a> ToolCallProcessor<'a> {
     fn canonical_tool_name(name: &str) -> &str {
         match name {
-            "spawn" => "agent.spawn",
-            "message" => "agent.message",
-            "search" => "web.search",
-            "fetch" => "web.fetch",
+            "spawn" => "agent_spawn",
+            "message" => "agent_message",
+            "search" => "web_search",
+            "fetch" => "web_fetch",
             _ => name,
         }
     }
@@ -366,9 +366,9 @@ impl<'a> ToolCallProcessor<'a> {
 
     fn log_memory_tool_event(&self, tracer: &mut SessionTracer, tool_name: &str, result: &str) {
         let action = match tool_name {
-            "memory.remember" => "remember",
-            "memory.recall" => "recall",
-            "memory.search" => "search",
+            "memory_remember" => "remember",
+            "memory_recall" => "recall",
+            "memory_search" => "search",
             _ => return,
         };
 
@@ -498,7 +498,7 @@ fn infer_trace_command(tool_name: &str, arguments_json: &str) -> Option<String> 
         if let Some(command) = args.get("cmd").and_then(|v| v.as_str()) {
             return Some(command.to_string());
         }
-        if tool_name == "sandbox.exec" {
+        if tool_name == "sandbox_exec" {
             if let Some(script) = args.get("script").and_then(|v| v.as_str()) {
                 return Some(script.to_string());
             }
@@ -585,7 +585,7 @@ mod tests {
 
         let tool_calls = vec![ToolCall {
             id: "tc1".to_string(),
-            name: "knowledge.store".to_string(),
+            name: "knowledge_store".to_string(),
             arguments: r#"{"id":"","content":"hello"}"#.to_string(),
         }];
 
@@ -693,12 +693,12 @@ mod tests {
         let tool_calls = vec![
             ToolCall {
                 id: "tc1".to_string(),
-                name: "knowledge.store".to_string(),
+                name: "knowledge_store".to_string(),
                 arguments: r#"{"id":"","content":"hello"}"#.to_string(),
             },
             ToolCall {
                 id: "tc2".to_string(),
-                name: "knowledge.recall".to_string(),
+                name: "knowledge_recall".to_string(),
                 arguments: r#"{"id":"some-id"}"#.to_string(),
             },
         ];
@@ -1006,7 +1006,7 @@ mod tests {
         // First turn: malformed tool call - empty id triggers validation error
         let tool_calls_turn1 = vec![ToolCall {
             id: "tc1".to_string(),
-            name: "knowledge.store".to_string(),
+            name: "knowledge_store".to_string(),
             arguments: r#"{"id":"","content":"hello"}"#.to_string(),
         }];
 
@@ -1041,7 +1041,7 @@ mod tests {
         // Second turn: agent reads error, corrects the tool call with valid id
         let tool_calls_turn2 = vec![ToolCall {
             id: "tc2".to_string(),
-            name: "knowledge.store".to_string(),
+            name: "knowledge_store".to_string(),
             arguments: r#"{"id":"valid-id-123","content":"hello world"}"#.to_string(),
         }];
 
@@ -1165,24 +1165,24 @@ mod tests {
     fn test_canonical_tool_name_aliases() {
         assert_eq!(
             ToolCallProcessor::canonical_tool_name("spawn"),
-            "agent.spawn"
+            "agent_spawn"
         );
         assert_eq!(
             ToolCallProcessor::canonical_tool_name("message"),
-            "agent.message"
+            "agent_message"
         );
         assert_eq!(
             ToolCallProcessor::canonical_tool_name("search"),
-            "web.search"
+            "web_search"
         );
-        assert_eq!(ToolCallProcessor::canonical_tool_name("fetch"), "web.fetch");
+        assert_eq!(ToolCallProcessor::canonical_tool_name("fetch"), "web_fetch");
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("agent.spawn"),
-            "agent.spawn"
+            ToolCallProcessor::canonical_tool_name("agent_spawn"),
+            "agent_spawn"
         );
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("web.search"),
-            "web.search"
+            ToolCallProcessor::canonical_tool_name("web_search"),
+            "web_search"
         );
     }
 

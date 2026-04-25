@@ -258,7 +258,7 @@ fn create_revision(
     });
     let create_result = registry
         .execute(
-            "agent.revision.create",
+            "agent_revision_create",
             manifest,
             policy,
             builder_dir,
@@ -301,7 +301,7 @@ fn record_promotion(
     });
     let result = registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             manifest,
             policy,
             builder_dir,
@@ -341,7 +341,7 @@ fn try_promote(
         "reason": "integration test",
     });
     match registry.execute(
-        "agent.revision.promote",
+        "agent_revision_promote",
         manifest,
         policy,
         builder_dir,

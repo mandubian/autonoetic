@@ -142,7 +142,7 @@ fn test_credential_check_no_store_returns_structured_error() {
 
     let result = registry
         .execute(
-            "credential.check",
+            "credential_check",
             &manifest,
             &policy,
             temp.path(),
@@ -181,7 +181,7 @@ fn test_scheduler_create_no_store_returns_structured_error() {
 
     let result = registry
         .execute(
-            "scheduler.cron.create",
+            "scheduler_cron_create",
             &manifest,
             &policy,
             temp.path(),
@@ -219,7 +219,7 @@ fn test_scheduler_pause_not_found_returns_structured_error() {
 
     let result = registry
         .execute(
-            "scheduler.cron.pause",
+            "scheduler_cron_pause",
             &manifest,
             &policy,
             temp.path(),
@@ -252,7 +252,7 @@ fn test_loop_guard_permission_errors_skip_budget() {
 
     for _ in 0..20 {
         guard.register_failure(
-            "web.fetch",
+            "web_fetch",
             r#"{"url":"https://denied.com"}"#,
             Some(&ToolErrorType::Permission),
         );
@@ -267,7 +267,7 @@ fn test_loop_guard_validation_errors_count_normally() {
 
     for _ in 0..5 {
         guard.register_failure(
-            "web.fetch",
+            "web_fetch",
             r#"{"url":"https://bad.com"}"#,
             Some(&ToolErrorType::Validation),
         );
@@ -281,13 +281,13 @@ fn test_loop_guard_mixed_errors_permission_skipped() {
     let mut guard = LoopGuard::new(100);
 
     for _ in 0..4 {
-        guard.register_failure("web.fetch", "{}", Some(&ToolErrorType::Validation));
-        guard.register_failure("web.fetch", "{}", Some(&ToolErrorType::Permission));
+        guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Validation));
+        guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Permission));
     }
 
     assert!(guard.check_loop().is_ok());
 
-    guard.register_failure("web.fetch", "{}", Some(&ToolErrorType::Validation));
+    guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Validation));
     assert!(guard.check_loop().is_err());
 }
 
@@ -296,7 +296,7 @@ fn test_loop_guard_unknown_error_type_counts_as_failure() {
     let mut guard = LoopGuard::new(100);
 
     for _ in 0..5 {
-        guard.register_failure("sandbox.exec", "{}", None);
+        guard.register_failure("sandbox_exec", "{}", None);
     }
 
     assert!(guard.check_loop().is_err());
@@ -305,13 +305,13 @@ fn test_loop_guard_unknown_error_type_counts_as_failure() {
 #[test]
 fn test_loop_guard_snapshot_restore_preserves_failure_counts() {
     let mut guard = LoopGuard::new(100);
-    guard.register_failure("web.fetch", "{}", Some(&ToolErrorType::Execution));
-    guard.register_failure("web.fetch", "{}", Some(&ToolErrorType::Permission));
-    guard.register_failure("sandbox.exec", "{}", None);
+    guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Execution));
+    guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Permission));
+    guard.register_failure("sandbox_exec", "{}", None);
 
     let state: LoopGuardState = guard.snapshot();
     let restored = LoopGuard::restore(state);
 
-    assert_eq!(*restored.snapshot().tool_failure_counts.get("web.fetch").unwrap(), 1);
-    assert_eq!(*restored.snapshot().tool_failure_counts.get("sandbox.exec").unwrap(), 1);
+    assert_eq!(*restored.snapshot().tool_failure_counts.get("web_fetch").unwrap(), 1);
+    assert_eq!(*restored.snapshot().tool_failure_counts.get("sandbox_exec").unwrap(), 1);
 }

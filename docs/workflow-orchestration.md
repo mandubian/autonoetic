@@ -8,7 +8,7 @@ This layer sits above the session/timeline infrastructure and provides explicit 
 
 ### WorkflowRun
 
-One durable workflow per user-facing task. Created automatically when the first `agent.spawn` occurs for a root session.
+One durable workflow per user-facing task. Created automatically when the first `agent_spawn` occurs for a root session.
 
 ```
 workflow_id       Unique identifier (e.g. wf-a1b2c3d4)
@@ -100,11 +100,11 @@ Storage: `.gateway/continuations/<task_id>.json`
 
 ### Async Spawn
 
-`agent.spawn` creates a `QueuedTaskRun` and returns immediately with `task_id`. The gateway scheduler picks up queued tasks on its next tick and spawns background tokio tasks.
+`agent_spawn` creates a `QueuedTaskRun` and returns immediately with `task_id`. The gateway scheduler picks up queued tasks on its next tick and spawns background tokio tasks.
 
 ```rust
 // Planner code (conceptual)
-let result = agent.spawn(
+let result = agent_spawn(
     agent_id: "coder.default",
     message: "Build a REST API with authentication",
     metadata: { "priority": "high" },
@@ -140,10 +140,10 @@ When a task enters `AwaitingApproval`, its `message` and `metadata` are preserve
 
 Planners interact with the orchestration layer through:
 
-- **`agent.spawn(..., async: true)`** — Enqueue a child task and return immediately
-- **`workflow.wait({ task_ids, workflow_id?, timeout_secs? })`** — Inspect task statuses and join condition
-- **`workflow.cancel_task({ workflow_id, task_id, reason? })`** — Cancel `AwaitingApproval`/`Pending`/`Runnable` tasks and trigger join re-evaluation
-- **`approval.status({ request_id })`** — Inspect approval state when needed
+- **`agent_spawn(..., async: true)`** — Enqueue a child task and return immediately
+- **`workflow_wait({ task_ids, workflow_id?, timeout_secs? })`** — Inspect task statuses and join condition
+- **`workflow_cancel_task({ workflow_id, task_id, reason? })`** — Cancel `AwaitingApproval`/`Pending`/`Runnable` tasks and trigger join re-evaluation
+- **`approval_status({ request_id })`** — Inspect approval state when needed
 
 ### Planner Lifecycle
 
@@ -156,14 +156,14 @@ The planner is not "done" when it delegates:
 5. On approval: child turn is suspended to `TurnContinuation`, task becomes `AwaitingApproval`, and resources are released
 6. On approval resolution: task becomes `Runnable`; on next execution the gateway loads continuation, executes approved action, and resumes turn history
 7. When join condition is satisfied: workflow becomes `Resumable`
-8. Planner observes task state via `workflow.wait` and continues
+8. Planner observes task state via `workflow_wait` and continues
 
 ## Join Policies
 
 - **`AllOf`**: All tasks must complete (default)
 - **`AnyOf`**: Any task completion satisfies
 - **`FirstSuccess`**: First success satisfies; failures ignored
-- **`Manual`**: Explicit `workflow.wait` call required
+- **`Manual`**: Explicit `workflow_wait` call required
 
 ## CLI Integration
 
@@ -233,7 +233,7 @@ The workflow system emits structured events for all state transitions. These eve
 
 | Event Type | Description | Payload |
 |-----------|-------------|---------|
-| `workflow.escalated` | Agent requested help via `session.escalate` | `{ target: "human\|specialist\|reasoning_llm", urgency, reason, context }` |
+| `workflow.escalated` | Agent requested help via `session_escalate` | `{ target: "human\|specialist\|reasoning_llm", urgency, reason, context }` |
 | `workflow.failure_threshold_reached` | Multiple tasks failed — loop guard triggered | `{ failed_task_count }` |
 
 ### Approval Events (New)
@@ -252,7 +252,7 @@ The chat CLI polls workflow events and displays them with appropriate icons:
 📋 [2026-03-23T13:41:00] Workflow started
 🚀 [2026-03-23T13:41:05] Task spawned: task-94c19ac6
 ▶ [2026-03-23T13:41:10] Task started: task-94c19ac6
-⏸ [2026-03-23T13:41:15] Approval required: task-94c19ac6 (sandbox.exec)
+⏸ [2026-03-23T13:41:15] Approval required: task-94c19ac6 (sandbox_exec)
 ✅ [2026-03-23T13:42:30] Approval approved: task-94c19ac6
 🔁 [2026-03-23T13:42:35] Task resumed: task-94c19ac6
 ✅ [2026-03-23T13:43:00] Task completed: task-94c19ac6
@@ -264,7 +264,7 @@ The chat CLI polls workflow events and displays them with appropriate icons:
 Approval tracking is now unified through workflow events only:
 
 1. **Tool requires approval** → Task status set to `AwaitingApproval` → `task.awaiting_approval` event emitted
-2. **Chat CLI polls events** → Shows "⏸ Approval required: task-xxx (sandbox.exec)"
+2. **Chat CLI polls events** → Shows "⏸ Approval required: task-xxx (sandbox_exec)"
 3. **User approves via CLI** → `autonoetic gateway approve apr-xxx`
 4. **Task status updated** → Status changed to `Runnable` → `task.approved` event emitted
 5. **Chat CLI polls events** → Shows "✅ Approval approved: task-xxx"
@@ -308,11 +308,11 @@ Important: Every significant workflow transition emits a causal chain entry (`wo
 
 **Fix**: Corrected the deduplication logic to use `insert()` directly, which returns `true` for newly inserted events. Also improved workflow change detection to reset the bootstrap flag when a workflow is created mid-session.
 
-### Bug 4: Short alias used as full handle prevented content.read from working
+### Bug 4: Short alias used as full handle prevented content_read from working
 
-**Problem**: When `content.write` returns an alias (e.g., `"8b40c8e1"`), the LLM sometimes mistakenly treats it as a full SHA-256 handle by prepending `sha256:`, resulting in `content.read("sha256:8b40c8e1")`. The lookup logic treated this as a full handle lookup (expecting 64 hex chars) rather than an alias lookup (8 chars), causing "Content not found" errors.
+**Problem**: When `content_write` returns an alias (e.g., `"8b40c8e1"`), the LLM sometimes mistakenly treats it as a full SHA-256 handle by prepending `sha256:`, resulting in `content_read("sha256:8b40c8e1")`. The lookup logic treated this as a full handle lookup (expecting 64 hex chars) rather than an alias lookup (8 chars), causing "Content not found" errors.
 
-**Fix**: Enhanced `ContentStore::read_by_name_or_handle` to detect the pattern `sha256:SHORT_ALIAS` (exactly 8 hex chars after the prefix) and redirect it to alias lookup. This makes content.read more resilient to LLM misinterpretations of the alias value.
+**Fix**: Enhanced `ContentStore::read_by_name_or_handle` to detect the pattern `sha256:SHORT_ALIAS` (exactly 8 hex chars after the prefix) and redirect it to alias lookup. This makes content_read more resilient to LLM misinterpretations of the alias value.
 
 ## Files
 
@@ -338,7 +338,7 @@ This catches runaway loops from any cause (LLM confusion, tool errors, etc.).
 
 The planner's SKILL.md includes failure loop guard rules that trigger **before** the hard limit:
 
-1. **`failed_task_count >= 2`**: Calls `session.escalate(target="human", urgency="high")` instead of spawning more tasks
+1. **`failed_task_count >= 2`**: Calls `session_escalate(target="human", urgency="high")` instead of spawning more tasks
 2. **Approval timeout retry limit**: After 1 timeout on the same logical task, escalates to human instead of respawning
 3. **Functional failure retry limit**: After 2 retries, escalates to `debugger.default` for root cause analysis
 
@@ -364,7 +364,7 @@ loop_guard:
 
 ### Workflow State Fields
 
-`workflow.wait` and `workflow.state` expose failure data for the planner:
+`workflow_wait` and `workflow_state` expose failure data for the planner:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -373,14 +373,14 @@ loop_guard:
 
 ### Escalation Persistence
 
-When `session.escalate` is called, the gateway:
+When `session_escalate` is called, the gateway:
 1. Emits a `workflow.escalated` event (visible in chat CLI with `🆘` icon)
 2. Includes `escalation_id` and `workflow_id` in the response
 3. Persists the escalation in the workflow events table for audit
 
 ### Human Escalation Approval Flow
 
-When `session.escalate(target="human")` is called:
+When `session_escalate(target="human")` is called:
 
 1. **Creates `ApprovalRequest`** with `ScheduledAction::SessionEscalate` containing the agent's reason, context, urgency, and suggested actions
 2. **Returns `escalation_required: true`** — the lifecycle detects this sentinel and suspends the agent turn
@@ -390,5 +390,5 @@ When `session.escalate(target="human")` is called:
 
 The operator's guidance is persisted in the `decision_reason` column of the `approvals` table, separate from the agent's original `reason`. On checkpoint resume, the gateway reads `decision_reason` (not `reason`) so the agent receives the operator's actual guidance.
 
-`session.escalate(target="reasoning_llm")` and `session.escalate(target="specialist")` remain advisory — they return structured responses but do NOT create approvals or suspend execution.
+`session_escalate(target="reasoning_llm")` and `session_escalate(target="specialist")` remain advisory — they return structured responses but do NOT create approvals or suspend execution.
 - `autonoetic-gateway/src/runtime/content_store.rs` — Content addressing, visibility, alias/handle resolution

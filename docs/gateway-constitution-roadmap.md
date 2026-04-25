@@ -99,7 +99,7 @@ OOM or budget trips. Budget-aware attackers stay under per-session
 limits by fanning deep instead of wide.
 
 **Sketch.** Add `max_spawn_depth` to `AgentSpawn` capability, and a
-system-wide ceiling in `config.rs` (default 8). On `agent.spawn`,
+system-wide ceiling in `config.rs` (default 8). On `agent_spawn`,
 traverse the parent chain, reject if the new depth exceeds parent's
 cap or the system ceiling. Store `spawn_depth` on the session record
 for cheap lookups.
@@ -234,7 +234,7 @@ failure mode of "one more capability per revision, each PR reasonable
 in isolation, result after six revisions is god-mode." Detection
 without prevention is how privileged systems erode.
 
-**Sketch.** At `agent.revision.promote`, compute
+**Sketch.** At `agent_revision_promote`, compute
 `cap_set(candidate) \ cap_set(current_active_revision)`. If the delta
 is non-empty, create a distinct approval class
 `ApprovalClass::CapabilityAccretion` whose payload names each added
@@ -272,7 +272,7 @@ natural-language intent per call closes most of the gap.
 
 **Sketch.** Add an `intent` field to every tool call's arguments
 (string, max 500 chars). For privileged tool classes
-(`sandbox.exec`, `credential.*`, `agent.spawn`, `agent.revision.*`,
+(`sandbox_exec`, `credential.*`, `agent_spawn`, `agent.revision.*`,
 `scheduler.*`), missing intent is a hard rejection. For non-privileged
 tools it is optional but strongly encouraged via foundation-prompt
 guidance. The field is persisted verbatim to the causal chain event
@@ -285,7 +285,7 @@ parsing — accept/validate field), `runtime/tool_call_processor.rs`
 (teach the field).
 
 **Test.** `constitution_audit_intent_captured.rs` — invoke
-`sandbox.exec` without intent, assert reject with `intent_required`;
+`sandbox_exec` without intent, assert reject with `intent_required`;
 invoke with intent, assert it lands in the `tool.invoked` causal event
 verbatim.
 
@@ -497,7 +497,7 @@ trusted by content-digest downstream.
 
 **Sketch.** Add a `signature` field to the revision-create input,
 verify against a configured trust-root at the time of
-`agent.revision.create`. Reject unsigned or invalid bundles unless a
+`agent_revision_create`. Reject unsigned or invalid bundles unless a
 `trust_local` config flag is set (dev mode only).
 
 Sign with existing Rust crypto (ed25519, `ring` or `ed25519-dalek`).
@@ -626,7 +626,7 @@ ECONNREFUSED.
 records but does not require their `agent_id` to differ. A single
 compromised specialist holding both capabilities can self-approve.
 
-**Sketch.** In `agent.revision.promote`, load both promotion records
+**Sketch.** In `agent_revision_promote`, load both promotion records
 and assert `evaluator.agent_id != auditor.agent_id`. Session identity
 is not sufficient — agent identity must differ. Reject with
 `gate_identity_overlap` otherwise.
@@ -703,7 +703,7 @@ Files: `autonoetic-gateway/src/runtime/lifecycle.rs` (state machine),
 `autonoetic-gateway/src/runtime/tools/session.rs` (new subtools).
 
 **Test.** `constitution_abuse_degraded_mode.rs` — trigger degrade via
-loop guard, attempt `sandbox.exec`, assert reject with
+loop guard, attempt `sandbox_exec`, assert reject with
 `session_degraded`; operator clears, tool works.
 
 **Size.** M.
@@ -870,7 +870,7 @@ Confirm with a test that CoT tokens are preserved verbatim in the
 
 **(c) Capability-gated disclosure (Ri-0.13c).** New capability
 `ReasoningAudit`, scoped by target agent pattern. New tool
-`observability.read_reasoning` that fetches reasoning traces for the
+`observability_read_reasoning` that fetches reasoning traces for the
 target — gated by the capability and **writes a disclosure event
 visible to the reviewed agent** listing who read what and when.
 Holders: auditor, security-sentinel, evolution-steward, operator
@@ -983,7 +983,7 @@ Several rules are marked `PARTIAL` because enforcement exists but no
 test pins the invariant. Add tests for:
 
 - R-2.11 approval timeout
-- R-2.14 `user.ask` blocked during pending approvals
+- R-2.14 `user_ask` blocked during pending approvals
 - R-3.7 sandbox resource limits (docker/microvm paths)
 - R-5.11 uniform error envelope (shared helper + contract test)
 - R-6.14 `EmergencyStop` never auto-resumes

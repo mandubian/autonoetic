@@ -1,12 +1,12 @@
 # Channel-agnostic interaction answer resolution
 
-This document specifies how the **gateway** (not individual channel adapters) owns **persisting** `user.ask` answers and **resuming** suspended work: workflow tasks in `Paused` and standalone sessions blocked on `UserInputRequired` checkpoints.
+This document specifies how the **gateway** (not individual channel adapters) owns **persisting** `user_ask` answers and **resuming** suspended work: workflow tasks in `Paused` and standalone sessions blocked on `UserInputRequired` checkpoints.
 
 **Related code**
 
 - `autonoetic-gateway/src/interaction_answer.rs` — orchestration entrypoints
 - `autonoetic-gateway/src/router.rs` — JSON-RPC `interaction.answer`, `interaction.resolve_and_answer`
-- `autonoetic-gateway/src/runtime/tools/user_interaction.rs` — `user.ask` row creation (workflow/task bindings)
+- `autonoetic-gateway/src/runtime/tools/user_interaction.rs` — `user_ask` row creation (workflow/task bindings)
 - `autonoetic-gateway/src/execution.rs` — `resume_from_user_interaction`, checkpoint resume
 - `autonoetic-gateway/src/scheduler.rs` — `process_runnable_workflow_tasks` (Runnable → queue)
 
@@ -68,9 +68,9 @@ Future adapters may extend correlation (e.g. provider message maps) without chan
 
 ---
 
-## Persistence: `user.ask` rows
+## Persistence: `user_ask` rows
 
-When `user.ask` runs inside a **workflow task**, the emitted `UserInteraction` row must carry:
+When `user_ask` runs inside a **workflow task**, the emitted `UserInteraction` row must carry:
 
 | Column | Source |
 |--------|--------|
@@ -129,7 +129,7 @@ Direct `GatewayStore.answer_user_interaction` from adapters is **deprecated** fo
 | `interaction.resolve_and_answer` + `reply_to_interaction_id` | Resolves to same id as explicit |
 | Single pending for `root_session_id` | Auto-match |
 | Multiple pending for `root_session_id` | `ambiguous: true`, no mutation |
-| Workflow `Paused` after `user.ask` | After answer, task `Runnable`, queue processed |
+| Workflow `Paused` after `user_ask` | After answer, task `Runnable`, queue processed |
 | Duplicate delivery (already answered) | Idempotent, no double resume |
 | `interaction_answer_orchestration: false` | RPC error; proves flag wiring |
 
@@ -153,7 +153,7 @@ Direct `GatewayStore.answer_user_interaction` from adapters is **deprecated** fo
 
 ## Implementation phases (completed in tree)
 
-1. **Bindings** — `user.ask` rows include workflow/task/checkpoint turn when run context provides them.  
+1. **Bindings** — `user_ask` rows include workflow/task/checkpoint turn when run context provides them.  
 2. **API** — `interaction.answer`, `interaction.resolve_and_answer`.  
 3. **Orchestrator** — `interaction_answer::answer_and_orchestrate_resume`, workflow Runnable + `process_runnable_workflow_tasks`, else `resume_from_user_interaction`.  
 4. **Adapters** — chat TUI + gateway CLI.  

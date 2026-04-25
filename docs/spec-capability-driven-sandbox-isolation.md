@@ -19,12 +19,12 @@ Additionally, the planner's agent creation flow (Steps 1-7) does not include `pa
 
 ### 1. Capability-Driven Sandbox Isolation
 
-When `sandbox.exec` or script execution runs, check the agent manifest's capabilities. If `NetworkAccess` is declared and approved, inject `--share-net` into the bwrap command for that execution only.
+When `sandbox_exec` or script execution runs, check the agent manifest's capabilities. If `NetworkAccess` is declared and approved, inject `--share-net` into the bwrap command for that execution only.
 
 **Mechanism:**
 - `append_bwrap_isolation_flags` gains an optional `overrides: &BwrapIsolationOverrides` parameter
 - A new function `isolation_overrides_from_manifest(manifest: &AgentManifest) -> BwrapIsolationOverrides` derives overrides from the agent's capabilities
-- The caller (`sandbox.exec` tool, `execute_script_in_sandbox`) passes the overrides from the active manifest
+- The caller (`sandbox_exec` tool, `execute_script_in_sandbox`) passes the overrides from the active manifest
 - Global config remains the default; per-execution overrides are additive
 
 **`BwrapIsolationOverrides`:**
@@ -62,7 +62,7 @@ This makes packager invocation deterministic rather than relying on the LLM noti
 - Update all callers: `bubblewrap_command`, `bubblewrap_shell_command`
 - When `overrides.share_net == true`, append `--share-net` after `--unshare-all`
 
-### `autonoetic-gateway/src/runtime/tools.rs` (`sandbox.exec`)
+### `autonoetic-gateway/src/runtime/tools.rs` (`sandbox_exec`)
 - Compute overrides from `manifest` (already available as parameter)
 - Pass overrides through to sandbox spawn
 
@@ -90,7 +90,7 @@ This makes packager invocation deterministic rather than relying on the LLM noti
 
 - Only **approved** capabilities affect sandbox isolation
 - Manifest capabilities are set at install time via `agent.install`, which requires approval for high-risk capabilities (including `NetworkAccess`)
-- The evaluator running `sandbox.exec` with an artifact's manifest inherits that artifact's approved capabilities — this is correct because:
+- The evaluator running `sandbox_exec` with an artifact's manifest inherits that artifact's approved capabilities — this is correct because:
   - The evaluator is testing what the artifact does
   - The artifact's capabilities were already reviewed at install time
   - Without this, evaluation of network-dependent agents is impossible

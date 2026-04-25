@@ -24,7 +24,7 @@ An agent is a **SKILL.md manifest** + **instructions** that runs inside a sandbo
 
 - **Pure reasoner**: Proposes actions, never executes directly
 - **Capability-declared**: All permissions declared in manifest YAML
-- **Content-addressed**: Uses content.write/read for file operations
+- **Content-addressed**: Uses content_write/read for file operations
 - **Role-based**: Each agent fills a specific role (planner, coder, researcher, etc.)
 
 ### Agent vs Role vs Template
@@ -62,7 +62,7 @@ When a message arrives at the gateway:
 | **Debugger** | `debugger.default` | Isolates root causes, proposes fixes |
 | **Evaluator** | `evaluator.default` | Validates behavior with tests/metrics |
 | **Auditor** | `auditor.default` | Checks security, governance, reproducibility |
-| **Registrar** | `registration.default` | Onboards services via `credential.setup(skill_url)` — keeps secrets vault-side |
+| **Registrar** | `registration.default` | Onboards services via `credential_setup(skill_url)` — keeps secrets vault-side |
 | **Discovery** | `discovery.default` | Finds installed non-foundational agents that match a task intent |
 
 ### Evolution Roles
@@ -80,11 +80,11 @@ When a message arrives at the gateway:
 1. **Foundational match**: route directly to the appropriate foundational agent (researcher, executor, coder, debugger, registration, …)
 2. **Unknown intent**: `discovery.default` → semantic match among installed agents → spawn best candidate
 3. **No candidate**: `agent-factory.default` → builds new agent end-to-end (design → code → package → gate → install)
-4. **Recurring task**: `agent-factory.default` → install agent → `scheduler.cron.create`
+4. **Recurring task**: `agent-factory.default` → install agent → `scheduler_cron_create`
 
 ### Delegation Contract
 
-When calling `agent.spawn`, include structured metadata:
+When calling `agent_spawn`, include structured metadata:
 
 ```json
 {
@@ -205,14 +205,14 @@ Capabilities fall into three categories:
 |------------|--------|-------------|
 | `SandboxFunctions` | `allowed: [string]` | MCP tool access by prefix (e.g., `web.*`, `sandbox.*`) |
 | `ReadAccess` | `scopes: [string]` | Read access to content, memory, knowledge (includes search) |
-| `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge (includes `knowledge.store`) |
+| `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge (includes `knowledge_store`) |
 | `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts |
 | `CodeExecution` | `patterns: [string]` | Execute scripts/commands in sandbox |
 | `AgentSpawn` | `max_children: number` | Create child agent sessions |
 | `AgentMessage` | `patterns: [string]` | Send messages to other agents |
 | `BackgroundReevaluation` | `min_interval_secs: number, allow_reasoning: boolean` | Periodic wake-ups for background processing |
 | `SchedulerAccess` | `patterns: [string]` | Create, list, pause, resume, cancel scheduled cron jobs (e.g., `scheduler.cron.*`) |
-| `SkillInstall` | `allowed_sources: [string]` | Fetch a remote SKILL.md and install it as a new local agent via `skill.install`. Use `["*"]` for any source, or specific hosts like `["agentskills.io"]`. |
+| `SkillInstall` | `allowed_sources: [string]` | Fetch a remote SKILL.md and install it as a new local agent via `skill_install`. Use `["*"]` for any source, or specific hosts like `["agentskills.io"]`. |
 
 ### Capability Semantics
 
@@ -220,15 +220,15 @@ Capabilities fall into three categories:
 
 | Capability | Gates These Tools |
 |------------|------------------|
-| `ReadAccess` | `content.read`, `artifact.inspect`, `memory.read`, `knowledge.recall`, `knowledge.search` |
-| `WriteAccess` | `content.write`, `artifact.build`, `memory.write`, `knowledge.store` |
+| `ReadAccess` | `content_read`, `artifact_inspect`, `memory.read`, `knowledge_recall`, `knowledge_search` |
+| `WriteAccess` | `content_write`, `artifact_build`, `memory.write`, `knowledge_store` |
 
 **Privilege capabilities gate boundary-crossing operations:**
 
 | Capability | Controls |
 |------------|----------|
-| `NetworkAccess` | HTTP requests via `web.fetch`, `web.search` |
-| `CodeExecution` | Script execution via `sandbox.exec` |
+| `NetworkAccess` | HTTP requests via `web_fetch`, `web_search` |
+| `CodeExecution` | Script execution via `sandbox_exec` |
 | `AgentSpawn` | Creating new agent sessions |
 
 ### Scoping
@@ -271,8 +271,8 @@ For files and data within a session:
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `content.write` | `(name: string, content: string, visibility?: string) → handle` | Write content with visibility (private/session/global). Default: session |
-| `content.read` | `(name_or_handle: string) → content` | Read by name or handle with root-based resolution |
+| `content_write` | `(name: string, content: string, visibility?: string) → handle` | Write content with visibility (private/session/global). Default: session |
+| `content_read` | `(name_or_handle: string) → content` | Read by name or handle with root-based resolution |
 
 ### Artifact Tools (Trust Boundary)
 
@@ -280,8 +280,8 @@ For reviewable/installable file bundles:
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `artifact.build` | `(inputs: [string], entrypoints?: [string]) → artifact` | Build immutable artifact from session content |
-| `artifact.inspect` | `(artifact_id: string) → artifact` | Inspect artifact files, entrypoints, digest |
+| `artifact_build` | `(inputs: [string], entrypoints?: [string]) → artifact` | Build immutable artifact from session content |
+| `artifact_inspect` | `(artifact_id: string) → artifact` | Inspect artifact files, entrypoints, digest |
 
 ### Knowledge Tools (Durable Memory)
 
@@ -289,27 +289,27 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `knowledge.store` | `(id, content, scope?, tags?, confidence?, retention?, visibility?) → record` | Upsert a fact. **`visibility`**: `session` (default), `private`, or `global`. **`retention`**: `stable` (default), `ephemeral`, `1d`, `30d`. Widen access by calling again with the same `id` and a broader `visibility`. |
-| `knowledge.recall` | `(id: string) → fact` | Retrieve fact if visible to this agent/session |
-| `knowledge.search` | `(scope: string, query: string) → [facts]` | Search facts by scope and content |
-| `knowledge.search_by_tags` | `(scope, tags, text?, limit?) → [facts]` | AND match on JSON tags |
-| `digest.query` | `(session_id?, narrative_handle?) → narrative` | Read post-session narrative / digest content |
+| `knowledge_store` | `(id, content, scope?, tags?, confidence?, retention?, visibility?) → record` | Upsert a fact. **`visibility`**: `session` (default), `private`, or `global`. **`retention`**: `stable` (default), `ephemeral`, `1d`, `30d`. Widen access by calling again with the same `id` and a broader `visibility`. |
+| `knowledge_recall` | `(id: string) → fact` | Retrieve fact if visible to this agent/session |
+| `knowledge_search` | `(scope: string, query: string) → [facts]` | Search facts by scope and content |
+| `knowledge_search_by_tags` | `(scope, tags, text?, limit?) → [facts]` | AND match on JSON tags |
+| `digest_query` | `(session_id?, narrative_handle?) → narrative` | Read post-session narrative / digest content |
 
-**Cross-agent memory sharing:** Facts stored with `session` visibility (the default for both `knowledge.store` and `sdk.memory.remember`) are readable by all agents participating in the same root session. This includes the planner reading memories written by sub-agents (e.g., a fibonacci calculator storing results via `sdk.memory.remember`). Use `private` visibility for data that should only be accessible to the writing agent, or Tier 1 `memory.write`/`memory.read` for scratch data.
+**Cross-agent memory sharing:** Facts stored with `session` visibility (the default for both `knowledge_store` and `sdk.memory.remember`) are readable by all agents participating in the same root session. This includes the planner reading memories written by sub-agents (e.g., a fibonacci calculator storing results via `sdk.memory.remember`). Use `private` visibility for data that should only be accessible to the writing agent, or Tier 1 `memory.write`/`memory.read` for scratch data.
 
 ### Agent Tools
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `agent.spawn` | `(agent_id: string, message: any, ...) → result` | Spawn child agent |
-| `agent.exists` | `(agent_id: string) → bool` | Check if agent exists |
-| `agent.discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
+| `agent_spawn` | `(agent_id: string, message: any, ...) → result` | Spawn child agent |
+| `agent_exists` | `(agent_id: string) → bool` | Check if agent exists |
+| `agent_discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
 
 ### Skill Install Tool
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `skill.install` | `(url: string, agent_id: string, trust_mode?: string) → result` | Fetch a remote SKILL.md, write it to `agents_dir`, and immediately bootstrap + promote it as a new local agent. Requires `SkillInstall` capability. |
+| `skill_install` | `(url: string, agent_id: string, trust_mode?: string) → result` | Fetch a remote SKILL.md, write it to `agents_dir`, and immediately bootstrap + promote it as a new local agent. Requires `SkillInstall` capability. |
 
 **Parameters:**
 
@@ -348,30 +348,30 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `agent.revision.create` | `(artifact_id: string, agent_id: string, ...) → revision` | Low-level strict artifact path (expects manifest/lock already present in artifact) |
-| `agent.revision.create_from_intent` | `(agent_id, artifact_id, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock` |
-| `agent.revision.schema` | `() → schema` | Return install contract ownership split, required fields, and canonical examples |
-| `agent.revision.list` | `(agent_id: string) → [revisions]` | List revisions for an agent |
-| `agent.revision.inspect` | `(agent_ref: string) → revision` | Inspect revision metadata and status |
-| `agent.revision.promote` | `(agent_ref: string, alias: string, ...) → promotion` | Move alias to a revision (activates it) |
-| `agent.revision.rollback` | `(alias: string, target_ref?: string) → promotion` | Roll alias back to previous or explicit revision |
-| `agent.revision.diff` | `(from_ref: string, to_ref: string) → diff` | File-level diff between two revisions |
+| `agent_revision_create` | `(artifact_id: string, agent_id: string, ...) → revision` | Low-level strict artifact path (expects manifest/lock already present in artifact) |
+| `agent_revision_create_from_intent` | `(agent_id, artifact_id, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock` |
+| `agent_revision_schema` | `() → schema` | Return install contract ownership split, required fields, and canonical examples |
+| `agent_revision_list` | `(agent_id: string) → [revisions]` | List revisions for an agent |
+| `agent_revision_inspect` | `(agent_ref: string) → revision` | Inspect revision metadata and status |
+| `agent_revision_promote` | `(agent_ref: string, alias: string, ...) → promotion` | Move alias to a revision (activates it) |
+| `agent_revision_rollback` | `(alias: string, target_ref?: string) → promotion` | Roll alias back to previous or explicit revision |
+| `agent_revision_diff` | `(from_ref: string, to_ref: string) → diff` | File-level diff between two revisions |
 
 ### Eval Tools
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `eval.suite.publish` | `(suite_id: string, cases: [...]) → suite` | Publish an evaluation suite |
-| `eval.run` | `(suite_id: string, agent_ref: string) → run` | Queue an eval run against a revision |
-| `eval.compare` | `(suite_id: string, baseline_ref: string, candidate_ref: string) → comparison` | Compare two revisions on a suite |
-| `eval.report` | `(run_id: string) → report` | Retrieve eval run report |
+| `eval_suite_publish` | `(suite_id: string, cases: [...]) → suite` | Publish an evaluation suite |
+| `eval_run` | `(suite_id: string, agent_ref: string) → run` | Queue an eval run against a revision |
+| `eval_compare` | `(suite_id: string, baseline_ref: string, candidate_ref: string) → comparison` | Compare two revisions on a suite |
+| `eval_report` | `(run_id: string) → report` | Retrieve eval run report |
 
 ### Promotion Tools
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `promotion.record` | `(artifact_id: string, ...) → record` | Record evaluator/auditor evidence for promotion. Canonical `content_digest` binding is gateway-owned and attached during revision create/promote. |
-| `promotion.query` | `(scope: string, ...) → [records]` | Query promotion records |
+| `promotion_record` | `(artifact_id: string, ...) → record` | Record evaluator/auditor evidence for promotion. Canonical `content_digest` binding is gateway-owned and attached during revision create/promote. |
+| `promotion_query` | `(scope: string, ...) → [records]` | Query promotion records |
 
 ### Execution Tools (Same-Session Debugging)
 
@@ -379,7 +379,7 @@ For searching raw tool execution traces within sessions. Returns stdout, stderr,
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `execution.search` | `(tool_name?, success?, error_type?, command_pattern?, agent_id?, session_id?, limit?) → traces` | Search raw execution traces by tool name, success/failure, error type, command pattern, or agent. Returns full execution detail. For cross-session discovery of summaries, use `observability.search`. |
+| `execution_search` | `(tool_name?, success?, error_type?, command_pattern?, agent_id?, session_id?, limit?) → traces` | Search raw execution traces by tool name, success/failure, error type, command pattern, or agent. Returns full execution detail. For cross-session discovery of summaries, use `observability_search`. |
 
 ### Artifact Execution Tool (Transient Runs)
 
@@ -387,18 +387,18 @@ For running built artifact entrypoints in a sandbox with artifact-aware analysis
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `artifact.exec` | `(artifact_id: string, entrypoint: string, args?: [string], env?: {string: string}, credential_env?: [{credential_id: string, env_var: string}], deployment_ticket?: string, approval_ref?: string) → result` | Execute an artifact entrypoint in a sandbox. Remote-access analysis runs against the artifact's source files. Approval reuse is bound to the artifact identity + concrete targets. Use for transient validation, smoke tests, and ad hoc runs. `credential_env` injects vault-stored secrets as environment variables — the gateway resolves them server-side, they never reach LLM context. `deployment_ticket` from `artifact.prepare` resolves both approval and credentials in one pass. |
+| `artifact_exec` | `(artifact_id: string, entrypoint: string, args?: [string], env?: {string: string}, credential_env?: [{credential_id: string, env_var: string}], deployment_ticket?: string, approval_ref?: string) → result` | Execute an artifact entrypoint in a sandbox. Remote-access analysis runs against the artifact's source files. Approval reuse is bound to the artifact identity + concrete targets. Use for transient validation, smoke tests, and ad hoc runs. `credential_env` injects vault-stored secrets as environment variables — the gateway resolves them server-side, they never reach LLM context. `deployment_ticket` from `artifact_prepare` resolves both approval and credentials in one pass. |
 
-**When to use `artifact.exec` vs `sandbox.exec`:**
+**When to use `artifact_exec` vs `sandbox_exec`:**
 
 | Scenario | Tool | Why |
 |----------|------|-----|
-| Run a built artifact's entrypoint | `artifact.exec` | Analysis on source files, stable approval reuse |
-| Generic shell command | `sandbox.exec` | Command-string analysis, general purpose |
-| Smoke test before promotion | `artifact.exec` | Artifact-bound identity, no command-shape sensitivity |
-| Quick bash one-liner | `sandbox.exec` | No artifact involved |
+| Run a built artifact's entrypoint | `artifact_exec` | Analysis on source files, stable approval reuse |
+| Generic shell command | `sandbox_exec` | Command-string analysis, general purpose |
+| Smoke test before promotion | `artifact_exec` | Artifact-bound identity, no command-shape sensitivity |
+| Quick bash one-liner | `sandbox_exec` | No artifact involved |
 
-**Approval behavior:** `artifact.exec` uses the same dedup chain as `sandbox.exec` (exec cache → approved requests → session grants → create approval), but the fingerprint is based on `artifact_id` instead of the raw command string. This means the same artifact re-run with different arguments reuses the prior approval as long as the concrete network targets are covered.
+**Approval behavior:** `artifact_exec` uses the same dedup chain as `sandbox_exec` (exec cache → approved requests → session grants → create approval), but the fingerprint is based on `artifact_id` instead of the raw command string. This means the same artifact re-run with different arguments reuses the prior approval as long as the concrete network targets are covered.
 
 ### Artifact Preparation Tool (One-Pass Preflight)
 
@@ -406,11 +406,11 @@ For resolving credentials + approval in a single pass before execution. Eliminat
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `artifact.prepare` | `(artifact_id: string, entrypoint: string, args?: [string], required_credentials?: [{credential_id: string, env_var: string}]) → result` | One-pass preflight: analyzes artifact source for remote access, resolves credentials from the vault, creates a single approval covering all domains + credential injection. Returns a `deployment_ticket` for use with `artifact.exec`. |
+| `artifact_prepare` | `(artifact_id: string, entrypoint: string, args?: [string], required_credentials?: [{credential_id: string, env_var: string}]) → result` | One-pass preflight: analyzes artifact source for remote access, resolves credentials from the vault, creates a single approval covering all domains + credential injection. Returns a `deployment_ticket` for use with `artifact_exec`. |
 
 Artifact ID constraints:
-- `artifact.prepare`, `artifact.exec`, and `artifact.inspect` require explicit bundle IDs (`art_...`).
-- Implicit workflow outputs (`impl_task-...`) are content records, not executable bundles. Use `content.read` on the implicit handle and then select `content.artifacts[*].artifact_id`.
+- `artifact_prepare`, `artifact_exec`, and `artifact_inspect` require explicit bundle IDs (`art_...`).
+- Implicit workflow outputs (`impl_task-...`) are content records, not executable bundles. Use `content_read` on the implicit handle and then select `content.artifacts[*].artifact_id`.
 
 Credential reference constraints:
 - `credential_id` references used by artifact/sandbox credential injection must be canonical IDs from credential tools (`cred_...`).
@@ -418,33 +418,33 @@ Credential reference constraints:
 
 **Flow:**
 ```
-1. agent calls artifact.prepare({ artifact_id, entrypoint, required_credentials })
+1. agent calls artifact_prepare({ artifact_id, entrypoint, required_credentials })
 2. gateway analyzes source → detects domains
 3. gateway resolves all credentials → verifies they exist in vault
 4. gateway checks exec cache / session grants → auto-approves if covered
 5. if new approval needed → creates ONE request (domains + credentials declared)
 6. returns deployment_ticket
-7. agent calls artifact.exec({ deployment_ticket, artifact_id, entrypoint, args })
+7. agent calls artifact_exec({ deployment_ticket, artifact_id, entrypoint, args })
 8. gateway injects credentials as env vars → executes with network access → done
 ```
 
-**When to use `artifact.prepare` vs calling `artifact.exec` directly:**
+**When to use `artifact_prepare` vs calling `artifact_exec` directly:**
 
 | Scenario | Tool | Why |
 |----------|------|-----|
-| Artifact needs credentials + network access | `artifact.prepare` → `artifact.exec` | One-pass resolution, single approval |
-| Simple artifact, no network, no credentials | `artifact.exec` directly | No preflight needed |
-| Re-running an already-approved artifact | `artifact.prepare` → `artifact.exec` | Reuses cached approval, resolves credentials |
-| Quick smoke test, no secrets | `artifact.exec` directly | Minimal ceremony |
+| Artifact needs credentials + network access | `artifact_prepare` → `artifact_exec` | One-pass resolution, single approval |
+| Simple artifact, no network, no credentials | `artifact_exec` directly | No preflight needed |
+| Re-running an already-approved artifact | `artifact_prepare` → `artifact_exec` | Reuses cached approval, resolves credentials |
+| Quick smoke test, no secrets | `artifact_exec` directly | Minimal ceremony |
 
 ### Observability Tools (Cross-Session Discovery)
 
-For discovering and reading published session reports across sessions. The high-level observability surface — complements `execution.search` (which is for raw tool traces).
+For discovering and reading published session reports across sessions. The high-level observability surface — complements `execution_search` (which is for raw tool traces).
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `observability.search` | `(query: string, limit?) → reports` | Discover published session reports by text search. Returns matching reports with URIs and summaries. |
-| `observability.read` | `(uri: string, view?) → resource` | Read an observability resource by URI. `view`: `metadata` (structure only), `summary` (default, compact body), `full` (complete detail). URIs follow `autonoetic://observability/roots/<root>/report[/...]`. |
+| `observability_search` | `(query: string, limit?) → reports` | Discover published session reports by text search. Returns matching reports with URIs and summaries. |
+| `observability_read` | `(uri: string, view?) → resource` | Read an observability resource by URI. `view`: `metadata` (structure only), `summary` (default, compact body), `full` (complete detail). URIs follow `autonoetic://observability/roots/<root>/report[/...]`. |
 
 ---
 
@@ -453,7 +453,7 @@ For discovering and reading published session reports across sessions. The high-
 ### Wake → Context → Reason → Hibernate
 
 ```
-1. WAKE: Gateway receives event.ingest or agent.spawn
+1. WAKE: Gateway receives event.ingest or agent_spawn
 2. CONTEXT ASSEMBLY:
    - Load SKILL.md instructions
    - Inject foundation instructions
@@ -470,7 +470,7 @@ For discovering and reading published session reports across sessions. The high-
    - Apply disclosure filter to response
 4. HIBERNATE:
    - Log session end in causal chain
-   - Persist conversation history via content.write
+   - Persist conversation history via content_write
    - Update session context
    - Return response through ingress channel
 ```
@@ -480,7 +480,7 @@ For discovering and reading published session reports across sessions. The high-
 For `execution_mode: "script"` agents:
 
 ```
-1. WAKE: Gateway receives event.ingest or agent.spawn
+1. WAKE: Gateway receives event.ingest or agent_spawn
 2. SCRIPT EXECUTION:
    - Resolve script path from manifest
    - Build sandbox command
@@ -523,7 +523,7 @@ script_entry: "scripts/main.py"  # Must exist and be executable
 - Has access to `AGENT_DIR` env var
 
 **Input schema contract:**
-- The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest to describe the input the script expects. The gateway exposes this schema through `agent.describe` so callers (including the planner) can translate natural-language intent into matching fields before calling `agent.spawn`.
+- The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest to describe the input the script expects. The gateway exposes this schema through `agent.describe` so callers (including the planner) can translate natural-language intent into matching fields before calling `agent_spawn`.
 - When `io.accepts` is present, the gateway validates the caller's `message` at spawn time. On mismatch the call is rejected with a structured tool error that includes `expected_schema`, per-field errors, and a repair hint — the calling LLM reads this and retries with a corrected payload.
 - When `io.accepts` is absent, the `message` is passed through unchanged. The author is responsible for parsing it inside the script.
 - There is no auto-generated default schema; the shape of the input is entirely the author's choice.
@@ -690,7 +690,7 @@ llm_config:
    ---
    # Instructions
    You are a [role]. When given [input], you should:
-   1. [Step 1 using content.write for files]
+   1. [Step 1 using content_write for files]
    2. [Step 2]
    ...
    ```
@@ -723,7 +723,7 @@ capabilities:
 **Tool call:**
 ```json
 {
-  "tool": "skill.install",
+  "tool": "skill_install",
   "url": "https://agentskills.io/skills/web-researcher/SKILL.md",
   "agent_id": "web-researcher.default",
   "trust_mode": "strict"
@@ -738,11 +738,11 @@ capabilities:
 5. Calls `bootstrap_single_agent()` — computes the content digest, creates a revision, auto-promotes to Active.
 6. Returns `{ ok, agent_id, trust_mode, activated }`.
 
-The installed agent is immediately available for `agent.spawn` calls. No separate `autonoetic agent bootstrap` step is needed.
+The installed agent is immediately available for `agent_spawn` calls. No separate `autonoetic agent bootstrap` step is needed.
 
-**Compared to `credential.setup(skill_url)`:**
+**Compared to `credential_setup(skill_url)`:**
 
-| | `credential.setup(skill_url)` | `skill.install` |
+| | `credential_setup(skill_url)` | `skill_install` |
 |---|---|---|
 | **Purpose** | Onboard API credentials from a service's SKILL.md | Install the skill itself as a runnable agent |
 | **Output** | `credential_id` stored in vault | New agent directory + active revision |
@@ -750,7 +750,7 @@ The installed agent is immediately available for `agent.spawn` calls. No separat
 | **User interaction** | May pause for API keys | None |
 | **Capability required** | `CredentialAccess` + `NetworkAccess` | `SkillInstall` |
 
-Both can be used together: `registration.default` handles `credential.setup` to onboard the API key, while `skill.install` installs the agent that will use it.
+Both can be used together: `registration.default` handles `credential_setup` to onboard the API key, while `skill_install` installs the agent that will use it.
 
 ### Activating Agents
 
@@ -773,8 +773,8 @@ autonoetic agent revision promote <rev-id> --alias myagent.default
 Planner: "Create a weather agent"
   → Spawns specialized_builder
   → coder/packager provide artifact + semantic install intent + free-form instructions
-  → specialized_builder calls agent.revision.create_from_intent
-  → specialized_builder calls agent.revision.promote
+  → specialized_builder calls agent_revision_create_from_intent
+  → specialized_builder calls agent_revision_promote
   → Agent is active and discoverable
 ```
 
@@ -808,7 +808,7 @@ Before revision creation, the system validates:
 
 After installation, agents are discoverable:
 ```python
-results = sdk.tools.invoke("agent.discover", {
+results = sdk.tools.invoke("agent_discover", {
     "intent": "fetch weather data",
     "required_capabilities": ["NetConnect"]
 })

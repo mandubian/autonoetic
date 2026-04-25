@@ -144,7 +144,7 @@ Complete, modular LLM provider system — thin by design (≤250 LOC per driver)
 - Upgraded gateway sandbox runtime to a multi-driver model (`bubblewrap`, `docker`, `microvm`) with strict env-driven configuration for Docker image and Firecracker config path.
 - Added unit coverage for sandbox driver parsing and command construction (`sandbox::tests::*`).
 - Wired `autonoetic agent run` to the real lifecycle executor so manifest-declared sandbox runtime is now exercised from CLI.
-- Added capability-gated `sandbox.exec` tool dispatch with policy enforcement and hard-fail behavior for unknown tools.
+- Added capability-gated `sandbox_exec` tool dispatch with policy enforcement and hard-fail behavior for unknown tools.
 - Added thin dependency bootstrap support (Python/Node), with deterministic defaults read from `runtime.lock` (`dependencies`) and explicit tool-call overrides.
 
 ---
@@ -159,7 +159,7 @@ Complete, modular LLM provider system — thin by design (≤250 LOC per driver)
 
 ### Progress notes
 
-- `autonoetic agent run --interactive` now executes a real stdin chat loop and reuses lifecycle tool execution (`mcp_*` and `sandbox.exec`) instead of warning-only fallback behavior.
+- `autonoetic agent run --interactive` now executes a real stdin chat loop and reuses lifecycle tool execution (`mcp_*` and `sandbox_exec`) instead of warning-only fallback behavior.
 - `autonoetic agent init` now scaffolds `SKILL.md`, `runtime.lock` (including `dependencies: []`), and baseline agent directories (`state/`, `history/`, `skills/`, `scripts/`).
 - Added CLI tests for runtime policy enforcement and scaffold creation in `autonoetic/src/main.rs`.
 - Added binary-level CLI integration coverage in `autonoetic/tests/cli_e2e.rs` for `agent init` + `agent run --interactive` (scripted `/exit`) to validate end-to-end command wiring.
@@ -192,15 +192,15 @@ Design decisions:
 - Added reference evolution bundles: `specialized_builder.default`, `evolution-steward.default`, and `memory-curator.default`.
 - Added reference specialist bundles `architect.default` and `debugger.default` to complete the baseline hand role set used by `planner.default`.
 - Added `autonoetic agent bootstrap` to seed grouped reference bundles into runtime `agents_dir` with optional `--from` and `--overwrite`.
-- Added native `agent.spawn` tool for in-session lead->specialist delegation from agent runtime (distinct from external JSON-RPC `agent.spawn` ingress).
-- Added CLI E2E coverage proving implicit terminal chat routing can hit `planner.default` and delegate via `agent.spawn` to `researcher.default` in the same session.
+- Added native `agent_spawn` tool for in-session lead->specialist delegation from agent runtime (distinct from external JSON-RPC `agent_spawn` ingress).
+- Added CLI E2E coverage proving implicit terminal chat routing can hit `planner.default` and delegate via `agent_spawn` to `researcher.default` in the same session.
 
 ---
 
 ## Phase 8: Gateway Event Ingress & Agent Orchestration 🔜
 
 - [x] Add a real Gateway JSON-RPC listener on `config.port` (line-delimited JSON-RPC over TCP).
-- [x] Add `event.ingest` and `agent.spawn` JSON-RPC methods that trigger an agent runtime session.
+- [x] Add `event.ingest` and `agent_spawn` JSON-RPC methods that trigger an agent runtime session.
 - [x] Add policy gate for spawn delegation (`AgentSpawn` / `AgentMessage`) before runtime dispatch.
 - [x] Implement OFP inbound `AgentMessage` handling to execute targeted local agent sessions (replace `501 Not Implemented` path).
 - [x] Add end-to-end integration tests for external event -> gateway ingress -> agent reply -> causal trace verification.
@@ -209,7 +209,7 @@ Design decisions:
 ### Progress notes
 
 - Gateway now boots both OFP and JSON-RPC listeners concurrently.
-- `agent.spawn` loads agent manifest/instructions from disk and executes one runtime turn via the same lifecycle engine used by CLI, including causal/session tracing.
+- `agent_spawn` loads agent manifest/instructions from disk and executes one runtime turn via the same lifecycle engine used by CLI, including causal/session tracing.
 - `event.ingest` converts incoming event payload into a kickoff prompt and dispatches to the target agent.
 - Gateway JSON-RPC dispatch now writes its own causal entries (`*.requested` / `*.completed` / `*.failed`) to `agents/.gateway/history/causal_chain.jsonl` with shared session IDs for cross-layer trace correlation.
 - Added a hermetic live-ingress test in `autonoetic-gateway/tests/gateway_ingress_integration.rs` that hits the TCP JSON-RPC listener, runs a real `event.ingest` session through a local OpenAI-compatible stub, and verifies both gateway and agent causal traces share the same session ID.
@@ -473,7 +473,7 @@ Acceptance criteria:
 - [x] Keep the design intentionally thin: static in-process handlers only, no dynamic loading, no external plugin protocol, no separate service layer.
 - [x] Define one native tool handler shape that covers: tool name, availability check from manifest/policy, invocation, and optional metadata extraction for audit/disclosure.
 - [x] Preserve the current MCP-first behavior so external MCP tools still bypass native dispatch when present.
-- [x] Move `sandbox.exec`, `memory.read`, `memory.write`, and `skill.draft` into registry-backed handlers without changing user-facing behavior.
+- [x] Move `sandbox_exec`, `memory.read`, `memory.write`, and `skill.draft` into registry-backed handlers without changing user-facing behavior.
 - [x] Stop special-casing native-tool path extraction in the main lifecycle loop; let handlers expose any disclosure/audit metadata they produce.
 - [x] Keep tool-result redaction, disclosure, and causal logging centralized in the lifecycle path even after dispatch is modularized.
 - [x] Add focused runtime tests proving known native tools still execute, unknown tools still fail cleanly, and MCP/native precedence remains unchanged.
@@ -536,12 +536,12 @@ Progress notes:
 
 ##### 4. Router spawn/ingest unification ✅
 
-- [x] Extract one internal helper for the shared `agent.spawn` / `event.ingest` workflow: parse input, resolve session, emit gateway causal events, optionally append task-board metadata, and call the execution service.
+- [x] Extract one internal helper for the shared `agent_spawn` / `event.ingest` workflow: parse input, resolve session, emit gateway causal events, optionally append task-board metadata, and call the execution service.
 - [x] Stop reloading target agent data in router-only prechecks when the same path is reloaded again by the execution layer.
 - [x] Keep param parsing and user-facing response shapes distinct, but collapse the duplicated orchestration path.
 
 Acceptance criteria:
-- `agent.spawn` and `event.ingest` share one internal execution pipeline.
+- `agent_spawn` and `event.ingest` share one internal execution pipeline.
 - Gateway causal logging shape remains unchanged externally.
 - Tests continue covering both JSON-RPC methods independently.
 
@@ -618,13 +618,13 @@ Progress notes (2026-03-08):
 - Refactored `MemoryReadTool`, `MemoryWriteTool`, and `SkillDraftTool` to use shared helper
 - Reduced `tools.rs` from 687 to 675 lines (12 lines removed)
 - All 6 tool registry tests pass, no compiler warnings
-- Registry remains thin and static with 4 core tools (sandbox.exec, memory.read, memory.write, skill.draft)
+- Registry remains thin and static with 4 core tools (sandbox_exec, memory.read, memory.write, skill.draft)
 
 ## Current State Snapshot (2026-03-08)
 
 Autonoetic is past the "architecture sketch" stage. The runtime already has the key execution surfaces needed for real validation work:
 
-- Gateway-owned ingress via `event.ingest` and delegated `agent.spawn`
+- Gateway-owned ingress via `event.ingest` and delegated `agent_spawn`
 - Background scheduler with wake predicates, deduplication, and backpressure controls
 - Deterministic scheduled actions plus approval-gated side effects
 - Agent runtime with real LLM loop, native tool registry, MCP tool dispatch, and sandbox execution
@@ -760,20 +760,20 @@ Follow-up evolution items from the planner/specialist workflow and install relia
 ### Pre-install discovery via AgentRepository
 
 - [x] Keep fixed role-map routing as the primary planner path; run discovery only before durable install decisions.
-- [x] Add native `agent.exists` tool backed by `AgentRepository` for deterministic ID collision checks before `agent.install`.
-- [x] Add native `agent.discover` tool backed by `AgentRepository` returning ranked reusable-agent candidates by intent/capability match.
-- [x] Update planner policy: before delegating install to `specialized_builder.default`, call `agent.discover`; if a strong match exists, spawn/reuse it instead of creating a new agent.
-- [x] Update specialized builder policy: call `agent.exists` first; if target exists, return reusable result (`already_exists`) instead of retrying installation.
+- [x] Add native `agent_exists` tool backed by `AgentRepository` for deterministic ID collision checks before `agent.install`.
+- [x] Add native `agent_discover` tool backed by `AgentRepository` returning ranked reusable-agent candidates by intent/capability match.
+- [x] Update planner policy: before delegating install to `specialized_builder.default`, call `agent_discover`; if a strong match exists, spawn/reuse it instead of creating a new agent.
+- [x] Update specialized builder policy: call `agent_exists` first; if target exists, return reusable result (`already_exists`) instead of retrying installation.
 - [x] Add deterministic ranking and audit fields for discovery results (`score`, `match_reasons`, matched capabilities) to keep decisions explainable.
-- [x] Add unit tests for: `agent.exists` (existing/nonexistent agents), `agent.discover` (ranked results, exclude_ids, capability matching).
+- [x] Add unit tests for: `agent_exists` (existing/nonexistent agents), `agent_discover` (ranked results, exclude_ids, capability matching).
 
 Progress notes (2026-03-11):
-- Implemented `AgentExistsTool` in `autonoetic-gateway/src/runtime/tools.rs` with `agent.exists` tool that checks AgentRepository for existing agent IDs
-- Implemented `AgentDiscoverTool` in `autonoetic-gateway/src/runtime/tools.rs` with `agent.discover` tool that returns ranked candidates by intent/capability match
+- Implemented `AgentExistsTool` in `autonoetic-gateway/src/runtime/tools.rs` with `agent_exists` tool that checks AgentRepository for existing agent IDs
+- Implemented `AgentDiscoverTool` in `autonoetic-gateway/src/runtime/tools.rs` with `agent_discover` tool that returns ranked candidates by intent/capability match
 - Discovery ranking algorithm scores agents based on: exact intent match (30 pts), keyword matches (up to 20 pts), required capabilities (15 pts each), background support (5 pts)
 - Both tools require `AgentSpawn` capability, making them available to planner and evolution roles
-- Updated `planner.default/SKILL.md` to call `agent.discover` before delegating to `specialized_builder.default` (Rule 6-7)
-- Updated `specialized_builder.default/SKILL.md` to call `agent.exists` before installation attempts (Rule 7)
+- Updated `planner.default/SKILL.md` to call `agent_discover` before delegating to `specialized_builder.default` (Rule 6-7)
+- Updated `specialized_builder.default/SKILL.md` to call `agent_exists` before installation attempts (Rule 7)
 - Registered both tools in `default_registry()` alongside existing agent tools
 - Added 4 unit tests: `test_agent_exists_returns_true_for_existing_agent`, `test_agent_exists_returns_false_for_nonexistent_agent`, `test_agent_discover_returns_ranked_candidates`, `test_agent_discover_exclude_ids`
 - All 130 library tests pass
@@ -789,7 +789,7 @@ Progress notes (2026-03-11):
 
 Goal: allow agents that only run scripts/APIs to execute without consuming LLM resources. A "deterministic agent" declares itself as script-only in its manifest; the gateway executes it directly in sandbox, bypassing the full lifecycle loop.
 
-**Current gap:** `BackgroundMode::Deterministic` exists for the background scheduler but only executes `pending_scheduled_action` (WriteFile/SandboxExec). Foreground agents (`event.ingest` / `agent.spawn`) always go through the full LLM lifecycle. The `skip_llm` middleware hook (`lifecycle.rs:269`) is inside the lifecycle loop, not a true bypass — it still builds the LLM request, manages history, and runs the full orchestration path.
+**Current gap:** `BackgroundMode::Deterministic` exists for the background scheduler but only executes `pending_scheduled_action` (WriteFile/SandboxExec). Foreground agents (`event.ingest` / `agent_spawn`) always go through the full LLM lifecycle. The `skip_llm` middleware hook (`lifecycle.rs:269`) is inside the lifecycle loop, not a true bypass — it still builds the LLM request, manages history, and runs the full orchestration path.
 
 **Target behavior:**
 - Agent manifest declares `execution_mode: script` with an entry point script
@@ -879,7 +879,7 @@ Goal: allow agents that only run scripts/APIs to execute without consuming LLM r
 - Added `session_trace_integration.rs` with 2 integration tests:
   - `test_multi_agent_session_trace_reconstruction`: verifies parent→child agent spawn creates events in all three causal logs (gateway, parent, child) with proper session filtering
   - `test_session_trace_deterministic_ordering`: verifies events are sorted by timestamp and event_seq within session
-- Test uses `#[tokio::test(flavor = "multi_thread")]` for agent.spawn tool compatibility (block_in_place requires multi-threaded runtime)
+- Test uses `#[tokio::test(flavor = "multi_thread")]` for agent_spawn tool compatibility (block_in_place requires multi-threaded runtime)
 
 ### Causal chain rotation and retention
 
@@ -925,7 +925,7 @@ Goal: allow agents that only run scripts/APIs to execute without consuming LLM r
 
 ### Pluggable schema enforcement hook
 
-**Problem:** When agents call other agents via `agent.spawn`, the calling LLM must produce payloads matching the target's `io` schema. LLMs are inconsistent at exact structural output. Current lightweight validation passes through garbage or fails without actionable feedback.
+**Problem:** When agents call other agents via `agent_spawn`, the calling LLM must produce payloads matching the target's `io` schema. LLMs are inconsistent at exact structural output. Current lightweight validation passes through garbage or fails without actionable feedback.
 
 **Goal:** Add a pluggable enforcement hook between tool-call interception and target-agent dispatch that can coerce payloads, reject with actionable errors, and log all decisions. Keep the hook swappable between pure code (first) and cheap LLM (later) implementations.
 
@@ -936,10 +936,10 @@ Goal: allow agents that only run scripts/APIs to execute without consuming LLM r
 - [x] Define `SchemaEnforcer` trait and `EnforcementResult` enum (`Pass`, `Coerced`, `Reject`) in `autonoetic-types`
 - [x] Implement `DeterministicCoercionEnforcer` (pure code): required-field defaults, field renaming by similarity, safe type coercion
 - [x] Add `schema_enforcement` config section to `GatewayConfig` (`primary`, `fallback`, `audit`, `agent_overrides`)
-- [x] Insert hook into `agent.spawn` tool execution path in `runtime/tools.rs` — after capability check, before target dispatch
+- [x] Insert hook into `agent_spawn` tool execution path in `runtime/tools.rs` — after capability check, before target dispatch
 - [x] Add causal chain logging for all enforcement decisions (pass, coerce, reject) with transformation details
 - [x] Add unit tests for all coercion rules: exact match (pass), missing defaults (coerce), field rename (coerce), unrecoverable mismatch (reject)
-- [x] Add integration test: malformed `agent.spawn` payload → auto-coerced → target receives valid input
+- [x] Add integration test: malformed `agent_spawn` payload → auto-coerced → target receives valid input
 - [x] Add integration test: unrecoverable mismatch → structured error with `hint` → calling agent repairs in-session
 - [x] Update planner `SKILL.md` guidance to note that structural schema errors are auto-corrected when possible; explicit `skill.describe` is optional
 - [ ] (Later) Implement `LlmCoercionEnforcer` with cheap model fallback for complex structural transforms
@@ -949,7 +949,7 @@ Goal: allow agents that only run scripts/APIs to execute without consuming LLM r
 - Added `schema_enforcement.rs` in autonoetic-types with `SchemaEnforcer` trait and `EnforcementResult` enum
 - Added `DeterministicCoercionEnforcer` with default value and type coercion support
 - Added `SchemaEnforcementConfig` to GatewayConfig with mode (disabled/deterministic/llm), audit flag, and agent_overrides
-- Hook inserted in `agent.spawn` tool at `runtime/tools.rs` - reads target agent's `io.accepts` schema
+- Hook inserted in `agent_spawn` tool at `runtime/tools.rs` - reads target agent's `io.accepts` schema
 - Enforcement logs transformations via tracing at `schema_enforcement` target
 - Added `schema_enforcement_integration.rs` with 2 tests verifying hook is in place
 - All 210+ tests pass
@@ -1068,7 +1068,7 @@ The approval request (example: `c19a8a50-d6c8-4c5f-aa3c-6ba119751b11`) remains p
 - [x] Update planner SKILL.md to document the correct install flow:
   ```
   Install Flow:
-  1. Check agent.discover for existing agents
+  1. Check agent_discover for existing agents
   2. If none found, spawn specialized_builder.default with the request
   3. If specialized_builder returns approval_pending, report to user
   4. After user approves, re-spawn specialized_builder with install_approval_ref
@@ -1249,13 +1249,13 @@ The approval request (example: `c19a8a50-d6c8-4c5f-aa3c-6ba119751b11`) remains p
 - `sdk_checkpoint.json` is opt-in (only if agent called `sdk.state.checkpoint()`) — optional
 - `execute_with_history()` already accepts pre-built `&mut Vec<Message>` — fork just loads and continues
 - Causal chain is append-only — fork writes a `session.forked` lineage entry
-- **New:** History and snapshots stored as content objects via `content.write/persist/read`
+- **New:** History and snapshots stored as content objects via `content_write/persist/read`
 
 ### Storage Model (Content-based)
 
 ```
 History storage:
-  content.write("session_history", serialized_history) → handle
+  content_write("session_history", serialized_history) → handle
   content.persist(handle) → survives session cleanup
 
 Snapshot storage:
@@ -1263,8 +1263,8 @@ Snapshot storage:
   Returns handle for later retrieval
 
 Fork operation:
-  content.read(history_handle) → get history
-  content.write("session_history", history) → new content for forked session
+  content_read(history_handle) → get history
+  content_write("session_history", history) → new content for forked session
 ```
 
 **Benefits over file-based storage:**
@@ -1277,23 +1277,23 @@ Fork operation:
 
 - [x] Add `SessionSnapshot` struct in `autonoetic-gateway/src/runtime/session_snapshot.rs`:
   - Fields: `source_session_id`, `turn_count`, `created_at`, `history: Vec<Message>`, `session_context: SessionContext`, `sdk_checkpoint: Option<serde_json::Value>`, `content_handle: Option<String>`
-  - `SessionSnapshot::capture(session_id, history, turn_count)` — serializes history, stores via `content.write`, returns snapshot with handle
-  - `SessionSnapshot::load(handle)` — reads from content store via `content.read(handle)`
+  - `SessionSnapshot::capture(session_id, history, turn_count)` — serializes history, stores via `content_write`, returns snapshot with handle
+  - `SessionSnapshot::load(handle)` — reads from content store via `content_read(handle)`
   - `SessionSnapshot::persist()` — calls `content.persist(handle)` for permanent storage
   - `SessionFork::fork()` — creates a new session by copying history from a snapshot
 - [x] Persist conversation history at hibernate points in `lifecycle.rs`:
   - After `log_hibernate()`, serialize `history` to JSON
-  - Store via `content.write("session_history", history_json)`
+  - Store via `content_write("session_history", history_json)`
   - Persist handle via `content.persist()` for cross-session access
 - [x] Add `session.snapshot` native tool in `runtime/tools.rs`:
   - Explicit snapshot capture at any point during execution
   - Serializes current history + session context
-  - Stores via `content.write` then `content.persist` (makes permanent)
+  - Stores via `content_write` then `content.persist` (makes permanent)
   - Returns content handle to the agent (not file path)
 - [x] Add `session.fork` JSON-RPC method in `router.rs`:
   - Params: `source_session_id`, `branch_message` (optional), `new_session_id` (optional, auto-generated if missing)
-  - Loads history via `content.read(handle)` from source session manifest
-  - Creates new session with copied history via `content.write`
+  - Loads history via `content_read(handle)` from source session manifest
+  - Creates new session with copied history via `content_write`
   - Copies `SessionContext` under new session_id
   - Copies `sdk_checkpoint.json` if it exists
   - Logs `session.forked` lineage entry in causal chain (with `source_session_id`, `fork_turn`, `history_handle`)
@@ -1310,11 +1310,11 @@ Fork operation:
   - New entry type: `history.persisted` logged on each hibernate with `message_count`, `content_handle`
 - [x] Add `autonoetic trace history <session_id>` CLI command:
   - Reads history handle from session manifest
-  - Fetches via `content.read(handle)` through gateway API
+  - Fetches via `content_read(handle)` through gateway API
   - `--json` flag for raw output
   - Works for remote sessions too (uses gateway API)
 - [x] Integration tests:
-  - `test_session_history_persisted_on_hibernate`: run agent, hibernate, verify history stored via content.write, verify handle in manifest
+  - `test_session_history_persisted_on_hibernate`: run agent, hibernate, verify history stored via content_write, verify handle in manifest
   - `test_session_fork_creates_new_session`: snapshot session A via content.persist, fork to session B, verify B has copied history via content handles
   - `test_session_fork_with_branch_message`: fork with alternative prompt, verify branch message is appended to history
   - `test_session_fork_lineage_in_causal_chain`: verify `session.forked` entry links source and forked sessions with history handles
@@ -1323,12 +1323,12 @@ Fork operation:
   - `test_session_snapshot_content_handle`: verify snapshot returns valid content handle, can be read back
 
 ### Acceptance criteria
-- [x] Conversation history is persisted via content.write on every hibernate
+- [x] Conversation history is persisted via content_write on every hibernate
 - [x] History handle stored in session manifest for retrieval
-- [x] Any session can be forked via content.read/write (works remotely)
+- [x] Any session can be forked via content_read/write (works remotely)
 - [x] Fork lineage is tracked in the causal chain with content handles
 - [x] Snapshots use content.persist for permanent storage
-- [x] CLI trace commands use gateway API (content.read) not file paths
+- [x] CLI trace commands use gateway API (content_read) not file paths
 - [x] All existing tests still pass
 
 ---
@@ -1342,7 +1342,7 @@ Fork operation:
 - Tier 2 (long-term memory) is complex with visibility ACLs → LLMs struggle to use correctly
 - File paths are local → remote agents can't access files on other machines
 - Multi-file projects (Python UV project) can't be returned in a single response
-- LLMs keep trying to load from memory after `agent.spawn` returns, even though the response contains the content
+- LLMs keep trying to load from memory after `agent_spawn` returns, even though the response contains the content
 
 **Root cause:** Memory coordination is an LLM-facing concern when it should be a system concern. File paths assume local filesystem.
 
@@ -1361,29 +1361,29 @@ Gateway Storage (content-addressed, works local + remote):
 └── .gateway/knowledge.db          ← Tier 2 facts (renamed from memory.db)
 
 Gateway API (all agents use this, local or remote):
-├── content.write(name, content) → handle
-├── content.read(handle_or_name) → content
+├── content_write(name, content) → handle
+├── content_read(handle_or_name) → content
 ├── content.persist(handle) → permanent
 └── content.exec(handle, input) → execute (configurable: agent-side or gateway-side)
 
 Knowledge (durable facts, renamed Tier 2):
-├── knowledge.store(id, content, tags) → persist fact
-├── knowledge.recall(id) → retrieve fact
-└── knowledge.search(query) → search facts
+├── knowledge_store(id, content, tags) → persist fact
+├── knowledge_recall(id) → retrieve fact
+└── knowledge_search(query) → search facts
 ```
 
 ### Three Simple Tools for LLMs
 
 | Tool | Purpose | Example |
 |------|---------|---------|
-| `content.write(name, content)` | Write content to session | `content.write("main.py", script)` → returns `sha256:abc123` |
-| `content.read(handle_or_name)` | Read content | `content.read("main.py")` or `content.read("sha256:abc123")` |
-| `knowledge.store/recall/search` | Durable facts with provenance | `knowledge.store("weather-api", "open-meteo", ["api"])` |
+| `content_write(name, content)` | Write content to session | `content_write("main.py", script)` → returns `sha256:abc123` |
+| `content_read(handle_or_name)` | Read content | `content_read("main.py")` or `content_read("sha256:abc123")` |
+| `knowledge_store/recall/search` | Durable facts with provenance | `knowledge_store("weather-api", "open-meteo", ["api"])` |
 
 **Why 3 tools are enough:**
-- `content.write` = "I made something, save it"
-- `content.read` = "I need that thing" (by name in session, or by handle)
-- `knowledge.store/recall` = "I learned something, remember it" (cross-session)
+- `content_write` = "I made something, save it"
+- `content_read` = "I need that thing" (by name in session, or by handle)
+- `knowledge_store/recall` = "I learned something, remember it" (cross-session)
 
 ### Agent Artifacts: SKILL.md (not MANIFEST.json)
 
@@ -1444,10 +1444,10 @@ All operations go through gateway API (HTTP/JSON-RPC). Agent doesn't care where 
 
 | Operation | Local Agent | Remote Agent |
 |-----------|-------------|--------------|
-| `content.write("main.py", script)` | Gateway API → local storage | Gateway API → same central storage |
-| `content.read("sha256:abc123")` | Gateway API → returns content | Gateway API → same content |
+| `content_write("main.py", script)` | Gateway API → local storage | Gateway API → same central storage |
+| `content_read("sha256:abc123")` | Gateway API → returns content | Gateway API → same content |
 | SKILL.md transfer | Just another content object | Same API call, works identically |
-| Discovery (`agent.discover`) | Gateway API | Gateway API |
+| Discovery (`agent_discover`) | Gateway API | Gateway API |
 
 **Remote agent needs:**
 - Network access to gateway (HTTP endpoint)
@@ -1468,7 +1468,7 @@ Gateway decides based on agent manifest capabilities and config.
 
 **Write flow:**
 ```
-Agent: content.write("main.py", script)
+Agent: content_write("main.py", script)
 Gateway: 1. Compute SHA-256
          2. Store at .gateway/content/sha256/ab/c123...
          3. Update session manifest: {"main.py": "sha256:abc123"}
@@ -1477,16 +1477,16 @@ Gateway: 1. Compute SHA-256
 
 **Read flow:**
 ```
-Agent: content.read("main.py") or content.read("sha256:abc123")
+Agent: content_read("main.py") or content_read("sha256:abc123")
 Gateway: 1. Resolve name → handle from session manifest (if name)
          2. Fetch from content store
          3. Return content
 ```
 
-**Artifact creation (automatic on agent.spawn):**
+**Artifact creation (automatic on agent_spawn):**
 ```
-1. Coder writes files → content.write() calls
-2. Coder writes SKILL.md → content.write("SKILL.md", ...)
+1. Coder writes files → content_write() calls
+2. Coder writes SKILL.md → content_write("SKILL.md", ...)
 3. Gateway detects SKILL.md in session manifest
 4. Gateway creates artifact:
    - Bundles all session content
@@ -1508,7 +1508,7 @@ Gateway: 1. Resolve name → handle from session manifest (if name)
 **Agent installation flow:**
 ```
 1. Planner passes artifact handles to specialized_builder
-2. Specialized_builder reads SKILL.md via content.read()
+2. Specialized_builder reads SKILL.md via content_read()
 3. Specialized_builder creates agent directory:
    - Copies files from content store
    - SKILL.md becomes agent manifest
@@ -1519,14 +1519,14 @@ Gateway: 1. Resolve name → handle from session manifest (if name)
 **Persistence for reuse:**
 ```
 content.persist("sha256:abc123") → makes content permanent
-Future sessions can discover and reuse via agent.discover
+Future sessions can discover and reuse via agent_discover
 ```
 
 ### Design Decisions
 
 | Current | New | Rationale |
 |---------|-----|-----------|
-| `memory.working.save/load` | `content.write/read` | Works locally + remotely |
+| `memory.working.save/load` | `content_write/read` | Works locally + remotely |
 | File paths (local only) | Content handles (SHA-256) | Remote agent compatible |
 | Agent returns content in response | Gateway creates artifacts automatically | Multi-file support |
 | MANIFEST.json (structured JSON) | SKILL.md (YAML + markdown) | LLM-friendly, existing pattern |
@@ -1543,14 +1543,14 @@ Future sessions can discover and reuse via agent.discover
   - `read(handle) -> Content` - fetch from store by hash
   - `read_by_name(session_id, name) -> Content` - resolve name → handle → content
   - `persist(handle) -> ()` - mark content as permanent (no session cleanup)
-- [x] Add `content.write`, `content.read`, `content.persist` native tools:
-  - `content.write(name, content)` - stores content, returns handle
-  - `content.read(handle_or_name)` - reads by handle or session-relative name
+- [x] Add `content_write`, `content_read`, `content.persist` native tools:
+  - `content_write(name, content)` - stores content, returns handle
+  - `content_read(handle_or_name)` - reads by handle or session-relative name
   - `content.persist(handle)` - marks content for cross-session persistence
   - All tools work via gateway API (local socket or HTTP for remote)
 - [x] Session manifest management:
   - `.gateway/sessions/<session_id>/manifest.json` - maps names → handles
-  - Updated on every content.write
+  - Updated on every content_write
   - Gateway manages automatically
 
 #### 2. Artifact creation from SKILL.md
@@ -1559,7 +1559,7 @@ Future sessions can discover and reuse via agent.discover
   - When agent writes SKILL.md, gateway parses YAML frontmatter
   - Extracts: name, description, script_entry, io schema
   - Stores artifact metadata in session artifacts.json
-- [x] Auto-create artifact on agent.spawn completion:
+- [x] Auto-create artifact on agent_spawn completion:
   - Bundle all session content into artifact
   - Include SKILL.md frontmatter metadata
   - Add structured `artifacts` field to spawn response
@@ -1585,8 +1585,8 @@ Future sessions can discover and reuse via agent.discover
 - Added `parse_skill_md_artifact()` helper for frontmatter parsing
 - Modified `SpawnResult` to include `artifacts: Vec<ArtifactMetadata>`
 - Updated both script-mode and LLM-mode spawn paths to extract artifacts
-- Updated `agent.spawn` tool response to include `artifacts` field
-- Updated JSON-RPC responses for `agent.spawn` and `event.ingest` to include `artifacts`
+- Updated `agent_spawn` tool response to include `artifacts` field
+- Updated JSON-RPC responses for `agent_spawn` and `event.ingest` to include `artifacts`
 - Added unit test for SKILL.md artifact creation
 
 #### 3. Remove Tier 1 memory (working memory)
@@ -1594,17 +1594,17 @@ Future sessions can discover and reuse via agent.discover
 - [x] Deprecate `memory.working.save/load/list` tools:
   - Keep tools operational for backward compatibility
   - Add deprecation warning in tool description
-  - Redirect to `content.write/read` in foundation instructions
+  - Redirect to `content_write/read` in foundation instructions
 - [x] Update foundation instructions:
   - Replace Tier 1 memory guidance with content tools
-  - "Use `content.write` for files/scripts/data"
-  - "Use `content.read` to retrieve by name or handle"
+  - "Use `content_write` for files/scripts/data"
+  - "Use `content_read` to retrieve by name or handle"
   - "Content is automatically session-scoped and accessible to all session agents"
 - [x] Update all SKILL.md files:
-  - planner: use `content.write/read` instead of `memory.working.save/load`
-  - architect: write schemas via `content.write`
-  - coder: write scripts via `content.write`, include SKILL.md
-  - specialized_builder: use content.read to access files
+  - planner: use `content_write/read` instead of `memory.working.save/load`
+  - architect: write schemas via `content_write`
+  - coder: write scripts via `content_write`, include SKILL.md
+  - specialized_builder: use content_read to access files
   - Remove all memory coordination instructions (no more "return content in response")
 - [ ] Migration path:
   - Existing `state/` directories continue to work
@@ -1613,17 +1613,17 @@ Future sessions can discover and reuse via agent.discover
 #### 4. Rename Tier 2 to "knowledge"
 
 - [x] Rename tools:
-  - `memory.remember` → `knowledge.store`
-  - `memory.recall` → `knowledge.recall`
-  - `memory.search` → `knowledge.search`
+  - `memory.remember` → `knowledge_store`
+  - `memory.recall` → `knowledge_recall`
+  - `memory.search` → `knowledge_search`
   - `memory.share` → `knowledge.share`
 - [x] Keep existing implementation (SQLite + provenance)
   - Same `MemoryObject` schema
   - Same ACL/visibility controls
   - Just rename the tool interface
 - [x] Update foundation instructions:
-  - "Use `knowledge.store` for durable facts you want to persist across sessions"
-  - "Use `content.write` for working files within a session"
+  - "Use `knowledge_store` for durable facts you want to persist across sessions"
+  - "Use `content_write` for working files within a session"
   - Clear distinction: content = files/data, knowledge = facts with provenance
 - [x] Update SKILL.md files:
   - planner, coder, architect, specialized_builder now use knowledge tools
@@ -1637,8 +1637,8 @@ Future sessions can discover and reuse via agent.discover
   - `POST /api/content/read` - Read content (alternative body params)
   - `POST /api/content/persist` - Mark content as persistent
   - `GET /api/content/names?session_id=X` - List content names with handles
-  - `content.write` → POST /api/content/write
-  - `content.read` → GET /api/content/{handle}
+  - `content_write` → POST /api/content/write
+  - `content_read` → GET /api/content/{handle}
   - Same tool interface, different transport
 - [ ] Remote agent configuration:
   - Gateway URL in agent config
@@ -1652,17 +1652,17 @@ Future sessions can discover and reuse via agent.discover
 #### 6. SKILL.md guidance for specialists
 
 - [ ] Coder SKILL.md update:
-  - "Write all code files using `content.write(filename, content)`"
+  - "Write all code files using `content_write(filename, content)`"
   - "Write SKILL.md with YAML frontmatter containing name, description, script_entry, io schema"
   - "SKILL.md body should include usage instructions in natural language"
-  - "Do NOT return file contents in response - just write them via content.write"
+  - "Do NOT return file contents in response - just write them via content_write"
 - [ ] Architect SKILL.md update:
-  - "Write design documents using `content.write(filename, content)`"
+  - "Write design documents using `content_write(filename, content)`"
   - "Include I/O contracts in the design"
 - [ ] Planner SKILL.md update:
   - "After spawning coder/architect, check response `artifacts` field"
   - "Pass artifact handles to specialized_builder for installation"
-  - "Do NOT try to load from memory - use content.read with handles from artifacts"
+  - "Do NOT try to load from memory - use content_read with handles from artifacts"
 
 ### Acceptance Criteria
 
@@ -1672,7 +1672,7 @@ Future sessions can discover and reuse via agent.discover
 - [x] SKILL.md is used for all agent artifacts (not MANIFEST.json)
 - [x] Gateway auto-creates artifacts from SKILL.md in session content
 - [x] Content is addressable by SHA-256 handle (works locally + remotely)
-- [x] LLM has 3 simple tools: content.write, content.read, knowledge.store/recall
+- [x] LLM has 3 simple tools: content_write, content_read, knowledge_store/recall
 - [x] No more "return content in response" or "don't load from memory" rules
 - [x] Demo-session-6 type scenario works without looping (validated via full_lifecycle_integration tests)
 - [x] All existing tests pass with new content tools
@@ -1686,20 +1686,20 @@ Future sessions can discover and reuse via agent.discover
   - Session manifest management at `.gateway/sessions/<session_id>/manifest.json`
   - Full test coverage (9 unit tests)
 - Added native tools in `autonoetic-gateway/src/runtime/tools.rs`:
-  - `content.write(name, content)` → returns content handle
-  - `content.read(name_or_handle)` → reads by name or SHA-256 handle
+  - `content_write(name, content)` → returns content handle
+  - `content_read(name_or_handle)` → reads by name or SHA-256 handle
   - `content.persist(handle)` → marks content for cross-session persistence
 - Added knowledge tools (renamed Tier 2 memory):
-  - `knowledge.store(id, content, scope)` → stores durable facts with provenance
-  - `knowledge.recall(id)` → retrieves facts with visibility checks
-  - `knowledge.search(scope, query)` → searches by scope and content
+  - `knowledge_store(id, content, scope)` → stores durable facts with provenance
+  - `knowledge_recall(id)` → retrieves facts with visibility checks
+  - `knowledge_search(scope, query)` → searches by scope and content
   - `knowledge.share(id, agents)` → shares with specific agents
 - Updated foundation instructions with content/knowledge guidance
 - **Artifact auto-creation** from SKILL.md:
   - Added `ArtifactMetadata` struct in `execution.rs`
   - Added `extract_artifacts_from_content_store()` function
   - Modified `SpawnResult` to include artifacts
-  - Updated `agent.spawn` and `event.ingest` to return artifacts
+  - Updated `agent_spawn` and `event.ingest` to return artifacts
 - All 176 unit tests pass
 - Legacy memory tools retained for backward compatibility
 
@@ -1709,11 +1709,11 @@ Future sessions can discover and reuse via agent.discover
 
 ### Test Scenarios
 
-1. **Basic content sharing**: Architect writes design.json via content.write, planner reads via content.read
+1. **Basic content sharing**: Architect writes design.json via content_write, planner reads via content_read
 2. **Multi-file project**: Coder creates Python project with SKILL.md, specialized_builder installs via artifact handles
 3. **Remote agent**: Remote coder writes content, local planner reads it (requires HTTP endpoints)
 4. **SKILL.md artifact**: Gateway parses SKILL.md frontmatter, creates structured artifact (TODO)
-5. **Knowledge persistence**: Agent stores fact via knowledge.store, different session recalls it
+5. **Knowledge persistence**: Agent stores fact via knowledge_store, different session recalls it
 6. **Content persistence**: Agent persists content, later session discovers and reuses
 7. **Sandbox execution**: Script agent executes via agent-side or gateway-side sandbox based on capabilities
 
@@ -1736,7 +1736,7 @@ Future sessions can discover and reuse via agent.discover
    - main.py (or weather.py) - actual Python code
    - SKILL.md - with YAML frontmatter (name, description, script_entry, io schema)
 4. Verify gateway captures content:
-   - content.write calls logged to causal chain
+   - content_write calls logged to causal chain
    - Content stored in content-addressable store
    - Session manifest updated with file handles
 5. Verify gateway creates artifact:
@@ -1744,10 +1744,10 @@ Future sessions can discover and reuse via agent.discover
    - Artifact response includes structured metadata (name, description, io)
 6. Spawn specialized_builder with artifact handles
 7. Verify specialized_builder can:
-   - Read SKILL.md via content.read
-   - Read script file via content.read
+   - Read SKILL.md via content_read
+   - Read script file via content_read
    - Install agent using extracted metadata
-8. Verify new agent is registered and discoverable via agent.discover
+8. Verify new agent is registered and discoverable via agent_discover
 
 ### Test Implementation
 
@@ -1780,7 +1780,7 @@ Future sessions can discover and reuse via agent.discover
   - Specialized_builder reads SKILL.md → extracts metadata
   - Specialized_builder reads script → installs agent
   - Verify agent is registered in AgentRepository
-  - Verify agent is discoverable via agent.discover
+  - Verify agent is discoverable via agent_discover
 
 - [ ] Test: `test_full_lifecycle_planner_coder_builder`:
   - Spawn planner with user goal: "I need a weather checking agent"
@@ -1792,10 +1792,10 @@ Future sessions can discover and reuse via agent.discover
 
 ### Required Infrastructure
 
-- [ ] Ensure coder agent SKILL.md instructs content.write usage
+- [ ] Ensure coder agent SKILL.md instructs content_write usage
 - [ ] Ensure coder agent SKILL.md instructs SKILL.md creation with YAML frontmatter
 - [ ] Ensure gateway auto-creates artifacts from SKILL.md in session content
-- [ ] Ensure content.write/read tools are available in test environment
+- [ ] Ensure content_write/read tools are available in test environment
 - [ ] Ensure artifact handles are passed correctly in spawn response
 
 ### Acceptance Criteria
@@ -1804,9 +1804,9 @@ Future sessions can discover and reuse via agent.discover
 - [ ] Coder generates at least 1 Python file + SKILL.md
 - [ ] SKILL.md has valid YAML frontmatter with name, description, io schema
 - [ ] Gateway stores content and creates artifacts automatically
-- [ ] Specialized_builder can read files via content.read handles
+- [ ] Specialized_builder can read files via content_read handles
 - [ ] Specialized_builder can install agent using SKILL.md metadata
-- [ ] New agent is discoverable via agent.discover
+- [ ] New agent is discoverable via agent_discover
 - [ ] Full lifecycle works without memory coordination or looping
 - [ ] Test is skippable when OPENROUTER_API_KEY not set
 
@@ -1833,23 +1833,23 @@ Future sessions can discover and reuse via agent.discover
 
 - [x] Remove "JSON Output Format (Required)" section
 - [x] Remove strict JSON validation requirements
-- [x] Add `content.write("findings.md", research_content)` for storing full research
-- [x] Change output guidance: "Write findings to content.write, return natural summary"
+- [x] Add `content_write("findings.md", research_content)` for storing full research
+- [x] Change output guidance: "Write findings to content_write, return natural summary"
 - [x] Update `io.returns` to be guidance only (add `validation: "soft"`)
 - [x] Remove "Common Mistakes to Avoid" section about JSON formatting
 - [x] Add guidance: "Include sources, data, confidence naturally in your response"
 
 #### 2. Architect (`architect.default/SKILL.md`)
 
-- [x] Add `content.write("design.md", design_document)` for storing designs
-- [x] Remove "return in response" pattern - use content.write instead
-- [x] Add guidance: "Write I/O contracts and design decisions to content.write"
+- [x] Add `content_write("design.md", design_document)` for storing designs
+- [x] Remove "return in response" pattern - use content_write instead
+- [x] Add guidance: "Write I/O contracts and design decisions to content_write"
 - [x] Update capabilities to include ToolInvoke for content/knowledge tools
 - [x] Add `validation: "soft"` to frontmatter
 
 #### 3. Coder (`coder.default/SKILL.md`)
 
-- [x] Update to use `content.write` for all code files
+- [x] Update to use `content_write` for all code files
 - [x] Update to write SKILL.md with YAML frontmatter for metadata
 - [x] Remove "return code in response" pattern
 - [x] Remove JSON output format section
@@ -1859,7 +1859,7 @@ Future sessions can discover and reuse via agent.discover
 
 #### 4. Evaluator (`evaluator.default/SKILL.md`)
 
-- [x] Update to read artifacts via `content.read` instead of memory
+- [x] Update to read artifacts via `content_read` instead of memory
 - [x] Add content tools section
 - [x] Add guidance: "Write detailed evaluation reports to content store"
 - [x] Add `validation: "soft"` to frontmatter
@@ -1881,8 +1881,8 @@ Future sessions can discover and reuse via agent.discover
 
 #### 7. Specialized Builder (`specialized_builder.default/SKILL.md`)
 
-- [x] Already updated to read SKILL.md from artifacts via `content.read`
-- [ ] Update to read script files from artifacts via `content.read`
+- [x] Already updated to read SKILL.md from artifacts via `content_read`
+- [ ] Update to read script files from artifacts via `content_read`
 - [ ] Update agent.install flow to use content handles
 - [ ] Remove file path assumptions (content handles work remotely)
 - [ ] Update "File shapes" section to reference content handles
@@ -1892,8 +1892,8 @@ Future sessions can discover and reuse via agent.discover
 
 - [x] Change from schema-diff to content-transform approach
 - [x] Add guidance: "Transform content at consumption time, not production time"
-- [x] Update to read base agent content via `content.read`
-- [x] Write wrapper via `content.write`
+- [x] Update to read base agent content via `content_read`
+- [x] Write wrapper via `content_write`
 - [x] Add `validation: "soft"` for LLM-to-LLM adaptation
 - [x] Add ToolInvoke capability for content/knowledge/agent tools
 
@@ -1905,34 +1905,34 @@ Future sessions can discover and reuse via agent.discover
 
 #### 10. Memory Curator (`memory-curator.default/SKILL.md`)
 
-- [x] Update from `memory.remember` to `knowledge.store`
-- [x] Update from `memory.recall` to `knowledge.recall`
-- [x] Update from `memory.search` to `knowledge.search`
-- [x] Add guidance: "Use knowledge.store for durable facts with provenance"
+- [x] Update from `memory.remember` to `knowledge_store`
+- [x] Update from `memory.recall` to `knowledge_recall`
+- [x] Update from `memory.search` to `knowledge_search`
+- [x] Add guidance: "Use knowledge_store for durable facts with provenance"
 - [x] Add `validation: "soft"` to frontmatter
 - [x] Add ToolInvoke capability for content/knowledge tools
 
 #### 11. Evolution Steward (`evolution-steward.default/SKILL.md`)
 
 - [x] Update to use `content.persist` for promoting artifacts
-- [x] Update to use `knowledge.store` for durable learnings
+- [x] Update to use `knowledge_store` for durable learnings
 - [x] Add `validation: "soft"` to frontmatter
 - [x] Add ToolInvoke capability for content/knowledge/agent tools
 
 ### Foundation Instructions Update
 
 - [x] Update `foundation_instructions.md`:
-  - Add content.write/read tools documentation
-  - Add knowledge.store/recall tools documentation
+  - Add content_write/read tools documentation
+  - Add knowledge_store/recall tools documentation
   - Add two-tier validation explanation (Rule 4)
   - Add guidance: "LLM agents produce natural content, gateway handles storage"
 
 ### Acceptance Criteria
 
 - [x] All LLM agents have `validation: "soft"` (or omit, default is soft)
-- [x] All agents use content.write for producing artifacts
-- [x] All agents use content.read for consuming artifacts
-- [x] Memory tools renamed: knowledge.store/recall/search
+- [x] All agents use content_write for producing artifacts
+- [x] All agents use content_read for consuming artifacts
+- [x] Memory tools renamed: knowledge_store/recall/search
 - [x] Foundation instructions explain fuzzy content + two-tier validation
 - [x] All existing tests pass
 

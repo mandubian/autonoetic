@@ -206,7 +206,7 @@ mod tests {
         let mut guard = LoopGuard::new(3);
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
-        guard.register_progress("web.fetch", r#"{"url":"https://a.com"}"#);
+        guard.register_progress("web_fetch", r#"{"url":"https://a.com"}"#);
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
@@ -219,11 +219,11 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         for _ in 0..4 {
-            guard.register_failure("web.fetch", r#"{"url":"https://example.com/a"}"#, None);
-            guard.register_progress("web.fetch", r#"{"url":"https://example.com/a"}"#);
+            guard.register_failure("web_fetch", r#"{"url":"https://example.com/a"}"#, None);
+            guard.register_progress("web_fetch", r#"{"url":"https://example.com/a"}"#);
             assert!(guard.check_loop().is_ok());
         }
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com/z"}"#, None);
+        guard.register_failure("web_fetch", r#"{"url":"https://example.com/z"}"#, None);
         assert!(guard.check_loop().is_err());
     }
 
@@ -238,12 +238,12 @@ mod tests {
             } else {
                 "https://weather.com/b"
             };
-            guard.register_failure("web.fetch", &format!(r#"{{"url":"{}"}}"#, url), None);
-            guard.register_progress("web.fetch", &format!(r#"{{"url":"{}"}}"#, url));
+            guard.register_failure("web_fetch", &format!(r#"{{"url":"{}"}}"#, url), None);
+            guard.register_progress("web_fetch", &format!(r#"{{"url":"{}"}}"#, url));
             assert!(guard.check_loop().is_ok());
         }
 
-        guard.register_failure("web.fetch", r#"{"url":"https://accuweather.com/e"}"#, None);
+        guard.register_failure("web_fetch", r#"{"url":"https://accuweather.com/e"}"#, None);
         assert!(guard.check_loop().is_err());
     }
 
@@ -253,13 +253,13 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         for _ in 0..4 {
-            guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#, None);
-            guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#, None);
-            guard.register_progress("sandbox.exec", r#"{"command":"python3 test.py"}"#);
+            guard.register_failure("web_fetch", r#"{"url":"https://example.com"}"#, None);
+            guard.register_failure("sandbox_exec", r#"{"command":"python3 test.py"}"#, None);
+            guard.register_progress("sandbox_exec", r#"{"command":"python3 test.py"}"#);
             assert!(guard.check_loop().is_ok());
         }
 
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#, None);
+        guard.register_failure("web_fetch", r#"{"url":"https://example.com"}"#, None);
         assert!(guard.check_loop().is_err());
     }
 
@@ -269,45 +269,45 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         for _ in 0..4 {
-            guard.register_failure("sandbox.exec", r#"{"command":"python3 test.py"}"#, None);
-            guard.register_progress("sandbox.exec", r#"{"command":"python3 test.py"}"#);
+            guard.register_failure("sandbox_exec", r#"{"command":"python3 test.py"}"#, None);
+            guard.register_progress("sandbox_exec", r#"{"command":"python3 test.py"}"#);
             assert!(guard.check_loop().is_ok());
         }
-        guard.register_failure("sandbox.exec", r#"{"command":"python3 other.py"}"#, None);
+        guard.register_failure("sandbox_exec", r#"{"command":"python3 other.py"}"#, None);
         assert!(guard.check_loop().is_err());
     }
 
     #[test]
     fn test_loop_guard_snapshot_restore() {
         let mut guard = LoopGuard::new(3);
-        guard.register_failure("web.fetch", r#"{"url":"https://example.com"}"#, None);
-        guard.register_failure("web.fetch", r#"{"url":"https://other.com"}"#, None);
+        guard.register_failure("web_fetch", r#"{"url":"https://example.com"}"#, None);
+        guard.register_failure("web_fetch", r#"{"url":"https://other.com"}"#, None);
         assert_eq!(guard.check_loop().unwrap(), ());
 
         let snap = guard.snapshot();
         let restored = LoopGuard::restore(snap);
 
         assert_eq!(restored.current_loops, 1);
-        assert_eq!(*restored.tool_failure_counts.get("web.fetch").unwrap(), 2);
+        assert_eq!(*restored.tool_failure_counts.get("web_fetch").unwrap(), 2);
     }
 
     #[test]
     fn test_repeated_same_tool_call_does_not_reset() {
         let mut guard = LoopGuard::new(4);
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_err());
     }
 
@@ -316,12 +316,12 @@ mod tests {
         let mut guard = LoopGuard::new(100);
 
         for _ in 0..10 {
-            guard.register_failure("web.fetch", r#"{"url":"https://denied.com"}"#, Some(&ToolErrorType::Permission));
-            guard.register_progress("web.fetch", r#"{"url":"https://denied.com"}"#);
+            guard.register_failure("web_fetch", r#"{"url":"https://denied.com"}"#, Some(&ToolErrorType::Permission));
+            guard.register_progress("web_fetch", r#"{"url":"https://denied.com"}"#);
             assert!(guard.check_loop().is_ok());
         }
 
-        guard.register_failure("web.fetch", r#"{"url":"https://denied.com"}"#, Some(&ToolErrorType::Permission));
+        guard.register_failure("web_fetch", r#"{"url":"https://denied.com"}"#, Some(&ToolErrorType::Permission));
         assert!(guard.check_loop().is_ok());
     }
 
@@ -331,11 +331,11 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         for _ in 0..4 {
-            guard.register_failure("web.fetch", r#"{"url":"https://bad.com"}"#, Some(&ToolErrorType::Validation));
-            guard.register_progress("web.fetch", r#"{"url":"https://bad.com"}"#);
+            guard.register_failure("web_fetch", r#"{"url":"https://bad.com"}"#, Some(&ToolErrorType::Validation));
+            guard.register_progress("web_fetch", r#"{"url":"https://bad.com"}"#);
             assert!(guard.check_loop().is_ok());
         }
-        guard.register_failure("web.fetch", r#"{"url":"https://bad.com"}"#, Some(&ToolErrorType::Validation));
+        guard.register_failure("web_fetch", r#"{"url":"https://bad.com"}"#, Some(&ToolErrorType::Validation));
         assert!(guard.check_loop().is_err());
     }
 
@@ -343,28 +343,28 @@ mod tests {
     fn test_different_tool_resets_consecutive_count() {
         let mut guard = LoopGuard::new(4);
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("content.read", r#"{"name":"file.txt"}"#);
+        guard.register_progress("content_read", r#"{"name":"file.txt"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_err());
     }
 
@@ -372,25 +372,25 @@ mod tests {
     fn test_different_args_resets_consecutive_count() {
         let mut guard = LoopGuard::new(4);
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"Paris weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"London weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"London weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"London weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"London weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("web.search", r#"{"query":"London weather"}"#);
+        guard.register_progress("web_search", r#"{"query":"London weather"}"#);
         assert!(guard.check_loop().is_err());
     }
 
@@ -404,7 +404,7 @@ mod tests {
             } else {
                 r#"{"query":"forecast"}"#
             };
-            guard.register_progress("web.search", q);
+            guard.register_progress("web_search", q);
             guard.check_loop().ok();
         }
 

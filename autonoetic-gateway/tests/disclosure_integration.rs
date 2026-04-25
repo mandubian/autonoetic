@@ -19,7 +19,7 @@ async fn test_disclosure_policy_integration() {
                 "model": "gpt-4o",
                 "choices": [{
                     "index": 0,
-                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "content.read", "arguments": "{\"name_or_handle\":\"secret.txt\"}" } }] },
+                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "content_read", "arguments": "{\"name_or_handle\":\"secret.txt\"}" } }] },
                     "finish_reason": "tool_calls"
                 }],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -46,7 +46,7 @@ async fn test_disclosure_policy_integration() {
                 "model": "gpt-4o",
                 "choices": [{
                     "index": 0,
-                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_2", "type": "function", "function": { "name": "content.read", "arguments": "{\"name_or_handle\":\"confidential.txt\"}" } }] },
+                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_2", "type": "function", "function": { "name": "content_read", "arguments": "{\"name_or_handle\":\"confidential.txt\"}" } }] },
                     "finish_reason": "tool_calls"
                 }],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -73,7 +73,7 @@ async fn test_disclosure_policy_integration() {
                 "model": "gpt-4o",
                 "choices": [{
                     "index": 0,
-                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_3", "type": "function", "function": { "name": "content.read", "arguments": "{\"name_or_handle\":\"public.txt\"}" } }] },
+                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_3", "type": "function", "function": { "name": "content_read", "arguments": "{\"name_or_handle\":\"public.txt\"}" } }] },
                     "finish_reason": "tool_calls"
                 }],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -137,14 +137,14 @@ llm_config:
   model: "gpt-4o"
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["content.read", "content.write"]
+    allowed: ["content_read", "content_write"]
 disclosure:
   default_class: "public"
   rules:
-    - source: "content.read"
+    - source: "content_read"
       path_pattern: "secret*"
       class: "secret"
-    - source: "content.read"
+    - source: "content_read"
       path_pattern: "confidential*"
       class: "confidential"
 "#
@@ -225,12 +225,12 @@ disclosure:
     let policy = DisclosurePolicy {
         rules: vec![
             DisclosureRule {
-                source: "content.read".to_string(),
+                source: "content_read".to_string(),
                 path_pattern: Some("secret*".to_string()),
                 class: DisclosureClass::Restricted,
             },
             DisclosureRule {
-                source: "content.read".to_string(),
+                source: "content_read".to_string(),
                 path_pattern: Some("confidential*".to_string()),
                 class: DisclosureClass::Restricted,
             },
@@ -239,9 +239,9 @@ disclosure:
     };
 
     let mut state = DisclosureState::new(policy);
-    state.register_result("content.read", Some("secret.txt"), "super_secret_wahoo");
+    state.register_result("content_read", Some("secret.txt"), "super_secret_wahoo");
     state.register_result(
-        "content.read",
+        "content_read",
         Some("confidential.txt"),
         "confidential_business_plan_v2",
     );

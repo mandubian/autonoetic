@@ -76,7 +76,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
     let policy = PolicyEngine::new(manifest.clone());
 
     let prepare = registry.execute(
-        "artifact.prepare",
+        "artifact_prepare",
         &manifest,
         &policy,
         temp.path(),
@@ -97,7 +97,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
     assert_eq!(prepare_json["error"], "invalid_artifact_id");
 
     let exec = registry.execute(
-        "artifact.exec",
+        "artifact_exec",
         &manifest,
         &policy,
         temp.path(),
@@ -118,7 +118,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
     assert_eq!(exec_json["error"], "invalid_artifact_id");
 
     let inspect = registry.execute(
-        "artifact.inspect",
+        "artifact_inspect",
         &manifest,
         &policy,
         temp.path(),
@@ -138,7 +138,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
     assert_eq!(inspect_json["error"], "invalid_artifact_id");
 
     let sandbox_with_impl = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         temp.path(),
@@ -159,7 +159,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
     assert_eq!(sandbox_impl_json["error"], "invalid_artifact_id");
 
     let cnt_misuse = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         temp.path(),
@@ -220,7 +220,7 @@ fn test_user_interaction_status_scope_enforced() -> anyhow::Result<()> {
     let peer_manifest = manifest("peer.default", vec![]);
     let peer_policy = PolicyEngine::new(peer_manifest.clone());
     let same_root = registry.execute(
-        "user.interaction.status",
+        "user_interaction_status",
         &peer_manifest,
         &peer_policy,
         temp.path(),
@@ -239,7 +239,7 @@ fn test_user_interaction_status_scope_enforced() -> anyhow::Result<()> {
     let foreign_manifest = manifest("foreign.default", vec![]);
     let foreign_policy = PolicyEngine::new(foreign_manifest.clone());
     let foreign = registry.execute(
-        "user.interaction.status",
+        "user_interaction_status",
         &foreign_manifest,
         &foreign_policy,
         temp.path(),
@@ -256,7 +256,7 @@ fn test_user_interaction_status_scope_enforced() -> anyhow::Result<()> {
     assert_eq!(foreign_json["error_type"], "permission");
 
     let owner_access = registry.execute(
-        "user.interaction.status",
+        "user_interaction_status",
         &owner_manifest,
         &owner_policy,
         temp.path(),

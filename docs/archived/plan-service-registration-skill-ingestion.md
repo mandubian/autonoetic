@@ -3,8 +3,8 @@
 ## Context
 
 A first demo session showed the system can execute the Moltbook registration flow
-end-to-end, but `web.call` returns API secrets to the LLM context and the agent stores
-them in `knowledge.store` in plain text.
+end-to-end, but `web_call` returns API secrets to the LLM context and the agent stores
+them in `knowledge_store` in plain text.
 
 Three goals:
 1. Secrets from external API responses must never reach the LLM.
@@ -14,18 +14,18 @@ Three goals:
 ## Implementation status (2026-04-14)
 
 ### Done
-- Vault auto-init and default vault path are implemented and wired into `credential.setup` and `credential.request`.
+- Vault auto-init and default vault path are implemented and wired into `credential_setup` and `credential_request`.
 - `CredentialSetupStep::UserInput` is implemented in shared types.
 - `credential_setup_state` persistence table + GatewayStore CRUD are implemented.
-- `credential.setup` supports:
+- `credential_setup` supports:
   - `skill_url` ingestion from remote `skill.md`
-  - `resume_vars` for multi-step resume after `user.ask`
+  - `resume_vars` for multi-step resume after `user_ask`
   - template substitution in URL/headers/body/question
   - secret extraction to vault with public-data extraction to tool response
   - suspension return contract (`suspended_for_user_input`, `question`, `var_name`, `credential_id`)
 - Setup state cleanup on completion is implemented.
 - Setup state cleanup on credential deletion is implemented in `GatewayStore::delete_credential`.
-- Demo agent instructions in `examples/moltbook_registration/sample_agent/SKILL.md` now use generic `credential.setup(skill_url)` + `user.ask` + resume loop.
+- Demo agent instructions in `examples/moltbook_registration/sample_agent/SKILL.md` now use generic `credential_setup(skill_url)` + `user_ask` + resume loop.
 
 ### Done with caveat
 - `autonoetic-gateway/src/bin/mock_moltbook_skill.md` is intentionally kept as the external/raw demo skill format.
@@ -38,36 +38,36 @@ Three goals:
 ### Key findings from code audit
 
 **Existing infrastructure that we reuse (no changes needed):**
-- `user.ask` tool — creates `UserInteraction`, returns `{ interaction_required: true, interaction_id }`.
+- `user_ask` tool — creates `UserInteraction`, returns `{ interaction_required: true, interaction_id }`.
 - Execution engine (`lifecycle.rs:2002-2019`) — detects `interaction_required: true` in **any** tool result (tool-name-agnostic), checkpoints with `YieldReason::UserInputRequired`, returns `TurnOutcome::SuspendedUserInput`.
-- Resume logic (`execution.rs:2833-2879`) — restores checkpoint and injects the user's answer when a `UserInteraction` is answered. **Note:** `execution.rs:2813` hardcodes `tc.name != "user.ask"` — resume only works for `user.ask` tool calls. This is fine because the agent calls `user.ask` directly (not `credential.setup`).
+- Resume logic (`execution.rs:2833-2879`) — restores checkpoint and injects the user's answer when a `UserInteraction` is answered. **Note:** `execution.rs:2813` hardcodes `tc.name != "user_ask"` — resume only works for `user_ask` tool calls. This is fine because the agent calls `user_ask` directly (not `credential_setup`).
 - `CredentialSetupStep::ApiCall` — executes HTTP calls server-side, extracts secrets to vault, returns only public data.
 - `Vault::load_from_file` — already returns empty vault for non-existent files (line 85-87).
 - `GatewayStore::upsert_credential` — creates/updates credential records.
-- `credential.request` — authenticated HTTP with vault-stored Bearer injection.
+- `credential_request` — authenticated HTTP with vault-stored Bearer injection.
 - `gray_matter` — already a dependency for YAML frontmatter parsing.
 - `extract_json_path` — already in `credential.rs` for `$.field` path parsing.
 
 **What the plan does NOT change:**
 - The execution engine / turn continuation system.
-- The `user.ask` / `user.interaction.status` tools.
+- The `user_ask` / `user_interaction_status` tools.
 - The `UserInteraction` / `UserInteractionAnswer` types.
 
 ---
 
-## Design: `credential.setup` drives, agent calls `user.ask`
+## Design: `credential_setup` drives, agent calls `user_ask`
 
-The core idea: `credential.setup` executes onboarding steps server-side. When it
+The core idea: `credential_setup` executes onboarding steps server-side. When it
 hits a `user_input` step it **returns early** to the LLM with the question. The LLM
-then calls `user.ask` (existing tool, existing suspension infrastructure), collects
-the answer, and calls `credential.setup` again with the collected `vars` to resume.
+then calls `user_ask` (existing tool, existing suspension infrastructure), collects
+the answer, and calls `credential_setup` again with the collected `vars` to resume.
 
 No execution engine changes. No new interaction-creation code. The gateway stays dumb.
 
 ### Flow walkthrough (Moltbook example)
 
 ```
-1. Agent: credential.setup(skill_url: "http://localhost:8765/skill.md")
+1. Agent: credential_setup(skill_url: "http://localhost:8765/skill.md")
    Gateway: fetches skill.md → parses onboarding → executes steps 0-1:
      step 0: api_call POST /register-agent
        → vault stores secret, public_data gets agent_id
@@ -77,12 +77,12 @@ No execution engine changes. No new interaction-creation code. The gateway stays
            question: "Enter your X username:", var_name: "x_username",
            public_data: { agent_id: "moltbook_agent_xyz" } }
 
-2. Agent: user.ask(question: "Enter your X username:")
+2. Agent: user_ask(question: "Enter your X username:")
    Execution engine: suspends turn, checkpoints, waits.
    User answers: "@handle"
    Execution engine: resumes turn with answer.
 
-3. Agent: credential.setup(credential_id: "cred_moltbook_abc", resume_vars: { x_username: "@handle" })
+3. Agent: credential_setup(credential_id: "cred_moltbook_abc", resume_vars: { x_username: "@handle" })
    Gateway: loads saved state → resumes from step 2:
      step 2: api_call POST /human-claim
        headers: { Authorization: "Bearer {{secrets.moltbook_secret}}" }  ← resolved from vault
@@ -91,10 +91,10 @@ No execution engine changes. No new interaction-creation code. The gateway stays
      step 3: user_input "Post this tweet: {{public.tweet_text}} ..."
        → STOP. Save state. Return to LLM.
 
-4. Agent: user.ask(question: "Post this tweet: ... Paste the URL:")
+4. Agent: user_ask(question: "Post this tweet: ... Paste the URL:")
    User answers: "https://x.com/..."
 
-5. Agent: credential.setup(credential_id: "cred_moltbook_abc", resume_vars: { tweet_url: "https://x.com/..." })
+5. Agent: credential_setup(credential_id: "cred_moltbook_abc", resume_vars: { tweet_url: "https://x.com/..." })
    Gateway: resumes from step 4:
      step 4: api_call POST /verify-human-claim
      step 5: api_call POST /setup-heartbeat
@@ -124,7 +124,7 @@ set, generates a random 32-byte key → hex-encodes → writes to
 
 `default_vault_path`: returns `{agents_dir}/.gateway/vault.enc.json`.
 
-### 2. Vault auto-init in `credential.setup` and `credential.request` (`tools/credential.rs`)
+### 2. Vault auto-init in `credential_setup` and `credential_request` (`tools/credential.rs`)
 
 Replace the hard-fail vault block in both tools:
 
@@ -148,15 +148,15 @@ pub enum CredentialSetupStep {
     ApiCall { ... },      // existing
     UserPrompt { ... },   // existing (operator secrets via approval channel)
     UserAction { ... },   // existing (display-only marker)
-    UserInput {           // NEW: tells credential.setup to pause and ask the agent to collect input
+    UserInput {           // NEW: tells credential_setup to pause and ask the agent to collect input
         question: String,
         var_name: String,
     },
 }
 ```
 
-This variant is just a marker — `credential.setup` returns early when it encounters it.
-No `UserInteraction` record creation inside `credential.setup`.
+This variant is just a marker — `credential_setup` returns early when it encounters it.
+No `UserInteraction` record creation inside `credential_setup`.
 
 ### 4. State persistence for multi-step resume (`gateway_store`)
 
@@ -175,9 +175,9 @@ CRUD functions on `GatewayStore`:
 - `load_credential_setup_state(credential_id) -> Option<state_json>`
 - `delete_credential_setup_state(credential_id)`
 
-Dropped when `credential.setup` completes or the credential is deleted.
+Dropped when `credential_setup` completes or the credential is deleted.
 
-### 5. `credential.setup` extended (`tools/credential.rs`)
+### 5. `credential_setup` extended (`tools/credential.rs`)
 
 **New parameters:**
 
@@ -287,13 +287,13 @@ autonoetic:
 `examples/moltbook_registration/sample_agent/SKILL.md` becomes generic:
 
 ```
-Call credential.setup with skill_url: "http://localhost:8765/skill.md".
+Call credential_setup with skill_url: "http://localhost:8765/skill.md".
 
-When it returns suspended_for_user_input, call user.ask with the question it gives you.
-When the user answers, call credential.setup again with credential_id and resume_vars
+When it returns suspended_for_user_input, call user_ask with the question it gives you.
+When the user answers, call credential_setup again with credential_id and resume_vars
 containing the user's answer mapped to the var_name.
 
-Repeat until credential.setup returns ok: true. Then use credential.request with the
+Repeat until credential_setup returns ok: true. Then use credential_request with the
 returned credential_id for any further API calls.
 ```
 
@@ -303,13 +303,13 @@ No Moltbook-specific steps in the agent prompt.
 
 ## What was removed from the previous plan (superfluous)
 
-1. **`store_secret_fields` on `web.call`** — Not needed for the primary path
-   (`credential.setup` handles secret extraction server-side). A nice generic primitive
+1. **`store_secret_fields` on `web_call`** — Not needed for the primary path
+   (`credential_setup` handles secret extraction server-side). A nice generic primitive
    but not required for the skill.md ingestion goal. Can be added later independently.
-2. **Creating `UserInteraction` records inside `credential.setup`** — Not needed.
-   The agent calls `user.ask` itself, reusing the existing suspension infrastructure.
-3. **Execution engine changes** — Not needed. The `user.ask` name check at
-   `execution.rs:2813` is not a problem because the agent calls `user.ask` directly.
+2. **Creating `UserInteraction` records inside `credential_setup`** — Not needed.
+   The agent calls `user_ask` itself, reusing the existing suspension infrastructure.
+3. **Execution engine changes** — Not needed. The `user_ask` name check at
+   `execution.rs:2813` is not a problem because the agent calls `user_ask` directly.
 
 ---
 
@@ -318,9 +318,9 @@ No Moltbook-specific steps in the agent prompt.
 The `onboarding:` format is the bridge between today and the future:
 - Today: a human writes the skill.md spec, the gateway executes it.
 - Tomorrow: an agent reads a service's docs, writes the `onboarding:` spec, and
-  calls `credential.setup(skill_url)`.
+  calls `credential_setup(skill_url)`.
 - Further: an agent identifies a missing `CredentialSetupStep` variant (e.g., OAuth2 PKCE),
-  writes the Rust implementation, compiles it via `sandbox.exec`, and proposes a gateway
+  writes the Rust implementation, compiles it via `sandbox_exec`, and proposes a gateway
   revision through the `AgentRevision` system.
 
 The gateway tool registry and the step type enum are the extension points that make this
@@ -338,7 +338,7 @@ possible without architectural changes.
 | `autonoetic-gateway/src/runtime/tools/credential.rs` | vault auto-init; `skill_url` + `resume_vars` params; `UserInput` step returns early; template substitution in ApiCall bodies/headers; `extract_json_path` → `pub(crate)` |
 | `autonoetic-gateway/src/bin/mock_moltbook_skill.md` | External/raw demo skill (kept unchanged) |
 | `autonoetic-gateway/src/bin/mock_moltbook_skill_autonoetic.md` | Converted structured `autonoetic:` frontmatter reference |
-| `examples/moltbook_registration/sample_agent/SKILL.md` | Generic `credential.setup(skill_url)` workflow |
+| `examples/moltbook_registration/sample_agent/SKILL.md` | Generic `credential_setup(skill_url)` workflow |
 
 ## Verification
 
@@ -346,7 +346,7 @@ possible without architectural changes.
 2. `cargo test -p autonoetic-gateway` — existing tests pass
 3. `bash examples/moltbook_registration/run.sh` (no vault env vars)
    - Gateway auto-creates `.gateway/vault.key` and `.gateway/vault.enc.json`
-   - Agent calls `credential.setup(skill_url)` → suspends → `user.ask` → resumes twice
+   - Agent calls `credential_setup(skill_url)` → suspends → `user_ask` → resumes twice
    - Session log: no `sk_molt_...` secret ever appears in LLM messages
    - `curl http://localhost:8765/status` → agent verified
-4. `credential.request` works with returned `credential_id` for post-to-feed calls
+4. `credential_request` works with returned `credential_id` for post-to-feed calls

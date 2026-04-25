@@ -125,9 +125,9 @@ Not every deployment needs every role as a long-lived installed agent. Some role
 
 Role prompts are not enough by themselves; runtime capability policy must enforce boundaries:
 
-- `researcher` should have explicit external-tool capability (for example native `web.search`/`web.fetch` via `NetworkAccess`, plus `SandboxFunctions` permissions for approved `mcp_*` tools).
+- `researcher` should have explicit external-tool capability (for example native `web_search`/`web_fetch` via `NetworkAccess`, plus `SandboxFunctions` permissions for approved `mcp_*` tools).
 - `researcher` should not depend on ad-hoc shell networking as its primary evidence path.
-- `planner.default` should include structured metadata on each `agent.spawn` delegation.
+- `planner.default` should include structured metadata on each `agent_spawn` delegation.
 - roles without `NetworkAccess` should not be able to use native web tools; roles without `SandboxFunctions` should not be able to see or invoke MCP tools.
 
 This keeps specialization enforceable at runtime, not only suggested in prompts.
@@ -271,7 +271,7 @@ Example planner-to-gateway spawn call:
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "agent.spawn",
+  "method": "agent_spawn",
   "params": {
     "agent_id": "researcher.default",
     "session_id": "sess_01",
@@ -322,7 +322,7 @@ The exact payload can evolve, but the principle should hold:
 
 Implementation note:
 
-- `agent.spawn.metadata` should be first-class and preserved through traces and specialist handoff.
+- `agent_spawn.metadata` should be first-class and preserved through traces and specialist handoff.
 
 ## 10. Practical Selection Heuristics for the Lead Agent
 
@@ -447,23 +447,23 @@ Treat the result as a promotion candidate when one or more apply:
 The only way to activate a new logical agent or change which revision is active:
 
 ```
-artifact.build()  →  agent.revision.create()  →  agent.revision.promote()
+artifact_build()  →  agent_revision_create()  →  agent_revision_promote()
 ```
 
-There is no `agent.install`. `agent.revision.promote` is the sole alias-movement mechanism.
+There is no `agent.install`. `agent_revision_promote` is the sole alias-movement mechanism.
 
 ### Evidence gating via eval
 
-`agent.revision.promote` accepts an optional `required_eval_run_id`. When provided, the gateway validates that the eval run's subject revision matches the promote target — promotion fails if not.
+`agent_revision_promote` accepts an optional `required_eval_run_id`. When provided, the gateway validates that the eval run's subject revision matches the promote target — promotion fails if not.
 
 ### Canonical flow
 
 1. `planner` identifies durable-promotion intent.
-2. `coder` or `builder` produces the agent bundle via `artifact.build`.
-3. `evaluator` validates behavior via `eval.run`.
+2. `coder` or `builder` produces the agent bundle via `artifact_build`.
+3. `evaluator` validates behavior via `eval_run`.
 4. `auditor` reports governance/risk outcome.
 5. `evolution-steward` decides promote/defer/rework.
-6. `specialized_builder` calls `agent.revision.create` (from artifact) then `agent.revision.promote` (optionally with `required_eval_run_id` from the eval run).
+6. `specialized_builder` calls `agent_revision_create` (from artifact) then `agent_revision_promote` (optionally with `required_eval_run_id` from the eval run).
 
 ### Example promote call
 
@@ -492,10 +492,10 @@ Human-override path — promote without a prior eval run using an explicit appro
 Current iteration status:
 
 - [x] enforce MCP tool exposure/invocation through `SandboxFunctions` capability checks
-- [x] add native `web.search` and `web.fetch` tools gated by `NetworkAccess`
-- [x] add `web.search` provider auto-mode (`google` then `duckduckgo`) with bounded TTL response caching
-- [x] support structured `agent.spawn.metadata` delegation contracts in gateway/native spawn paths
+- [x] add native `web_search` and `web_fetch` tools gated by `NetworkAccess`
+- [x] add `web_search` provider auto-mode (`google` then `duckduckgo`) with bounded TTL response caching
+- [x] support structured `agent_spawn.metadata` delegation contracts in gateway/native spawn paths
 - [x] update `researcher.default` to prefer authorized MCP research tools over ad-hoc shell networking
-- [x] enforce evaluator+auditor evidence gates (or explicit override) before durable promotion via `agent.revision.promote`
+- [x] enforce evaluator+auditor evidence gates (or explicit override) before durable promotion via `agent_revision_promote`
 - [ ] validate role-specific output schemas (research/evaluation/audit contracts)
 - [ ] close the loop on learned routing fitness with persisted success/cost/latency signals

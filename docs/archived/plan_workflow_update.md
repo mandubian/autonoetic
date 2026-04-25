@@ -217,7 +217,7 @@ Keep:
 
 ### W2.4 — Bind approvals to workflow explicitly
 
-When creating an `ApprovalRequest` (from `agent.install`, `sandbox.exec`):
+When creating an `ApprovalRequest` (from `agent.install`, `sandbox_exec`):
 - Resolve `workflow_id` from session → root session → workflow index
 - Resolve `task_id` via `resolve_task_id_for_session()`
 - Store both on the approval row

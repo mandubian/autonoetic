@@ -40,7 +40,7 @@ Validation uses authoritative runtime state, not natural-language assertions:
 - `max_reply_length_chars`: validates the final reply string length.
 - `output_schema`: validates the final reply text when it is JSON. This may come from an explicit response contract or from manifest `io.returns` when no explicit output schema overrides it.
 - `prohibited_text_patterns`: rejects replies that match forbidden regex patterns.
-- `min_artifact_builds`: checks durable execution-trace evidence for successful `artifact.build` calls in the current session branch.
+- `min_artifact_builds`: checks durable execution-trace evidence for successful `artifact_build` calls in the current session branch.
 
 ## Repair Semantics
 
@@ -63,15 +63,15 @@ Repair is not a debate with the gateway. The agent must use normal tools to chan
 
 Typical repair actions:
 
-- write or rewrite missing files with `content.write`
-- rebuild the promoted output with `artifact.build`
+- write or rewrite missing files with `content_write`
+- rebuild the promoted output with `artifact_build`
 - shorten or restructure the final reply to satisfy length or schema constraints
 - remove forbidden text or local-path leakage from the reply
 
 Non-repairs that will still fail:
 
 - saying an artifact exists without returning it
-- claiming a build happened without a successful `artifact.build` trace
+- claiming a build happened without a successful `artifact_build` trace
 - arguing that a response is acceptable without changing the violating output
 
 ## Specialist Guidance
@@ -80,10 +80,10 @@ Non-repairs that will still fail:
 
 `coder.default` already has the correct core split between ordinary coding work and promotable artifact-building work. For response validation and repair, its operational rules should be:
 
-1. Treat `artifact.build` as the authoritative completion event for promotable outputs.
+1. Treat `artifact_build` as the authoritative completion event for promotable outputs.
 2. When a planner asks for a durable artifact, do not end the turn after writing files; build the artifact and return the resulting `artifact_id`.
 3. If the gateway sends a repair prompt, fix the real output set first. That usually means writing the missing file, rebuilding the artifact, or trimming the final reply.
-4. Do not treat a passed `sandbox.exec` as sufficient evidence when the contract requires durable output artifacts.
+4. Do not treat a passed `sandbox_exec` as sufficient evidence when the contract requires durable output artifacts.
 5. When evaluator or auditor feedback arrives, rebuild and return a new artifact instead of claiming the prior artifact was implicitly updated.
 
 Concretely, the coder SKILL should state that response-contract repair has the same priority as tool error repair: the agent must modify files, artifacts, or reply text until the gateway contract passes.
@@ -93,11 +93,11 @@ Concretely, the coder SKILL should state that response-contract repair has the s
 `evaluator.default` already produces a structured evaluation report and records promotion evidence. For response validation and repair, its operational rules should be:
 
 1. Ensure the final reply remains valid JSON when the evaluation report is expected to be machine-readable.
-2. Treat `promotion.record` as promotion evidence, but not as a substitute for response-contract outputs; if the contract requires files or bounded reply text, those constraints still apply.
+2. Treat `promotion_record` as promotion evidence, but not as a substitute for response-contract outputs; if the contract requires files or bounded reply text, those constraints still apply.
 3. If the gateway issues a repair prompt, repair the evaluation output itself. That can mean rewriting the JSON report, reducing reply size, or returning the required named report artifact.
 4. Keep findings traceable to the reviewed `artifact_id` in both the report content and promotion record.
 5. If execution is blocked on approval, stop as instructed; do not force a partial report into a shape that looks complete just to satisfy validation.
-6. The gateway mechanically gates `promotion.record`: `pass=true` is rejected if any finding has `error`/`critical` severity, or if `warning` findings lack a non-empty `evidence` field. This is enforced at the gateway boundary — the evaluator cannot override it.
+6. The gateway mechanically gates `promotion_record`: `pass=true` is rejected if any finding has `error`/`critical` severity, or if `warning` findings lack a non-empty `evidence` field. This is enforced at the gateway boundary — the evaluator cannot override it.
 
 Concretely, the evaluator SKILL should say that repair prompts are authoritative gateway feedback about the evaluation deliverable, not a request to reinterpret the findings.
 
@@ -120,7 +120,7 @@ metadata:
 Effect:
 
 - the coder must return `main.py` in the final output set
-- the session must contain at least one successful `artifact.build`
+- the session must contain at least one successful `artifact_build`
 - the final textual reply must stay concise
 
 ### Example: evaluator JSON report
@@ -173,7 +173,7 @@ Mode semantics:
 
 ## Notes And Current Semantics
 
-- `min_artifact_builds` is based on successful `artifact.build` execution traces. It measures durable evidence, not text.
+- `min_artifact_builds` is based on successful `artifact_build` execution traces. It measures durable evidence, not text.
 - The current artifact-build evidence counts successful build calls, including reuse cases where the tool reports `reused: true`.
 - `max_total_size_mb` uses content-store byte sizes for returned files rather than estimated reply text size.
 - Validation runs after execution completes and before the result is returned to the caller.

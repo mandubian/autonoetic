@@ -3,10 +3,10 @@
 **Status:** Partially implemented — see implementation notes below
 **Author:** Architecture Review
 **Date:** 2026-03-23
-**Updated:** 2026-03-28 — Added `workflow.state` for structured resume; clarified implicit-vs-explicit boundary
+**Updated:** 2026-03-28 — Added `workflow_state` for structured resume; clarified implicit-vs-explicit boundary
 
 > **Implementation status (as of 2026-04-01):**
-> - **Part 1 (sections 1–3): Implicit artifacts, content visibility model, structured escalation** — ✅ Implemented. `content.write` visibility, session-rooted content resolution, and clarification escalation are live.
+> - **Part 1 (sections 1–3): Implicit artifacts, content visibility model, structured escalation** — ✅ Implemented. `content_write` visibility, session-rooted content resolution, and clarification escalation are live.
 > - **Part 2 (sections 4–6): Agent evolution hooks, autonomous skill creation, composition primitives** — ❌ Not yet implemented. The evolution agents (`specialized_builder`, `evolution-steward`) exist as static bundles but the closed-loop automation (trigger → create → improve cycle) described in these sections has not been built. See [plan-hermes-gap-closure.md](plan-hermes-gap-closure.md) for the roadmap.
 
 ---
@@ -51,7 +51,7 @@ Every completed task automatically produces an implicit artifact containing:
 
 ### 2.2 Structured Workflow State
 
-The `workflow.state` tool exposes compact, structured workflow facts so agents can resume deterministically without re-inferring state from conversation history:
+The `workflow_state` tool exposes compact, structured workflow facts so agents can resume deterministically without re-inferring state from conversation history:
 - Current workflow step
 - Completed tasks with artifact IDs
 - Pending approvals
@@ -84,10 +84,10 @@ The system distinguishes between two artifact classes with different use cases:
 
 | Aspect | Implicit Artifacts | Explicit Artifacts |
 |--------|-------------------|-------------------|
-| **Created by** | Gateway (automatic, on task completion) | Agent (via `artifact.build`) |
+| **Created by** | Gateway (automatic, on task completion) | Agent (via `artifact_build`) |
 | **Purpose** | Parent-child output handoff | Specialist boundary / review / install |
 | **When to use** | Ordinary agent collaboration | Evaluation, audit, installation |
-| **Access pattern** | `workflow.wait` output field, `workflow.state` completed_tasks | `artifact.inspect`, `artifact.build` |
+| **Access pattern** | `workflow_wait` output field, `workflow_state` completed_tasks | `artifact_inspect`, `artifact_build` |
 | **Persistence** | TTL-based (default 24h) | Permanent (until deleted) |
 | **Who needs it** | All agents | Evaluators, auditors, specialized_builder |
 
@@ -95,8 +95,8 @@ The system distinguishes between two artifact classes with different use cases:
 
 **Ordinary agents should think in terms of implicit outputs first.** Explicit artifacts are specialist-boundary objects that should not be a universal cognitive burden.
 
-- Planner consuming researcher output → use `workflow.wait` implicit output
-- Evaluator validating coder output → use `artifact.inspect` on explicit artifact
+- Planner consuming researcher output → use `workflow_wait` implicit output
+- Evaluator validating coder output → use `artifact_inspect` on explicit artifact
 - Specialized_builder installing → use explicit artifact_id from promotion gate
 
 ---
@@ -128,7 +128,7 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
     "llm_response": "The current weather in Paris is...",
     "tool_outputs": [
       {
-        "tool": "web.fetch",
+        "tool": "web_fetch",
         "summary": "Open-Meteo API response",
         "content_ref": "sha256:abc123..."  // Reference, not inline
       }
@@ -154,7 +154,7 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 │       ↓                                                      │
 │  Gateway creates impl_{task_id}                              │
 │       ↓                                                      │
-│  Parent session can access via workflow.wait or workflow.state │
+│  Parent session can access via workflow_wait or workflow_state │
 │       ↓                                                      │
 │  TTL expires (default 24h) → garbage collected               │
 └─────────────────────────────────────────────────────────────┘
@@ -162,10 +162,10 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 
 ### 4.4 Access Patterns
 
-#### Via workflow.wait Response
+#### Via workflow_wait Response
 
 ```json
-// workflow.wait returns:
+// workflow_wait returns:
 {
   "task_id": "task-94c19ac6",
   "status": "completed",
@@ -176,10 +176,10 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 }
 ```
 
-#### Via workflow.state (Recommended for Resume)
+#### Via workflow_state (Recommended for Resume)
 
 ```json
-// workflow.state returns structured facts:
+// workflow_state returns structured facts:
 {
   "workflow_status": "active",
   "completed_tasks": [
@@ -200,18 +200,18 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 }
 ```
 
-#### Via content.read
+#### Via content_read
 
 ```json
-content.read({
+content_read({
   "name_or_handle": "impl_task-94c19ac6"
 })
 ```
 
-#### Via artifact.inspect
+#### Via artifact_inspect
 
 ```json
-artifact.inspect({
+artifact_inspect({
   "artifact_id": "impl_task-94c19ac6"
 })
 ```
@@ -227,18 +227,18 @@ implicit_artifacts:
   ttl_hours: 24
   include_tool_outputs: true
   max_tool_output_size_kb: 64
-  excluded_tools: ["sandbox.exec"]  // Don't capture large/verbose outputs
+  excluded_tools: ["sandbox_exec"]  // Don't capture large/verbose outputs
 ```
 
 ### 4.6 Enhanced Error Messages
 
-When `content.read` fails for a name that looks like a guessed name:
+When `content_read` fails for a name that looks like a guessed name:
 
 ```json
 {
   "error_type": "resource",
   "message": "Content 'weather_result' not found",
-  "hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
+  "hint": "Use workflow_wait or workflow_state to get stable output handles from completed child tasks, then use content_read with the artifact_id from the output field.",
   "available_artifacts": [
     {"artifact_id": "impl_task-94c19ac6", "from": "researcher.default", "summary": "Fetched weather..."},
     {"artifact_id": "impl_task-fb261586", "from": "architect.default", "summary": "Design document..."}
@@ -265,7 +265,7 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
     "llm_response": "The current weather in Paris is...",
     "tool_outputs": [
       {
-        "tool": "web.fetch",
+        "tool": "web_fetch",
         "summary": "Open-Meteo API response",
         "content_ref": "sha256:abc123..."  // Reference, not inline
       }
@@ -299,10 +299,10 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 
 ### 3.4 Access Patterns
 
-#### Via workflow.wait Response
+#### Via workflow_wait Response
 
 ```json
-// workflow.wait returns:
+// workflow_wait returns:
 {
   "task_id": "task-94c19ac6",
   "status": "completed",
@@ -313,18 +313,18 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 }
 ```
 
-#### Via content.read
+#### Via content_read
 
 ```json
-content.read({
+content_read({
   "name_or_handle": "impl_task-94c19ac6"
 })
 ```
 
-#### Via artifact.inspect
+#### Via artifact_inspect
 
 ```json
-artifact.inspect({
+artifact_inspect({
   "artifact_id": "impl_task-94c19ac6"
 })
 ```
@@ -340,12 +340,12 @@ implicit_artifacts:
   ttl_hours: 24
   include_tool_outputs: true
   max_tool_output_size_kb: 64
-  excluded_tools: ["sandbox.exec"]  # Don't capture large/verbose outputs
+  excluded_tools: ["sandbox_exec"]  # Don't capture large/verbose outputs
 ```
 
 ### 3.6 Enhanced Error Messages
 
-When `content.read` fails for a name that looks like a guessed name:
+When `content_read` fails for a name that looks like a guessed name:
 
 ```json
 {
@@ -376,7 +376,7 @@ Self-retry → Escalate to reasoning LLM → Escalate to specialist → Escalate
 
 ```json
 {
-  "name": "session.escalate",
+  "name": "session_escalate",
   "description": "Request help when stuck. Use this when you've tried reasonable approaches but cannot proceed correctly.",
   "parameters": {
     "type": "object",
@@ -422,12 +422,12 @@ Self-retry → Escalate to reasoning LLM → Escalate to specialist → Escalate
 
 ```json
 // Agent calls:
-session.escalate({
-  "reason": "Cannot determine correct artifact ID from workflow.wait response",
-  "context": "workflow.wait returned task-94c19ac6 completed but I don't see an output_artifact field",
+session_escalate({
+  "reason": "Cannot determine correct artifact ID from workflow_wait response",
+  "context": "workflow_wait returned task-94c19ac6 completed but I don't see an output_artifact field",
   "target": "reasoning_llm",
   "suggested_actions": [
-    "Try content.read with task ID",
+    "Try content_read with task ID",
     "Ask user for clarification",
     "Check if output is in a different field"
   ]
@@ -435,7 +435,7 @@ session.escalate({
 
 // Gateway responds:
 {
-  "analysis": "The workflow.wait response structure includes an 'output' object with 'artifact_id'. Use: content.read({'name_or_handle': 'impl_task-94c19ac6'})",
+  "analysis": "The workflow_wait response structure includes an 'output' object with 'artifact_id'. Use: content_read({'name_or_handle': 'impl_task-94c19ac6'})",
   "confidence": "high",
   "alternative": "If that fails, the task output may be in the workflow.events for this task."
 }
@@ -449,7 +449,7 @@ session.escalate({
 - **Latency**: Medium
 
 ```json
-session.escalate({
+session_escalate({
   "reason": "Need to understand security implications of this code pattern",
   "context": "Code uses subprocess with user input, not sure if it's safe",
   "target": "specialist",
@@ -465,7 +465,7 @@ session.escalate({
 - **Latency**: Variable (minutes to hours)
 
 ```json
-session.escalate({
+session_escalate({
   "reason": "Multiple approaches possible, need business decision",
   "context": "Can implement as (A) simple but limited, or (B) complex but flexible",
   "target": "human",
@@ -655,10 +655,10 @@ Add tools and instructions without full rewrite:
 base: researcher.default
 injections:
   tools:
-    - session.escalate
+    - session_escalate
     - session.request_clarification
   instructions:
-    - "When web.fetch fails after 2 retries, escalate to reasoning_llm"
+    - "When web_fetch fails after 2 retries, escalate to reasoning_llm"
     - "If results seem incomplete, ask user for clarification"
 ---
 ```
@@ -763,9 +763,9 @@ Every evolved agent tracks its lineage:
 | Component | Change |
 |-----------|--------|
 | Task completion | Create implicit artifact |
-| workflow.wait | Include output artifact in response |
-| content.read | Enhanced error messages with hints |
-| Tool registry | Add session.escalate tool |
+| workflow_wait | Include output artifact in response |
+| content_read | Enhanced error messages with hints |
+| Tool registry | Add session_escalate tool |
 | Agent loader | Support base inheritance, hooks, injections |
 | Session metadata | Track escalation count |
 
@@ -773,7 +773,7 @@ Every evolved agent tracks its lineage:
 
 | Agent | Update |
 |-------|--------|
-| planner.default | Use artifact IDs from workflow.wait, don't guess names |
+| planner.default | Use artifact IDs from workflow_wait, don't guess names |
 | researcher.default | Consider persisting outputs, use escalation when stuck |
 | architect.default | Write content with semantic names |
 | specialized_builder.default | Support agent.enhance tool |
@@ -829,13 +829,13 @@ evolution:
 ### Phase 1: Implicit Artifacts (Week 1-2)
 
 1. Implement implicit artifact creation on task completion
-2. Update workflow.wait to include artifact reference
-3. Add enhanced error messages to content.read
+2. Update workflow_wait to include artifact reference
+3. Add enhanced error messages to content_read
 4. Update planner SKILL.md to use artifact IDs
 
 ### Phase 2: Escalation (Week 2-3)
 
-1. Implement session.escalate tool
+1. Implement session_escalate tool
 2. Add escalation capability to SKILL.md schema
 3. Update key agents with escalation guidance
 4. Add escalation tracking to session metadata
@@ -882,9 +882,9 @@ evolution:
 ```
 planner spawns researcher (async)
 planner spawns architect (async)
-planner calls workflow.wait
+planner calls workflow_wait
   → returns: {"status": "completed", "task_id": "task-94c19ac6"}
-planner tries content.read("weather_result")
+planner tries content_read("weather_result")
   → FAIL: not found
 planner guesses another name, fails again
 planner proceeds with missing data
@@ -898,7 +898,7 @@ planner spawns researcher (async)
 researcher completes → gateway creates impl_task-94c19ac6
 planner spawns architect (async)
 architect completes → gateway creates impl_task-fb261586
-planner calls workflow.wait
+planner calls workflow_wait
   → returns: {
        "task_id": "task-94c19ac6",
        "status": "completed",
@@ -908,7 +908,7 @@ planner calls workflow.wait
        }
      }
 planner uses artifact_id from response
-planner calls content.read("impl_task-94c19ac6")
+planner calls content_read("impl_task-94c19ac6")
   → SUCCESS
 planner has all data needed
   → High quality output
@@ -919,7 +919,7 @@ planner has all data needed
 ```
 planner spawns researcher (async)
 researcher gets stuck (API returns unexpected format)
-researcher calls session.escalate({
+researcher calls session_escalate({
   target: "reasoning_llm",
   reason: "API response format doesn't match expected schema"
 })
@@ -962,7 +962,7 @@ planner finds output immediately
 - **Trigger**: Automatic when task transitions to `Succeeded` status
 - **Format**: `impl_{task_id}` content with `artifact_id`, `summary`, `created_at`
 - **Storage**: Session-visible in parent session via `ContentStore`
-- **Access**: Via `workflow.wait` response → `output.artifact_id`
+- **Access**: Via `workflow_wait` response → `output.artifact_id`
 
 #### 3.6 Enhanced Error Messages
 - **Tool**: `ContentReadTool` enhanced in `tools.rs:2100`
@@ -976,7 +976,7 @@ planner finds output immediately
   - `reasoning_llm`: Returns structured analysis (stub, extensible)
   - `specialist`: Suggests appropriate specialist agents
   - `human`: Returns guidance for user interaction (NOT integrated with chat yet)
-- **Usage**: `session.escalate({ reason, context, target, urgency, suggested_actions })`
+- **Usage**: `session_escalate({ reason, context, target, urgency, suggested_actions })`
 
 ### 🔄 Partial Implementation
 

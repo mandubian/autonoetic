@@ -601,7 +601,7 @@ fn collect_layer_scope_issues(
 
 impl NativeTool for SandboxExecTool {
     fn name(&self) -> &'static str {
-        "sandbox.exec"
+        "sandbox_exec"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -712,7 +712,7 @@ impl NativeTool for SandboxExecTool {
                         ScheduledAction::SandboxExec { command, .. } => {
                             effective_command = command.clone();
                             tracing::info!(
-                                target: "sandbox.exec",
+                                target: "sandbox_exec",
                                 approval_ref = %approval_ref,
                                 approved_command = %effective_command,
                                 "Proceeding with approved sandbox execution (command from store)"
@@ -758,13 +758,13 @@ impl NativeTool for SandboxExecTool {
                                         };
                                         if let Err(e) = cache.record(entry) {
                                             tracing::warn!(
-                                                target: "sandbox.exec", error = %e,
+                                                target: "sandbox_exec", error = %e,
                                                 fingerprint = %fingerprint,
                                                 "Failed to record approved exec cache entry"
                                             );
                                         } else {
                                             tracing::info!(
-                                                target: "sandbox.exec", fingerprint = %fingerprint,
+                                                target: "sandbox_exec", fingerprint = %fingerprint,
                                                 "Cached approved exec on approval_ref validation"
                                             );
                                         }
@@ -789,7 +789,7 @@ impl NativeTool for SandboxExecTool {
                                 .into());
                             }
                             tracing::info!(
-                                target: "sandbox.exec",
+                                target: "sandbox_exec",
                                 approval_ref = %approval_ref,
                                 "Proceeding with approved layer mount (command and scope match approval)"
                             );
@@ -931,7 +931,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
             && !approval_validated_for_command
         {
             tracing::info!(
-                target: "sandbox.exec",
+                target: "sandbox_exec",
                 agent_id = %manifest.agent.id,
                 patterns = ?remote_analysis.detected_patterns,
                 "Agent has NetworkAccess capability — auto-approving remote access patterns"
@@ -945,7 +945,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
             && crate::runtime::remote_access::is_safe_inspection_command(&effective_command)
         {
             tracing::info!(
-                target: "sandbox.exec",
+                target: "sandbox_exec",
                 command = %effective_command,
                 "Safe inspection command — skipping approval (no network needed)"
             );
@@ -979,7 +979,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
         }
 
         tracing::info!(
-            target: "sandbox.exec",
+            target: "sandbox_exec",
             agent_id = %manifest.agent.id,
             session_id = %session_id.unwrap_or(""),
             approval_ref_validated = approval_validated_for_command,
@@ -1090,7 +1090,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                             if let Some(entry) = cache.find(&fingerprint) {
                                 tracing::info!(
-                                    target: "sandbox.exec",
+                                    target: "sandbox_exec",
                                     fingerprint = %fingerprint,
                                     previously_approved_by = %entry.approved_by,
                                     previously_approved_at = %entry.approved_at,
@@ -1119,7 +1119,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                                         gateway_dir,
                                     ) {
                                         tracing::info!(
-                                            target: "sandbox.exec",
+                                            target: "sandbox_exec",
                                             targets = ?targets,
                                             "Approved request covers targets, skipping new approval"
                                         );
@@ -1165,7 +1165,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             if !targets.is_empty() {
                                 if gw_store.session_grants_cover_targets(&root_sid, &targets) {
                                     tracing::info!(
-                                        target: "sandbox.exec",
+                                        target: "sandbox_exec",
                                         agent_id = %manifest.agent.id,
                                         root_session_id = %root_sid,
                                         targets = ?targets,
@@ -1514,13 +1514,13 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             .into());
                         }
                         tracing::info!(
-                            target: "sandbox.exec",
+                            target: "sandbox_exec",
                             layer_count = scope_issues.len(),
                             "Approved LayerMount still covers current layer scope"
                         );
                     } else {
                     tracing::warn!(
-                        target: "sandbox.exec",
+                        target: "sandbox_exec",
                         agent_id = %manifest.agent.id,
                         issue_count = scope_issues.len(),
                         "Layer mount approval required: build-time scope not covered by session grants"
@@ -1782,7 +1782,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(
-                            target: "sandbox.exec",
+                            target: "sandbox_exec",
                             error = %e,
                             "Failed to load vault for credential_env resolution"
                         );
@@ -1807,7 +1807,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             )
                         })?;
                     tracing::info!(
-                        target: "sandbox.exec",
+                        target: "sandbox_exec",
                         credential_id = %mapping.credential_id,
                         env_var = %mapping.env_var,
                         "Injecting credential into sandbox as environment variable"
@@ -1888,7 +1888,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                 has_network_cap,
             ) {
                 tracing::warn!(
-                    target: "sandbox.exec",
+                    target: "sandbox_exec",
                     agent_id = %manifest.agent.id,
                     has_network_cap = has_network_cap,
                     patterns = ?network_errors,
@@ -2023,14 +2023,14 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         };
                         if let Err(e) = cache.record(entry) {
                             tracing::warn!(
-                                target: "sandbox.exec",
+                                target: "sandbox_exec",
                                 error = %e,
                                 fingerprint = %fingerprint,
                                 "Failed to record approved exec cache entry"
                             );
                         } else {
                             tracing::info!(
-                                target: "sandbox.exec",
+                                target: "sandbox_exec",
                                 fingerprint = %fingerprint,
                                 "Recorded approved execution in cache (operator-granted approval)"
                             );

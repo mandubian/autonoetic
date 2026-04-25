@@ -64,7 +64,7 @@ pub struct KnowledgeStoreTool;
 
 impl NativeTool for KnowledgeStoreTool {
     fn name(&self) -> &'static str {
-        "knowledge.store"
+        "knowledge_store"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -213,7 +213,7 @@ pub struct KnowledgeRecallTool;
 
 impl NativeTool for KnowledgeRecallTool {
     fn name(&self) -> &'static str {
-        "knowledge.recall"
+        "knowledge_recall"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -290,7 +290,7 @@ pub struct KnowledgeSearchTool;
 
 impl NativeTool for KnowledgeSearchTool {
     fn name(&self) -> &'static str {
-        "knowledge.search"
+        "knowledge_search"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -379,7 +379,7 @@ pub struct KnowledgeSearchByTagsTool;
 
 impl NativeTool for KnowledgeSearchByTagsTool {
     fn name(&self) -> &'static str {
-        "knowledge.search_by_tags"
+        "knowledge_search_by_tags"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -509,7 +509,7 @@ pub struct DigestQueryTool;
 
 impl NativeTool for DigestQueryTool {
     fn name(&self) -> &'static str {
-        "digest.query"
+        "digest_query"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

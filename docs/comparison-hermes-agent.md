@@ -30,7 +30,7 @@
 |---|---|---|
 | **Tier 1 (working)** | Content-addressable store (SHA-256), visibility model (private/session/global), artifacts for trust boundary | File-based working memory, conversation context |
 | **Tier 2 (durable)** | Gateway-managed `knowledge.*` tools with provenance, scope, visibility | Procedural memory via **Skills** (autonomous creation from experience), `MEMORY.md`/`USER.md` |
-| **Cross-session recall** | `execution.search`, `knowledge.search_by_tags`, `digest.query` — three native tools querying unified gateway DB | FTS5 session search with LLM summarization, Honcho dialectic user modeling |
+| **Cross-session recall** | `execution_search`, `knowledge_search_by_tags`, `digest_query` — three native tools querying unified gateway DB | FTS5 session search with LLM summarization, Honcho dialectic user modeling |
 | **Post-session memory extraction** | **Implemented**: LLM-driven digest agent extracts error lessons, decisions, approaches, facts, open items; stores as tagged Tier-2 memories (`post_session_digest.rs`, 397 lines) | Background memory review thread after sessions end (turn-count triggered) |
 | **Self-improvement** | **Partially implemented**: evolution agents exist as static bundles; learning tools and background scheduler are fully wired; no autonomous closed-loop skill creation/improvement yet | **Closed learning loop**: skills self-improve during use, autonomous skill creation after complex tasks (5+ tool calls), periodic nudges to persist knowledge |
 | **Audit trail** | Hash-chained JSONL causal chain (immutable, verifiable) | Trajectory saving (for RL training), session persistence |
@@ -42,7 +42,7 @@
 | **Tool count** | Core set: `content.*`, `knowledge.*`, `agent.*`, `artifact.*`, `web.*`, `sandbox.*`, MCP tools | **40+ built-in tools**: file ops, browser, code execution, web search, voice, TTS, vision, delegation, etc. |
 | **MCP support** | MCP client + server (registry, discovery, agent exposure) | MCP client integration (`tools/mcp_tool.py`) |
 | **Tool registration** | Capability-declared in SKILL.md manifest, validated by policy engine | Central `tools/registry.py` with schema collection, dispatch, availability checking |
-| **Extensibility pattern** | Install agents via `agent.install`, discovery via `agent.discover` | Create `tools/your_tool.py`, import in `model_tools.py`, add to `toolsets.py` |
+| **Extensibility pattern** | Install agents via `agent.install`, discovery via `agent_discover` | Create `tools/your_tool.py`, import in `model_tools.py`, add to `toolsets.py` |
 | **Federation** | OpenFang Protocol (OFP) with HMAC handshake | Platform gateway: Telegram, Discord, Slack, WhatsApp, Signal |
 
 ## 5. Multi-Agent System
@@ -51,7 +51,7 @@
 |---|---|---|
 | **Agent roles** | Formal role catalog: Lead (planner), Specialists (researcher, architect, coder, debugger, evaluator, auditor), Evolution (builder, curator, steward) | Delegation via `delegate_tool.py` (spawn isolated subagents) |
 | **Routing** | Explicit target → session affinity → default lead (`planner.default`) | Task-based delegation, no formal routing hierarchy |
-| **Agent spawning** | `agent.spawn` with structured metadata (role, expected outputs, parent goal) | `execute_code` + `delegate` for subagent creation |
+| **Agent spawning** | `agent_spawn` with structured metadata (role, expected outputs, parent goal) | `execute_code` + `delegate` for subagent creation |
 | **Agent persistence** | Durable agent directories with `SKILL.md` + `runtime.lock` | Ephemeral subagents (session-scoped) |
 
 ## 6. Portability & Reproducibility
@@ -95,7 +95,7 @@ This table reflects what is actually implemented in the codebase, not just docum
 
 | Feature | Autonoetic Status | Hermes Status |
 |---|---|---|
-| **Learning tools** (`execution.search`, `knowledge.search_by_tags`, `digest.query`) | **Fully implemented** — native tools at `tools.rs`, integration tested | N/A (uses FTS5 session search instead) |
+| **Learning tools** (`execution_search`, `knowledge_search_by_tags`, `digest_query`) | **Fully implemented** — native tools at `tools.rs`, integration tested | N/A (uses FTS5 session search instead) |
 | **Post-session memory extraction** | **Fully implemented** — `post_session_digest.rs` (397 lines), wired into execution lifecycle | **Implemented** — background review thread |
 | **Background scheduling** | **Fully implemented** — 9-module scheduler (`scheduler/`), tick loop, wake predicates, workflow tasks, approval gating, signal delivery | **Implemented** — cron scheduler with JSON job storage |
 | **Context compression** | **Partial** — token counting, context %, session pruning, text truncation exist; no LLM summarization when approaching limits | **Implemented** — iterative summarization at configurable threshold |
@@ -103,7 +103,7 @@ This table reflects what is actually implemented in the codebase, not just docum
 | **Smart model routing** | **Not implemented** — single provider/model per agent; `llm_preset_mapping` config field declared but never read | **Implemented** — cheap vs strong model based on task complexity |
 | **User modeling** | **Not implemented** — no Honcho integration, no user profile system | **Implemented** — Honcho dialectic user modeling + `USER.md` |
 | **Skill self-improvement** | **Partial** — evolution agents exist as static bundles; `agent.install` works; no autonomous closed-loop improvement | **Implemented** — skills auto-patch during use, autonomous creation after complex tasks |
-| **Session search (FTS)** | **Not implemented** — `execution.search` covers tool traces only, not conversation content | **Implemented** — FTS5 across all session transcripts with LLM summarization |
+| **Session search (FTS)** | **Not implemented** — `execution_search` covers tool traces only, not conversation content | **Implemented** — FTS5 across all session transcripts with LLM summarization |
 | **Multi-channel adapters** | **Not implemented** — CLI + HTTP JSON-RPC only | **Implemented** — 15+ messaging platforms |
 
 ## 11. Maturity & Status
@@ -219,16 +219,16 @@ CREATE TABLE user_agent_bindings (
 
 **Tool surface:**
 ```
-user.profile.read(user_id?)        → profile (defaults to caller's bound user)
-user.profile.update(fields)        → requires user approval or pre-granted scope
-user.profile.share(agent_id, scope) → grants agent access
-user.profile.revoke(agent_id)      → removes binding
+user_profile_read(user_id?)        → profile (defaults to caller's bound user)
+user_profile_update(fields)        → requires user approval or pre-granted scope
+user_profile_share(agent_id, scope) → grants agent access
+user_profile_revoke(agent_id)      → removes binding
 ```
 
 **Wake injection:** At session start, the gateway injects a **bounded user context snippet** into the system prompt, computed from `user_agent_bindings.scope`:
 - `full` → full profile
 - `restricted` → preferences + constraints only
-- `task_only` → nothing injected; agent must explicitly request via `user.profile.read`
+- `task_only` → nothing injected; agent must explicitly request via `user_profile_read`
 
 **Federation:** Profile export is signed, carries `trust_domain`, imported as `foreign` until attested. Cross-node profile sharing requires explicit user consent recorded in the approval queue.
 
@@ -843,7 +843,7 @@ The increase from the original ~480 estimate reflects the pluggable architecture
 - Cross-agent sessions (agent A spawned agent B)
 - Distributed session fragments (future)
 - Causal chain (structured events) + session transcripts (conversation) are separate
-- Execution traces already searchable via `execution.search` — this adds conversation content
+- Execution traces already searchable via `execution_search` — this adds conversation content
 
 #### Current state of conversation storage
 
@@ -852,7 +852,7 @@ Autonoetic already stores three kinds of session data — but none of it is sear
 | Data | Where stored | Searchable? | What it covers |
 |---|---|---|---|
 | **Conversation history** | Content store (SHA-256 blobs) via `persist_history_to_content_store()` in `lifecycle.rs` | ❌ No — blob-addressed, requires exact `session_id` to retrieve | Full message array (user/assistant/tool turns), merged across runs, redacted, bounded to 400 messages |
-| **Execution traces** | `execution_traces` table in `gateway.db` | ✅ Yes, via `execution.search` tool | Structured tool execution records: command, stdout, stderr, exit code, duration, error type |
+| **Execution traces** | `execution_traces` table in `gateway.db` | ✅ Yes, via `execution_search` tool | Structured tool execution records: command, stdout, stderr, exit code, duration, error type |
 | **Causal chain** | JSONL files (`causal_chain-*.jsonl`) + `causal_events` table in `gateway.db` | ❌ Not directly — table queryable by `session_id`/`agent_id` but no text search tool exposed | Hash-chained event entries: tool invocations, approvals, turn boundaries, status changes |
 
 **Key gap: conversation history is only persisted at hibernate/suspend points, not at session end.** The `persist_history_to_content_store()` function (lifecycle.rs:2123–2206) is called at line 1149 inside the hibernation yield branch only. The `close_session()` method (lifecycle.rs:313) does _not_ persist history — it only writes reevaluation state and a session summary. Normal sessions that complete without hibernating may never have their conversation stored.
@@ -998,12 +998,12 @@ if let Some(gs) = gateway_store {
 
 This means the FTS index updates incrementally at every hibernate point and at session close. No batch job needed.
 
-#### `session.search` tool
+#### `session_search` tool
 
-Follows the same native tool pattern as `execution.search` (tools.rs:2991–3125) — the implementation structure is nearly identical.
+Follows the same native tool pattern as `execution_search` (tools.rs:2991–3125) — the implementation structure is nearly identical.
 
 ```
-session.search(
+session_search(
     query: string,              -- FTS5 query (supports AND/OR/NOT/phrase)
     agent_id?: string,          -- filter by agent
     user_id?: string,           -- defaults to caller's bound user
@@ -1046,7 +1046,7 @@ LIMIT ?6
 
 #### ACL enforcement (query-time filter)
 
-Follows the same capability-check pattern used by `execution.search` and `knowledge.search_by_tags`. The key constraint: agents should only see sessions they participated in, their child sessions, or sessions explicitly shared with them.
+Follows the same capability-check pattern used by `execution_search` and `knowledge_search_by_tags`. The key constraint: agents should only see sessions they participated in, their child sessions, or sessions explicitly shared with them.
 
 ```rust
 fn enforce_search_acl(
@@ -1068,12 +1068,12 @@ fn enforce_search_acl(
 }
 ```
 
-#### `session.peek` (optional, separate tool)
+#### `session_peek` (optional, separate tool)
 
 Post-processing step on search results. Uses a cheap model to summarize multiple sessions. Not part of FTS5.
 
 ```
-session.peek(session_ids: [string]) → {
+session_peek(session_ids: [string]) → {
     summary, common_themes, decisions, open_items
 }
 ```
@@ -1086,11 +1086,11 @@ After this feature, autonoetic has three complementary search surfaces:
 
 | Tool | What it searches | Data source | Use case |
 |---|---|---|---|
-| `execution.search` | Tool execution records (commands, stdout, errors) | `execution_traces` table | "What commands failed?" "How did we fix that build error?" |
-| `knowledge.search_by_tags` | Durable facts stored by agents | Tier 2 memory (per-agent SQLite) | "What API patterns did we learn?" "What user preferences exist?" |
-| `session.search` (**new**) | Conversation content across sessions | `session_transcripts` + FTS5 | "When did we discuss the caching strategy?" "Find sessions where we debugged timeouts" |
+| `execution_search` | Tool execution records (commands, stdout, errors) | `execution_traces` table | "What commands failed?" "How did we fix that build error?" |
+| `knowledge_search_by_tags` | Durable facts stored by agents | Tier 2 memory (per-agent SQLite) | "What API patterns did we learn?" "What user preferences exist?" |
+| `session_search` (**new**) | Conversation content across sessions | `session_transcripts` + FTS5 | "When did we discuss the caching strategy?" "Find sessions where we debugged timeouts" |
 
-The post-session digest (`post_session_digest.rs`) bridges conversation → knowledge: it extracts structured memories from conversation content and stores them as Tier 2 knowledge. `session.search` provides the raw conversation search that complements those extracted memories.
+The post-session digest (`post_session_digest.rs`) bridges conversation → knowledge: it extracts structured memories from conversation content and stores them as Tier 2 knowledge. `session_search` provides the raw conversation search that complements those extracted memories.
 
 #### Distributed search (future)
 
@@ -1166,11 +1166,11 @@ The 38 registered native tools include specialized tools (eval, revision, promot
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolTier {
-    /// Always sent: content.write, content.read, sandbox.exec, knowledge.store/recall/search/search_by_tags
+    /// Always sent: content_write, content_read, sandbox_exec, knowledge_store/recall/search/search_by_tags
     Core,
-    /// Sent when agent is in a workflow or delegates: agent.spawn, workflow.wait, workflow.state
+    /// Sent when agent is in a workflow or delegates: agent_spawn, workflow_wait, workflow_state
     Workflow,
-    /// Sent only to agents with matching capabilities: eval.*, agent.revision.*, artifact.build
+    /// Sent only to agents with matching capabilities: eval.*, agent.revision.*, artifact_build
     Specialized,
 }
 ```
@@ -1310,7 +1310,7 @@ MVP: ship observability (`PromptBudgetBreakdown`) + tool tiering (~200 lines). T
 | **Tool access** | `allowed-tools` is advisory — the host decides enforcement | `capabilities` are enforced by the gateway policy engine |
 | **Execution model** | LLM reads instructions, uses host's tools freely | Sandboxed execution, capability-gated tools, approval gates |
 | **Trust model** | Implicit trust (single user, local environment) | Multi-user ACLs, approval gates, disclosure policies |
-| **File access** | Direct filesystem | Content store (`content.write`/`content.read`), sandboxed mounts |
+| **File access** | Direct filesystem | Content store (`content_write`/`content_read`), sandboxed mounts |
 | **Networking** | Assumed available | `NetworkAccess` capability, approval-gated |
 | **Resources** | `scripts/`, `references/`, `assets/` loaded on demand | Agent directory files mounted in sandbox |
 | **Progressive disclosure** | 3 tiers: metadata (~100 tokens) → instructions (<5000 tokens) → resources (on demand) | All instructions loaded at agent wake |
@@ -1403,7 +1403,7 @@ fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
 
 #### Tool name bridging
 
-External skills reference tools by names defined in their host environment (e.g., `Bash`, `Read`, `WebSearch` for Claude Code). Autonoetic uses different names (`sandbox.exec`, `content.read`, `web.search`). The adapter injects a short **tool name mapping** into the agent's instructions:
+External skills reference tools by names defined in their host environment (e.g., `Bash`, `Read`, `WebSearch` for Claude Code). Autonoetic uses different names (`sandbox_exec`, `content_read`, `web_search`). The adapter injects a short **tool name mapping** into the agent's instructions:
 
 ```markdown
 ---
@@ -1414,24 +1414,24 @@ The following tool mappings apply:
 
 | Skill references | Autonoetic equivalent |
 |---|---|
-| `Bash(command)` | `sandbox.exec(command)` |
-| `Read(path)` | `content.read(name_or_handle)` — files must be loaded via content store |
-| `Write(path, content)` | `content.write(name, content)` |
-| `WebSearch(query)` | `web.search(query)` |
-| `WebFetch(url)` | `web.fetch(url)` |
+| `Bash(command)` | `sandbox_exec(command)` |
+| `Read(path)` | `content_read(name_or_handle)` — files must be loaded via content store |
+| `Write(path, content)` | `content_write(name, content)` |
+| `WebSearch(query)` | `web_search(query)` |
+| `WebFetch(url)` | `web_fetch(url)` |
 
 File paths referenced by the skill are mounted in the sandbox at `/workspace/`.
-Use `content.read` for any file the skill's instructions reference.
+Use `content_read` for any file the skill's instructions reference.
 ```
 
-This mapping is appended to the agent's system prompt. The LLM handles the translation naturally — it reads "use `Bash(git log)`" in the skill instructions and translates it to `sandbox.exec({"command": "git log"})` based on the mapping table. Token cost: ~200 tokens.
+This mapping is appended to the agent's system prompt. The LLM handles the translation naturally — it reads "use `Bash(git log)`" in the skill instructions and translates it to `sandbox_exec({"command": "git log"})` based on the mapping table. Token cost: ~200 tokens.
 
 #### Resource mounting
 
 Agent Skills may include `scripts/`, `references/`, `assets/` directories. The adapter:
 
 1. Copies these directories into the agent's directory under `imported/`
-2. Registers them as content store entries (so they're accessible via `content.read`)
+2. Registers them as content store entries (so they're accessible via `content_read`)
 3. Mounts them into the sandbox at their expected paths
 
 ```rust
@@ -1531,7 +1531,7 @@ The bulk of the complexity is not in the adapter itself (which is straightforwar
 
 ### 7. Credential Management & Service Registration
 
-**Problem:** agents need to interact with external services (APIs, social platforms, SaaS tools) that require registration, account creation, credential storage, and authenticated requests. The Moltbook skill (a social network for AI agents) is a concrete example: it requires POST to a registration endpoint, receiving an API key, having the human visit a claim URL, storing credentials, and then using them for all subsequent requests. Today, Autonoetic has no mechanism for this — if an agent calls `sandbox.exec(curl register...)`, the API key appears in the response and flows through the LLM, leaking into provider context windows, conversation logs, and the causal chain.
+**Problem:** agents need to interact with external services (APIs, social platforms, SaaS tools) that require registration, account creation, credential storage, and authenticated requests. The Moltbook skill (a social network for AI agents) is a concrete example: it requires POST to a registration endpoint, receiving an API key, having the human visit a claim URL, storing credentials, and then using them for all subsequent requests. Today, Autonoetic has no mechanism for this — if an agent calls `sandbox_exec(curl register...)`, the API key appears in the response and flows through the LLM, leaking into provider context windows, conversation logs, and the causal chain.
 
 #### The security constraint: zero secret exposure to agents
 
@@ -1549,12 +1549,12 @@ Here's how the complete Moltbook registration flow would work with the proposed 
 Step 1: Agent decides it needs Moltbook access
 ─────────────────────────────────────────────
 Agent: "I need to register on Moltbook to post about our project"
-Agent calls → credential.check(service: "moltbook")
+Agent calls → credential_check(service: "moltbook")
 Gateway returns → { available: false, setup_required: true }
 
 Step 2: Agent initiates registration
 ─────────────────────────────────────
-Agent calls → credential.setup({
+Agent calls → credential_setup({
   service: "moltbook",
   steps: [{
     type: "api_call",
@@ -1588,7 +1588,7 @@ Agent tells user: "I've registered on Moltbook! Please visit [claim_url] to veri
 
 Step 5: Agent uses the service (gateway injects credentials transparently)
 ──────────────────────────────────────────────────────────────────────────
-Agent calls → credential.request({
+Agent calls → credential_request({
     credential_id: "cred_moltbook_001",
   method: "POST",
   url: "https://www.moltbook.com/api/v1/posts",
@@ -1609,7 +1609,7 @@ At **no point** does the agent see `moltbook_xxx`. It knows credentials exist (v
 |---|---|---|---|
 | **API-automated** | Agent provides registration parameters (name, description) | Human approves the registration (via approval queue) | Service has a programmatic registration API (Moltbook, most developer APIs) |
 | **Human-assisted** | Agent explains what to register for and why | Human performs the registration, enters credentials in secure prompt | Service requires captcha, OAuth consent, browser interaction, email verification |
-| **Pre-configured** | Agent calls `credential.check`, uses existing credential | Human configured credentials beforehand (env var, config file, keychain) | Credentials already exist from a previous session or manual setup |
+| **Pre-configured** | Agent calls `credential_check`, uses existing credential | Human configured credentials beforehand (env var, config file, keychain) | Credentials already exist from a previous session or manual setup |
 
 #### API-automated mode (detailed)
 
@@ -1657,13 +1657,13 @@ pub struct SecretFieldSpec {
 }
 ```
 
-The `credential.setup` tool accepts a sequence of steps. The gateway executes them **server-side**, one at a time:
+The `credential_setup` tool accepts a sequence of steps. The gateway executes them **server-side**, one at a time:
 
 ```rust
 pub struct CredentialSetupTool;
 
 impl NativeTool for CredentialSetupTool {
-    fn name(&self) -> &'static str { "credential.setup" }
+    fn name(&self) -> &'static str { "credential_setup" }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -1698,7 +1698,7 @@ impl NativeTool for CredentialSetupTool {
 For services requiring browser interaction (OAuth, captcha, email verification), the agent can't make the API call — a human must do it. But the agent can still **orchestrate** the process:
 
 ```
-Agent calls → credential.setup({
+Agent calls → credential_setup({
   service: "github",
   steps: [
     {
@@ -1722,14 +1722,14 @@ The gateway:
 3. Human enters the token in the secure channel — the agent never sees it
 4. Gateway stores it and returns `credential_stored: true` to the agent
 
-**Critical: the secure prompt is NOT `user.ask`.** The `user.ask` tool sends the question through the LLM conversation, which means any answer (including a pasted API key) would enter the LLM context. The credential prompt uses a **separate, direct channel** to the human that bypasses the agent entirely:
+**Critical: the secure prompt is NOT `user_ask`.** The `user_ask` tool sends the question through the LLM conversation, which means any answer (including a pasted API key) would enter the LLM context. The credential prompt uses a **separate, direct channel** to the human that bypasses the agent entirely:
 
 ```
 ┌─────────────────────────────────────────────┐
 │  LLM Conversation (agent sees this)         │
 │                                             │
 │  Agent: "Please create a GitHub token..."   │
-│  [credential.setup returns]                 │
+│  [credential_setup returns]                 │
 │  Agent: "Great, credentials stored!"        │
 │                                             │
 ├─────────────────────────────────────────────┤
@@ -1742,15 +1742,15 @@ The gateway:
 └─────────────────────────────────────────────┘
 ```
 
-#### Authenticated requests: `credential.request`
+#### Authenticated requests: `credential_request`
 
-Once credentials are stored, the agent uses them via `credential.request`. It specifies *what* to do but *not* the credentials:
+Once credentials are stored, the agent uses them via `credential_request`. It specifies *what* to do but *not* the credentials:
 
 ```rust
 pub struct CredentialRequestTool;
 
 impl NativeTool for CredentialRequestTool {
-    fn name(&self) -> &'static str { "credential.request" }
+    fn name(&self) -> &'static str { "credential_request" }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -1763,7 +1763,7 @@ impl NativeTool for CredentialRequestTool {
                 "properties": {
                     "credential_id": {
                         "type": "string",
-                        "description": "Credential ID from credential.setup or credential.check"
+                        "description": "Credential ID from credential_setup or credential_check"
                     },
                     "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
                     "url": { "type": "string" },
@@ -1889,21 +1889,21 @@ pub struct CredentialRecord {
 }
 ```
 
-**3. Three new native tools** — `credential.check`, `credential.setup`, `credential.request`.
+**3. Three new native tools** — `credential_check`, `credential_setup`, `credential_request`.
 
-These use the existing Vault for storage and the existing `apply_and_redact` pattern for response sanitization. The `credential.request` tool also needs a gateway-side HTTP client (`reqwest`) for making authenticated calls server-side.
+These use the existing Vault for storage and the existing `apply_and_redact` pattern for response sanitization. The `credential_request` tool also needs a gateway-side HTTP client (`reqwest`) for making authenticated calls server-side.
 
 **4. SecretStoreRuntime upgrade** — extend JSONPath parsing.
 
-The current `SecretStoreRuntime` parses directives from markdown using a custom syntax (`` From: `response.xxx` → To: `secret:YYY` ``). The `credential.setup` tool uses standard JSONPath (`$.agent.api_key`). The extraction logic in `extract_json_path_as_string()` already supports dot-separated paths — it just needs to accept `$`-prefixed JSONPath notation too. This is a ~10-line change.
+The current `SecretStoreRuntime` parses directives from markdown using a custom syntax (`` From: `response.xxx` → To: `secret:YYY` ``). The `credential_setup` tool uses standard JSONPath (`$.agent.api_key`). The extraction logic in `extract_json_path_as_string()` already supports dot-separated paths — it just needs to accept `$`-prefixed JSONPath notation too. This is a ~10-line change.
 
 #### Integration with existing gateway systems
 
 The credential system hooks into three existing mechanisms:
 
-**1. Approval queue → `credential.setup` triggers approval**
+**1. Approval queue → `credential_setup` triggers approval**
 
-When an agent calls `credential.setup`, the gateway creates an approval request:
+When an agent calls `credential_setup`, the gateway creates an approval request:
 ```
 "Agent 'planner.default' wants to register on service 'moltbook' 
  and store API credentials. Steps: 1 API call, 1 user action.
@@ -1913,11 +1913,11 @@ The user approves before any HTTP calls are made. This gives the human visibilit
 
 **2. Disclosure policy → credential responses are automatically restricted**
 
-All `credential.request` responses are automatically classified as `DisclosureClass::Restricted` for credential-adjacent fields. The existing `DisclosureState` taint registration (already wired into `ToolCallProcessor`) handles this.
+All `credential_request` responses are automatically classified as `DisclosureClass::Restricted` for credential-adjacent fields. The existing `DisclosureState` taint registration (already wired into `ToolCallProcessor`) handles this.
 
 **3. Capability system → `CredentialAccess` capability**
 
-Only agents with the `CredentialAccess` capability can use `credential.setup`, `credential.request`, and `credential.check`. This prevents arbitrary agents from registering on services:
+Only agents with the `CredentialAccess` capability can use `credential_setup`, `credential_request`, and `credential_check`. This prevents arbitrary agents from registering on services:
 
 ```yaml
 capabilities:
@@ -1935,13 +1935,13 @@ Today the Moltbook skill tells agents to `curl` the registration endpoint and sa
 This skill requires API credentials for `moltbook`.
 
 Instead of running `curl` commands with raw API keys:
-- Use `credential.check(service: "moltbook")` to verify credentials exist
-- Use `credential.setup(service: "moltbook", ...)` to register (see below)
-- Use `credential.request(credential_id: "...", ...)` for authenticated API calls
+- Use `credential_check(service: "moltbook")` to verify credentials exist
+- Use `credential_setup(service: "moltbook", ...)` to register (see below)
+- Use `credential_request(credential_id: "...", ...)` for authenticated API calls
 
 The gateway handles credentials securely — you never need to store or transmit API keys.
 
-### Registration (credential.setup)
+### Registration (credential_setup)
 ```json
 {
   "service": "moltbook",
@@ -1973,10 +1973,10 @@ Here's the complete agent-initiated, human-supervised, zero-secret-exposure flow
 ```
 1. Agent decides it needs Moltbook access (from skill instructions or user request)
    │
-2. Agent calls credential.check("moltbook")
+2. Agent calls credential_check("moltbook")
    → { available: false }
    │
-3. Agent calls credential.setup({ service: "moltbook", steps: [...] })
+3. Agent calls credential_setup({ service: "moltbook", steps: [...] })
    │
 4. Gateway creates ApprovalRequest:
    "Agent wants to register on moltbook. Approve?"
@@ -1992,7 +1992,7 @@ Here's the complete agent-initiated, human-supervised, zero-secret-exposure flow
    │
 8. Human visits claim URL, verifies (out-of-band, nothing to do with gateway)
    │
-9. Agent calls credential.request({
+9. Agent calls credential_request({
     credential_id: "cred_moltbook_001",
       method: "POST",
       url: "https://www.moltbook.com/api/v1/posts",
@@ -2008,13 +2008,13 @@ The human was involved at exactly **two points**: approving the registration (st
 
 #### Edge cases
 
-**Token refresh / rotation:** Some services issue refresh tokens. The gateway handles this transparently — when a `credential.request` gets a 401, the gateway checks if a refresh token exists, uses it to get a new access token, retries, and updates the Vault. The agent sees a normal response.
+**Token refresh / rotation:** Some services issue refresh tokens. The gateway handles this transparently — when a `credential_request` gets a 401, the gateway checks if a refresh token exists, uses it to get a new access token, retries, and updates the Vault. The agent sees a normal response.
 
 **Multi-step registration:** Some services require multiple API calls (register → verify email → create API key). The `steps` array supports sequencing: each step can reference public data from previous steps via `data_refs`.
 
 **Credential sharing between agents:** By default, credentials are scoped to the agent that created them. An agent can grant access to another agent via `credential.share(credential_id, target_agent_id)` — which creates an approval request for the human to authorize.
 
-**Credential expiry / revocation:** The gateway tracks expiry metadata in `CredentialRecord`. When a credential expires, `credential.check` returns `{ available: false, expired: true }`, and the agent can re-initiate `credential.setup`.
+**Credential expiry / revocation:** The gateway tracks expiry metadata in `CredentialRecord`. When a credential expires, `credential_check` returns `{ available: false, expired: true }`, and the agent can re-initiate `credential_setup`.
 
 #### Complexity breakdown (adjusted for existing infrastructure)
 
@@ -2034,12 +2034,12 @@ The existing `Vault` (~78 lines) and `SecretStoreRuntime` (~183 lines) already p
 | **`CredentialAccess` capability type** | ❌ new | ~40 | Low — extends existing capability enum |
 | **JSONPath `$` prefix support** in `extract_json_path_as_string` | ❌ new | ~10 | Low — trivial parser extension |
 | Secure user prompt channel (TUI/CLI, for human-assisted mode) | ❌ new | ~200 | Medium — must bypass LLM conversation |
-| Approval queue integration for `credential.setup` | ❌ new | ~60 | Low — follows existing approval patterns |
+| Approval queue integration for `credential_setup` | ❌ new | ~60 | Low — follows existing approval patterns |
 | Tests | ❌ new | ~150 | Low |
 | **Total new code** | | **~1,130** | **Low-Medium overall** |
 | *Existing code leveraged* | | *~260* | |
 
-MVP: `credential.check` + `credential.request` using the existing Vault with manual pre-configuration (~250 lines new). This gives agents the ability to use pre-configured credentials securely — the human sets up `AUTONOETIC_VAULT_PATH` with credentials, and agents reference them by service name. Full `credential.setup` with automated registration adds ~350 more lines. Encryption at rest adds ~100 more. The secure user prompt channel for human-assisted mode adds ~200 more.
+MVP: `credential_check` + `credential_request` using the existing Vault with manual pre-configuration (~250 lines new). This gives agents the ability to use pre-configured credentials securely — the human sets up `AUTONOETIC_VAULT_PATH` with credentials, and agents reference them by service name. Full `credential_setup` with automated registration adds ~350 more lines. Encryption at rest adds ~100 more. The secure user prompt channel for human-assisted mode adds ~200 more.
 
 ---
 

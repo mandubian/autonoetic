@@ -81,7 +81,7 @@ The gateway is the security boundary and execution engine. It is a **narrow rule
 
 | Component | Responsibility |
 |-----------|---------------|
-| **JSON-RPC Router** | Accepts `event.ingest` and `agent.spawn` requests |
+| **JSON-RPC Router** | Accepts `event.ingest` and `agent_spawn` requests |
 | **Policy Engine** | Validates capabilities, ACLs, and disclosure rules |
 | **Execution Service** | Spawns agent sessions, manages lifecycle |
 | **Layer Store** | Content-addressed storage for compressed directory trees (artifact dependencies) |
@@ -127,7 +127,7 @@ The `autonoetic_sdk` package (Python/TypeScript) provides the agent's view of th
 5. Gateway spawns agent session from the pinned revision directory + runtime closure
 6. Agent reasoning loop:
    a. LLM processes context + instructions
-   b. LLM emits tool calls (content.write, agent.spawn, etc.)
+   b. LLM emits tool calls (content_write, agent_spawn, etc.)
    c. Gateway validates and executes tools
    d. Tool results returned to LLM
    e. Loop until EndTurn
@@ -138,14 +138,14 @@ The `autonoetic_sdk` package (Python/TypeScript) provides the agent's view of th
 ### Content Storage Flow
 
 ```
-Agent: content.write("main.py", script_content)
+Agent: content_write("main.py", script_content)
   ↓
 Gateway: 1. Compute SHA-256 hash
          2. Store blob at .gateway/content/sha256/ab/c123...
          3. Update session manifest: {"main.py": "sha256:abc123"}
          4. Return handle to agent
 
-Agent: content.read("main.py")
+Agent: content_read("main.py")
   ↓
 Gateway: 1. Resolve name → handle from session manifest
          2. Fetch blob from content store
@@ -155,22 +155,22 @@ Gateway: 1. Resolve name → handle from session manifest
 ### Artifact Creation Flow
 
 ```
-1. Coder writes files via content.write()
+1. Coder writes files via content_write()
 2. Coder writes SKILL.md with YAML frontmatter
 3. Gateway detects SKILL.md, extracts metadata
-4. On agent.spawn completion:
+4. On agent_spawn completion:
    - All session content bundled into artifact
    - Artifact metadata from SKILL.md frontmatter
    - Structured artifact added to spawn response
 5. Planner receives artifacts in spawn response
-6. Specialized_builder reads artifacts via content.read()
+6. Specialized_builder reads artifacts via content_read()
 ```
 
 ### Build Layer Flow
 
 ```
 1. Packager agent (with network access) runs:
-   sandbox.exec({
+   sandbox_exec({
      "command": "pip install -r /tmp/requirements.txt --target /tmp/venv",
      "capture_paths": [
        {"path": "/tmp/venv", "mount_as": "/opt/venv"}
@@ -184,7 +184,7 @@ Gateway: 1. Resolve name → handle from session manifest
    - Returns captured_layer with layer_id, name, mount_path, digest
 
 3. Packager builds layered artifact:
-   artifact.build({
+   artifact_build({
      "inputs": ["main.py", "requirements.txt"],
      "layers": [
        {
@@ -202,7 +202,7 @@ Gateway: 1. Resolve name → handle from session manifest
    - Evaluator receives layered artifact
 
 5. Evaluator runs with layered artifact:
-   sandbox.exec({
+   sandbox_exec({
      "artifact_id": "art_xxxxxx",
      "command": "python3 /tmp/main.py"
    })
@@ -323,7 +323,7 @@ Agent-local files for per-tick determinism:
 └── skills/          # Installed skills
 ```
 
-**Tools:** `content.write`, `content.read`, `artifact.build`, `artifact.inspect`
+**Tools:** `content_write`, `content_read`, `artifact_build`, `artifact_inspect`
 
 Content uses root-session visibility. Default is `session` (collaborative within root). Use `visibility: "private"` for scratch work. Artifacts are the mandatory boundary for review/install/execution.
 
@@ -331,9 +331,9 @@ Content uses root-session visibility. Default is `session` (collaborative within
 
 Gateway-managed facts with provenance:
 
-**Tools:** `knowledge.store`, `knowledge.recall`, `knowledge.search`, `knowledge.search_by_tags`, `digest.query`
+**Tools:** `knowledge_store`, `knowledge_recall`, `knowledge_search`, `knowledge_search_by_tags`, `digest_query`
 
-Sharing is done by **storing (or re-storing) with the right visibility** — there is no separate share tool. To expose a fact to collaborators in the same root workflow, use `knowledge.store` with default `visibility: "session"` (or call `knowledge.store` again with the same `id` to widen visibility).
+Sharing is done by **storing (or re-storing) with the right visibility** — there is no separate share tool. To expose a fact to collaborators in the same root workflow, use `knowledge_store` with default `visibility: "session"` (or call `knowledge_store` again with the same `id` to widen visibility).
 
 | Field | Description |
 |-------|-------------|
@@ -354,7 +354,7 @@ Sharing is done by **storing (or re-storing) with the right visibility** — the
 Agents run from **immutable revisions**, not from mutable authoring directories. The activation path is always:
 
 ```
-artifact.build()  →  agent.revision.create()  →  agent.revision.promote()
+artifact_build()  →  agent_revision_create()  →  agent_revision_promote()
       ↓                        ↓                           ↓
   AgentBundle            revision stored,            alias moves to
   artifact in            content-addressed,          new revision;
@@ -365,7 +365,7 @@ artifact.build()  →  agent.revision.create()  →  agent.revision.promote()
 
 - A session always executes from a **pinned revision directory** + a **pinned runtime closure** (hashed `runtime.lock`).
 - The **alias registry** is the sole source of truth for which revision is "active" for a logical agent.
-- `agent.revision.promote` is the only way to change what alias lookup resolves to.
+- `agent_revision_promote` is the only way to change what alias lookup resolves to.
 - Running sessions remain pinned to their revision; promotion does not affect them.
 - Candidate revisions are runnable via explicit `agent_ref` (e.g. for eval) without being promoted.
 - `agent.install` is **not** part of the runtime tool surface; seeding is always via revision + promote.
@@ -384,7 +384,7 @@ artifact.build()  →  agent.revision.create()  →  agent.revision.promote()
 Promotion can be gated by a passed eval run:
 
 ```
-eval.suite.publish()  →  eval.run(suite, agent_ref)  →  agent.revision.promote(required_eval_run_id=...)
+eval_suite_publish()  →  eval_run(suite, agent_ref)  →  agent_revision_promote(required_eval_run_id=...)
 ```
 
 If the eval run's subject revision does not match the promote target, the promote is rejected.
@@ -458,7 +458,7 @@ agent_dir/history/causal_chain.jsonl
   "category": "tool",
   "action": "requested",
   "timestamp": "2026-03-15T10:30:00Z",
-  "payload": {"tool_name": "content.write", ...},
+  "payload": {"tool_name": "content_write", ...},
   "entry_hash": "sha256:...",
   "prev_hash": "sha256:..."
 }
@@ -537,7 +537,7 @@ Universal execution snapshots saved at every yield point for crash recovery and 
 | `Hibernation` | EndTurn / StopSequence between turns | Yes |
 | `BudgetExhausted` | Session budget depleted | Yes (after budget reset) |
 | `ApprovalRequired` | Tool needs approval gate | Via turn continuation |
-| `UserInputRequired` | `user.ask` pending answer | Yes (when answered) |
+| `UserInputRequired` | `user_ask` pending answer | Yes (when answered) |
 | `EmergencyStop` | Operator circuit breaker | **No** (blocks auto-resume) |
 | `MaxTurnsReached` | Loop guard limit | Yes |
 | `ManualStop` | Operator/user interrupt | Yes |
@@ -561,7 +561,7 @@ When a tool call requires operator approval, the turn is **suspended to disk** r
 
 #### Suspension Flow
 
-1. Agent requests a privileged tool call (e.g., `agent.revision.promote`, `sandbox.exec` on a new resource)
+1. Agent requests a privileged tool call (e.g., `agent_revision_promote`, `sandbox_exec` on a new resource)
 2. Gateway evaluates policy → approval required
 3. Gateway saves a `TurnContinuation` to `.gateway/continuations/{task_id}.json`
 4. Gateway checkpoints the session with `YieldReason::ApprovalRequired`
@@ -590,7 +590,7 @@ When a tool call requires operator approval, the turn is **suspended to disk** r
 
 1. Operator approves (or rejects) the approval request
 2. Gateway loads the continuation from disk
-3. For `sandbox.exec` approvals: gateway records session approval grants for the detected hosts (enabling auto-approval of subsequent calls to the same hosts within this root session)
+3. For `sandbox_exec` approvals: gateway records session approval grants for the detected hosts (enabling auto-approval of subsequent calls to the same hosts within this root session)
 4. Gateway executes the approved action (sandbox exec, revision promote, etc.)
 5. Gateway injects the real tool result into conversation history
 6. Gateway executes any remaining tool calls from the original batch
@@ -704,7 +704,7 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 |--------|-------------|
 | `trace_id` | UUID |
 | `event_id` | Joins to `causal_events.event_id` — the universal correlation key |
-| `tool_name` | sandbox.exec, agent.revision.promote... |
+| `tool_name` | sandbox_exec, agent_revision_promote... |
 | `command` | The executed command |
 | `exit_code` | Process exit code |
 | `stdout`, `stderr` | Full output (not truncated) |
@@ -714,10 +714,10 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 
 ### Agent Learning Tools
 
-**`execution.search`** — Query past executions:
+**`execution_search`** — Query past executions:
 ```json
 {
-  "tool_name": "sandbox.exec",
+  "tool_name": "sandbox_exec",
   "success": false,
   "error_type": "compilation",
   "command_pattern": "%client.rs%",
@@ -725,7 +725,7 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 }
 ```
 
-**`knowledge.search_by_tags`** — Search tagged memories:
+**`knowledge_search_by_tags`** — Search tagged memories:
 ```json
 {
   "tags": ["type:error_lesson", "domain:http"],
@@ -754,7 +754,7 @@ Agent: {agent_id} | Started: {timestamp}
 ---
 
 ## Turn 1 — {timestamp}
-**Action:** Called `sandbox.exec` with `python3 tests/run_all.py`
+**Action:** Called `sandbox_exec` with `python3 tests/run_all.py`
 **Result:** 12 tests passed, 1 failed
 **Reasoning:** Running full test suite first.
 
@@ -767,21 +767,21 @@ Agent: {agent_id} | Started: {timestamp}
 
 ### Tools
 
-- **`digest.annotate`** — Agent adds reasoning/decision notes
-- **`digest.query`** — Search past session digests
+- **`digest_annotate`** — Agent adds reasoning/decision notes
+- **`digest_query`** — Search past session digests
 
 ---
 
 ## Observability Surface
 
-The observability surface lets agents discover and inspect session reports across sessions. It is built on top of the causal chain (the authoritative spine) and is complementary to `execution.search` (which searches raw tool traces within a session).
+The observability surface lets agents discover and inspect session reports across sessions. It is built on top of the causal chain (the authoritative spine) and is complementary to `execution_search` (which searches raw tool traces within a session).
 
 ### Architecture
 
 1. **Session reports** are written to the session directory during execution (JSON, markdown, HTML)
 2. On session close, the **hook system** fires a `session.closed` event
 3. The `publish_report` hook action reads the report, writes it to the content store, and registers it in the `published_session_reports` catalog
-4. Agents use `observability.search` to discover reports and `observability.read` to fetch them by URI
+4. Agents use `observability_search` to discover reports and `observability_read` to fetch them by URI
 
 ### URI Scheme
 
@@ -837,7 +837,7 @@ hooks:
 |--------|-------------|
 | `publish_report` | Reads session report, writes to content store, registers in catalog |
 | `deliver_signal` | Delivers a signal to a waiting session (approval, workflow join) |
-| `agent.spawn` | *(reserved)* Spawns an agent in response to an event |
+| `agent_spawn` | *(reserved)* Spawns an agent in response to an event |
 | `http.callback` | *(reserved)* Sends an HTTP POST to an external URL |
 
 ### Hook Dispatch
@@ -869,7 +869,7 @@ All transactional state in a single SQLite database:
 │
 │   ── Workflow & Approval ──
 ├── approvals              # Approval gates
-├── user_interactions      # user.ask questions/answers
+├── user_interactions      # user_ask questions/answers
 ├── workflow_events        # Workflow event log
 ├── workflow_index         # Root session → workflow mapping
 │
@@ -882,17 +882,17 @@ All transactional state in a single SQLite database:
 │
 │   ── Memory & Artifacts ──
 ├── memories               # Tier 2 durable memory
-├── memory_tags            # Tag index for knowledge.search_by_tags
+├── memory_tags            # Tag index for knowledge_search_by_tags
 ├── artifact_refs          # Short ref → digest mapping
 ├── short_id_index         # LLM-friendly short IDs for revisions and runs
 │
 │   ── Observability & Hooks ──
 ├── published_session_reports      # Published report catalog (root_session_id → handles + metadata)
-├── published_session_reports_fts  # FTS5 index for observability.search
+├── published_session_reports_fts  # FTS5 index for observability_search
 └── hook_deliveries                # Hook dispatch tracking (idempotency + retry state)
 ```
 
-### `user.ask` answers and gateway orchestration
+### `user_ask` answers and gateway orchestration
 
 `user_interactions` rows can store `workflow_id`, `task_id`, and `checkpoint_turn_id` when the question was raised from a workflow task (tool run context). **Adapters and CLIs should submit answers via** JSON-RPC `interaction.answer` or `interaction.resolve_and_answer` (or the shared in-process orchestrator used by the chat TUI) so paused workflow tasks and `UserInputRequired` checkpoints resume deterministically—not via SQLite writes alone.
 
@@ -946,11 +946,11 @@ autonoetic gateway emergency-stop <root_session_id> --reason "Security incident"
 
 ## Human Escalation
 
-Mechanically enforced workflow suspension when an agent requests human guidance via `session.escalate(target="human")`.
+Mechanically enforced workflow suspension when an agent requests human guidance via `session_escalate(target="human")`.
 
 ### How It Works
 
-1. **Agent calls `session.escalate(target="human", reason, context, urgency, suggested_actions)`**
+1. **Agent calls `session_escalate(target="human", reason, context, urgency, suggested_actions)`**
 2. **Gateway creates `ApprovalRequest`** with `ScheduledAction::SessionEscalate` — this is a blocking approval, not advisory
 3. **Lifecycle detects `escalation_required: true`** sentinel in the tool response, saves a checkpoint with `YieldReason::HumanEscalation`, and returns `TurnOutcome::Escalated`
 4. **Agent session is suspended** — it cannot continue until the approval is resolved
@@ -1048,7 +1048,7 @@ Scheduled jobs are **decoupled from session lifecycle** — they are gateway-lev
 |---------------|-------------------------|
 | **Normal session close** | No effect. Jobs remain `active` and continue firing on schedule. |
 | **Session suspension** (e.g., pending approval) | No effect. Jobs fire independently. |
-| **Session resume** (checkpoint respawn or turn continuation) | Jobs continue unaffected. The workflow run for the root session is not re-created on resume; it is loaded on demand when the first `agent.spawn` delegation occurs. |
+| **Session resume** (checkpoint respawn or turn continuation) | Jobs continue unaffected. The workflow run for the root session is not re-created on resume; it is loaded on demand when the first `agent_spawn` delegation occurs. |
 | **Emergency stop** | All `active` jobs for the root session are cancelled via `cancel_scheduled_jobs_for_root()`. |
 
 This means:

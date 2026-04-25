@@ -102,14 +102,14 @@ The following tool mappings apply:
 
 | Skill references | Autonoetic equivalent |
 |---|---|
-| `Bash(command)` | `sandbox.exec({"command": "command"})` |
-| `Read(path)` | `content.read(name_or_handle)` — files must be loaded via content store |
-| `Write(path, content)` | `content.write(name, content)` |
-| `WebSearch(query)` | `web.search({"query": "query"})` |
-| `WebFetch(url)` | `web.fetch({"url": "url"})` |
+| `Bash(command)` | `sandbox_exec({"command": "command"})` |
+| `Read(path)` | `content_read(name_or_handle)` — files must be loaded via content store |
+| `Write(path, content)` | `content_write(name, content)` |
+| `WebSearch(query)` | `web_search({"query": "query"})` |
+| `WebFetch(url)` | `web_fetch({"url": "url"})` |
 
 File paths referenced by the skill are available in the agent directory.
-Use content.read/content.write or sandbox paths relative to the agent working directory."#;
+Use content_read/content_write or sandbox paths relative to the agent working directory."#;
 
 fn tool_bridging_appendix() -> String {
     TOOL_BRIDGING_APPENDIX.to_string()
@@ -343,7 +343,7 @@ mod agentskills_bridging_tests {
             "should contain Bash mapping"
         );
         assert!(
-            output.contains("content.read"),
+            output.contains("content_read"),
             "should contain content.read mapping"
         );
         assert!(
@@ -1159,7 +1159,7 @@ impl AgentExecutor {
                     history.push(Message::user(text.clone()));
                     
                     let _ = tracer.log_event(
-                        "agent.message",
+                        "agent_message",
                         "received",
                         autonoetic_types::causal_chain::EntryStatus::Success,
                         Some(serde_json::json!({
@@ -2750,7 +2750,7 @@ mod tests {
     #[test]
     fn test_apply_prompt_budget_warn_passes_through() {
         let tools = vec![ToolDefinition {
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             description: "Write content".to_string(),
             input_schema: serde_json::json!({}),
         }];
@@ -2789,17 +2789,17 @@ mod tests {
     fn test_apply_prompt_budget_demote_tools_removes_specialized() {
         let tools = vec![
             ToolDefinition {
-                name: "content.write".to_string(),
+                name: "content_write".to_string(),
                 description: "Write content".to_string(),
                 input_schema: serde_json::json!({}),
             },
             ToolDefinition {
-                name: "web.search".to_string(),
+                name: "web_search".to_string(),
                 description: "Search web".to_string(),
                 input_schema: serde_json::json!({}),
             },
             ToolDefinition {
-                name: "agent.spawn".to_string(),
+                name: "agent_spawn".to_string(),
                 description: "Spawn agent".to_string(),
                 input_schema: serde_json::json!({}),
             },
@@ -2841,16 +2841,16 @@ mod tests {
         .expect("demote tools should not fail");
 
         assert_eq!(result_tools.len(), 2);
-        assert!(result_tools.iter().any(|t| t.name == "content.write"));
-        assert!(result_tools.iter().any(|t| t.name == "agent.spawn"));
-        assert!(!result_tools.iter().any(|t| t.name == "web.search"));
+        assert!(result_tools.iter().any(|t| t.name == "content_write"));
+        assert!(result_tools.iter().any(|t| t.name == "agent_spawn"));
+        assert!(!result_tools.iter().any(|t| t.name == "web_search"));
         assert_eq!(result_history.len(), history.len());
     }
 
     #[test]
     fn test_apply_prompt_budget_fail_returns_error() {
         let tools = vec![ToolDefinition {
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             description: "Write content".to_string(),
             input_schema: serde_json::json!({}),
         }];
@@ -2889,7 +2889,7 @@ mod tests {
     #[test]
     fn test_apply_prompt_budget_trim_history_removes_oldest_messages() {
         let tools = vec![ToolDefinition {
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             description: "Write content".to_string(),
             input_schema: serde_json::json!({}),
         }];
@@ -2941,7 +2941,7 @@ mod tests {
     #[test]
     fn test_apply_prompt_budget_trim_history_preserves_tool_call_groups() {
         let tools = vec![ToolDefinition {
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             description: "Write content".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
         }];
@@ -2952,14 +2952,14 @@ mod tests {
         let mut assistant_with_tc1 = Message::assistant(long_content.clone());
         assistant_with_tc1.tool_calls = vec![ToolCall {
             id: "tc1".to_string(),
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             arguments: "{}".to_string(),
         }];
 
         let mut assistant_with_tc2 = Message::assistant(long_content.clone());
         assistant_with_tc2.tool_calls = vec![ToolCall {
             id: "tc2".to_string(),
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             arguments: "{}".to_string(),
         }];
 
@@ -2967,10 +2967,10 @@ mod tests {
             Message::system("System prompt".to_string()),
             Message::user(long_content.clone()),
             assistant_with_tc1,
-            Message::tool_result("tc1", "content.write", "ok".to_string()),
+            Message::tool_result("tc1", "content_write", "ok".to_string()),
             Message::user(long_content.clone()),
             assistant_with_tc2,
-            Message::tool_result("tc2", "content.write", "ok".to_string()),
+            Message::tool_result("tc2", "content_write", "ok".to_string()),
             Message::user("Final question".to_string()),
             Message::assistant("Final reply".to_string()),
         ];
@@ -3033,17 +3033,17 @@ mod tests {
     fn test_apply_prompt_budget_section_cap_tool_definitions_triggers_demote_tools() {
         let tools = vec![
             ToolDefinition {
-                name: "content.write".to_string(),
+                name: "content_write".to_string(),
                 description: "Write content".to_string(),
                 input_schema: serde_json::json!({}),
             },
             ToolDefinition {
-                name: "web.search".to_string(),
+                name: "web_search".to_string(),
                 description: "Search web".to_string(),
                 input_schema: serde_json::json!({}),
             },
             ToolDefinition {
-                name: "agent.spawn".to_string(),
+                name: "agent_spawn".to_string(),
                 description: "Spawn agent".to_string(),
                 input_schema: serde_json::json!({}),
             },
@@ -3080,13 +3080,13 @@ mod tests {
         .expect("demote tools should succeed for section-cap violation");
 
         assert_eq!(result_tools.len(), 2);
-        assert!(!result_tools.iter().any(|t| t.name == "web.search"));
+        assert!(!result_tools.iter().any(|t| t.name == "web_search"));
     }
 
     #[test]
     fn test_apply_prompt_budget_section_cap_system_prompt_fails_for_trim_history() {
         let tools = vec![ToolDefinition {
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             description: "Write content".to_string(),
             input_schema: serde_json::json!({}),
         }];
@@ -3156,7 +3156,7 @@ mod tests {
         // (total is under effective_limit), the error should mention the system
         // prompt cap specifically, not the generic "prompt budget exceeded".
         let tools = vec![ToolDefinition {
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             description: "Write content".to_string(),
             input_schema: serde_json::json!({}),
         }];
@@ -3715,7 +3715,7 @@ mod tests {
         let registry = crate::runtime::tools::default_registry();
         // content.read uses name_or_handle, not path
         let meta =
-            registry.extract_metadata("content.read", "{\"name_or_handle\": \"secrets.txt\"}");
+            registry.extract_metadata("content_read", "{\"name_or_handle\": \"secrets.txt\"}");
         assert_eq!(meta.path.as_deref(), Some("secrets.txt"));
     }
 
@@ -4251,7 +4251,7 @@ mod history_persistence_tests {
         let mut assistant = Message::assistant("Will use Authorization: Bearer very-secret-value");
         assistant.tool_calls = vec![ToolCall {
             id: "tc-1".to_string(),
-            name: "web.fetch".to_string(),
+            name: "web_fetch".to_string(),
             arguments: r#"{"headers":{"authorization":"Bearer very-secret-value"}}"#.to_string(),
         }];
 
@@ -4478,35 +4478,35 @@ mod tier_filter_tests {
     fn test_root_session_no_pending_approvals_allows_all() {
         let manifest = test_manifest();
         let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false);
-        assert!(filter.allows("content.write"));
-        assert!(filter.allows("web.search"));
-        assert!(filter.allows("agent.spawn"));
-        assert!(filter.allows("promotion.record"));
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("web_search"));
+        assert!(filter.allows("agent_spawn"));
+        assert!(filter.allows("promotion_record"));
     }
 
     #[test]
     fn test_child_session_core_only_by_default() {
         let manifest = test_manifest();
         let filter = determine_tool_tier_filter(&manifest, Some("root/child-session"), false);
-        assert!(filter.allows("content.write"));
-        assert!(filter.allows("sandbox.exec"));
-        assert!(!filter.allows("web.search"));
-        assert!(!filter.allows("agent.spawn"));
-        assert!(!filter.allows("promotion.record"));
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("sandbox_exec"));
+        assert!(!filter.allows("web_search"));
+        assert!(!filter.allows("agent_spawn"));
+        assert!(!filter.allows("promotion_record"));
     }
 
     #[test]
     fn test_pending_approvals_restricts_to_core_and_workflow() {
         let manifest = test_manifest();
         let filter = determine_tool_tier_filter(&manifest, Some("root-session"), true);
-        assert!(filter.allows("content.write"));
-        assert!(filter.allows("sandbox.exec"));
-        assert!(filter.allows("agent.spawn"));
-        assert!(filter.allows("approval.status"));
-        assert!(filter.allows("workflow.state"));
-        assert!(!filter.allows("web.search"));
-        assert!(!filter.allows("promotion.record"));
-        assert!(!filter.allows("agent.revision.create"));
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("sandbox_exec"));
+        assert!(filter.allows("agent_spawn"));
+        assert!(filter.allows("approval_status"));
+        assert!(filter.allows("workflow_state"));
+        assert!(!filter.allows("web_search"));
+        assert!(!filter.allows("promotion_record"));
+        assert!(!filter.allows("agent_revision_create"));
     }
 
     #[test]
@@ -4514,16 +4514,16 @@ mod tier_filter_tests {
         let mut manifest = test_manifest();
         manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
         let filter = determine_tool_tier_filter(&manifest, Some("root/child"), true);
-        assert!(filter.allows("content.write"));
-        assert!(filter.allows("web.search"));
-        assert!(!filter.allows("agent.spawn"));
-        assert!(filter.allows("approval.status"));
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("web_search"));
+        assert!(!filter.allows("agent_spawn"));
+        assert!(filter.allows("approval_status"));
     }
 
     #[test]
     fn test_no_session_id_allows_all() {
         let manifest = test_manifest();
         let filter = determine_tool_tier_filter(&manifest, None, false);
-        assert!(filter.allows("web.search"));
+        assert!(filter.allows("web_search"));
     }
 }

@@ -102,7 +102,7 @@ fn test_sandbox_exec_with_capture_paths() {
     });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,
@@ -155,7 +155,7 @@ fn test_sandbox_exec_without_capture_paths() {
     });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,
@@ -230,7 +230,7 @@ fn test_sandbox_exec_capture_multiple_paths() {
     });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,

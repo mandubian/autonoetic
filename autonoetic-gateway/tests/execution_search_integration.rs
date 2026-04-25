@@ -70,7 +70,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         session_id: "sess-error-test".to_string(),
         turn_id: Some("turn-001".to_string()),
         timestamp: chrono::Utc::now().to_rfc3339(),
-        tool_name: "sandbox.exec".to_string(),
+        tool_name: "sandbox_exec".to_string(),
         command: Some("rustc src/main.rs".to_string()),
         exit_code: Some(1),
         stdout: Some("Compiling...".to_string()),
@@ -102,7 +102,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         session_id: "sess-error-test".to_string(),
         turn_id: Some("turn-002".to_string()),
         timestamp: chrono::Utc::now().to_rfc3339(),
-        tool_name: "sandbox.exec".to_string(),
+        tool_name: "sandbox_exec".to_string(),
         command: Some("cargo test".to_string()),
         exit_code: Some(0),
         stdout: Some("running 5 tests\ntest result: ok. 5 passed".to_string()),
@@ -125,14 +125,14 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
 
     // Search for compilation errors
     let args = serde_json::json!({
-        "tool_name": "sandbox.exec",
+        "tool_name": "sandbox_exec",
         "success": false,
         "error_type": "compilation",
         "limit": 10
     });
 
     let result = registry.execute(
-        "execution.search",
+        "execution_search",
         &manifest,
         &policy,
         temp.path(),
@@ -178,12 +178,12 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
 
     // Search for all sandbox.exec runs
     let args_all = serde_json::json!({
-        "tool_name": "sandbox.exec",
+        "tool_name": "sandbox_exec",
         "limit": 100
     });
 
     let result_all = registry.execute(
-        "execution.search",
+        "execution_search",
         &manifest,
         &policy,
         temp.path(),
@@ -222,7 +222,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         session_id: "sess-pattern".to_string(),
         turn_id: None,
         timestamp: chrono::Utc::now().to_rfc3339(),
-        tool_name: "sandbox.exec".to_string(),
+        tool_name: "sandbox_exec".to_string(),
         command: Some("rustc main.rs".to_string()),
         exit_code: Some(0),
         stdout: None,
@@ -244,7 +244,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         session_id: "sess-pattern".to_string(),
         turn_id: None,
         timestamp: chrono::Utc::now().to_rfc3339(),
-        tool_name: "sandbox.exec".to_string(),
+        tool_name: "sandbox_exec".to_string(),
         command: Some("python script.py".to_string()),
         exit_code: Some(0),
         stdout: None,
@@ -271,7 +271,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
     });
 
     let result = registry.execute(
-        "execution.search",
+        "execution_search",
         &manifest,
         &policy,
         temp.path(),

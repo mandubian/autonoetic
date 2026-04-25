@@ -14,7 +14,7 @@ The previous version described a file-based approval payload workflow and an aut
 
 For current operator and developer behavior, treat these as source-of-truth:
 
-1. `docs/approval-system.md` for approval/user.ask/clarification semantics.
+1. `docs/approval-system.md` for approval/user_ask/clarification semantics.
 2. `docs/workflow-orchestration.md` for workflow task states and resume flow.
 3. `docs/approval-notification-delivery.md` for delivery path differences.
 

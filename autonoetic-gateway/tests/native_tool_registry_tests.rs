@@ -126,7 +126,7 @@ fn test_native_tool_registry_availability() {
     }]);
     let defs = registry.available_definitions(&manifest_shell);
     assert!(defs.len() >= 10);
-    assert!(defs.iter().any(|d| d.name == "sandbox.exec"));
+    assert!(defs.iter().any(|d| d.name == "sandbox_exec"));
 
     let manifest_all = test_manifest(vec![
         Capability::CodeExecution {
@@ -142,10 +142,10 @@ fn test_native_tool_registry_availability() {
     let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4 }]);
     let defs_spawn = registry.available_definitions(&manifest_spawn);
     assert!(defs_spawn.len() >= 8);
-    assert!(defs_spawn.iter().any(|d| d.name == "agent.spawn"));
-    assert!(defs_spawn.iter().any(|d| d.name == "agent.exists"));
-    assert!(defs_spawn.iter().any(|d| d.name == "agent.discover"));
-    assert!(defs_spawn.iter().any(|d| d.name == "workflow.wait"));
+    assert!(defs_spawn.iter().any(|d| d.name == "agent_spawn"));
+    assert!(defs_spawn.iter().any(|d| d.name == "agent_exists"));
+    assert!(defs_spawn.iter().any(|d| d.name == "agent_discover"));
+    assert!(defs_spawn.iter().any(|d| d.name == "workflow_wait"));
 
     let manifest_revision = test_manifest(vec![Capability::AgentRevision {
         patterns: vec!["*".to_string()],
@@ -153,33 +153,33 @@ fn test_native_tool_registry_availability() {
     let defs_revision = registry.available_definitions(&manifest_revision);
     assert!(defs_revision
         .iter()
-        .any(|d| d.name == "agent.revision.create"));
+        .any(|d| d.name == "agent_revision_create"));
     assert!(defs_revision
         .iter()
-        .any(|d| d.name == "agent.revision.create_from_intent"));
+        .any(|d| d.name == "agent_revision_create_from_intent"));
     assert!(defs_revision
         .iter()
-        .any(|d| d.name == "agent.revision.list"));
+        .any(|d| d.name == "agent_revision_list"));
     assert!(defs_revision
         .iter()
-        .any(|d| d.name == "agent.revision.inspect"));
+        .any(|d| d.name == "agent_revision_inspect"));
     assert!(defs_revision
         .iter()
-        .any(|d| d.name == "agent.revision.promote"));
+        .any(|d| d.name == "agent_revision_promote"));
     assert!(defs_revision
         .iter()
-        .any(|d| d.name == "agent.revision.rollback"));
+        .any(|d| d.name == "agent_revision_rollback"));
     assert!(defs_revision
         .iter()
-        .any(|d| d.name == "agent.revision.diff"));
+        .any(|d| d.name == "agent_revision_diff"));
 
     let manifest_net = test_manifest(vec![Capability::NetworkAccess {
         hosts: vec!["*".to_string()],
     }]);
     let defs_net = registry.available_definitions(&manifest_net);
     assert!(defs_net.len() >= 10);
-    assert!(defs_net.iter().any(|d| d.name == "web.search"));
-    assert!(defs_net.iter().any(|d| d.name == "web.fetch"));
+    assert!(defs_net.iter().any(|d| d.name == "web_search"));
+    assert!(defs_net.iter().any(|d| d.name == "web_fetch"));
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn test_workflow_wait_missing_task_returns_immediately_in_blocking_mode() {
     let started = std::time::Instant::now();
     let result = registry
         .execute(
-            "workflow.wait",
+            "workflow_wait",
             &manifest,
             &policy,
             &caller_dir,
@@ -258,7 +258,7 @@ fn test_web_fetch_tool_roundtrip_local_server() {
     let registry = default_registry();
     let result = registry
         .execute(
-            "web.fetch",
+            "web_fetch",
             &manifest,
             &policy,
             temp.path(),
@@ -299,7 +299,7 @@ fn test_web_fetch_tool_denied_by_netconnect_policy() {
     let registry = default_registry();
     let err = registry
         .execute(
-            "web.fetch",
+            "web_fetch",
             &manifest,
             &policy,
             temp.path(),
@@ -331,7 +331,7 @@ fn test_web_search_tool_denied_by_netconnect_policy() {
     let registry = default_registry();
     let err = registry
         .execute(
-            "web.search",
+            "web_search",
             &manifest,
             &policy,
             temp.path(),
@@ -385,7 +385,7 @@ fn test_web_search_tool_roundtrip_local_engine() {
     let registry = default_registry();
     let result = registry
         .execute(
-            "web.search",
+            "web_search",
             &manifest,
             &policy,
             temp.path(),
@@ -432,7 +432,7 @@ fn test_web_search_google_requires_api_key_env() {
     let registry = default_registry();
     let err = registry
         .execute(
-            "web.search",
+            "web_search",
             &manifest,
             &policy,
             temp.path(),
@@ -493,7 +493,7 @@ fn test_web_search_google_roundtrip_local_engine() {
     let registry = default_registry();
     let result = registry
         .execute(
-            "web.search",
+            "web_search",
             &manifest,
             &policy,
             temp.path(),
@@ -564,7 +564,7 @@ fn test_web_search_google_legacy_cx_env_alias_roundtrip() {
     let registry = default_registry();
     let result = registry
         .execute(
-            "web.search",
+            "web_search",
             &manifest,
             &policy,
             temp.path(),
@@ -642,7 +642,7 @@ fn test_web_search_auto_falls_back_to_duckduckgo_when_google_fails() {
     let registry = default_registry();
     let result = registry
         .execute(
-            "web.search",
+            "web_search",
             &manifest,
             &policy,
             temp.path(),
@@ -733,7 +733,7 @@ fn test_web_search_cache_hits_without_second_network_call() {
     let registry = default_registry();
     let first = registry
         .execute(
-            "web.search",
+            "web_search",
             &manifest,
             &policy,
             temp.path(),
@@ -748,7 +748,7 @@ fn test_web_search_cache_hits_without_second_network_call() {
         .expect("first web.search call should succeed");
     let second = registry
         .execute(
-            "web.search",
+            "web_search",
             &manifest,
             &policy,
             temp.path(),
@@ -819,7 +819,7 @@ fn test_scheduler_cron_create_rejects_sub10s_for_reasoning_target() {
 
     let result = registry
         .execute(
-            "scheduler.cron.create",
+            "scheduler_cron_create",
             &manifest,
             &policy,
             &caller_dir,
@@ -861,7 +861,7 @@ fn test_agent_spawn_tool_validates_non_empty_message() {
     let registry = default_registry();
     let err = registry
         .execute(
-            "agent.spawn",
+            "agent_spawn",
             &manifest,
             &policy,
             &parent_dir,
@@ -898,7 +898,7 @@ fn test_agent_spawn_tool_accepts_metadata_argument() {
     let registry = default_registry();
     let err = registry
         .execute(
-            "agent.spawn",
+            "agent_spawn",
             &manifest,
             &policy,
             &parent_dir,

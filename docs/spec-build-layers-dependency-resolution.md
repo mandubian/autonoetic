@@ -14,10 +14,10 @@ When a planner delegates "fetch weather in Paris" to specialist agents:
 
 ```
 coder → writes weather_fetcher.py (imports httpx) + requirements.txt
-       → artifact.build(["weather_fetcher.py", "requirements.txt"])
+       → artifact_build(["weather_fetcher.py", "requirements.txt"])
          (packages files only, no dependency installation)
 
-evaluator → sandbox.exec("python3 weather_fetcher.py Paris")
+evaluator → sandbox_exec("python3 weather_fetcher.py Paris")
           → ModuleNotFoundError: No module named 'httpx'
           → tries pip install manually → no network in bubblewrap
           → tries --break-system-packages → permission denied
@@ -31,9 +31,9 @@ Three disconnected phases with no bridge:
 
 | Phase | Has Files | Has Network | Can Install Deps |
 |-------|-----------|-------------|-----------------|
-| `artifact.build` | Yes (packages them) | No | No |
-| `sandbox.exec` (bubblewrap) | Yes (mounts artifact) | No (`--unshare-all`) | No |
-| `sandbox.exec` (with `dependencies` param) | Yes | No (venv + pip but no egress) | No |
+| `artifact_build` | Yes (packages them) | No | No |
+| `sandbox_exec` (bubblewrap) | Yes (mounts artifact) | No (`--unshare-all`) | No |
+| `sandbox_exec` (with `dependencies` param) | Yes | No (venv + pip but no egress) | No |
 
 The `compose_entrypoint` function prepends `pip install` but the sandbox has no network, so pip can never reach PyPI.
 
@@ -108,8 +108,8 @@ Artifacts gain an optional `layers` field referencing zero or more layers. When 
 Agents with `WriteAccess` can create layers. The tool captures a directory from inside a sandbox and stores it as a layer.
 
 ```jsonc
-// Agent calls sandbox.exec with network + capture_paths
-sandbox.exec({
+// Agent calls sandbox_exec with network + capture_paths
+sandbox_exec({
   "command": "pip install -r requirements.txt -t /tmp/deps",
   "capture_paths": ["/tmp/deps"]
 })
@@ -120,14 +120,14 @@ Wait — this conflates two things. Let me reframe.
 
 The builder agent runs in a **network-enabled sandbox** (declared in its SKILL.md). It:
 
-1. Calls `sandbox.exec` to install deps (has network because builder's sandbox allows it)
+1. Calls `sandbox_exec` to install deps (has network because builder's sandbox allows it)
 2. Files written inside the sandbox are ephemeral — lost when the sandbox exits
 3. Needs a way to get those files out
 
-**Option chosen**: `sandbox.exec` gains `capture_paths`. After execution, the gateway captures the listed paths as a layer.
+**Option chosen**: `sandbox_exec` gains `capture_paths`. After execution, the gateway captures the listed paths as a layer.
 
 ```jsonc
-sandbox.exec({
+sandbox_exec({
   "command": "pip install -r requirements.txt -t /tmp/deps",
   "capture_paths": [
     {"path": "/tmp/deps", "mount_as": "/tmp/deps"}
@@ -165,10 +165,10 @@ Returns:
 
 This is a dumb operation: tar, compress, hash, store. No language detection, no parsing.
 
-### 2.5 `artifact.build` Extension
+### 2.5 `artifact_build` Extension
 
 ```jsonc
-artifact.build({
+artifact_build({
   "inputs": ["weather_fetcher.py"],
   "entrypoints": ["weather_fetcher.py"],
   "layers": [
@@ -182,9 +182,9 @@ The gateway:
 2. Records layers in the artifact manifest
 3. The artifact's deterministic ID now incorporates layer digests (so different deps → different artifact)
 
-### 2.6 `sandbox.exec` with Layer-Aware Artifacts
+### 2.6 `sandbox_exec` with Layer-Aware Artifacts
 
-When `sandbox.exec` runs with an `artifact_id` that has layers:
+When `sandbox_exec` runs with an `artifact_id` that has layers:
 
 1. Mount flat files as today (read-only bind from content store)
 2. For each layer, extract `contents.tar.zst` into a temp dir and bind-mount at `mount_path`
@@ -192,7 +192,7 @@ When `sandbox.exec` runs with an `artifact_id` that has layers:
 
 The evaluator just runs:
 ```jsonc
-sandbox.exec({
+sandbox_exec({
   "artifact_id": "art_1756ca5a",
   "command": "PYTHONPATH=/tmp/deps python3 weather_fetcher.py Paris"
 })
@@ -214,7 +214,7 @@ Packager agent profile:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["content.", "artifact.", "sandbox.exec"]
+    allowed: ["content.", "artifact.", "sandbox_exec"]
   - type: "ReadAccess"
     scopes: ["self.*", "session/*"]
   - type: "WriteAccess"
@@ -227,7 +227,7 @@ The packager's sandbox must have network access. This is controlled by the gatew
 **Network access for the packager**:
 - The packager agent directory gets a `sandbox.conf` (or env var) that tells the gateway to use `--share-net` for this agent's sandbox executions
 - This is a deployment/admin decision, not an agent capability
-- The packager does NOT get `NetworkAccess` capability in the general sense — it only gets network during `sandbox.exec` for dep installation
+- The packager does NOT get `NetworkAccess` capability in the general sense — it only gets network during `sandbox_exec` for dep installation
 - Runtime code execution (by evaluator) still goes through the normal approval flow if it needs network
 
 Alternative: extend the existing `SandboxConfig` with a per-agent `share_net` flag:
@@ -251,13 +251,13 @@ Complete flow for the weather demo:
      "Install deps from requirements.txt and build artifact with deps"
 
    builder:
-     a. content.read("requirements.txt")          # get dep list
-     b. sandbox.exec({
+     a. content_read("requirements.txt")          # get dep list
+     b. sandbox_exec({
           "command": "pip install -r requirements.txt -t /tmp/deps",
           "capture_paths": [{"path": "/tmp/deps", "mount_as": "/tmp/deps"}]
         })
         → captured_layers: [{layer_id: "layer_abc123", ...}]
-     c. artifact.build({
+     c. artifact_build({
           "inputs": ["weather_fetcher.py"],
           "layers": [{"layer_id": "layer_abc123", "name": "python-deps", "mount_path": "/tmp/deps"}],
           "entrypoints": ["weather_fetcher.py"]
@@ -268,7 +268,7 @@ Complete flow for the weather demo:
      "Validate artifact art_with_deps, run weather_fetcher.py Paris"
 
    evaluator:
-     a. sandbox.exec({
+     a. sandbox_exec({
           "artifact_id": "art_with_deps",
           "command": "PYTHONPATH=/tmp/deps python3 weather_fetcher.py Paris"
         })
@@ -304,7 +304,7 @@ impl LayerStore {
 
 ### 3.2 Capture Mechanism
 
-`sandbox.exec` with `capture_paths` needs the sandbox workspace to persist after command execution so the gateway can read the captured paths. Current flow:
+`sandbox_exec` with `capture_paths` needs the sandbox workspace to persist after command execution so the gateway can read the captured paths. Current flow:
 
 ```
 spawn sandbox → run command → wait_with_output → drop sandbox
@@ -331,7 +331,7 @@ Same source files + different dependency versions → different artifact ID. Cor
 
 ### 3.4 Sandbox Mount Changes
 
-`sandbox.exec` with `artifact_id` currently:
+`sandbox_exec` with `artifact_id` currently:
 ```rust
 fn resolve_files(artifact_id) → Vec<(name, content_bytes)>
 // Write each to temp, bind-mount at /tmp/<name>
@@ -385,7 +385,7 @@ Layers contain installed packages — a supply chain attack vector. Mitigations:
 
 - Layer digest is content-addressed — tampering is detected
 - Auditor agent inspects the artifact manifest (including layer references)
-- `promotion.record` findings can flag suspicious packages
+- `promotion_record` findings can flag suspicious packages
 - Future: pin dependency hashes in `runtime.lock`, verify at layer creation
 
 ### 5.2 Network Isolation
@@ -393,29 +393,29 @@ Layers contain installed packages — a supply chain attack vector. Mitigations:
 The packager agent's sandbox has network. Principles:
 
 - Network is granted at the **sandbox configuration** level, not as an agent capability
-- The packager can only reach the network during `sandbox.exec` — all other tool calls go through the gateway's normal policy engine
-- The packager cannot exfiltrate data — content.write/read are still gateway-mediated
+- The packager can only reach the network during `sandbox_exec` — all other tool calls go through the gateway's normal policy engine
+- The packager cannot exfiltrate data — content_write/read are still gateway-mediated
 - Other agents (evaluator, coder, etc.) remain fully isolated
 
 ### 5.3 Layer Tampering
 
 Layers are immutable (read-only after creation). The digest is verified:
-- At artifact.build time (layers referenced must exist with matching digest)
+- At artifact_build time (layers referenced must exist with matching digest)
 - At sandbox mount time (layer archive is verified before extraction)
 
 ---
 
 ## 6. Alternatives Considered
 
-### 6.1 `build_command` on `artifact.build`
+### 6.1 `build_command` on `artifact_build`
 
-Let agents pass a build command to `artifact.build` that runs in a network-enabled sandbox before packaging.
+Let agents pass a build command to `artifact_build` that runs in a network-enabled sandbox before packaging.
 
-**Rejected because**: Makes `artifact.build` into a build system. The gateway gains implicit knowledge of "build phases." Violates the neutral executor principle.
+**Rejected because**: Makes `artifact_build` into a build system. The gateway gains implicit knowledge of "build phases." Violates the neutral executor principle.
 
 ### 6.2 Sandbox Reuse
 
-Persist a sandbox across multiple `sandbox.exec` calls. Install deps once, reuse the sandbox.
+Persist a sandbox across multiple `sandbox_exec` calls. Install deps once, reuse the sandbox.
 
 **Rejected because**: Bubblewrap has no "save image" concept. Docker could do this but couples design to one driver. Artifacts (content-addressed, portable) are the natural reusable unit, not sandboxes.
 
@@ -425,11 +425,11 @@ Use Docker images with common deps pre-installed.
 
 **Rejected because**: Couples to Docker driver. Not content-addressed. No dedup. Doesn't generalize to bubblewrap or microvm.
 
-### 6.4 Agent Writes Every File via content.write
+### 6.4 Agent Writes Every File via content_write
 
-Packager does `content.write` for every file in `node_modules/`.
+Packager does `content_write` for every file in `node_modules/`.
 
-**Rejected because**: 30,000 content.write calls. Infeasible for LLM-driven agents.
+**Rejected because**: 30,000 content_write calls. Infeasible for LLM-driven agents.
 
 ---
 

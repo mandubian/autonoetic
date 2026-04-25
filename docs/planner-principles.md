@@ -26,13 +26,13 @@ This principle replaces the "MUST delegate" table. The table was derivable from 
 
 ### 3. Secrets never reach LLM context
 
-Any flow involving API keys or tokens must route through `credential.setup` / `credential.request`. The gateway owns the vault. A script that calls a registration API directly prints the secret into LLM context — that is the security anti-pattern `registration.default` exists to prevent.
+Any flow involving API keys or tokens must route through `credential_setup` / `credential_request`. The gateway owns the vault. A script that calls a registration API directly prints the secret into LLM context — that is the security anti-pattern `registration.default` exists to prevent.
 
 This principle was the root cause of the security routing bug that triggered this refactor: the planner was sending registration tasks to `coder.default`, which wrote Python scripts that logged secrets into the chat. The principle makes the invariant explicit and durable.
 
 ### 4. Reuse state, never recompute
 
-On resume after any interruption, `workflow.state` is the first call — always. The `reuse_guards` flags are mechanical truth. If `has_coder_artifact: true`, do not re-spawn coder. Respecting them is not optional; violating them creates retry loops, wasted compute, and inconsistent workflow state.
+On resume after any interruption, `workflow_state` is the first call — always. The `reuse_guards` flags are mechanical truth. If `has_coder_artifact: true`, do not re-spawn coder. Respecting them is not optional; violating them creates retry loops, wasted compute, and inconsistent workflow state.
 
 ### 5. Sequential dependencies are sequential
 
@@ -40,7 +40,7 @@ If B uses A's output, they cannot be parallelized. Only tasks with no data depen
 
 ### 6. Artifact IDs come from structured results
 
-Never type artifact IDs from memory. Copy from `artifact.build`, `artifact.resolve_ref`, or child `result_summary`. Run `artifact.inspect(artifact_id)` as a preflight before spawning any dependent child. Wrong artifact IDs create avoidable retry loops.
+Never type artifact IDs from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Run `artifact_inspect(artifact_id)` as a preflight before spawning any dependent child. Wrong artifact IDs create avoidable retry loops.
 
 ---
 
@@ -52,7 +52,7 @@ Never type artifact IDs from memory. Copy from `artifact.build`, `artifact.resol
 | Promotion gate decision matrix | `agent-factory.default` |
 | Post-coder dependency check | `agent-factory.default` |
 | Agent installation message templates | `agent-factory.default` |
-| Service registration / credential.setup loop | `registration.default` |
+| Service registration / credential_setup loop | `registration.default` |
 | "Why registration is not a coder task" prose | Principle 3 |
 | Enumerated error-type-to-action table | Failure handling as principles |
 | Exhaustive "MUST delegate" and "CANNOT do directly" lists | Foundational agent directory + Principle 2 |
@@ -76,7 +76,7 @@ The planner knows these twelve agents by name. Each entry is one line: the role,
 | `packager.default` | Dependency installation for code agents | NetworkAccess (deps) |
 | `specialized_builder.default` | Final agent install (revision create + promote) | AgentRevision |
 | `debugger.default` | Root cause analysis when things fail repeatedly | CodeExecution |
-| `registration.default` | Service onboarding via credential.setup | CredentialAccess |
+| `registration.default` | Service onboarding via credential_setup | CredentialAccess |
 | `agent-factory.default` | Building a new agent end-to-end | AgentSpawn |
 | `discovery.default` | Finding a non-foundational agent for an intent | SandboxFunctions |
 
@@ -106,7 +106,7 @@ For non-foundational (user-installed, evolved) agents, the planner uses `discove
    → debugger.default
 
 7. Recurring/scheduled task
-   → agent-factory.default → scheduler.cron.create
+   → agent-factory.default → scheduler_cron_create
 
 8. Pure prose, analysis, knowledge lookup
    → handle directly
@@ -139,18 +139,18 @@ The correct path:
 User: "Register my account with Moltbook"
 Planner → researcher.default (discover skill_url from service docs)
 Planner → registration.default (spawn with skill_url)
-registration.default → credential.setup(skill_url)   # HTTP happens gateway-side
+registration.default → credential_setup(skill_url)   # HTTP happens gateway-side
   → gateway stores secret in vault
   → returns suspended_for_user_input if user input needed
-registration.default → user.ask(question)
-registration.default → credential.setup(credential_id, resume_vars)  # resumes
+registration.default → user_ask(question)
+registration.default → credential_setup(credential_id, resume_vars)  # resumes
   → ok: true, credential_id returned
 ```
 
 The LLM never sees the secret at any step. This is Principle 3 operationalized.
 
 The security guarantee comes from `registration.default`'s capability declaration:
-- `CredentialAccess: ["*"]` — can call `credential.setup` and `credential.request`
+- `CredentialAccess: ["*"]` — can call `credential_setup` and `credential_request`
 - `NetworkAccess: ["*"]` — can reach any host for the setup flow
 
 The planner lacks both. It cannot accidentally perform registration even if misconfigured. Capability enforcement is mechanical (Principle 1).

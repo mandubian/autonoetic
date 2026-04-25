@@ -82,7 +82,7 @@ async fn test_agent_message_delivery() -> anyhow::Result<()> {
 
     // 1. Invoke agent.message
     let result = registry.execute(
-        "agent.message",
+        "agent_message",
         &manifest,
         &policy,
         &workspace.agents_dir.join("sender-agent"),
@@ -140,7 +140,7 @@ async fn test_agent_message_missing_target_agent_returns_structured_error() -> a
     });
 
     let result = registry.execute(
-        "agent.message",
+        "agent_message",
         &manifest,
         &policy,
         &workspace.agents_dir.join("sender-agent"),
@@ -193,7 +193,7 @@ async fn test_agent_message_existing_agent_without_live_session_returns_structur
     });
 
     let result = registry.execute(
-        "agent.message",
+        "agent_message",
         &manifest,
         &policy,
         &workspace.agents_dir.join("sender-agent"),

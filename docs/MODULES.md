@@ -90,20 +90,20 @@ The core gateway library. Handles all server, runtime, and execution logic.
 |------|---------------|
 | `lifecycle.rs` | Agent execution loop (LLM + tool dispatch) |
 | `tools/mod.rs` | NativeTool trait, NativeToolRegistry, default_registry(), shared helpers |
-| `tools/sandbox.rs` | `sandbox.exec` |
-| `tools/web.rs` | `web.search`, `web.fetch` |
-| `tools/knowledge.rs` | `knowledge.*`, `digest.query` |
-| `tools/agent.rs` | `agent.spawn`, `agent.exists`, `agent.discover` |
+| `tools/sandbox.rs` | `sandbox_exec` |
+| `tools/web.rs` | `web_search`, `web_fetch` |
+| `tools/knowledge.rs` | `knowledge.*`, `digest_query` |
+| `tools/agent.rs` | `agent_spawn`, `agent_exists`, `agent_discover` |
 | `tools/agent_revision.rs` | `agent.revision.*` |
 | `tools/evaluation.rs` | `eval.*` |
-| `tools/workflow.rs` | `workflow.*`, `approval.status` |
-| `tools/user_interaction.rs` | `user.ask`, `user.interaction.status` |
+| `tools/workflow.rs` | `workflow.*`, `approval_status` |
+| `tools/user_interaction.rs` | `user_ask`, `user_interaction_status` |
 | `tools/artifact.rs` | `artifact.*` |
-| `tools/content.rs` | `content.write`, `content.read` |
-| `tools/promotion.rs` | `promotion.record`, `promotion.query` |
-| `tools/session.rs` | `session.escalate` |
-| `tools/execution.rs` | `execution.search` |
-| `tools/digest.rs` | `digest.annotate` |
+| `tools/content.rs` | `content_write`, `content_read` |
+| `tools/promotion.rs` | `promotion_record`, `promotion_query` |
+| `tools/session.rs` | `session_escalate` |
+| `tools/execution.rs` | `execution_search` |
+| `tools/digest.rs` | `digest_annotate` |
 | `content_store.rs` | SHA-256 content-addressable storage |
 | `session_snapshot.rs` | Session checkpointing and forking |
 | `tool_call_processor.rs` | Tool execution, disclosure tracking |
@@ -129,7 +129,7 @@ The core gateway library. Handles all server, runtime, and execution logic.
 
 | Responsibility |
 |---------------|
-| JSON-RPC method dispatch (`event.ingest`, `agent.spawn`) |
+| JSON-RPC method dispatch (`event.ingest`, `agent_spawn`) |
 | Explicit target validation (missing target fails immediately) |
 | Alias registry resolution (target → active revision) |
 | Session binding creation (pinned revision + runtime lock) |
@@ -383,7 +383,7 @@ mode = "deterministic"  # disabled, deterministic, or llm
 audit = true
 ```
 
-> **Note:** `default_lead_agent_id` and `agent_install_approval_policy` have been removed. Routing requires an explicit `target_agent_id`; agent activation is always via `agent.revision.promote`.
+> **Note:** `default_lead_agent_id` and `agent_install_approval_policy` have been removed. Routing requires an explicit `target_agent_id`; agent activation is always via `agent_revision_promote`.
 
 Session-scoped LLM/tool/token/wall-clock/optional USD caps are configured in YAML as `session_budget` (see [session-budget.md](session-budget.md)).
 

@@ -23,7 +23,7 @@ This plan makes the runtime responses expose a compact, safe subset of that stru
 
 Primary targets:
 
-- `sandbox.exec` approval-required response
+- `sandbox_exec` approval-required response
 - `agent.install` approval-required response
 
 Likely files:
@@ -83,7 +83,7 @@ Suggested shape:
 
 ## Tool-Specific Details
 
-## 1. `sandbox.exec`
+## 1. `sandbox_exec`
 
 Return:
 
@@ -156,7 +156,7 @@ Tasks:
   - `retry_field`
   - `subject`
 
-## Phase 2: `sandbox.exec`
+## Phase 2: `sandbox_exec`
 
 Tasks:
 
@@ -192,7 +192,7 @@ This helper should reduce drift between:
 
 Tasks:
 
-- [x] add unit tests for `sandbox.exec` approval response shape
+- [x] add unit tests for `sandbox_exec` approval response shape
 - [x] add unit tests for `agent.install` approval response shape
 - [x] assert presence of:
   - `approval.kind`
@@ -219,7 +219,7 @@ Recommended:
 - no
 - keep it close, but optimize for runtime UX and compactness
 
-2. Should `detected_patterns` remain top-level in `sandbox.exec` responses?
+2. Should `detected_patterns` remain top-level in `sandbox_exec` responses?
 
 Recommended:
 
@@ -245,7 +245,7 @@ Recommended:
 ## Acceptance Criteria
 
 - approval-blocked responses include a structured `approval` object
-- `sandbox.exec` responses explain what remote-capable action is awaiting approval
+- `sandbox_exec` responses explain what remote-capable action is awaiting approval
 - `agent.install` responses explain what install is awaiting approval and why
 - agents can explain approval requirements without parsing prose
 - existing retry flow remains compatible

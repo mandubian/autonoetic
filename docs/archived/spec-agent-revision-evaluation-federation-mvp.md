@@ -37,7 +37,7 @@ After this MVP:
 - the user-facing `agent_id` resolves through a mutable alias entry to a concrete revision;
 - a new candidate revision can be created from an artifact without mutating the live alias;
 - a revision's execution closure is explicit: revision bytes plus pinned `runtime.lock` and any pinned layer mounts;
-- the first activation of an agent is `agent.revision.create` plus `agent.revision.promote`, not a separate install path;
+- the first activation of an agent is `agent_revision_create` plus `agent_revision_promote`, not a separate install path;
 - eval suites can run against candidate revisions;
 - promotion and rollback are alias updates recorded in durable history;
 - the gateway stores enough provenance to support later federation, peer import, and training workflows.
@@ -82,16 +82,16 @@ Required now:
 
 The MVP tool surface is limited to:
 
-- `agent.revision.create`
-- `agent.revision.list`
-- `agent.revision.inspect`
-- `agent.revision.promote`
-- `agent.revision.rollback`
-- `agent.revision.diff`
-- `eval.suite.publish`
-- `eval.run`
-- `eval.compare`
-- `eval.report`
+- `agent_revision_create`
+- `agent_revision_list`
+- `agent_revision_inspect`
+- `agent_revision_promote`
+- `agent_revision_rollback`
+- `agent_revision_diff`
+- `eval_suite_publish`
+- `eval_run`
+- `eval_compare`
+- `eval_report`
 
 Registry-backed inspection surfaces such as alias listing or promotion history may still exist as CLI or admin HTTP operations in MVP, but they are not required native tools.
 
@@ -118,7 +118,7 @@ The following are explicitly post-MVP:
 
 Example: `planner.default`
 
-This is what callers pass to `event.ingest` and `agent.spawn` in normal use.
+This is what callers pass to `event.ingest` and `agent_spawn` in normal use.
 
 Validation rules:
 
@@ -173,8 +173,8 @@ Development helpers may package an authoring directory into an `AgentBundle` art
 Seeding a new logical agent is:
 
 1. build or upload an `agent_bundle` artifact;
-2. call `agent.revision.create`;
-3. call `agent.revision.promote` for alias `agent_id`.
+2. call `agent_revision_create`;
+3. call `agent_revision_promote` for alias `agent_id`.
 
 `agent.install` is removed rather than wrapped.
 
@@ -391,7 +391,7 @@ pub struct PromotionRecord {
 
 Revision status semantics:
 
-- `candidate`: default result of `agent.revision.create`; runnable by explicit `agent_ref`, but not yet active through alias movement;
+- `candidate`: default result of `agent_revision_create`; runnable by explicit `agent_ref`, but not yet active through alias movement;
 - `ready`: optional promotable marker for deployments that add an explicit pre-promotion validation or review step;
 - `rejected`: not promotable and not eligible for new normal session launches;
 - `archived`: retained for audit and rollback history but not eligible for ordinary promotion.
@@ -649,7 +649,7 @@ Primary key:
 
 All new tools are native tools.
 
-### 10.1 `agent.revision.create`
+### 10.1 `agent_revision_create`
 
 Purpose: create a candidate immutable revision from an artifact.
 
@@ -688,7 +688,7 @@ Rules:
 - store lineage to `base_ref` if provided;
 - if no alias exists yet, creation is still allowed, but activation requires a later promote step.
 
-### 10.2 `agent.revision.list`
+### 10.2 `agent_revision_list`
 
 Input:
 
@@ -698,7 +698,7 @@ Input:
 
 Output: ordered newest first.
 
-### 10.3 `agent.revision.inspect`
+### 10.3 `agent_revision_inspect`
 
 Input:
 
@@ -715,7 +715,7 @@ Output includes:
 - current aliases pointing to this revision;
 - latest eval runs.
 
-### 10.4 `agent.revision.promote`
+### 10.4 `agent_revision_promote`
 
 Input:
 
@@ -735,7 +735,7 @@ Rules:
 - write one `promotion_history` record;
 - update alias atomically.
 
-### 10.5 `agent.revision.rollback`
+### 10.5 `agent_revision_rollback`
 
 Input:
 
@@ -752,7 +752,7 @@ Rules:
 - `target_revision_id` must belong to the same logical agent;
 - if omitted, rollback targets the immediately previous revision from promotion history.
 
-### 10.6 `eval.suite.publish`
+### 10.6 `eval_suite_publish`
 
 Input:
 
@@ -783,7 +783,7 @@ Minimal assertion language for MVP:
 - `artifacts_min`
 - `artifacts_max`
 
-### 10.7 `eval.run`
+### 10.7 `eval_run`
 
 Input:
 
@@ -813,7 +813,7 @@ MVP behavior:
 - `baseline_ref`, when supplied, is stored as report metadata only and does not change case assertions or pass/fail semantics in MVP;
 - final report is written to content store and referenced by `report_handle`.
 
-### 10.8 `eval.report`
+### 10.8 `eval_report`
 
 Input:
 
@@ -823,7 +823,7 @@ Input:
 
 Output includes summary fields and `report_handle`.
 
-### 10.9 `agent.revision.diff`
+### 10.9 `agent_revision_diff`
 
 Input:
 
@@ -847,7 +847,7 @@ Rules:
 - diff operates on immutable materialized revision directories only;
 - output ordering must be deterministic.
 
-### 10.10 `eval.compare`
+### 10.10 `eval_compare`
 
 Input:
 
@@ -869,7 +869,7 @@ Rules:
 
 - baseline and candidate refs must resolve to the same logical agent in MVP;
 - if completed runs already exist for each revision and suite, reuse them;
-- when missing runs are queued, return queued run ids and require a later `eval.compare` call to obtain the completed report.
+- when missing runs are queued, return queued run ids and require a later `eval_compare` call to obtain the completed report.
 
 ## 11. Capability Model Changes
 

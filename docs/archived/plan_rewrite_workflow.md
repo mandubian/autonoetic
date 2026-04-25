@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-When an agent tool call (`sandbox.exec`, `agent.install`) requires operator approval, the current system **kills the agent turn** and relies on the agent to understand a text notification and retry the tool with `approval_ref` on resume. This breaks agent continuity:
+When an agent tool call (`sandbox_exec`, `agent.install`) requires operator approval, the current system **kills the agent turn** and relies on the agent to understand a text notification and retry the tool with `approval_ref` on resume. This breaks agent continuity:
 
 - The coder agent loses its mid-task reasoning (write code → exec → **approval wall** → resume → forgets to create artifact → planner retries from scratch → loop).
 - Two different resume message formats exist (plain text signal vs JSON checkpoint), confusing the agent.
@@ -21,7 +21,7 @@ The approval boundary becomes invisible to the agent. From the LLM's perspective
 
 ```
 Agent turn executes normally:
-  LLM → tool_call(sandbox.exec) → tool handler detects remote access
+  LLM → tool_call(sandbox_exec) → tool handler detects remote access
     → returns {"approval_required": true, "request_id": "apr-xxx"}
 
 Turn loop (lifecycle.rs) intercepts:
@@ -40,7 +40,7 @@ Scheduler tick detects resolved approval:
 execute_with_history detects continuation:
   1. Load TurnContinuation from disk
   2. Check approval decision in SQLite
-  3. Gateway executes the approved action directly (sandbox.exec / agent.install)
+  3. Gateway executes the approved action directly (sandbox_exec / agent.install)
   4. Reconstruct history: [...saved_history, assistant(tool_calls), tool_result(REAL output)]
   5. Delete continuation file
   6. Enter main loop — LLM sees its tool call and the real result
@@ -150,7 +150,7 @@ pub fn execute_approved_action(
     match &decision.action {
         ScheduledAction::SandboxExec { command, dependencies, .. } => {
             // Execute the sandbox command directly using the same sandbox driver
-            // that sandbox.exec uses, but with approval already validated.
+            // that sandbox_exec uses, but with approval already validated.
             // Returns: {"ok": true/false, "exit_code": N, "stdout": "...", "stderr": "..."}
             execute_sandbox_command(command, dependencies, manifest, agent_dir, config)
         }
@@ -203,12 +203,12 @@ fn check_approval_timeouts(config, store) {
 
 ## Spec: Task Cancellation
 
-**New tool:** `workflow.cancel_task`
+**New tool:** `workflow_cancel_task`
 
 ```rust
 // Tool definition
 {
-    "name": "workflow.cancel_task",
+    "name": "workflow_cancel_task",
     "description": "Cancel a task that is AwaitingApproval or Pending. Running tasks cannot be cancelled (use timeout instead).",
     "parameters": {
         "task_id": { "type": "string", "description": "Task to cancel" },
@@ -545,7 +545,7 @@ Remove string-based event type detection in `update_task_run_status()` and pass 
 - [x] **1.2** Add `execute_approved_action()` function to `continuation.rs`. Wire to existing sandbox execution (`sandbox_driver::execute_command`) and agent install code paths. Write unit tests for both `SandboxExec` and `AgentInstall` dispatch.
 - [x] **1.3** Add `TurnOutcome` enum to `lifecycle.rs` (or a shared types location). Keep `execute_with_history` returning `Result<Option<String>>` for now — `TurnOutcome` will be adopted in Phase 2.
 - [x] **1.4** Add `approval_timeout_secs` config field to `GatewayConfig` with default 600. Add `check_approval_timeouts()` function to scheduler (calls `list_suspended_task_ids`, checks elapsed time, marks timed-out tasks as Failed).
-- [x] **1.5** Add `workflow.cancel_task` tool to `tools.rs`. Only supports cancelling `AwaitingApproval` and `Pending` tasks. Deletes continuation file, updates task status to `Cancelled`.
+- [x] **1.5** Add `workflow_cancel_task` tool to `tools.rs`. Only supports cancelling `AwaitingApproval` and `Pending` tasks. Deletes continuation file, updates task status to `Cancelled`.
 
 ### Phase 2: Turn Loop Suspension
 
@@ -559,7 +559,7 @@ Remove string-based event type detection in `update_task_run_status()` and pass 
 - [x] **3.1** Modify `spawn_task_execution` in `scheduler.rs`: before calling `spawn_agent_once`, check for `TurnContinuation`. If found + approval resolved → call `execute_approved_action` → reconstruct history → call `execute_with_history` with reconstructed history. Handle remaining tool calls.
 - [x] **3.2** Modify `process_runnable_workflow_tasks` in `scheduler.rs`: remove resume message extraction logic (lines 601-618) and stale queued task reconciliation (lines 620-654). The continuation model handles this.
 - [x] **3.3** Wire `check_approval_timeouts()` into `run_scheduler_tick_at()` after processing background agents.
-- [x] **3.4** Write integration test: agent calls `sandbox.exec` with remote access → task suspends → approve → task resumes → agent gets real exec output → agent continues and completes. Verify the LLM conversation history contains the real tool result, not an approval notification.
+- [x] **3.4** Write integration test: agent calls `sandbox_exec` with remote access → task suspends → approve → task resumes → agent gets real exec output → agent continues and completes. Verify the LLM conversation history contains the real tool result, not an approval notification.
 
 ### Phase 4: Cleanup
 
@@ -578,8 +578,8 @@ Goal: prove the continuation model is correct under concurrency, timeout, cancel
 Current coverage snapshot:
 - `turn_continuation_approval_integration::test_approval_continuation_suspends_and_resumes` covers the core suspend/approve/resume path and verifies the resumed LLM sees the real tool result.
 - `turn_continuation_approval_integration::test_approval_continuation_file_deleted_on_cancellation` covers continuation file cleanup via direct continuation deletion (low-level behavior).
-- `turn_continuation_approval_integration::test_parallel_join_waits_for_approval_task_completion` covers parallel join gating: one task completes while another awaits approval, `workflow.wait` reports `join_satisfied=false`, then flips to `true` only after the approved task completes.
-- `turn_continuation_approval_integration::test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join` covers end-to-end cancellation via `workflow.cancel_task`: suspended task cancellation, continuation deletion, terminal task state, and join satisfaction.
+- `turn_continuation_approval_integration::test_parallel_join_waits_for_approval_task_completion` covers parallel join gating: one task completes while another awaits approval, `workflow_wait` reports `join_satisfied=false`, then flips to `true` only after the approved task completes.
+- `turn_continuation_approval_integration::test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join` covers end-to-end cancellation via `workflow_cancel_task`: suspended task cancellation, continuation deletion, terminal task state, and join satisfaction.
 - `turn_continuation_approval_integration::test_approval_timeout_fails_task_and_satisfies_join` covers approval timeout: stale `AwaitingApproval` task fails with reason `"Approval timed out"`, continuation is deleted, and join becomes satisfiable.
 - `turn_continuation_approval_integration::test_restart_during_suspension_then_approve_and_resume` covers gateway restart behavior: continuation persists across a new `GatewayExecutionService`/store instance, then resumes correctly after approval.
 - `turn_continuation_approval_integration::test_two_approval_tasks_both_resume_before_join_satisfies` covers dual approval suspension/resume: both tasks suspend, both are approved, and join is satisfied only after both resumed tasks complete.
@@ -591,9 +591,9 @@ Hardening exit criteria for this phase:
 - Failure paths assert reason strings exactly (for deterministic operator/debug UX).
 - No test relies on synthetic resume messages; all resume behavior flows through persisted continuation state.
 
-- [x] **5.1** Integration test: parallel tasks where one hits approval, others complete. Verify join is not satisfied until approved task also completes. Verify planner sees correct status via `workflow.wait`.
+- [x] **5.1** Integration test: parallel tasks where one hits approval, others complete. Verify join is not satisfied until approved task also completes. Verify planner sees correct status via `workflow_wait`.
 - [x] **5.2** Integration test: approval timeout. Task suspends → no approval for `approval_timeout_secs` → task marked Failed → join fires → planner sees failure reason "Approval timed out".
-- [x] **5.3** Integration test: task cancellation via `workflow.cancel_task`. Suspended task cancelled → continuation deleted → task terminal → join fires.
+- [x] **5.3** Integration test: task cancellation via `workflow_cancel_task`. Suspended task cancelled → continuation deleted → task terminal → join fires.
 - [x] **5.4** Integration test: gateway restart during suspension. Stop gateway while task is AwaitingApproval → restart → approve → task resumes from continuation → completes.
 - [x] **5.5** Integration test: two tasks both hit approval simultaneously. Both approved. Both resume. Join satisfied. Planner resumes.
 - [x] **5.6** Verify chat CLI still displays `task.awaiting_approval`, `task.approved`, `task.rejected` events correctly (no changes expected — events still emitted by `update_task_run_status`).
@@ -632,6 +632,6 @@ Hardening exit criteria for this phase:
 | `autonoetic-gateway/src/scheduler/workflow_store.rs` | Minor fix | ~15 lines changed |
 | `autonoetic-types/src/workflow.rs` | Minor cleanup | ~5 lines removed |
 | `autonoetic-types/src/config.rs` | Add field | ~3 lines |
-| `autonoetic-gateway/src/runtime/tools.rs` | Add tool | ~60 lines (workflow.cancel_task) |
+| `autonoetic-gateway/src/runtime/tools.rs` | Add tool | ~60 lines (workflow_cancel_task) |
 | `autonoetic-gateway/src/execution.rs` | Modify | ~15 lines (SpawnResult/TurnOutcome) |
 | **Net** | | **~+200 new, ~-400 removed** |

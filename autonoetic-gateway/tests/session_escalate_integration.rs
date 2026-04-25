@@ -29,7 +29,7 @@ fn make_escalation_stub_responses() -> Vec<serde_json::Value> {
                     "id": "tc-escalate-001",
                     "type": "function",
                     "function": {
-                        "name": "session.escalate",
+                        "name": "session_escalate",
                         "arguments": serde_json::json!({
                             "reason": "I am stuck on a critical bug",
                             "context": "Tried multiple approaches but none work",
@@ -159,7 +159,7 @@ async fn test_session_escalate_creates_approval_and_suspends() -> anyhow::Result
     std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []")?;
 
     let result = registry.execute(
-        "session.escalate",
+        "session_escalate",
         &manifest,
         &policy,
         &agent_dir,
@@ -238,7 +238,7 @@ async fn test_session_escalate_non_human_no_approval() -> anyhow::Result<()> {
     std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []")?;
 
     let result = registry.execute(
-        "session.escalate",
+        "session_escalate",
         &manifest,
         &policy,
         &agent_dir,
@@ -298,7 +298,7 @@ async fn test_session_escalate_specialist_no_approval() -> anyhow::Result<()> {
     std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []")?;
 
     let result = registry.execute(
-        "session.escalate",
+        "session_escalate",
         &manifest,
         &policy,
         &agent_dir,

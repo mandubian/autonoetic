@@ -300,7 +300,7 @@ fn test_checkpoint_with_pending_tool_state() {
     checkpoint.pending_tool_state = Some(PendingToolState {
         completed_tool_results: vec![(
             "call-1".to_string(),
-            "sandbox.exec".to_string(),
+            "sandbox_exec".to_string(),
             r#"{"ok": true}"#.to_string(),
         )],
         pending_tool_call: PendingToolCall {

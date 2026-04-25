@@ -57,9 +57,9 @@ For example:
 
 ### Gateway JSON-RPC (control plane, newline-delimited TCP)
 
-The daemon also serves **JSON-RPC 2.0** on its configured TCP port for operators and channel adapters. Besides `agent.spawn` / `event.ingest`, user-interaction answering is first-class:
+The daemon also serves **JSON-RPC 2.0** on its configured TCP port for operators and channel adapters. Besides `agent_spawn` / `event.ingest`, user-interaction answering is first-class:
 
-- **`interaction.answer`**: Persist a `user.ask` response when `interaction_id` is known (`answer_text` *xor* `answer_option_id`), then run **gateway-owned resume** (workflow task `Paused` → `Runnable` + durable queue, or `resume_from_user_interaction` for standalone sessions).
+- **`interaction.answer`**: Persist a `user_ask` response when `interaction_id` is known (`answer_text` *xor* `answer_option_id`), then run **gateway-owned resume** (workflow task `Paused` → `Runnable` + durable queue, or `resume_from_user_interaction` for standalone sessions).
 - **`interaction.resolve_and_answer`**: For “dumb” inbound channels; resolves the interaction by deterministic priority (`interaction_id` → `reply_to_interaction_id` → exactly one pending under `root_session_id`), then applies the same orchestration as `interaction.answer`.
 
 Contract, resolution order, and rollout notes: [`docs/plan-channel-agnostic-interaction-answering.md`](../plan-channel-agnostic-interaction-answering.md).

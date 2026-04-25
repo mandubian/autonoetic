@@ -10,7 +10,7 @@ Reduce dependency-install approval churn by mechanically redirecting non-builder
 
 2. **No mechanical redirect.** When coder/evaluator tries `pip install`, the gateway runs the full remote-access approval flow instead of telling the agent to stop and route through builder.
 
-3. **Evaluator can't access builder's layers automatically.** Builder captures dependency layers via `capture_paths` and embeds them in artifacts. But when planner spawns evaluator, the evaluator's `sandbox.exec` calls don't auto-mount those layers unless the LLM manually passes `artifact_id` in every call.
+3. **Evaluator can't access builder's layers automatically.** Builder captures dependency layers via `capture_paths` and embeds them in artifacts. But when planner spawns evaluator, the evaluator's `sandbox_exec` calls don't auto-mount those layers unless the LLM manually passes `artifact_id` in every call.
 
 4. **Safe inspection commands trigger approval.** `pip list`, `pip show`, `python3 -c "import pkg"` are read-only operations that don't need network access, but the remote access analyzer flags them.
 
@@ -125,7 +125,7 @@ Adding new safe commands is a one-line table entry.
 
 3. **Artifact-level dependency declarations.** `dependency_plan_from_args_or_lock` (tools/mod.rs:573) already normalizes dependency intent from either explicit args or `runtime.lock`. A future step could allow artifacts to declare their dependency requirements in their manifest, enabling the gateway to automatically route artifacts through packager without planner guidance.
 
-4. **Layer composition.** `artifact.build` already accepts `layers: Vec<ArtifactLayer>`. Multiple packager runs (Python deps + Node deps) could produce separate layers composed into one artifact. No gateway changes needed — the layer infrastructure already supports this.
+4. **Layer composition.** `artifact_build` already accepts `layers: Vec<ArtifactLayer>`. Multiple packager runs (Python deps + Node deps) could produce separate layers composed into one artifact. No gateway changes needed — the layer infrastructure already supports this.
 
 ### What keeps the gateway dumb
 
@@ -152,11 +152,11 @@ The intelligence lives in the planner's routing decisions and the agents' behavi
 | `SandboxMount` | `sandbox.rs:696` | Bind mount struct — adding `readonly` field |
 | `LayerStore` | `layer_store.rs` | Content-addressed layer storage (compress, extract) |
 | `ArtifactLayer` | `types/layer.rs:28` | Layer references in artifact bundles |
-| `SandboxExecArgs.artifact_id` | `tools/mod.rs:559` | Already exists — triggers layer mounting in sandbox.exec |
-| Layer auto-mount in sandbox.exec | `sandbox.rs:1303-1334` | Extracts and mounts artifact layers — reuse this logic |
+| `SandboxExecArgs.artifact_id` | `tools/mod.rs:559` | Already exists — triggers layer mounting in sandbox_exec |
+| Layer auto-mount in sandbox_exec | `sandbox.rs:1303-1334` | Extracts and mounts artifact layers — reuse this logic |
 | `NetworkAccess` auto-approve | `sandbox.rs:833-849` | Builder already bypasses approval for all remote access |
 | `capture_paths` | `sandbox.rs:1418-1487` | Captures sandbox directories as layers after execution |
-| `artifact.build` with `layers` | `tools/artifact.rs` | Embeds layer references into artifact manifests |
+| `artifact_build` with `layers` | `tools/artifact.rs` | Embeds layer references into artifact manifests |
 | `LockedLayerMount` | `types/runtime_lock.rs:49` | Pinned layer mounts in runtime.lock |
 | `dependency_plan_from_args_or_lock` | `tools/mod.rs:573` | Normalizes dependency intent from args or runtime.lock |
 

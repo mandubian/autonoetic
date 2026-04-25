@@ -691,7 +691,7 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
     };
 
     match tool_name {
-        "sandbox.exec" => {
+        "sandbox_exec" => {
             let exit = v.get("exit_code").and_then(|x| x.as_i64());
             let stdout = as_str(&v, "stdout").unwrap_or("");
             let stderr = as_str(&v, "stderr").unwrap_or("");
@@ -727,7 +727,7 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
             }
             s
         }
-        "user.ask" => {
+        "user_ask" => {
             let q = as_str(&v, "question").unwrap_or("");
             let mut s = format!(
                 "`user.ask` — `{}`",
@@ -757,7 +757,7 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
             }
             s
         }
-        "content.write" | "content.read" => {
+        "content_write" | "content_read" => {
             let name = as_str(&v, "name")
                 .or_else(|| as_str(&v, "ref"))
                 .or_else(|| as_str(&v, "sandbox_path"))
@@ -811,7 +811,7 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
                 }
             }
         }
-        "artifact.build" | "artifact.inspect" => {
+        "artifact_build" | "artifact_inspect" => {
             let id = as_str(&v, "artifact_id")
                 .or_else(|| as_str(&v, "id"))
                 .unwrap_or("");
@@ -959,7 +959,7 @@ mod tests {
     #[test]
     fn format_sandbox_exec() {
         let j = r#"{"ok":true,"exit_code":1,"stdout":"a","stderr":"boom"}"#;
-        let s = format_tool_digest_result("sandbox.exec", j);
+        let s = format_tool_digest_result("sandbox_exec", j);
         assert!(s.contains("exit=1"));
         assert!(s.contains("stdout"));
         assert!(s.contains("stderr"));
@@ -968,7 +968,7 @@ mod tests {
     #[test]
     fn format_content_write_shows_tool_error_message() {
         let j = r#"{"ok":false,"error_type":"validation","message":"Invalid JSON arguments for 'content.write': missing field `name`"}"#;
-        let s = format_tool_digest_result("content.write", j);
+        let s = format_tool_digest_result("content_write", j);
         assert!(s.contains("validation"));
         assert!(s.contains("missing field"));
         assert!(!s.contains("(no result)"));

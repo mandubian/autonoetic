@@ -2,7 +2,7 @@
 
 ## Architectural Context
 
-The current Autonoetic gateway intercepts restricted tool calls (e.g., `sandbox.exec` requiring network), suspends the agent's workflow, waits for an operator approval, and then **auto-executes** the command on the agent's behalf. It injects a synthetic JSON payload containing the execution results (`exit_code`, `stdout`, `stderr`) into the session as a wake-up signal.
+The current Autonoetic gateway intercepts restricted tool calls (e.g., `sandbox_exec` requiring network), suspends the agent's workflow, waits for an operator approval, and then **auto-executes** the command on the agent's behalf. It injects a synthetic JSON payload containing the execution results (`exit_code`, `stdout`, `stderr`) into the session as a wake-up signal.
 
 **The Problem:**
 This breaks the natural LLM ReAct loop. The LLM remembers failing to run a tool, goes to sleep, and wakes up with a JSON document saying the tool has already run. This strips the LLM of its agency, causing context fragmentation where it often forgets its overarching task and immediately calls `EndTurn`. Furthermore, placing execution logic inside the `scheduler/approval.rs` violates the "Dumb Gateway" principle—the gateway should be a mechanism enforcing policy, not orchestrating tool calls.
@@ -21,7 +21,7 @@ Transition to a **"Dumb Gate / Agent Retry"** model. The gateway simply unblocks
 ### Simplify Wake-Up Notifications
 - Update `resume_session_after_approval()` to send a simple, stateless notification for `sandbox_exec`.
   - **Old Behavior:** Injects the full JSON stdout/stderr payload.
-  - **New Behavior:** `format!("Approval {} granted for your pending sandbox.exec. You must now RE-RUN your sandbox.exec command exactly as before, adding 'approval_ref': '{}' to the arguments.", request_id, request_id)`
+  - **New Behavior:** `format!("Approval {} granted for your pending sandbox_exec. You must now RE-RUN your sandbox_exec command exactly as before, adding 'approval_ref': '{}' to the arguments.", request_id, request_id)`
 
 ### Simplify Task Checkpointing
 - Update `build_approval_resume_message()`. It no longer needs to format the complex `execution: { stdout, stderr }` object. It just needs to provide the `status: "approved"` and `request_id`.
@@ -40,11 +40,11 @@ Once the backend is updated, we must revert the agent instructions to the pure R
 ```yaml
 ## Remote Access Approval (CRITICAL)
 
-When `sandbox.exec` returns `approval_required: true` with `request_id`:
+When `sandbox_exec` returns `approval_required: true` with `request_id`:
 **STOP and WAIT**. Do not continue or retry until the user approves.
 
 **After you receive an approval_resolved message:**
-1. Retry `sandbox.exec` with the EXACT SAME command PLUS the `approval_ref`:
+1. Retry `sandbox_exec` with the EXACT SAME command PLUS the `approval_ref`:
    {
      "command": "python3 /tmp/script.py",
      "approval_ref": "[request_id]"
@@ -58,7 +58,7 @@ When `sandbox.exec` returns `approval_required: true` with `request_id`:
 During deep review of the approval flow, several other areas were identified where the gateway enforces logic instead of mechanism, creating brittleness:
 
 ### A. Auto-Execution of `AgentInstall` and `WriteFile`
-While `SandboxExec` is moving to a retry model, `scheduler/approval.rs` **still auto-executes** `agent.install` and `content.write`. 
+While `SandboxExec` is moving to a retry model, `scheduler/approval.rs` **still auto-executes** `agent.install` and `content_write`. 
 - **The Danger**: For `agent.install`, the gateway dynamically builds a synthetic `parent_manifest` (with empty limits and capabilities) to execute the tool on behalf of the agent. This strips the action from the actual context and policy bounds of the calling agent (e.g., `specialized_builder.default`).
 - **The Fix**: These must also move to the "Dumb Gate / Agent Retry" model. The gateway should merely ping the builder agent that the install is approved, and the builder should retry `agent.install` with `install_approval_ref`.
 

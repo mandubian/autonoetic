@@ -274,13 +274,13 @@ fn test_lifecycle_cache_reuse_simulated() {
 #[test]
 fn test_artifact_exec_tool_registered_and_gated() {
     let registry = default_registry();
-    assert!(registry.has_tool("artifact.exec"));
+    assert!(registry.has_tool("artifact_exec"));
 
     let manifest = manifest_with_code_execution("coder.default");
     let defs = registry.available_definitions(&manifest);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
-        names.contains(&"artifact.exec"),
+        names.contains(&"artifact_exec"),
         "artifact.exec should be available with CodeExecution"
     );
 
@@ -321,7 +321,7 @@ fn test_artifact_exec_tool_registered_and_gated() {
     let defs = registry.available_definitions(&manifest_no_exec);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
-        !names.contains(&"artifact.exec"),
+        !names.contains(&"artifact_exec"),
         "artifact.exec should NOT be available without CodeExecution"
     );
 }

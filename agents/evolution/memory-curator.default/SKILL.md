@@ -83,9 +83,9 @@ Truncate `session_ids` to `max_sessions`.
 
 For each session ID:
 
-1. `digest.query(session_id)` — read the narrative digest
-2. `execution.search(session_id=<id>, limit=200)` — raw tool traces
-3. `observability.search(query=<session_id>)` then `observability.read(uri=<uri>)` — published report if available
+1. `digest_query(session_id)` — read the narrative digest
+2. `execution_search(session_id=<id>, limit=200)` — raw tool traces
+3. `observability_search(query=<session_id>)` then `observability_read(uri=<uri>)` — published report if available
 
 ### Step 3: Extract durable learnings
 
@@ -93,17 +93,17 @@ From the gathered data, identify and store:
 
 - **Effective patterns** (what worked well across sessions):
   ```
-  knowledge.store(id=<deterministic_hash>, content=..., tags=["source:memory_curator", "type:effective_pattern", "agent:<id>"], scope="evolution/patterns", visibility="global", retention="stable")
+  knowledge_store(id=<deterministic_hash>, content=..., tags=["source:memory_curator", "type:effective_pattern", "agent:<id>"], scope="evolution/patterns", visibility="global", retention="stable")
   ```
 
 - **Error patterns** (what repeatedly failed):
   ```
-  knowledge.store(id=<deterministic_hash>, content=..., tags=["source:memory_curator", "type:error_pattern", "agent:<id>"], scope="evolution/patterns", visibility="global", retention="stable")
+  knowledge_store(id=<deterministic_hash>, content=..., tags=["source:memory_curator", "type:error_pattern", "agent:<id>"], scope="evolution/patterns", visibility="global", retention="stable")
   ```
 
 - **Approach improvements** (alternative strategies observed):
   ```
-  knowledge.store(id=<deterministic_hash>, content=..., tags=["source:memory_curator", "type:approach_improvement"], scope="evolution/patterns", visibility="global", retention="stable")
+  knowledge_store(id=<deterministic_hash>, content=..., tags=["source:memory_curator", "type:approach_improvement"], scope="evolution/patterns", visibility="global", retention="stable")
   ```
 
 Use deterministic IDs derived from a hash of `session_id + pattern_type + content_prefix` to prevent duplicates on re-processing.
@@ -119,7 +119,7 @@ For each agent observed in the traces, compute the multi-signal score:
 | Approval denial rate | Approvals with status=rejected | > 2 in window |
 | Low eval scores | eval results | avg < 0.5 |
 | Escalation frequency | user_interactions where kind=escalation | >= 2 |
-| Negative digest memories | knowledge.search_by_tags | >= 3 patterns |
+| Negative digest memories | knowledge_search_by_tags | >= 3 patterns |
 
 For each agent:
 - Count how many signals are triggered

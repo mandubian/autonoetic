@@ -53,7 +53,7 @@ This means the key risk is sandbox hardening, not lack of a "skill" primitive.
 
 Keep runtime primitive = **agent**, but add a **skill-profile UX wrapper**:
 
-- optional CLI/tool sugar (for example `skill.install`) that compiles into `agent.install`
+- optional CLI/tool sugar (for example `skill_install`) that compiles into `agent.install`
 - emits a script-mode agent manifest and files under the hood
 - applies opinionated defaults for "simple skills"
 

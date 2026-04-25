@@ -17,7 +17,7 @@ pub struct SessionEscalateTool;
 
 impl NativeTool for SessionEscalateTool {
     fn name(&self) -> &'static str {
-        "session.escalate"
+        "session_escalate"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -258,7 +258,7 @@ pub struct SessionSearchTool;
 
 impl NativeTool for SessionSearchTool {
     fn name(&self) -> &'static str {
-        "session.search"
+        "session_search"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -404,7 +404,7 @@ pub struct SessionSummarizeTool;
 
 impl NativeTool for SessionSummarizeTool {
     fn name(&self) -> &'static str {
-        "session.peek"
+        "session_peek"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {

@@ -33,7 +33,7 @@ This section maps each simplification area to the existing implementation with e
 | **Wake predicates** | 7 `WakeReason` variants (`Timer`, `NewMessage`, `TaskCompletion`, `QueuedWork`, `StaleGoal`, `RetryableFailure`, `ApprovalResolved`) in `background.rs:177-185`. `should_wake()` is 203 lines in `decision.rs` with predicate cascade (approval resolution, pending actions, new messages, task completions, stale goals, retryable failures, general timer). | 2 variants: `Timer` and `Signal { name, payload }`. `should_wake()` ≤50 lines: check timer → check inbox signals → return None. Agents decide what "stale" or "retryable" means in their SKILL.md. | `autonoetic-types/src/background.rs:177-185`, `autonoetic-gateway/src/scheduler/decision.rs` (203 lines) |
 | **Disclosure policy** | 4-class system (`Public`, `Internal`, `Confidential`, `Secret`) in `disclosure.rs`. `DisclosureState` at `runtime/disclosure.rs` (210 lines) with source-based classification, path-pattern matching, `evaluate_class()` rule chain. 7+ source categories (`user_input`, `session_context`, `tier1_memory`, `tier2_memory`, `secret_store`, `sandbox_output`, `external_tool`). | Binary `Safe`/`Restricted`. Tools declare `restricted_output: bool`. ~60 lines total. No source categories, no path-pattern matching. Simple taint tracking + reply filtering remains. | `autonoetic-types/src/disclosure.rs` (49 lines), `autonoetic-gateway/src/runtime/disclosure.rs` (210 lines) |
 | **Evolution gates** | `requires_promotion_gate()` at `tools.rs:84` hardcodes `specialized_builder.default` and `evolution-steward.default`. `is_install_high_risk()` at `tools.rs:92` classifies installs by capabilities. `AgentInstallApprovalPolicy` (`Always`/`RiskBased`/`Never`) in config. Install flow has promotion gate + human approval gate + install ref validation (~100 lines at `tools.rs:2769-2866`). | No promotion gates. No install-specific approval policy. Generic `skill.store` and `approval.queue` primitives. Agents request approval themselves via `approval.queue.request()` before calling `agent.install`. | `autonoetic-gateway/src/runtime/tools.rs:84-122, 2769-2866`, `autonoetic-types/src/config.rs:110` |
-| **Role-specific checks** | Hardcoded agent ID strings in gateway code: `requires_promotion_gate()` branches on `"specialized_builder.default"` / `"evolution-steward.default"`. `is_install_high_risk()` makes risk decisions. Gateway knows about role categories. | Gateway is agent-agnostic. Validates capabilities, not agent identities. `agent.discover` scores by declared capabilities (already implemented at `tools.rs`). Test fixtures may still use realistic agent IDs. | `autonoetic-gateway/src/runtime/tools.rs:84-122` |
+| **Role-specific checks** | Hardcoded agent ID strings in gateway code: `requires_promotion_gate()` branches on `"specialized_builder.default"` / `"evolution-steward.default"`. `is_install_high_risk()` makes risk decisions. Gateway knows about role categories. | Gateway is agent-agnostic. Validates capabilities, not agent identities. `agent_discover` scores by declared capabilities (already implemented at `tools.rs`). Test fixtures may still use realistic agent IDs. | `autonoetic-gateway/src/runtime/tools.rs:84-122` |
 | **Background state** | `ReevaluationState` already simplified to 5 fields (`retry_not_before`, `stale_goal_at`, `last_outcome`, `pending_scheduled_action`, `open_approval_request_ids`) at `background.rs:159-173`. However, `BackgroundState` has 15+ fields including `processed_inbox_event_ids`, `processed_task_keys`, `processed_approval_request_ids` at `background.rs:188-217`. | `ReevaluationState` ≤5 fields, all generic scheduling state. Remove `stale_goal_at`, `pending_scheduled_action` (domain-specific). Add `last_signal_name`, `last_signal_at`. `BackgroundState` fields reduced to generic scheduling only. State file conventions (`task.md`, `scratchpad.md`, `handoff.md`) documented as best practice, not enforced. | `autonoetic-types/src/background.rs:159-217`, `autonoetic-gateway/src/runtime/reevaluation_state.rs` |
 | **Approval mechanism** | Approval is embedded in `agent.install` with `AgentInstallApprovalPolicy` config gate. `scheduler/approval.rs` (133 lines) handles pending/approved/rejected files but is scheduler-coupled. No standalone `approval.queue` tool exists. | Generic `approval.queue` primitive: `approval.queue.request(capability, evidence, reason?)`, `approval.queue.status(request_id)`, `approval.queue.list(filter?)`. Any agent can request approval for any purpose. Decoupled from `agent.install`. | `autonoetic-gateway/src/scheduler/approval.rs` (133 lines), `autonoetic-types/src/config.rs:110` |
 | **Capability enum** | 8 variants: `SandboxFunctions`, `ReadAccess`, `WriteAccess`, `NetworkAccess`, `CodeExecution`, `AgentSpawn`, `AgentMessage`, `BackgroundReevaluation`. See capability.rs for current list. | Add `SchedulerSignal`, `SkillStore`, `ApprovalQueue`. Clean mapping to gateway primitives. | `autonoetic-types/src/capability.rs` |
@@ -44,9 +44,9 @@ These features were implemented after the simplification plan was written. They 
 
 | Feature | Description | File |
 |---------|-------------|------|
-| **Schema enforcement** | `DeterministicCoercionEnforcer` auto-coerces malformed `agent.spawn` payloads. Supports agent composition without structural precision. | `autonoetic-types/src/schema_enforcement.rs`, `autonoetic-gateway/src/runtime/tools.rs` (agent.spawn hook) |
+| **Schema enforcement** | `DeterministicCoercionEnforcer` auto-coerces malformed `agent_spawn` payloads. Supports agent composition without structural precision. | `autonoetic-types/src/schema_enforcement.rs`, `autonoetic-gateway/src/runtime/tools.rs` (agent_spawn hook) |
 | **Deterministic execution** | `execution_mode: script` agents bypass LLM lifecycle entirely. Gateway runs script directly in sandbox. Ultimate "dumb pipe" for procedural agents. | `autonoetic-types/src/agent.rs` (`ExecutionMode`), `autonoetic-gateway/src/execution.rs` |
-| **Pre-install discovery** | `agent.exists` and `agent.discover` tools for reuse-first behavior. Complements simplification by reducing unnecessary installs. | `autonoetic-gateway/src/runtime/tools.rs` |
+| **Pre-install discovery** | `agent_exists` and `agent_discover` tools for reuse-first behavior. Complements simplification by reducing unnecessary installs. | `autonoetic-gateway/src/runtime/tools.rs` |
 | **Agent-adapter.default** | Schema-driven wrapper generation via `middleware` (`pre_process`/`post_process`). Replaces overlay-based adaptation. | `autonoetic/agents/evolution/agent-adapter.default/` |
 | **Session observability** | `trace session rebuild` / `trace session follow` with session index manifest. Gateway primitive for unified timeline reconstruction. | CLI `trace.rs`, gateway session index at `.gateway/sessions/<id>/index.json` |
 | **Causal chain rotation** | Log segmentation by date/size with hash-chain continuity across segments. Retention/compression policy. | `autonoetic-gateway/src/causal_chain/rotation.rs` |
@@ -57,24 +57,24 @@ These features were identified by comparing Autonoetic with [Hermes-Agent](https
 
 | Feature | Why It Matters | Suggested Primitive |
 |---------|---------------|---------------------|
-| **Session search (FTS5 + LLM summarization)** | Autonoetic has causal chains but no cross-session semantic search. Agents need to recall past conversations by intent, not just replay raw logs. | `session.search(query, agent_id?, limit?) → ranked sessions` |
+| **Session search (FTS5 + LLM summarization)** | Autonoetic has causal chains but no cross-session semantic search. Agents need to recall past conversations by intent, not just replay raw logs. | `session_search(query, agent_id?, limit?) → ranked sessions` |
 | **Cron scheduling with NL support** | `scheduler.interval` exists but lacks natural-language scheduling ("every 20 minutes", "daily at 9am"). Hermes demonstrates the power of this pattern. | `scheduler.cron(expression_or_nl, agent_id, payload?)` |
-| **Batch subagent spawning** | Agents spawn subagents one-by-one. For research/coding workloads, parallel fan-out is essential. | `agent.spawn_batch([spawn_specs]) → [results]` |
-| **Code execution sandbox** | `CodeExecution` is low-level. A structured `sandbox.exec` with language, code, timeout, and result capture is more agent-friendly. | `sandbox.exec(language, code, timeout?, stdin?) → {stdout, stderr, exit_code}` |
+| **Batch subagent spawning** | Agents spawn subagents one-by-one. For research/coding workloads, parallel fan-out is essential. | `agent_spawn_batch([spawn_specs]) → [results]` |
+| **Code execution sandbox** | `CodeExecution` is low-level. A structured `sandbox_exec` with language, code, timeout, and result capture is more agent-friendly. | `sandbox_exec(language, code, timeout?, stdin?) → {stdout, stderr, exit_code}` |
 | **Central tool registry** | Hermes' `tools/registry.py` pattern (schema collection, dispatch, availability checking, error wrapping) makes adding new primitives frictionless. Adopt for gateway tool management. | Internal refactoring of `tools.rs` to registry pattern |
 | **Interrupt-and-redirect** | No mechanism to interrupt a running agent and redirect its goal mid-task. | `agent.interrupt(session_id, new_goal?)` |
 | **RL learning hooks** | Hermes integrates with Atropos RL environments for trajectory-based training. Autonoetic should expose hooks for plugging future learning strategies without mandating any specific one. | `trajectory.record(step)`, `trajectory.export(session_id, format)` |
 | **Skill progressive disclosure** | Hermes uses Anthropic's progressive disclosure pattern: metadata first (name + 1-line desc), full instructions on demand, linked files loaded lazily. Prevents context window bloat when agent has many skills. | Adopt for `skill.list` (metadata only) and `skill.view` (full content) |
 | **Toolset composition** | Hermes' `toolsets.py` supports `includes` for composing toolsets from other toolsets (e.g., `debugging = terminal + web + file`). Enables reusable capability bundles. | Agent-level convention: agents declare `toolset` in SKILL.md, gateway resolves composition |
-| **User profiling (Honcho)** | Hermes integrates Honcho for dialectic user modeling — the agent builds a persistent understanding of user preferences across sessions. Autonoetic's `knowledge.*` tools can support this pattern. | Convention: agents use `knowledge.store` with `scope: user_profile` for persistent user modeling |
-| **Unified memory** | Hermes has MEMORY.md (bounded, curated, injected at wake) + USER.md (user profile) + context compression. Autonoetic should unify memory behind `knowledge.store` with scopes. | `knowledge.store` with `memory`/`user_profile` scopes, gateway projection at wake (Phase 12) |
+| **User profiling (Honcho)** | Hermes integrates Honcho for dialectic user modeling — the agent builds a persistent understanding of user preferences across sessions. Autonoetic's `knowledge.*` tools can support this pattern. | Convention: agents use `knowledge_store` with `scope: user_profile` for persistent user modeling |
+| **Unified memory** | Hermes has MEMORY.md (bounded, curated, injected at wake) + USER.md (user profile) + context compression. Autonoetic should unify memory behind `knowledge_store` with scopes. | `knowledge_store` with `memory`/`user_profile` scopes, gateway projection at wake (Phase 12) |
 | **MCP skill integration** | Hermes exposes MCP servers as skills in its skills hub. Autonoetic should treat MCP tools as first-class skill citizens. | Convention: MCP-discovered tools registered as skills with metadata |
 
 ### Unified memory model (from `concepts.md` + Hermes patterns)
 
 The original design vision in `docs/design/concepts.md` describes memory-bearing agents that learn over time. The current implementation has `knowledge.*` tools but lacks auto-injection at wake and memory consolidation. Hermes demonstrates the value of bounded, curated memory (MEMORY.md/USER.md) injected into the system prompt at wake.
 
-This plan addresses the gap through Phase 12 (Unified Memory System) using `knowledge.store` with three scopes: `memory` (environment facts, tool quirks), `user_profile` (preferences, style), and `ephemeral` (session-specific, searchable but not injected).
+This plan addresses the gap through Phase 12 (Unified Memory System) using `knowledge_store` with three scopes: `memory` (environment facts, tool quirks), `user_profile` (preferences, style), and `ephemeral` (session-specific, searchable but not injected).
 
 ### Cognitive Capsule standardization (from `concepts.md` vision)
 
@@ -104,7 +104,7 @@ This plan addresses the gap through Phase 12 (Unified Memory System) using `know
 2. At agent wake, gateway reads `skills/` directory and injects relevant content into system prompt
 3. Agent gains new knowledge without LLM reasoning overhead
 
-**Why not just use content.read?**
+**Why not just use content_read?**
 - Skills auto-inject at wake (no tool call needed)
 - Skills can be selectively loaded based on task context
 - Skills stay in context for the full session (vs one-time read)
@@ -318,7 +318,7 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 **3.4 Update tool metadata**
 
 - **File**: `autonoetic-gateway/src/runtime/tools.rs` (each tool's `extract_metadata()`)
-- **Action**: Review each tool's metadata. Most tools (web.search, web.fetch, memory.read, sandbox.exec, etc.) produce `Safe` output. Only tools that could leak secrets should produce `Restricted` output.
+- **Action**: Review each tool's metadata. Most tools (web_search, web_fetch, memory.read, sandbox_exec, etc.) produce `Safe` output. Only tools that could leak secrets should produce `Restricted` output.
 
 **3.5 Update tests**
 
@@ -422,9 +422,9 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 - **File**: `autonoetic-gateway/src/runtime/tools.rs` (line ~86)
 - **Action**: Already handled in Phase 4, but verify complete removal.
 
-**5.3 Clean up `agent.discover` scoring**
+**5.3 Clean up `agent_discover` scoring**
 
-- **File**: `autonoetic-gateway/src/runtime/tools.rs` (`agent.discover` tool, lines 2980-3241)
+- **File**: `autonoetic-gateway/src/runtime/tools.rs` (`agent_discover` tool, lines 2980-3241)
 - **Action**: Ensure scoring is based on declared capabilities and descriptions, not hardcoded role names. If there's any special-casing of known roles, remove it.
 
 **5.4 Update reference agent bundles**
@@ -441,7 +441,7 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 - No gateway code branches on specific agent IDs
 - Gateway validates capabilities, not agent identities
 - Test fixtures can still use realistic agent IDs
-- `agent.discover` scores based on capabilities, not role names
+- `agent_discover` scores based on capabilities, not role names
 
 ---
 
@@ -571,7 +571,7 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 - **File**: `autonoetic/agents/lead/planner.default/SKILL.md`
 - **Action**:
   - Remove any references to gateway implicit routing
-  - Add explicit delegation instructions using `agent.spawn`
+  - Add explicit delegation instructions using `agent_spawn`
   - Add reevaluation instructions using tick handling
   - Add evolution instructions using `skill.store` and `approval.queue`
   - Keep the Role Registry as agent-authored mapping (this is fine — it's in the agent, not the gateway)
@@ -610,10 +610,10 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 
 ### Tasks
 
-**11.1 Add `session.search` primitive**
+**11.1 Add `session_search` primitive**
 
 - **File**: `autonoetic-gateway/src/runtime/tools.rs`
-- **Action**: Add native tool `session.search(query, agent_id?, limit?)` that performs full-text search across session transcripts and causal chain entries. Returns ranked results with session_id, turn_id, and content snippet.
+- **Action**: Add native tool `session_search(query, agent_id?, limit?)` that performs full-text search across session transcripts and causal chain entries. Returns ranked results with session_id, turn_id, and content snippet.
 - **Implementation**: Use SQLite FTS5 extension on the existing `knowledge.db` or create a dedicated `sessions.db`. Index session transcripts on hibernate.
 - **Capability**: `SessionSearch` in `autonoetic-types/src/capability.rs`
 - **Policy**: Scope search to agent's own sessions by default; `SessionSearch` capability with `allowed_targets` for cross-agent search.
@@ -628,17 +628,17 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 - **File**: `autonoetic-gateway/src/scheduler/cron.rs` (new)
 - **Action**: Cron expression parser and NL-to-cron converter.
 
-**11.3 Add `agent.spawn_batch` primitive**
+**11.3 Add `agent_spawn_batch` primitive**
 
 - **File**: `autonoetic-gateway/src/runtime/tools.rs`
-- **Action**: Add native tool `agent.spawn_batch([spawn_specs])` that spawns multiple subagents in parallel and returns results as a list. Each spec follows the same schema as `agent.spawn`.
+- **Action**: Add native tool `agent_spawn_batch([spawn_specs])` that spawns multiple subagents in parallel and returns results as a list. Each spec follows the same schema as `agent_spawn`.
 - **Implementation**: Use Rust async to run spawns concurrently. Respect `max_concurrent_spawns` from config.
 - **Capability**: Uses existing `AgentSpawn` capability (batch is just a convenience wrapper).
 
-**11.4 Add `sandbox.exec` primitive**
+**11.4 Add `sandbox_exec` primitive**
 
 - **File**: `autonoetic-gateway/src/runtime/tools.rs`
-- **Action**: Add native tool `sandbox.exec(language, code, timeout?, stdin?)` that executes code in the sandbox with structured I/O:
+- **Action**: Add native tool `sandbox_exec(language, code, timeout?, stdin?)` that executes code in the sandbox with structured I/O:
   - `language`: `"python"`, `"javascript"`, `"bash"`, etc.
   - `code`: the source code string
   - `timeout`: optional execution timeout (default 30s)
@@ -676,10 +676,10 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 
 ### Acceptance Criteria
 
-- `session.search` returns ranked results across sessions
+- `session_search` returns ranked results across sessions
 - `scheduler.cron` accepts both cron expressions and natural language
-- `agent.spawn_batch` spawns multiple agents concurrently
-- `sandbox.exec` executes code with structured I/O and timeout
+- `agent_spawn_batch` spawns multiple agents concurrently
+- `sandbox_exec` executes code with structured I/O and timeout
 - Tool registration follows declarative registry pattern
 - `agent.interrupt` gracefully stops running sessions
 - All new primitives have capability gates and policy checks
@@ -770,7 +770,7 @@ The planner is the **sensible default** for human-facing adapters (CLI chat, Wha
 
 **Problem**: `knowledge.*` tools exist but there's no auto-injection of curated memory at wake, no consolidation of older facts, and no distinction between raw recent facts and accumulated wisdom. Agents have no way to build up cross-session understanding that gets better over time.
 
-**Goal**: A unified memory system built on `knowledge.store` with three scopes (`memory`, `user_profile`, `ephemeral`). Gateway auto-projects curated memory at wake (recent facts + consolidated summary). Background consolidation keeps memory bounded and high-quality.
+**Goal**: A unified memory system built on `knowledge_store` with three scopes (`memory`, `user_profile`, `ephemeral`). Gateway auto-projects curated memory at wake (recent facts + consolidated summary). Background consolidation keeps memory bounded and high-quality.
 
 ### Design
 
@@ -812,7 +812,7 @@ USER PROFILE (who the user is) [18% — 360/2,000 chars]
 **12.1 Add memory projection at wake**
 
 - **File**: `autonoetic-gateway/src/runtime/lifecycle.rs`
-- **Action**: At agent wake, query `knowledge.search("memory", "*")` and `knowledge.search("user_profile", "*")`, render into bounded text blocks, inject into system prompt
+- **Action**: At agent wake, query `knowledge_search("memory", "*")` and `knowledge_search("user_profile", "*")`, render into bounded text blocks, inject into system prompt
 - **Format**: Recent facts (last 5-10) shown raw, older facts shown as consolidated summary
 - **Frozen snapshot**: Projection captured at wake, not refreshed mid-session (preserves prefix cache)
 
@@ -847,25 +847,25 @@ USER PROFILE (who the user is) [18% — 360/2,000 chars]
 - **Action**: Inject guidance into system prompt (like Hermes' MEMORY_GUIDANCE):
   ```
   MEMORY: You have persistent memory across sessions. Save durable facts 
-  using knowledge.store(id, fact, "memory"): user preferences, environment 
+  using knowledge_store(id, fact, "memory"): user preferences, environment 
   details, tool quirks, stable conventions. Memory is injected every session, 
   keep it compact. Do NOT save task progress or session outcomes to memory; 
-  use session.search for those.
+  use session_search for those.
   
   USER PROFILE: Save what you learn about the user using 
-  knowledge.store(id, fact, "user_profile"): name, preferences, 
+  knowledge_store(id, fact, "user_profile"): name, preferences, 
   communication style, workflow habits.
   ```
 
-**12.5 Agent uses content.write for working files**
+**12.5 Agent uses content_write for working files**
 
 - **File**: `autonoetic/docs/AGENTS.md` (update)
-- **Action**: Document that agents can use `content.write` for any working files they need (task tracking, scratchpads, notes). No enforced conventions — the agent organizes itself.
+- **Action**: Document that agents can use `content_write` for any working files they need (task tracking, scratchpads, notes). No enforced conventions — the agent organizes itself.
 - **Recommended patterns** (optional, in agent SKILL.md instructions):
   ```
-  For tracking progress: content.write("task.md", "## Goal: ...\n- [done] ...")
-  For working notes: content.write("notes.md", "...")
-  For handoff: content.write("handoff.md", "Status: ... Next: ...")
+  For tracking progress: content_write("task.md", "## Goal: ...\n- [done] ...")
+  For working notes: content_write("notes.md", "...")
+  For handoff: content_write("handoff.md", "Status: ... Next: ...")
   ```
 
 **12.6 Update tests**
@@ -874,16 +874,16 @@ USER PROFILE (who the user is) [18% — 360/2,000 chars]
 
 ### Acceptance Criteria
 
-- `knowledge.store(id, fact, "memory")` facts are injected at wake as bounded text block
-- `knowledge.store(id, fact, "user_profile")` facts are injected separately
+- `knowledge_store(id, fact, "memory")` facts are injected at wake as bounded text block
+- `knowledge_store(id, fact, "user_profile")` facts are injected separately
 - Recent facts (last 5-10) shown raw, older facts shown as consolidated summary
 - Total injection bounded (~3000 + ~2000 chars)
 - Frozen snapshot: projection stable within session (preserves prefix cache)
 - Background consolidation merges old facts into summary
 - Security scanning blocks injection patterns in injected content
 - System prompt includes guidance on what to save to memory vs user_profile
-- Agents can use `content.write` for any working files (no enforced conventions)
-- `knowledge.search("memory", query)` works for structured recall
+- Agents can use `content_write` for any working files (no enforced conventions)
+- `knowledge_search("memory", query)` works for structured recall
 
 ---
 
@@ -1019,7 +1019,7 @@ USER PROFILE (who the user is) [18% — 360/2,000 chars]
 - **Tools** are executable. The gateway runs them. They're Rust code.
 - **Skills** are contextual. The gateway injects them. They're Markdown.
 - **Agents** are full runtimes. The gateway manages them. They're directories.
-- **Agent composition** uses `agent.spawn` delegation — no manifest-level inheritance needed.
+- **Agent composition** uses `agent_spawn` delegation — no manifest-level inheritance needed.
 
 ### Design Reference
 
@@ -1033,7 +1033,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 - **Action**: Create a declarative tool registry replacing scattered match statements:
   ```rust
   pub struct ToolEntry {
-      pub name: String,              // "content.write"
+      pub name: String,              // "content_write"
       pub schema: Value,             // OpenAI-format JSON Schema
       pub handler: ToolHandler,      // fn(args, ctx) -> Result<Value>
       pub capability: Capability,    // Required capability
@@ -1114,8 +1114,8 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
   - `Mcp { server }` — MCP server exposes skills
 - **Trust levels**: `local` (trusted), `github:openai/` (trusted), `github:user/` (community)
 - **Hub tools** (multi-source, distinct from local `skill.list`):
-  - `skill.search(query, sources?, limit?) → [results]` — search across remote sources (GitHub, well-known, MCP). Returns metadata only. Agent reviews results, then calls `skill.install`.
-  - `skill.install(source, name?) → result` — install from any source into local store
+  - `skill.search(query, sources?, limit?) → [results]` — search across remote sources (GitHub, well-known, MCP). Returns metadata only. Agent reviews results, then calls `skill_install`.
+  - `skill_install(source, name?) → result` — install from any source into local store
   - `skill.uninstall(name) → result` — remove a skill from local store
 - **Difference from `skill.list`**: `skill.list` searches local store (already installed). `skill.search` discovers new skills from remote sources (not yet installed).
 - **Hub metadata**: `{gateway_data}/skills/.hub/lock.json` tracks provenance
@@ -1166,7 +1166,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
   ```
 - **At wake**: Gateway checks if required agents/skills exist. If not, injects warning into agent context:
   ```
-  Warning: architect.default not installed. agent.spawn('architect.default') will fail.
+  Warning: architect.default not installed. agent_spawn('architect.default') will fail.
   ```
 - **At capsule export**: `requires.agents` listed in capsule manifest. Importing gateway warns user about missing agent dependencies.
 - **No dependency resolution**: No fetching, no version matching, no transitive deps. Just a declaration the gateway can read. Agent adapts its plan based on the warning.
@@ -1205,7 +1205,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 - MCP tools register as first-class registry entries
 - Agent wake resolves skills from frontmatter → registry → store
 - Toolsets are a convention in SKILL.md, not gateway code
-- Agent composition uses `agent.spawn` delegation, not manifest inheritance
+- Agent composition uses `agent_spawn` delegation, not manifest inheritance
 - Total new code: ~850 lines
 
 ---
@@ -1234,7 +1234,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 - **File**: New test in `autonoetic-gateway/tests/`
 - **Action**: Add a test that proves the simplified architecture works:
   1. Terminal chat targets `planner.default` explicitly
-  2. Planner delegates to `researcher.default` via `agent.spawn`
+  2. Planner delegates to `researcher.default` via `agent_spawn`
   3. Researcher stores findings via `memory.remember`
   4. Planner checks background tick and reevaluates state
   5. Planner requests approval via `approval.queue.request()`
@@ -1267,10 +1267,10 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 | **Roles** | Hardcoded agent IDs in gateway code | Agent-agnostic, capability-based validation |
 | **State machine** | 15+ field `ReevaluationState`, prescribed file conventions | ≤5 field generic state, conventions documented as best practice |
 | **Approval** | Embedded in `agent.install` with role-specific gates | Generic `approval.queue` primitive, any agent can use |
-| **Session search** | Causal chain replay only (CLI) | `session.search` with FTS5 across all sessions |
+| **Session search** | Causal chain replay only (CLI) | `session_search` with FTS5 across all sessions |
 | **Scheduling** | Interval-based only | `scheduler.cron` with cron expressions + natural language |
-| **Subagent spawning** | Serial, one-by-one | `agent.spawn_batch` for parallel fan-out |
-| **Code execution** | Low-level `CodeExecution` | Structured `sandbox.exec` with language, timeout, result capture |
+| **Subagent spawning** | Serial, one-by-one | `agent_spawn_batch` for parallel fan-out |
+| **Code execution** | Low-level `CodeExecution` | Structured `sandbox_exec` with language, timeout, result capture |
 | **Tool registration** | Scattered match statements | Declarative registry pattern (schema + handler + capability) |
 | **Agent interruption** | Not possible | `agent.interrupt` for graceful stop + goal redirect |
 | **Self-learning** | No hooks | Trajectory recording, export, learning consolidation hooks |
@@ -1279,7 +1279,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 | **Tool/skill repository** | Scattered match statements, no skill system | Declarative tool registry + skill repository with progressive disclosure (3 tiers) |
 | **Skill system** | No skills separate from agents | Shared skill repository with progressive disclosure, multi-source hub (local/GitHub/well-known/MCP) |
 | **Toolset composition** | Flat tool lists | Convention in SKILL.md (not gateway code) |
-| **User profiling** | No cross-session user modeling | `knowledge.store` with `scope: user_profile` convention |
+| **User profiling** | No cross-session user modeling | `knowledge_store` with `scope: user_profile` convention |
 | **MCP as tools** | MCP tools separate from gateway tools | MCP tools register as first-class entries in the same tool registry |
 | **Capability enum** | 10 variants | 18 variants (8 new: SessionSearch, SandboxExec, AgentInterrupt, TrajectoryExport, CapsuleExport, SchedulerSignal, SkillStore, ApprovalQueue)
 
@@ -1308,7 +1308,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 
 | File | Change Type |
 |------|-------------|
-| `autonoetic-gateway/src/runtime/tools.rs` | Add ~800 lines (session.search, scheduler.cron, sandbox.exec, agent.spawn_batch, agent.interrupt, memory.summarize, memory.recall_text, trajectory.*, learning.*, capsule.*) |
+| `autonoetic-gateway/src/runtime/tools.rs` | Add ~800 lines (session_search, scheduler.cron, sandbox_exec, agent_spawn_batch, agent.interrupt, memory.summarize, memory.recall_text, trajectory.*, learning.*, capsule.*) |
 | `autonoetic-gateway/src/runtime/tool_registry.rs` | New file (~150 lines) — declarative tool registration |
 | `autonoetic-gateway/src/scheduler/cron.rs` | New file (~200 lines) — cron expression parser + NL converter |
 | `autonoetic-gateway/src/learning/mod.rs` | New file (~100 lines) — LearningEnvironment trait |
@@ -1331,7 +1331,7 @@ See `autonoetic/docs/tool-skill-repository-design.md` for the full design docume
 | `autonoetic-gateway/src/skills/hub.rs` | New file (~250 lines) — multi-source skill discovery (local, GitHub, well-known, MCP) |
 | `autonoetic-gateway/src/skills/mcp_adapter.rs` | New file (~100 lines) — MCP tools register as first-class registry entries |
 | `autonoetic-gateway/src/skills/mod.rs` | New file (~50 lines) — skill module exports |
-| `autonoetic-gateway/src/runtime/tools.rs` | Add ~200 lines (skill.list, skill.view, skill.install, skill.uninstall, skill.search, skill.categories) |
+| `autonoetic-gateway/src/runtime/tools.rs` | Add ~200 lines (skill.list, skill.view, skill_install, skill.uninstall, skill.search, skill.categories) |
 | `autonoetic/agents/*/SKILL.md` | Update with skill loading instructions (9 agent bundles) |
 | `autonoetic/docs/tool-skill-repository-design.md` | New file — full design document |
 | `autonoetic/docs/AGENTS.md` | Update with toolset convention documentation |

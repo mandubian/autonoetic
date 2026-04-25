@@ -53,7 +53,7 @@ pub struct UserAskTool;
 
 impl NativeTool for UserAskTool {
     fn name(&self) -> &'static str {
-        "user.ask"
+        "user_ask"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -333,7 +333,7 @@ pub struct UserInteractionStatusTool;
 
 impl NativeTool for UserInteractionStatusTool {
     fn name(&self) -> &'static str {
-        "user.interaction.status"
+        "user_interaction_status"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {

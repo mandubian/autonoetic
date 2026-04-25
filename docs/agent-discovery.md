@@ -19,7 +19,7 @@ Planner
   │
   └─ Unknown intent → discovery.default
                            │
-                           ├─ agent.list (gateway tool — dumb enumeration)
+                           ├─ agent_list (gateway tool — dumb enumeration)
                            │    └─ queries SQLite agent registry
                            │    └─ returns: agent_id, description, capabilities, execution_mode
                            │
@@ -31,9 +31,9 @@ The gateway's job is enumeration. The agent's job is understanding. Neither does
 
 ---
 
-## `agent.list` — Gateway Tool
+## `agent_list` — Gateway Tool
 
-`agent.list` is a read-only directory query. It scans the installed agent filesystem and returns structured metadata.
+`agent_list` is a read-only directory query. It scans the installed agent filesystem and returns structured metadata.
 
 **Capability required:** `SandboxFunctions` (lower privilege than `AgentSpawn` — any agent that can call knowledge tools can enumerate agents)
 
@@ -72,9 +72,9 @@ The gateway's job is enumeration. The agent's job is understanding. Neither does
 
 ## `discovery.default` — Semantic Matching Agent
 
-`discovery.default` calls `agent.list`, reasons about the results against the task description, and returns ranked candidates. It is a thin reasoning agent with no side effects.
+`discovery.default` calls `agent_list`, reasons about the results against the task description, and returns ranked candidates. It is a thin reasoning agent with no side effects.
 
-**Capabilities:** `SandboxFunctions: ["agent.", "knowledge."]` — can call `agent.list` and `knowledge.recall` for prior context, nothing else.
+**Capabilities:** `SandboxFunctions: ["agent.", "knowledge."]` — can call `agent_list` and `knowledge_recall` for prior context, nothing else.
 
 **Input (from spawn message):**
 
@@ -101,8 +101,8 @@ exclude_foundational: true  (optional — skip agents planner already knows)
 `needs_new_agent: true` signals that no installed agent fits. The planner then delegates to `agent-factory.default`.
 
 **How discovery works:**
-1. Call `agent.list` (with `requires_capability` filter if applicable)
-2. Optionally call `knowledge.recall` to retrieve prior context about agent usage for similar tasks
+1. Call `agent_list` (with `requires_capability` filter if applicable)
+2. Optionally call `knowledge_recall` to retrieve prior context about agent usage for similar tasks
 3. Reason: does each agent's `description` match the intent? Does its `capabilities` set enable the required operations?
 4. Score and rank. Return candidates with brief rationale.
 
@@ -116,7 +116,7 @@ exclude_foundational: true  (optional — skip agents planner already knows)
 #    specialized_builder, debugger, registration, agent-factory
 
 # 2. If none clearly fit, spawn discovery
-agent.spawn("discovery.default", message="Find an agent for: post to Moltbook feed. Required capabilities: [CredentialAccess]")
+agent_spawn("discovery.default", message="Find an agent for: post to Moltbook feed. Required capabilities: [CredentialAccess]")
 
 # 3. Read recommendation
 #    → ranked_candidates[0].agent_id = "moltbook-ops"
@@ -124,10 +124,10 @@ agent.spawn("discovery.default", message="Find an agent for: post to Moltbook fe
 #    → needs_new_agent = false
 
 # 4a. Candidate found → spawn it
-agent.spawn("moltbook-ops", message="Post: ...")
+agent_spawn("moltbook-ops", message="Post: ...")
 
 # 4b. No candidate found (needs_new_agent: true) → build it
-agent.spawn("agent-factory.default", message="Build an agent that posts to Moltbook feed. Capabilities: [CredentialAccess, NetworkAccess, ReadAccess, WriteAccess]")
+agent_spawn("agent-factory.default", message="Build an agent that posts to Moltbook feed. Capabilities: [CredentialAccess, NetworkAccess, ReadAccess, WriteAccess]")
 ```
 
 ---
@@ -148,7 +148,7 @@ Use discovery only when: the task requires a domain-specific or user-installed a
 
 ## Gateway Design: Why the Tool is Dumb
 
-`agent.list` deliberately does no semantic scoring. This preserves the gateway's role as a neutral executor.
+`agent_list` deliberately does no semantic scoring. This preserves the gateway's role as a neutral executor.
 
 If the gateway tried to match intent to agents, it would need to understand domain semantics, agent evolution patterns, and task decomposition — all of which belong to the reasoning layer. A dumb enumeration tool + a smart reasoning agent is strictly better:
 
@@ -156,4 +156,4 @@ If the gateway tried to match intent to agents, it would need to understand doma
 - The discovery agent can be replaced or evolved without gateway changes
 - The tool can be called by any agent with `SandboxFunctions`, not just discovery — other agents can enumerate installed agents for their own reasoning
 
-The same pattern applies to `agent.discover` (keyword-based, existing) and `agent.list` (structured enumeration, new). Discovery.default uses `agent.list` because it can reason; simple keyword lookup is insufficient for semantic intent matching.
+The same pattern applies to `agent_discover` (keyword-based, existing) and `agent_list` (structured enumeration, new). Discovery.default uses `agent_list` because it can reason; simple keyword lookup is insufficient for semantic intent matching.

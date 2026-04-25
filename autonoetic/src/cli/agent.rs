@@ -2134,14 +2134,14 @@ mod tests {
             &self,
             request: &CompletionRequest,
         ) -> anyhow::Result<CompletionResponse> {
-            if !request.tools.iter().any(|t| t.name == "sandbox.exec") {
+            if !request.tools.iter().any(|t| t.name == "sandbox_exec") {
                 anyhow::bail!("sandbox.exec not exposed to model");
             }
             Ok(CompletionResponse {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),
-                    name: "sandbox.exec".to_string(),
+                    name: "sandbox_exec".to_string(),
                     arguments: serde_json::json!({
                         "command": "echo blocked"
                     })

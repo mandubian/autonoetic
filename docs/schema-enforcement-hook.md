@@ -2,7 +2,7 @@
 
 ## Problem
 
-When an agent calls another agent via `agent.spawn`, the calling LLM must produce a payload matching the target agent's `io` schema. LLMs are good at reasoning but inconsistent at exact structural output. The current approach has two gaps:
+When an agent calls another agent via `agent_spawn`, the calling LLM must produce a payload matching the target agent's `io` schema. LLMs are good at reasoning but inconsistent at exact structural output. The current approach has two gaps:
 
 1. **Lightweight validation** — gateway checks required fields and basic types only
 2. **No coercion** — mismatches either pass through (garbage input to target) or fail (agent must repair)
@@ -19,7 +19,7 @@ The agent-adapter pattern (`agent-adapter.default`) handles schema mismatches by
 ## Architecture
 
 ```
-Agent → tool_call(agent.spawn) → Gateway intercepts
+Agent → tool_call(agent_spawn) → Gateway intercepts
                                         │
                                    ┌────▼──────────────┐
                                    │  Schema Enforcer   │
@@ -58,7 +58,7 @@ pub enum EnforcementResult {
 
 pub struct EnforcementContext {
     pub target_agent_id: String,
-    pub tool_name: String,        // "agent.spawn"
+    pub tool_name: String,        // "agent_spawn"
     pub calling_agent_id: String,
     pub target_schema: Option<IoSchema>,
 }
@@ -160,7 +160,7 @@ This enables the Auditor Agent to detect patterns: "planner.default consistently
 
 | Pattern | Scope | When to use |
 |---------|-------|-------------|
-| Schema enforcement hook | Structural coercion | Every `agent.spawn` call — first line of defense |
+| Schema enforcement hook | Structural coercion | Every `agent_spawn` call — first line of defense |
 | Agent-adapter | Behavioral + structural | Complex gaps requiring new middleware scripts |
 | Structured error repair | Agent self-correction | When hook rejects — agent repairs in-session |
 | `skill.describe` | Context injection | Agent proactively reads schema before calling |
@@ -172,7 +172,7 @@ The hook is the default fast path. The adapter is for complex transformations. E
 1. Define `SchemaEnforcer` trait and `EnforcementResult` enum in `autonoetic-types`
 2. Implement `DeterministicCoercionEnforcer` with required-field defaults and field renaming
 3. Add `schema_enforcement` config section to `GatewayConfig`
-4. Insert hook into `agent.spawn` tool execution path (after capability check, before target dispatch)
+4. Insert hook into `agent_spawn` tool execution path (after capability check, before target dispatch)
 5. Add causal chain logging for all enforcement decisions
 6. Add unit tests for coercion rules (pass, coerce, reject paths)
 7. Add integration tests proving malformed payloads are fixed or rejected with hints

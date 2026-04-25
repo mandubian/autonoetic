@@ -95,7 +95,7 @@ Acceptance test:
 
 ### 4. Prefer Structured Workflow Metadata Over Mutable Planner State
 
-Do not rely on free-form planner memory or optional writes like `knowledge.store` and `content.write` for workflow control.
+Do not rely on free-form planner memory or optional writes like `knowledge_store` and `content_write` for workflow control.
 
 Instead, each important workflow action should carry a required structured metadata envelope that the gateway persists mechanically with the task.
 
@@ -255,7 +255,7 @@ This checklist targets the current codebase directly. The aim is to tighten the 
 
 ### A. Approval Continuation Contract ✅
 
-1. ✅ Refactored `autonoetic-gateway/src/scheduler/approval.rs` so approval resolution emits a canonical continuation payload (`approval_resumed:<action>:<request_id>:<status>`) for both `sandbox.exec` and install flows.
+1. ✅ Refactored `autonoetic-gateway/src/scheduler/approval.rs` so approval resolution emits a canonical continuation payload (`approval_resumed:<action>:<request_id>:<status>`) for both `sandbox_exec` and install flows.
 2. ✅ Removed human-oriented retry prose in `resume_session_after_approval()` — replaced with structured machine-readable continuation strings.
 3. ✅ `unblock_task_on_approval()` checkpoint writes now use structured fields (`approval_resolved`, `request_id`, `status`, `action_type`) instead of free-form `resume_message`.
 4. ✅ Normalized `approval_resolved` checkpoint payload shape so every resumed tool flow exposes the same keys.
@@ -277,22 +277,22 @@ This checklist targets the current codebase directly. The aim is to tighten the 
 
 ### D. Implicit Output Handoff ✅
 
-1. ✅ Updated `workflow.wait` description to explicitly document the `output` field as the canonical parent-child output handoff mechanism.
-2. ✅ Added `workflow.state` tool that returns structured workflow facts (completed tasks, pending approvals, reuse guards, resume hint) in one call.
-3. ✅ Updated `ContentReadTool` hint behavior so guessed-name failures point to `workflow.wait`/`workflow.state` as the canonical way to discover output handles.
+1. ✅ Updated `workflow_wait` description to explicitly document the `output` field as the canonical parent-child output handoff mechanism.
+2. ✅ Added `workflow_state` tool that returns structured workflow facts (completed tasks, pending approvals, reuse guards, resume hint) in one call.
+3. ✅ Updated `ContentReadTool` hint behavior so guessed-name failures point to `workflow_wait`/`workflow_state` as the canonical way to discover output handles.
 4. ✅ The implicit output path is now the documented default for ordinary agents.
 
 ### E. Explicit Artifact Boundary ✅
 
-1. ✅ Reframed `ArtifactBuildTool` description: "Artifacts are specialist-boundary objects... For ordinary parent-child output handoff, prefer the implicit output from workflow.wait."
+1. ✅ Reframed `ArtifactBuildTool` description: "Artifacts are specialist-boundary objects... For ordinary parent-child output handoff, prefer the implicit output from workflow_wait."
 2. ✅ Artifacts remain first-class for evaluation, installation, and closed-boundary execution.
 3. ✅ Reframed `ArtifactInspectTool` similarly.
-4. ✅ `content.read` and `artifact.inspect` descriptions now make the implicit-vs-explicit split unambiguous.
+4. ✅ `content_read` and `artifact_inspect` descriptions now make the implicit-vs-explicit split unambiguous.
 
 ### F. Workflow Types And Event Surface ✅ (no changes needed)
 
 1. ✅ Reviewed `autonoetic-types/src/workflow.rs` — `WorkflowRun`, `TaskRun`, `TaskCheckpoint`, `WorkflowCheckpoint`, and `WorkflowEventRecord` already expose sufficient structure.
-2. ✅ The `output` field on succeeded `TaskRun` entries (populated by `workflow.wait`) provides the implicit artifact handoff.
+2. ✅ The `output` field on succeeded `TaskRun` entries (populated by `workflow_wait`) provides the implicit artifact handoff.
 3. ✅ No role-specific semantics in shared workflow types.
 
 ### G. Chat And Operator Visibility ⚠️ (deferred — low priority)
@@ -305,8 +305,8 @@ This checklist targets the current codebase directly. The aim is to tighten the 
 
 1. ✅ Rewrote `agents/lead/planner.default/SKILL.md` (554 → ~430 lines) after runtime contracts were tightened.
 2. ✅ Removed duplicated timeout and approval sections.
-3. ✅ Replaced 128-line recovery prose with a short universal rule: "Call `workflow.state` on wake-up. Read `resume_hint` and `reuse_guards`. Continue from where the workflow left off."
-4. ✅ Replaced artifact/name-guessing guidance with: "Use `workflow.state` for structured facts. Use `workflow.wait` output handles for child results."
+3. ✅ Replaced 128-line recovery prose with a short universal rule: "Call `workflow_state` on wake-up. Read `resume_hint` and `reuse_guards`. Continue from where the workflow left off."
+4. ✅ Replaced artifact/name-guessing guidance with: "Use `workflow_state` for structured facts. Use `workflow_wait` output handles for child results."
 5. ✅ Discovery-driven delegation preserved: planner classifies agents into generic families.
 6. ⚠️ Attempt fingerprints and family retry budgets are documented in the plan but not yet implemented as gateway-enforced metadata (deferred — the skill-level reuse guards handle the common cases).
 
@@ -321,8 +321,8 @@ This checklist targets the current codebase directly. The aim is to tighten the 
 
 1. ✅ Updated `workflow_approval_resume_integration` test to assert the canonical continuation payload shape (`approval_resumed:sandbox_exec:apr-xxx:approved`).
 2. ✅ The existing continuation mechanism already behaves like continuation of the original call (handled by `execute_approved_action`).
-3. ✅ `workflow.wait` already returns stable implicit output handles for completed child tasks (existing behavior, now better documented).
-4. ✅ `content.read` guessed-name failures now include canonical implicit-output hints.
+3. ✅ `workflow_wait` already returns stable implicit output handles for completed child tasks (existing behavior, now better documented).
+4. ✅ `content_read` guessed-name failures now include canonical implicit-output hints.
 5. ⚠️ End-to-end parent/child implicit output test deferred (the existing integration tests cover the component behaviors).
 
 ### K. Documentation Sync ⚠️ (deferred — low priority)
@@ -339,8 +339,8 @@ This checklist targets the current codebase directly. The aim is to tighten the 
 |------|--------|
 | `autonoetic-gateway/src/scheduler/approval.rs` | Canonical continuation payload format; removed prose retry messages |
 | `autonoetic-gateway/src/scheduler/workflow_store.rs` | Updated `refresh_queued_task_message_from_task_checkpoint` for new checkpoint format |
-| `autonoetic-gateway/src/runtime/tools.rs` | Added `WorkflowStateTool`; updated `SandboxExecTool` approval framing; updated `workflow.wait`, `content.read`, `artifact.build`, `artifact.inspect` descriptions |
-| `agents/lead/planner.default/SKILL.md` | 554 → ~430 lines; `workflow.state`-based resume; hard reuse guards |
+| `autonoetic-gateway/src/runtime/tools.rs` | Added `WorkflowStateTool`; updated `SandboxExecTool` approval framing; updated `workflow_wait`, `content_read`, `artifact_build`, `artifact_inspect` descriptions |
+| `agents/lead/planner.default/SKILL.md` | 554 → ~430 lines; `workflow_state`-based resume; hard reuse guards |
 | `agents/specialists/coder.default/SKILL.md` | 368 → ~210 lines; universal resumption rule |
 | `agents/specialists/evaluator.default/SKILL.md` | 340 → ~195 lines; narrowed to evaluation only |
 | `agents/specialists/builder.default/SKILL.md` | 226 → ~150 lines; streamlined |

@@ -565,7 +565,7 @@ fn dispatch_sdk_method(
     root_session_id: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     match method {
-        "memory.read" => {
+        "memory_read" => {
             let path = params
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -574,7 +574,7 @@ fn dispatch_sdk_method(
             let content = fs::read_to_string(agent_dir.join(path))?;
             Ok(serde_json::json!({ "content": content }))
         }
-        "memory.write" => {
+        "memory_write" => {
             let path = params
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -591,11 +591,11 @@ fn dispatch_sdk_method(
             fs::write(target, content)?;
             Ok(serde_json::json!({ "ok": true }))
         }
-        "memory.list_keys" => {
+        "memory_list_keys" => {
             let keys = list_state_keys(&agent_dir.join("state"))?;
             Ok(serde_json::json!({ "keys": keys }))
         }
-        "memory.remember" => {
+        "memory_remember" => {
             let key = params
                 .get("key")
                 .and_then(|v| v.as_str())
@@ -649,7 +649,7 @@ fn dispatch_sdk_method(
                 "source_ref": memory.source_ref,
             }))
         }
-        "memory.recall" => {
+        "memory_recall" => {
             let key = params
                 .get("key")
                 .and_then(|v| v.as_str())
@@ -683,7 +683,7 @@ fn dispatch_sdk_method(
                 Err(_) => Ok(serde_json::json!({ "value": serde_json::Value::Null })),
             }
         }
-        "memory.search" => {
+        "memory_search" => {
             let query = params
                 .get("query")
                 .and_then(|v| v.as_str())
@@ -719,7 +719,7 @@ fn dispatch_sdk_method(
             );
             Ok(serde_json::json!({ "results": results }))
         }
-        "state.checkpoint" => {
+        "state_checkpoint" => {
             let data = params
                 .get("data")
                 .cloned()
@@ -731,14 +731,14 @@ fn dispatch_sdk_method(
             )?;
             Ok(serde_json::json!({ "ok": true }))
         }
-        "state.get_checkpoint" => {
+        "state_get_checkpoint" => {
             let path = agent_dir.join("state").join("sdk_checkpoint.json");
             let payload = load_json_file(&path)?;
             Ok(
                 serde_json::json!({ "data": payload.get("data").cloned().unwrap_or(serde_json::Value::Null) }),
             )
         }
-        "events.emit" => {
+        "events_emit" => {
             let event_type = params
                 .get("type")
                 .and_then(|v| v.as_str())
@@ -1357,7 +1357,7 @@ mod tests {
         let checkpoint_params =
             serde_json::Map::from_iter(vec![("data".to_string(), json!({"cursor": 42}))]);
         let written = dispatch_sdk_method(
-            "state.checkpoint",
+            "state_checkpoint",
             &checkpoint_params,
             &agent_dir,
             &gateway_dir,
@@ -1367,7 +1367,7 @@ mod tests {
         assert_eq!(written["ok"], json!(true));
 
         let loaded = dispatch_sdk_method(
-            "state.get_checkpoint",
+            "state_get_checkpoint",
             &serde_json::Map::new(),
             &agent_dir,
             &gateway_dir,

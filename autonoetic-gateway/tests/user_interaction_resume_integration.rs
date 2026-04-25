@@ -59,7 +59,7 @@ fn stub_user_ask_then_text(
                         "id": "tc-ask-1",
                         "type": "function",
                         "function": {
-                            "name": "user.ask",
+                            "name": "user_ask",
                             "arguments": ask_arguments_json
                         }
                     }]
@@ -427,7 +427,7 @@ async fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
     );
 
     let traces = store.search_execution_traces(
-        Some("user.ask"),
+        Some("user_ask"),
         None,
         None,
         None,

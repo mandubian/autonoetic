@@ -593,10 +593,10 @@ impl SessionTracer {
 
     pub fn log_tool_requested(&mut self, tool_name: &str, arguments: &str) -> anyhow::Result<()> {
         let redacted_args = redact_text_for_logs(arguments);
-        if tool_name != "digest.annotate" {
+        if tool_name != "digest_annotate" {
             if let Some(w) = &self.live_digest {
                 let mut guard = w.lock().unwrap();
-                if tool_name == "agent.spawn" {
+                if tool_name == "agent_spawn" {
                     if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) {
                         let target = args["agent_id"].as_str().unwrap_or("unknown");
                         let msg = args["message"].as_str().unwrap_or("");
@@ -610,10 +610,10 @@ impl SessionTracer {
                 }
             }
         }
-        if tool_name != "digest.annotate" {
+        if tool_name != "digest_annotate" {
             if let Some(w) = &self.live_report {
                 let mut guard = w.lock().unwrap();
-                if tool_name == "agent.spawn" {
+                if tool_name == "agent_spawn" {
                     if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) {
                         let target = args["agent_id"].as_str().unwrap_or("unknown");
                         let msg = args["message"].as_str().unwrap_or("");
@@ -711,7 +711,7 @@ impl SessionTracer {
             Some(completed_payload),
         )?;
 
-        if tool_name != "digest.annotate" {
+        if tool_name != "digest_annotate" {
             if let Some(w) = &self.live_digest {
                 let mut guard = w.lock().unwrap();
                 let formatted = format_tool_digest_result(tool_name, result);
@@ -1040,7 +1040,7 @@ mod tests {
 
         tracer
             .log_tool_completed(
-                "sandbox.exec",
+                "sandbox_exec",
                 r#"{"ok":false,"exit_code":1,"stderr":"test failed","stdout":"full output"}"#,
             )
             .unwrap();
@@ -1098,7 +1098,7 @@ mod tests {
 
         // Log an event - should write to both JSONL and DB
         let payload = serde_json::json!({
-            "tool_name": "sandbox.exec",
+            "tool_name": "sandbox_exec",
             "arguments": "echo hello"
         });
         tracer
@@ -1157,7 +1157,7 @@ mod tests {
 
         // Log an error event
         let payload = serde_json::json!({
-            "tool_name": "sandbox.exec",
+            "tool_name": "sandbox_exec",
             "reason": "compilation failed"
         });
         tracer

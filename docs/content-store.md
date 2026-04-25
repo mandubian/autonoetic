@@ -36,7 +36,7 @@ The content store provides **content-addressable storage** (SHA-256 based) for a
 | **Session Manifest** | Maps names/handles to content with visibility |
 | **Root Session ID** | Top-level session for visibility grouping |
 | **Artifact** | Immutable file bundle for review/install/execution |
-| **Published Report** | Session report stored in content store, registered in `published_session_reports` catalog for cross-session discovery via `observability.search`/`observability.read` |
+| **Published Report** | Session report stored in content store, registered in `published_session_reports` catalog for cross-session discovery via `observability_search`/`observability_read` |
 
 ## Visibility Model
 
@@ -70,7 +70,7 @@ Root: demo-session
 
 ## API Reference
 
-### `content.write`
+### `content_write`
 
 Write content with visibility control.
 
@@ -94,10 +94,10 @@ Write content with visibility control.
 ```
 
 Default visibility is `session` (collaborative). Use `private` for scratchpads/drafts.
-Use `sandbox_path` when passing files to `sandbox.exec`.
-`cnt_...` and `sha256:...` are content references for `content.read`, not filesystem paths.
+Use `sandbox_path` when passing files to `sandbox_exec`.
+`cnt_...` and `sha256:...` are content references for `content_read`, not filesystem paths.
 
-### `content.read`
+### `content_read`
 
 Read by name, handle, or alias with root-based resolution.
 
@@ -119,7 +119,7 @@ Resolution order:
 2. If 8 hex chars → alias lookup (session, then root)
 3. Otherwise → name lookup (session, then root)
 
-### `artifact.build`
+### `artifact_build`
 
 Build an immutable artifact bundle from session content.
 
@@ -144,7 +144,7 @@ Build an immutable artifact bundle from session content.
 }
 ```
 
-### `artifact.inspect`
+### `artifact_inspect`
 
 Inspect an artifact by ID.
 
@@ -166,8 +166,8 @@ Inspect an artifact by ID.
 }
 ```
 
-`artifact.inspect` accepts explicit artifact bundle IDs (`art_...`) only.
-Implicit workflow output handles (`impl_task-...`) are content records and should be consumed via `content.read`.
+`artifact_inspect` accepts explicit artifact bundle IDs (`art_...`) only.
+Implicit workflow output handles (`impl_task-...`) are content records and should be consumed via `content_read`.
 
 ## Artifact Trust Boundary
 
@@ -181,9 +181,9 @@ Artifacts are the only units that may:
 
 The workflow for any executable-producing task:
 
-1. Coder writes files via `content.write`
-2. Coder builds an artifact: `artifact.build(inputs, entrypoints)`
-3. Evaluator/auditor review the artifact via `artifact.inspect`
+1. Coder writes files via `content_write`
+2. Coder builds an artifact: `artifact_build(inputs, entrypoints)`
+3. Evaluator/auditor review the artifact via `artifact_inspect`
 4. Install/run consumes only the artifact ID
 
 The artifact boundary must cover the full executable behavior surface, including:
@@ -226,30 +226,30 @@ On Unix hosts, the named files are symlinks to the canonical immutable content b
 
 ```json
 // Planner spawns coder
-agent.spawn({"agent_id": "coder.default", "message": "Write weather.py"})
+agent_spawn({"agent_id": "coder.default", "message": "Write weather.py"})
 
 // Coder writes content (session visibility by default)
-content.write({"name": "weather.py", "content": "import json..."})
+content_write({"name": "weather.py", "content": "import json..."})
 
 // Planner can read the coder's output
-content.read({"name_or_handle": "weather.py"})
+content_read({"name_or_handle": "weather.py"})
 
 // Coder builds artifact for review
-artifact.build({"inputs": ["weather.py"], "entrypoints": ["weather.py"]})
+artifact_build({"inputs": ["weather.py"], "entrypoints": ["weather.py"]})
 
 // Evaluator reviews the artifact
-artifact.inspect({"artifact_id": "art_a1b2c3d4"})
+artifact_inspect({"artifact_id": "art_a1b2c3d4"})
 ```
 
 ### Private Scratch Work
 
 ```json
 // Coder writes private draft (not visible to root/siblings)
-content.write({"name": "draft.py", "content": "# scratch work", "visibility": "private"})
+content_write({"name": "draft.py", "content": "# scratch work", "visibility": "private"})
 
 // Only the coder can read it
-content.read({"name_or_handle": "draft.py"})  // works in coder session
-// content.read in parent session → error
+content_read({"name_or_handle": "draft.py"})  // works in coder session
+// content_read in parent session → error
 ```
 
 ## Testing

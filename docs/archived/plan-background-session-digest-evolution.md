@@ -55,10 +55,10 @@ native tools, and a migration. Everything else is SKILL.md instructions.
 ┌──────────────────────────────────────────┐
 │  evolution-orchestrator.default          │  NEW root orchestrator
 │                                          │
-│  1. knowledge.recall("evolution.         │
+│  1. knowledge_recall("evolution.         │
 │       high_water_mark") → last ts        │
 │                                          │
-│  2. session.search(status=completed,     │
+│  2. session_search(status=completed,     │
 │       since=last_ts) → session_ids       │
 │                                          │
 │  3. spawn memory-curator.default ────────┼──► digests learnings, scores agents
@@ -70,9 +70,9 @@ native tools, and a migration. Everything else is SKILL.md instructions.
 │                                          │   (existing gates fire: eval + audit)
 │                                          │
 │  5. for each systemic gap:               │
-│     admin.proposal.create ───────────────┼──► admin_proposals table + notification
+│     admin_proposal_create ───────────────┼──► admin_proposals table + notification
 │                                          │
-│  6. knowledge.store(                     │
+│  6. knowledge_store(                     │
 │     "evolution.high_water_mark",         │
 │     new_ts)  (only on full success)      │
 └──────────────────────────────────────────┘
@@ -86,8 +86,8 @@ native tools, and a migration. Everything else is SKILL.md instructions.
 | `memory-curator.default` | Distills cross-session learnings + scores agents | **NEW** (referenced in `docs/AGENTS.md` but no directory yet) |
 | `evolution-steward.default` | Decides evolve/skip per-agent and triggers factory | **NEW** (referenced in `docs/AGENTS.md` but no directory yet) |
 | `agent-factory.default` | End-to-end agent creation pipeline | Existing |
-| `evaluator.default` | Produces `promotion.record(pass=true)` evidence | Existing |
-| `auditor.default` | Produces `promotion.record(pass=true)` evidence | Existing |
+| `evaluator.default` | Produces `promotion_record(pass=true)` evidence | Existing |
+| `auditor.default` | Produces `promotion_record(pass=true)` evidence | Existing |
 | `specialized_builder.default` | Installs revisions (revision.create + promote) | Existing |
 
 ### Separation of powers
@@ -121,31 +121,31 @@ Trade-off: 3-5 agent spawns per cron tick. Acceptable at 4h cadence.
 
 ### 2. What triggers a run?
 
-**Decision: wall-clock cron (`scheduler.cron.create`) + queue-drain within each run.**
+**Decision: wall-clock cron (`scheduler_cron_create`) + queue-drain within each run.**
 
 - `BackgroundReevaluation` capability is per-agent periodic wake; wrong fit for
   a cross-cutting orchestrator.
 - `scheduled_jobs` table + `process_due_scheduled_jobs` in `scheduler.rs`
   already support targeting a specific agent with a message. Use this.
-- Within each run: `session.search(status="completed", since=<bookmark>)` drains
+- Within each run: `session_search(status="completed", since=<bookmark>)` drains
   all new sessions.
 - Event-driven (on-session-end) was rejected: fires too often, no batching,
   thundering-herd risk.
 
 Concrete setup: orchestrator's SKILL.md includes a first-run step that calls
-`scheduler.cron.create` with `schedule_expr: "0 */4 * * *"` targeting itself with
+`scheduler_cron_create` with `schedule_expr: "0 */4 * * *"` targeting itself with
 a predefined message. Idempotent — can be re-run safely.
 
 ### 3. How does the orchestrator know what's new?
 
-**Decision: a `knowledge.store` bookmark at id `evolution.high_water_mark`.**
+**Decision: a `knowledge_store` bookmark at id `evolution.high_water_mark`.**
 
 - Stores `{ "last_processed_at": "<rfc3339>", "last_run_id": "<uuid>",
   "generation": <u64> }` with `visibility: "global"`, `retention: "stable"`.
-- `session.search(status="completed", since=<last_processed_at>)` returns the
+- `session_search(status="completed", since=<last_processed_at>)` returns the
   exact window.
 - Crash-safe: bookmark is only updated after all processing succeeds. Partial
-  failures re-process the same window on next run (`knowledge.store` upserts by
+  failures re-process the same window on next run (`knowledge_store` upserts by
   id; curator uses deterministic memory ids derived from session hashes — same
   pattern as `digest_memory_id` in `post_session_digest.rs`).
 - No new SQL table. No Rust code for the bookmark.
@@ -163,7 +163,7 @@ Signals (in priority order):
 | 3 | Approval denial rate | `approvals` WHERE `status='rejected'` GROUP BY `agent_id` | > 2 denials in window |
 | 4 | Low evaluator scores | `eval_case_results` via `eval_runs.subject_agent_id` | avg score < 0.5 or `status=Failed` |
 | 5 | Escalation frequency | `user_interactions` WHERE `kind='escalation'` | ≥ 2 escalations |
-| 6 | Negative post-session-digest memories | `knowledge.search_by_tags(["source:post_session_digest", "type:error_pattern", "agent:<id>"])` | ≥ 3 distinct patterns |
+| 6 | Negative post-session-digest memories | `knowledge_search_by_tags(["source:post_session_digest", "type:error_pattern", "agent:<id>"])` | ≥ 3 distinct patterns |
 
 Decision matrix (applied by steward):
 
@@ -207,7 +207,7 @@ CREATE INDEX IF NOT EXISTS idx_admin_proposals_category ON admin_proposals(categ
 CREATE INDEX IF NOT EXISTS idx_admin_proposals_created_at ON admin_proposals(created_at);
 ```
 
-Notification: on insert, `admin.proposal.create` writes a row to the existing
+Notification: on insert, `admin_proposal_create` writes a row to the existing
 `notifications` table with `type='admin_proposal'` and `payload={proposal_id,
 title, category, priority}`. CLI/chat TUI already renders notifications.
 
@@ -220,8 +220,8 @@ adding a new capability. Proposal creation is conceptually approval-queue-like.
 
 | Tier | Scope | Gate |
 |------|-------|------|
-| 1 — ungated | Reading sessions/traces/digests, writing curated learnings to knowledge store | None. Pure reads + knowledge.store writes. |
-| 2 — existing gates | Agent evolution via steward → factory → evaluator + auditor + builder | Already enforced: `promotion.rs` allows only evaluator/auditor to call `promotion.record`; strict-mode `agent.revision.create_from_intent` requires both records |
+| 1 — ungated | Reading sessions/traces/digests, writing curated learnings to knowledge store | None. Pure reads + knowledge_store writes. |
+| 2 — existing gates | Agent evolution via steward → factory → evaluator + auditor + builder | Already enforced: `promotion.rs` allows only evaluator/auditor to call `promotion_record`; strict-mode `agent_revision_create_from_intent` requires both records |
 | 3 — admin sign-off | Any revision that changes `NetworkAccess`/`CodeExecution`/`AgentSpawn` capabilities | Approval request at `approval_level: Admin` via existing gateway config escalation rules |
 
 Additional safety:
@@ -234,7 +234,7 @@ Additional safety:
   "agent-factory.default", "evolution-orchestrator.default",
   "memory-curator.default", "evolution-steward.default"]`) and skips any agent
   in it.
-- **Rollback always available**: `agent.revision.rollback` is the emergency exit
+- **Rollback always available**: `agent_revision_rollback` is the emergency exit
   if a bad promotion ships.
 - **All actions logged**: `causal_events` + `execution_traces` give a full audit trail.
 
@@ -247,7 +247,7 @@ Additional safety:
 | Agent bundles (SKILL.md + instructions) | Agent | 3 |
 | SQL migration | Rust | 1 |
 | Gateway-store module | Rust | 1 (`admin_proposals.rs`) |
-| Native tools | Rust | 2 (`admin.proposal.create`, `admin.proposal.list`) |
+| Native tools | Rust | 2 (`admin_proposal_create`, `admin_proposal_list`) |
 | New capabilities | — | 0 (reuse `ApprovalQueue` + `ReadAccess`) |
 
 ---
@@ -289,10 +289,10 @@ Note: no `AgentRevision`. All revision work is delegated.
 
 **Instructions outline**:
 
-1. On wake, read `knowledge.recall(id="evolution.high_water_mark")`. If absent,
+1. On wake, read `knowledge_recall(id="evolution.high_water_mark")`. If absent,
    initialise to `now - 4h`.
-2. If no cron job exists for self, call `scheduler.cron.create(message="Run evolution analysis", schedule_expr="0 */4 * * *")`.
-3. Call `session.search(status="completed", since=<bookmark>, limit=<max_sessions>)`.
+2. If no cron job exists for self, call `scheduler_cron_create(message="Run evolution analysis", schedule_expr="0 */4 * * *")`.
+3. Call `session_search(status="completed", since=<bookmark>, limit=<max_sessions>)`.
 4. If no sessions → update bookmark, end turn.
 5. Spawn `memory-curator.default` with `{ session_ids, max_sessions: 50 }`. Wait
    for result.
@@ -300,9 +300,9 @@ Note: no `AgentRevision`. All revision work is delegated.
    - For each agent in `agent_scores` where `evolution_recommended=true` AND not
      in exemption list AND under per-run cap: spawn `evolution-steward.default`
      with `{ agent_id, evidence }`. Track per-agent outcome.
-   - For each `systemic_gap`: call `admin.proposal.create` with structured
+   - For each `systemic_gap`: call `admin_proposal_create` with structured
      fields.
-7. Update `knowledge.store(id="evolution.high_water_mark", content={ last_processed_at: now, last_run_id, generation: +1 }, visibility: global)`.
+7. Update `knowledge_store(id="evolution.high_water_mark", content={ last_processed_at: now, last_run_id, generation: +1 }, visibility: global)`.
 8. End turn with a summary: sessions analysed, agents evolved, proposals created.
 
 **Delegation contract**:
@@ -337,13 +337,13 @@ No `AgentSpawn` — leaf agent.
 1. Receive `{ session_ids, max_sessions }` from orchestrator.
 2. Cap `session_ids` to `max_sessions`.
 3. For each session:
-   - `digest.query(session_id)` — read narrative digest
-   - `execution.search(session_id, limit=200)` — raw tool traces
-   - `observability.search` + `observability.read` — published session report
+   - `digest_query(session_id)` — read narrative digest
+   - `execution_search(session_id, limit=200)` — raw tool traces
+   - `observability_search` + `observability_read` — published session report
 4. Extract durable learnings:
-   - Effective patterns (what worked) → `knowledge.store(tags=["source:memory_curator", "type:effective_pattern", "agent:<id>"])`
-   - Error patterns (what repeatedly failed) → `knowledge.store(tags=["source:memory_curator", "type:error_pattern", "agent:<id>"])`
-   - Approach improvements (alternative strategies) → `knowledge.store(tags=["source:memory_curator", "type:approach_improvement"])`
+   - Effective patterns (what worked) → `knowledge_store(tags=["source:memory_curator", "type:effective_pattern", "agent:<id>"])`
+   - Error patterns (what repeatedly failed) → `knowledge_store(tags=["source:memory_curator", "type:error_pattern", "agent:<id>"])`
+   - Approach improvements (alternative strategies) → `knowledge_store(tags=["source:memory_curator", "type:approach_improvement"])`
 5. Compute per-agent metrics from traces/approvals/evals/escalations using the
    multi-signal scoring matrix (section "Selection criterion" above).
 6. Identify systemic gaps: errors that recur across multiple agents (not agent-
@@ -405,9 +405,9 @@ No `AgentRevision`. Evolution goes through `agent-factory.default`.
 **Instructions outline**:
 
 1. Receive `{ agent_id, evidence }` from orchestrator.
-2. Call `agent.revision.inspect(agent_id)` — current SKILL.md, capabilities,
+2. Call `agent_revision_inspect(agent_id)` — current SKILL.md, capabilities,
    script entry, runtime.lock.
-3. Call `knowledge.search_by_tags(tags=["source:memory_curator", "agent:<id>"])`
+3. Call `knowledge_search_by_tags(tags=["source:memory_curator", "agent:<id>"])`
    for historical context (beyond this run's window).
 4. Classify root cause:
    - **Instructions-level** (reasoning errors, wrong tool selection, format
@@ -418,7 +418,7 @@ No `AgentRevision`. Evolution goes through `agent-factory.default`.
      base_agent_id, intent }`.
    - **Systemic** (missing tool/capability — fix isn't in this agent) → return
      `{ evolved: false, reason: "systemic_gap", proposal: {...} }`. Orchestrator
-     will forward the proposal to `admin.proposal.create`.
+     will forward the proposal to `admin_proposal_create`.
 5. If evolution triggered: wait for factory result. On success → return
    `{ evolved: true, new_revision_id }`. On failure → return `{ evolved: false,
    reason: "factory_gate_failed", details }`.
@@ -481,7 +481,7 @@ Register the module in `autonoetic-gateway/src/scheduler/gateway_store/mod.rs`
 and add thin pass-through methods on `GatewayStore` (same pattern as
 `insert_agent_revision_transactional`).
 
-### 3. `admin.proposal.create` native tool
+### 3. `admin_proposal_create` native tool
 
 File: `autonoetic-gateway/src/runtime/tools/admin_proposal.rs`
 
@@ -491,7 +491,7 @@ Follows the existing `NativeTool` pattern:
 pub struct AdminProposalCreateTool;
 
 impl NativeTool for AdminProposalCreateTool {
-    fn name(&self) -> &'static str { "admin.proposal.create" }
+    fn name(&self) -> &'static str { "admin_proposal_create" }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         manifest.capabilities.iter().any(|c|
@@ -517,7 +517,7 @@ Tool definition:
 
 ```json
 {
-  "name": "admin.proposal.create",
+  "name": "admin_proposal_create",
   "description": "Create a feature-evolution proposal for admin review.",
   "input_schema": {
     "type": "object",
@@ -535,7 +535,7 @@ Tool definition:
 }
 ```
 
-### 4. `admin.proposal.list` native tool
+### 4. `admin_proposal_list` native tool
 
 Same file. Returns proposals filtered by `status`/`category`. Gated by
 `ReadAccess` (wildcard or `"admin.*"` scope).
@@ -562,7 +562,7 @@ crate::runtime::tools::admin_proposal::register_tools(&mut registry);
 | `agents/evolution/memory-curator.default/SKILL.md` | Session-digestion + scoring bundle |
 | `agents/evolution/evolution-steward.default/SKILL.md` | Per-agent evolve-decision bundle |
 | `autonoetic-gateway/src/scheduler/gateway_store/admin_proposals.rs` | SQL CRUD module |
-| `autonoetic-gateway/src/runtime/tools/admin_proposal.rs` | `admin.proposal.create` + `admin.proposal.list` tools |
+| `autonoetic-gateway/src/runtime/tools/admin_proposal.rs` | `admin_proposal_create` + `admin_proposal_list` tools |
 
 ### Modified files
 
@@ -595,7 +595,7 @@ crate::runtime::tools::admin_proposal::register_tools(&mut registry);
 - `evolution-orchestrator.default` (curator-only delegation, no steward calls)
 - `memory-curator.default`
 - `admin_proposals` table + migration v11
-- `admin.proposal.create` + `admin.proposal.list` tools
+- `admin_proposal_create` + `admin_proposal_list` tools
 - Cron job (every 4h) pointing at the orchestrator
 - Bookmark in knowledge store
 
@@ -645,7 +645,7 @@ crate::runtime::tools::admin_proposal::register_tools(&mut registry);
 - Auto-rollback on regression (same multi-signal scoring applied to the new
   revision vs. the previous one).
 - Proposal lifecycle management: triage queries, acceptance path, impl-tracking.
-- Admin-agent bundle: a reasoning agent with `admin.proposal.list` +
+- Admin-agent bundle: a reasoning agent with `admin_proposal_list` +
   `admin.proposal.triage` that can resolve proposals autonomously under human
   oversight.
 

@@ -114,7 +114,7 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
                             "id": "call_1",
                             "type": "function",
                             "function": {
-                                "name": "agent.spawn",
+                                "name": "agent_spawn",
                                 "arguments": serde_json::json!({
                                     "agent_id": child_id,
                                     "message": "do work"

@@ -97,26 +97,26 @@ pub fn estimate_tool_definition(tool: &ToolDefinition) -> usize {
 /// Get the tier for a tool by name prefix.
 pub fn tool_tier(tool_name: &str) -> ToolTier {
     match tool_name {
-        n if n.starts_with("content.") => ToolTier::Core,
-        n if n.starts_with("knowledge.store") => ToolTier::Core,
-        n if n.starts_with("knowledge.recall") => ToolTier::Core,
-        n if n.starts_with("knowledge.search_by_tags") => ToolTier::Core,
-        n if n.starts_with("knowledge.search") => ToolTier::Core,
-        n if n.starts_with("artifact.") => ToolTier::Core,
-        n if n.starts_with("sandbox.exec") => ToolTier::Core,
-        n if n.starts_with("agent.spawn") => ToolTier::Workflow,
-        n if n.starts_with("agent.exists") => ToolTier::Workflow,
-        n if n.starts_with("agent.discover") => ToolTier::Workflow,
-        n if n.starts_with("approval.") => ToolTier::Workflow,
-        n if n.starts_with("workflow.") => ToolTier::Workflow,
-        n if n.starts_with("eval.") => ToolTier::Workflow,
-        n if n.starts_with("user.") => ToolTier::Workflow,
-        n if n.starts_with("digest.") => ToolTier::Workflow,
-        n if n.starts_with("web.") => ToolTier::Specialized,
-        n if n.starts_with("execution.") => ToolTier::Specialized,
-        n if n.starts_with("promotion.") => ToolTier::Specialized,
-        n if n.starts_with("agent.revision.") => ToolTier::Specialized,
-        n if n.starts_with("admin.proposal.") => ToolTier::Specialized,
+        n if n.starts_with("content_") => ToolTier::Core,
+        n if n.starts_with("knowledge_store") => ToolTier::Core,
+        n if n.starts_with("knowledge_recall") => ToolTier::Core,
+        n if n.starts_with("knowledge_search_by_tags") => ToolTier::Core,
+        n if n.starts_with("knowledge_search") => ToolTier::Core,
+        n if n.starts_with("artifact_") => ToolTier::Core,
+        n if n.starts_with("sandbox_exec") => ToolTier::Core,
+        n if n.starts_with("agent_spawn") => ToolTier::Workflow,
+        n if n.starts_with("agent_exists") => ToolTier::Workflow,
+        n if n.starts_with("agent_discover") => ToolTier::Workflow,
+        n if n.starts_with("approval_") => ToolTier::Workflow,
+        n if n.starts_with("workflow_") => ToolTier::Workflow,
+        n if n.starts_with("eval_") => ToolTier::Workflow,
+        n if n.starts_with("user_") => ToolTier::Workflow,
+        n if n.starts_with("digest_") => ToolTier::Workflow,
+        n if n.starts_with("web_") => ToolTier::Specialized,
+        n if n.starts_with("execution_") => ToolTier::Specialized,
+        n if n.starts_with("promotion_") => ToolTier::Specialized,
+        n if n.starts_with("agent_revision_") => ToolTier::Specialized,
+        n if n.starts_with("admin_proposal_") => ToolTier::Specialized,
         _ => ToolTier::Specialized,
     }
 }
@@ -479,41 +479,41 @@ mod tests {
 
     #[test]
     fn test_tool_tier_core() {
-        assert_eq!(tool_tier("content.write"), ToolTier::Core);
-        assert_eq!(tool_tier("content.read"), ToolTier::Core);
-        assert_eq!(tool_tier("knowledge.store"), ToolTier::Core);
-        assert_eq!(tool_tier("sandbox.exec"), ToolTier::Core);
+        assert_eq!(tool_tier("content_write"), ToolTier::Core);
+        assert_eq!(tool_tier("content_read"), ToolTier::Core);
+        assert_eq!(tool_tier("knowledge_store"), ToolTier::Core);
+        assert_eq!(tool_tier("sandbox_exec"), ToolTier::Core);
     }
 
     #[test]
     fn test_tool_tier_workflow() {
-        assert_eq!(tool_tier("agent.spawn"), ToolTier::Workflow);
-        assert_eq!(tool_tier("workflow.wait"), ToolTier::Workflow);
-        assert_eq!(tool_tier("approval.status"), ToolTier::Workflow);
+        assert_eq!(tool_tier("agent_spawn"), ToolTier::Workflow);
+        assert_eq!(tool_tier("workflow_wait"), ToolTier::Workflow);
+        assert_eq!(tool_tier("approval_status"), ToolTier::Workflow);
     }
 
     #[test]
     fn test_tool_tier_specialized() {
-        assert_eq!(tool_tier("web.search"), ToolTier::Specialized);
-        assert_eq!(tool_tier("web.fetch"), ToolTier::Specialized);
-        assert_eq!(tool_tier("promotion.record"), ToolTier::Specialized);
+        assert_eq!(tool_tier("web_search"), ToolTier::Specialized);
+        assert_eq!(tool_tier("web_fetch"), ToolTier::Specialized);
+        assert_eq!(tool_tier("promotion_record"), ToolTier::Specialized);
     }
 
     #[test]
     fn test_filter_tools_by_tier() {
         let tools = vec![
             ToolDefinition {
-                name: "content.write".to_string(),
+                name: "content_write".to_string(),
                 description: "Write content".to_string(),
                 input_schema: serde_json::json!({}),
             },
             ToolDefinition {
-                name: "web.search".to_string(),
+                name: "web_search".to_string(),
                 description: "Search web".to_string(),
                 input_schema: serde_json::json!({}),
             },
             ToolDefinition {
-                name: "agent.spawn".to_string(),
+                name: "agent_spawn".to_string(),
                 description: "Spawn agent".to_string(),
                 input_schema: serde_json::json!({}),
             },
@@ -521,7 +521,7 @@ mod tests {
 
         let core_only = filter_tools_by_tier(tools.clone(), &[ToolTier::Core]);
         assert_eq!(core_only.len(), 1);
-        assert_eq!(core_only[0].name, "content.write");
+        assert_eq!(core_only[0].name, "content_write");
 
         let core_and_workflow =
             filter_tools_by_tier(tools.clone(), &[ToolTier::Core, ToolTier::Workflow]);
@@ -536,7 +536,7 @@ mod tests {
         let system = "You are a helpful assistant.";
         let messages = vec![Message::user("Hello"), Message::assistant("Hi there")];
         let tools = vec![ToolDefinition {
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             description: "Write content".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
         }];
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn test_compress_tool_definitions_turn_zero_keeps_full() {
         let tools = vec![ToolDefinition {
-            name: "content.write".to_string(),
+            name: "content_write".to_string(),
             description: "Write content".to_string(),
             input_schema: serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}}),
         }];
@@ -571,12 +571,12 @@ mod tests {
     fn test_compress_tool_definitions_subsequent_turns_minimal() {
         let tools = vec![
             ToolDefinition {
-                name: "content.write".to_string(),
+                name: "content_write".to_string(),
                 description: "Write content".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}}),
             },
             ToolDefinition {
-                name: "web.search".to_string(),
+                name: "web_search".to_string(),
                 description: "Search web".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
             },
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(compressed.len(), 2);
         assert_eq!(compressed[0].input_schema, serde_json::json!({}));
         assert_eq!(compressed[1].input_schema, serde_json::json!({}));
-        assert_eq!(compressed[0].name, "content.write");
-        assert_eq!(compressed[1].name, "web.search");
+        assert_eq!(compressed[0].name, "content_write");
+        assert_eq!(compressed[1].name, "web_search");
     }
 }

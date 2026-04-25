@@ -414,7 +414,7 @@ impl SessionReportWriter {
                 .as_ref()
                 .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
                 != Some(false);
-            if tool_name == "workflow.wait" {
+            if tool_name == "workflow_wait" {
                 if parsed
                     .as_ref()
                     .and_then(|v| v.get("any_failed").and_then(|x| x.as_bool()))
@@ -832,19 +832,19 @@ fn touch_agent(agent: &mut AgentReport, kind: &str, summary: &str, timestamp: &s
 fn summarize_tool_request(tool_name: &str, arguments_redacted: &str) -> String {
     let parsed = serde_json::from_str::<Value>(arguments_redacted).ok();
     match tool_name {
-        "sandbox.exec" => format!(
+        "sandbox_exec" => format!(
             "run {}",
             extract_field_str(parsed.as_ref(), &["command"]).unwrap_or("command")
         ),
-        "web.search" => format!(
+        "web_search" => format!(
             "search {}",
             extract_field_str(parsed.as_ref(), &["query", "q"]).unwrap_or("query")
         ),
-        "web.fetch" => format!(
+        "web_fetch" => format!(
             "fetch {}",
             extract_field_str(parsed.as_ref(), &["url"]).unwrap_or("url")
         ),
-        "workflow.wait" => {
+        "workflow_wait" => {
             let tasks = parsed
                 .as_ref()
                 .and_then(|v| v.get("task_ids").and_then(|x| x.as_array()))
@@ -856,8 +856,8 @@ fn summarize_tool_request(tool_name: &str, arguments_redacted: &str) -> String {
                 .unwrap_or(0);
             format!("wait on {} task(s) for {}s", tasks, timeout)
         }
-        "workflow.state" => "refresh workflow state".to_string(),
-        "content.write" => format!(
+        "workflow_state" => "refresh workflow state".to_string(),
+        "content_write" => format!(
             "write {}",
             extract_field_str(parsed.as_ref(), &["name"]).unwrap_or("content")
         ),
@@ -871,9 +871,9 @@ fn summarize_tool_request(tool_name: &str, arguments_redacted: &str) -> String {
 
 fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> String {
     match tool_name {
-        "workflow.wait" => summarize_workflow_wait(parsed),
-        "workflow.state" => summarize_workflow_state(parsed),
-        "artifact.build" | "artifact.inspect" => {
+        "workflow_wait" => summarize_workflow_wait(parsed),
+        "workflow_state" => summarize_workflow_state(parsed),
+        "artifact_build" | "artifact_inspect" => {
             let id = extract_field_str(parsed, &["artifact_id", "id"]).unwrap_or("artifact");
             let files = parsed
                 .and_then(|v| v.get("files").and_then(|x| x.as_array()))
@@ -885,11 +885,11 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
                 format!("{} `{}`", tool_name, id)
             }
         }
-        "content.write" => format!(
+        "content_write" => format!(
             "wrote {}",
             extract_field_str(parsed, &["name", "sandbox_path", "handle"]).unwrap_or("content")
         ),
-        "content.read" => {
+        "content_read" => {
             if let Some(len) = parsed
                 .and_then(|v| v.get("content"))
                 .and_then(|x| x.as_str())
@@ -900,7 +900,7 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
                 "read content".to_string()
             }
         }
-        "web.search" => {
+        "web_search" => {
             let query = extract_field_str(parsed, &["query"]).unwrap_or("query");
             let count = parsed
                 .and_then(|v| v.get("result_count").and_then(|x| x.as_u64()))
@@ -911,7 +911,7 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
                 count
             )
         }
-        "web.fetch" => {
+        "web_fetch" => {
             let url = extract_field_str(parsed, &["url"]).unwrap_or("url");
             let status = parsed
                 .and_then(|v| v.get("status_code").and_then(|x| x.as_u64()))
@@ -929,7 +929,7 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
                 format!("fetch `{}` -> {}", truncate_chars(url, 80), status)
             }
         }
-        "sandbox.exec" => {
+        "sandbox_exec" => {
             let exit = parsed
                 .and_then(|v| v.get("exit_code").and_then(|x| x.as_i64()))
                 .unwrap_or(-1);
@@ -1052,7 +1052,7 @@ fn summarize_workflow_state(parsed: Option<&Value>) -> String {
 }
 
 fn summarize_tool_error(tool_name: &str, parsed: Option<&Value>, raw: &str) -> String {
-    if tool_name == "workflow.wait" {
+    if tool_name == "workflow_wait" {
         return summarize_workflow_wait(parsed);
     }
     if let Some(v) = parsed {
@@ -1175,7 +1175,7 @@ fn maybe_record_output(
     now: &str,
 ) {
     match tool_name {
-        "artifact.build" | "artifact.inspect" => {
+        "artifact_build" | "artifact_inspect" => {
             if let Some(artifact_id) = extract_field_str(parsed, &["artifact_id", "id"]) {
                 if !agent.artifacts.iter().any(|a| a.artifact_id == artifact_id) {
                     agent.artifacts.push(ArtifactItem {
@@ -1188,15 +1188,15 @@ fn maybe_record_output(
                 agent.output_preview = Some(format!("artifact `{}`", artifact_id));
             }
         }
-        "content.write" => {
+        "content_write" => {
             agent.output_preview = Some(truncate_chars(summary, 160));
         }
-        "knowledge.store" => {
+        "knowledge_store" => {
             if let Some(id) = extract_field_str(parsed, &["id"]) {
                 agent.output_preview = Some(format!("stored knowledge `{}`", id));
             }
         }
-        "sandbox.exec" | "web.search" | "web.fetch" => {
+        "sandbox_exec" | "web_search" | "web_fetch" => {
             agent.output_preview = Some(truncate_chars(summary, 180));
         }
         _ => {}
@@ -1204,12 +1204,12 @@ fn maybe_record_output(
 }
 
 fn is_poll_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "workflow.wait" | "workflow.state")
+    matches!(tool_name, "workflow_wait" | "workflow_state")
 }
 
 fn poll_result_is_important(tool_name: &str, parsed: Option<&Value>) -> bool {
     match tool_name {
-        "workflow.wait" => {
+        "workflow_wait" => {
             let Some(v) = parsed else {
                 return false;
             };
@@ -1227,7 +1227,7 @@ fn poll_result_is_important(tool_name: &str, parsed: Option<&Value>) -> bool {
                     })
                     .unwrap_or(false)
         }
-        "workflow.state" => {
+        "workflow_state" => {
             let Some(v) = parsed else {
                 return false;
             };
@@ -3212,14 +3212,14 @@ mod tests {
         writer.start_turn(Some("turn-1")).unwrap();
         writer
             .record_tool_requested(
-                "sandbox.exec",
+                "sandbox_exec",
                 r#"{"command":"python3 /tmp/test_weather.py"}"#,
                 Some("turn-1"),
             )
             .unwrap();
         writer
             .record_tool_completed(
-                "sandbox.exec",
+                "sandbox_exec",
                 r#"{"approval_required":true,"request_id":"apr-1","approval":{"kind":"sandbox_exec","summary":"remote access detected","reason":"api.open-meteo.com"},"ok":false}"#,
                 None,
                 Some("turn-1"),

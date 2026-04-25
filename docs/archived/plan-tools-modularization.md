@@ -16,22 +16,22 @@
 autonoetic-gateway/src/runtime/
   tools/
     mod.rs                 # NativeTool trait, NativeToolRegistry, default_registry(), shared helpers, InstallAgentFile (~420 lines)
-    sandbox.rs             # sandbox.exec (~1,050 lines)
-    web.rs                 # web.search, web.fetch (~340 lines)
-    content.rs             # content.write, content.read (~260 lines)
-    artifact.rs            # artifact.build, artifact.inspect, artifact.resolve_ref (~450 lines)
-    execution.rs           # execution.search (~147 lines)
-    knowledge.rs           # knowledge.store/.recall/.search/.search_by_tags, digest.query (~680 lines)
-    session.rs             # session.escalate (~189 lines)
-    agent.rs               # agent.spawn, agent.exists, agent.discover (~450 lines)
+    sandbox.rs             # sandbox_exec (~1,050 lines)
+    web.rs                 # web_search, web_fetch (~340 lines)
+    content.rs             # content_write, content_read (~260 lines)
+    artifact.rs            # artifact_build, artifact_inspect, artifact_resolve_ref (~450 lines)
+    execution.rs           # execution_search (~147 lines)
+    knowledge.rs           # knowledge_store/.recall/.search/.search_by_tags, digest_query (~680 lines)
+    session.rs             # session_escalate (~189 lines)
+    agent.rs               # agent_spawn, agent_exists, agent_discover (~450 lines)
     agent_revision.rs      # agent.revision.{create,list,inspect,promote,rollback,diff} (~1,030 lines)
     evaluation.rs          # eval.{suite.publish,run,compare,report} (~704 lines)
-    workflow.rs            # approval.status, workflow.{wait,state,cancel_task} (~900 lines)
-    user_interaction.rs    # user.ask, user.interaction.status (~350 lines)
-    digest.rs              # digest.annotate (~107 lines)
-    promotion.rs           # promotion.record, promotion.query (~250 lines)
+    workflow.rs            # approval_status, workflow.{wait,state,cancel_task} (~900 lines)
+    user_interaction.rs    # user_ask, user_interaction_status (~350 lines)
+    digest.rs              # digest_annotate (~107 lines)
+    promotion.rs           # promotion_record, promotion_query (~250 lines)
   tests/
-    native_tool_registry_tests.rs  # Registry availability, web.fetch/search, agent.spawn tests (~880 lines)
+    native_tool_registry_tests.rs  # Registry availability, web_fetch/search, agent_spawn tests (~880 lines)
 ```
 
 ## 2. Module Sizes (Actual)
@@ -39,7 +39,7 @@ autonoetic-gateway/src/runtime/
 | Module | Tools | Lines | Notes |
 |--------|-------|-------|-------|
 | `mod.rs` | Trait, registry, default_registry(), shared helpers | ~420 | Core interface + sandbox helper types |
-| `sandbox.rs` | `sandbox.exec` | ~1,050 | Heavy sandbox plumbing |
+| `sandbox.rs` | `sandbox_exec` | ~1,050 | Heavy sandbox plumbing |
 | `agent_revision.rs` | 6 revision tools + helpers | ~1,030 | Revision materialization, diff logic |
 | `workflow.rs` | 4 workflow tools | ~900 | Task polling, approval status |
 | `evaluation.rs` | 4 eval tools + helpers | ~704 | Suite validation, assertion engine |
@@ -50,9 +50,9 @@ autonoetic-gateway/src/runtime/
 | `web.rs` | 2 web tools + HTTP helpers | ~340 | Provider fallback, caching |
 | `promotion.rs` | 2 promotion tools | ~250 | Artifact promotion gating |
 | `content.rs` | 2 content tools | ~260 | Simple CRUD |
-| `session.rs` | `session.escalate` | ~189 | Single tool |
-| `execution.rs` | `execution.search` | ~147 | Single tool |
-| `digest.rs` | `digest.annotate` | ~107 | Single tool |
+| `session.rs` | `session_escalate` | ~189 | Single tool |
+| `execution.rs` | `execution_search` | ~147 | Single tool |
+| `digest.rs` | `digest_annotate` | ~107 | Single tool |
 
 **Total reduction:** 8,863 → 0 lines in monolith (100% elimination).
 
@@ -139,7 +139,7 @@ cargo test -p autonoetic-gateway  # 363 tests, all passing
 ```
 
 Key test files:
-- `tests/native_tool_registry_tests.rs` (registry availability, web tools, agent.spawn)
+- `tests/native_tool_registry_tests.rs` (registry availability, web tools, agent_spawn)
 - `tests/execution_search_integration.rs`
 - `tests/tier2_memory_integration.rs`
 - `tests/post_session_digest_integration.rs`

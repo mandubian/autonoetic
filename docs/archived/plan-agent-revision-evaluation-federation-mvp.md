@@ -22,7 +22,7 @@ Landed work so far covers a subset of Phase 0, most of the Phase 1 registry and 
 - Phase 1b-1e landed for revision, alias, session-binding, promotion, and eval tables; alias-backed resolver behavior; short revision refs; revision create/list/inspect; and first-pass session pinning on spawn.
 - Follow-up hardening landed for ordered migration metadata (`schema_migrations`), canonical runtime lock hashing, revision directory materialization, binding-first session resolution, and removal of the non-store session-resolution fallback.
 - Phase 2 landed for transactional promote/rollback commands with same-agent validation, default rollback-to-previous behavior, durable promotion history, and optional eval-run gating.
-- Phase 3.5 landed for `agent.revision.diff` and `eval.compare` on top of the existing eval/report pipeline.
+- Phase 3.5 landed for `agent_revision_diff` and `eval_compare` on top of the existing eval/report pipeline.
 - Runtime `agent.install` is removed from active native tool exposure; activation is revision + promote (or operator seed).
 
 ## Cross-Cutting Epic Tracker
@@ -282,7 +282,7 @@ Goal: add measurable evidence before alias movement.
 - [x] Aggregate run summary data.
 - [x] Persist the full report to the content store.
 - [x] Persist optional `baseline_ref` as report metadata only in MVP.
-- [x] Expose summary plus `report_handle` through `eval.report`.
+- [x] Expose summary plus `report_handle` through `eval_report`.
 
 ### P3-T07 Concurrency and permits
 
@@ -315,23 +315,23 @@ Goal: add measurable evidence before alias movement.
 
 Goal: provide first-class "what changed" and "did it improve" tooling on top of immutable revisions and eval records.
 
-### P3.5-T01 `agent.revision.diff`
+### P3.5-T01 `agent_revision_diff`
 
-- [x] Add `agent.revision.diff` for deterministic file-level comparison between two refs.
+- [x] Add `agent_revision_diff` for deterministic file-level comparison between two refs.
 - [x] Resolve both `from_ref` and `to_ref` through registry-backed `agent_ref` resolution.
 - [x] Report added, removed, and modified files with per-file digest and size metadata.
 
-### P3.5-T02 `eval.compare`
+### P3.5-T02 `eval_compare`
 
-- [x] Add `eval.compare` for baseline/candidate comparison on the same suite.
+- [x] Add `eval_compare` for baseline/candidate comparison on the same suite.
 - [x] Reuse latest completed runs when available for each revision.
 - [x] Queue missing eval runs when no completed run exists and return a queued status.
 - [x] Return regression/improvement deltas once both baseline and candidate runs are complete.
 
 ### P3.5-T03 Tests
 
-- [x] Add integration coverage for `agent.revision.diff`.
-- [x] Add integration coverage for completed-path `eval.compare`.
+- [x] Add integration coverage for `agent_revision_diff`.
+- [x] Add integration coverage for completed-path `eval_compare`.
 
 ## Phase 4: Federation-Ready Provenance
 

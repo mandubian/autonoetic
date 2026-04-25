@@ -6,8 +6,8 @@
 
 Autonoetic automatically persists conversation history at hibernation points and session close, indexes it with SQLite FTS5, and exposes two tools:
 
-- **`session.search`** — FTS5 full-text search with bm25 ranking
-- **`session.peek`** — Read the raw transcript of a session (turn counts, role breakdown, truncated excerpt)
+- **`session_search`** — FTS5 full-text search with bm25 ranking
+- **`session_peek`** — Read the raw transcript of a session (turn counts, role breakdown, truncated excerpt)
 
 ## Architecture
 
@@ -39,14 +39,14 @@ persist_history_to_content_store()
 - Prefixes each message with role label (`[system]`, `[user]`, `[assistant]`, `[tool]`)
 - Skips empty messages
 - Caps at 8,000 characters
-- Used for both FTS indexing and `session.peek`
+- Used for both FTS indexing and `session_peek`
 
 ## Tools
 
-### session.search
+### session_search
 
 ```python
-result = sdk.tools.invoke("session.search", {
+result = sdk.tools.invoke("session_search", {
     "query": "API authentication token",       # FTS5 MATCH syntax
     "agent_id": "researcher.default",           # Filter by agent
     "root_session_id": "sess-abc123",           # Filter by workflow root
@@ -76,11 +76,11 @@ result = sdk.tools.invoke("session.search", {
 
 **ACL:** Agents can only search their own sessions and child sessions of the current root. Cross-agent searches are restricted to the caller's own agent ID.
 
-### session.peek
+### session_peek
 
 ```python
-result = sdk.tools.invoke("session.peek", {
-    "transcript_handle": "sha256:abc123...",    # From session.search results
+result = sdk.tools.invoke("session_peek", {
+    "transcript_handle": "sha256:abc123...",    # From session_search results
     "max_length": 500                            # 50-5000, default 500
 })
 # → {

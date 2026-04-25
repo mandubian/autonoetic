@@ -85,7 +85,7 @@ pub fn execute_scheduled_action(
                 "dependencies": dependencies.as_ref().map(|deps| serde_json::json!({ "runtime": deps.runtime, "packages": deps.packages }))
             }))?;
             let result = registry.execute(
-                "sandbox.exec",
+                "sandbox_exec",
                 manifest,
                 &policy,
                 agent_dir,

@@ -244,7 +244,7 @@ async fn test_promotion_record_full_pass_flow() {
 
     let eval_result = registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             &eval_manifest,
             &eval_policy,
             &builder_dir,
@@ -274,7 +274,7 @@ async fn test_promotion_record_full_pass_flow() {
 
     let audit_result = registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             &audit_manifest,
             &audit_policy,
             &builder_dir,
@@ -315,7 +315,7 @@ async fn test_promotion_record_full_pass_flow() {
     });
     let create_result = registry
         .execute(
-            "agent.revision.create",
+            "agent_revision_create",
             &b_manifest,
             &b_policy,
             &builder_dir,
@@ -342,7 +342,7 @@ async fn test_promotion_record_full_pass_flow() {
     });
     let promote_result = registry
         .execute(
-            "agent.revision.promote",
+            "agent_revision_promote",
             &b_manifest,
             &b_policy,
             &builder_dir,

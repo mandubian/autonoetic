@@ -107,7 +107,7 @@ Important workflow transitions **also** emit best-effort gateway causal-chain ro
 | Causal `action` | When |
 |-----------------|------|
 | `workflow.started` | New `WorkflowRun` created for a root session |
-| `workflow.task.spawned` | `agent.spawn` persisted a `TaskRun` and workflow `task.spawned` event |
+| `workflow.task.spawned` | `agent_spawn` persisted a `TaskRun` and workflow `task.spawned` event |
 | `workflow.task.completed` / `workflow.task.failed` | Task status updated to terminal (or `workflow.task.awaiting_approval` / `workflow.task.updated` for other updates) |
 
 Payloads include `workflow_id` and `task_id` where applicable. Rows are indexed under the workflow **root** `session_id` so the lead session’s evidence trail shows delegation.
@@ -235,13 +235,13 @@ This keeps planner continuity durable without requiring a live process.
 
 ## Execution Semantics
 
-### A. `agent.spawn` becomes asynchronous
+### A. `agent_spawn` becomes asynchronous
 
 This is the key change needed for robust parallelism.
 
 Current behavior is effectively synchronous:
 
-- planner calls `agent.spawn`
+- planner calls `agent_spawn`
 - gateway waits for the child to finish or block
 - planner only then continues the turn
 
@@ -249,10 +249,10 @@ This makes true parallel delegation impossible and is exactly why one approval c
 
 New behavior:
 
-- `agent.spawn` creates a `TaskRun`
+- `agent_spawn` creates a `TaskRun`
 - returns immediately with `task_id`, `session_id`, and accepted metadata
 - gateway scheduler starts the child task independently
-- planner can issue several `agent.spawn` calls in one turn
+- planner can issue several `agent_spawn` calls in one turn
 
 The planner should reason in terms of:
 
@@ -328,8 +328,8 @@ The planner should not need to understand session plumbing.
 
 Suggested gateway-facing primitives:
 
-- `agent.spawn(...) -> { task_id, session_id, accepted: true }`
-- `workflow.wait({ task_ids, policy })`
+- `agent_spawn(...) -> { task_id, session_id, accepted: true }`
+- `workflow_wait({ task_ids, policy })`
 - `workflow.get_status({ workflow_id })`
 - `workflow.get_results({ task_ids })`
 
@@ -530,7 +530,7 @@ The new workflow layer should sit above them:
 |----|------|-------------|
 | **P1.1** | [x] | Shared types: `WorkflowRun`, `TaskRun`, `WorkflowEventRecord`, status enums (`autonoetic-types::workflow`) |
 | **P1.2** | [x] | Durable store under `.gateway/scheduler/workflows/` (root index → `workflow_id`, `runs/<id>/workflow.json`, `tasks/`, `events.jsonl`) |
-| **P1.3** | [x] | Wire `agent.spawn` to ensure workflow per root session and return `workflow_id` + `task_id` |
+| **P1.3** | [x] | Wire `agent_spawn` to ensure workflow per root session and return `workflow_id` + `task_id` |
 | **P1.4** | [x] | Emit `task.spawned` / `task.completed` (and related) from the spawn path _(sync spawn: success → `task.completed`; error → `task.failed` via store)_ |
 | **P1.5** | [x] | Mirror key workflow/task transitions into the gateway **causal chain** (`workflow_causal` + `log_gateway_causal_event`) per § Relationship To Causal Chain |
 | **P6.1** | [x] | Read-only CLI: `autonoetic trace workflow <id> [--root] [--follow] [--json]` reads `events.jsonl`; gateway `resolve_workflow_id_for_root_session`, `load_workflow_events` (`workflow_store`) |
@@ -539,19 +539,19 @@ The new workflow layer should sit above them:
 | **P2.1** | [x] | `QueuedTaskRun` type, `JoinPolicy` enum, `join_group` field on `TaskRun`, `queued_task_ids`/`join_policy`/`join_task_ids` on `WorkflowRun` (`autonoetic-types::workflow`) |
 | **P2.2** | [x] | Queue persistence: `enqueue_task`, `dequeue_task`, `load_queued_tasks`, `load_all_queued_tasks`, `check_join_condition` (`workflow_store`) |
 | **P2.3** | [x] | Scheduler tick: `process_queued_workflow_tasks` picks up queued tasks, creates TaskRun, spawns background `spawn_agent_once`, updates status on completion (`scheduler.rs`) |
-| **P2.4** | [x] | `agent.spawn` async mode: `async: true` parameter → enqueues `QueuedTaskRun`, returns immediately with `task_id` + `accepted: true` |
-| **P2.5** | [x] | `workflow.wait` tool: checks task statuses by `task_ids`, returns per-task status + `join_satisfied` flag; registered in `default_registry` |
+| **P2.4** | [x] | `agent_spawn` async mode: `async: true` parameter → enqueues `QueuedTaskRun`, returns immediately with `task_id` + `accepted: true` |
+| **P2.5** | [x] | `workflow_wait` tool: checks task statuses by `task_ids`, returns per-task status + `join_satisfied` flag; registered in `default_registry` |
 | **P4.1** | [x] | Join condition check wired into `update_task_run_status`: after terminal task update, checks if all `join_task_ids` are done → marks workflow `Resumable` + emits `workflow.join.satisfied` event |
-| **P4.2** | [x] | `workflow.wait` blocking mode: `timeout_secs > 0` polls task status in a loop until join satisfied or timeout |
+| **P4.2** | [x] | `workflow_wait` blocking mode: `timeout_secs > 0` polls task status in a loop until join satisfied or timeout |
 | **P4.3** | [x] | `WorkflowJoinSatisfied` signal type + `send_workflow_join_satisfied` writes signal to planner session directory on join satisfaction |
 | **P5.1** | [x] | `workflow_id` and `task_id` optional fields added to `ApprovalRequest` and `ApprovalDecision` |
-| **P5.2** | [x] | Approval requests created by `sandbox.exec` and `agent.install` resolve and populate `workflow_id` from session context |
+| **P5.2** | [x] | Approval requests created by `sandbox_exec` and `agent.install` resolve and populate `workflow_id` from session context |
 | **P5.3** | [x] | `unblock_task_on_approval` called on approve/reject — updates task status (Runnable on approve, Failed on reject) + emits workflow events |
 | **P6.1** | [x] | `WorkflowEventStream` — in-process subscription via `std::sync::mpsc` channel, polls `events.jsonl` on a background thread |
 | **P6.2** | [x] | `workflow_updated_since` — fast check if any workflow events were emitted after a timestamp |
 | **P7.1** | [x] | `compact_workflow_summary` — single-line summary of workflow state (running/done/failed/queued counts) |
 | **P7.2** | [x] | Lifecycle integration: injects `[workflow status] ...` as a system message at turn end (EndTurn/StopSequence) |
-| **P8.1** | [x] | Planner SKILL.md updated with parallel delegation (async spawn + workflow.wait) guidance |
+| **P8.1** | [x] | Planner SKILL.md updated with parallel delegation (async spawn + workflow_wait) guidance |
 | **P8.2** | [x] | Approval section updated: async spawn not blocked by pending approvals |
 | **P3.1** | [x] | `WorkflowCheckpoint` type + `checkpoint_planner()` with auto-versioning |
 | **P3.2** | [x] | `TaskCheckpoint` type + `checkpoint_task()` with auto-versioning |
@@ -569,11 +569,11 @@ The new workflow layer should sit above them:
 
 ### Phase 2: Async child spawning ✅
 
-- `agent.spawn(async: true)` creates a `QueuedTaskRun` and returns immediately with `task_id`
+- `agent_spawn(async: true)` creates a `QueuedTaskRun` and returns immediately with `task_id`
 - Scheduler tick (`process_queued_workflow_tasks`) picks up queued tasks, spawns `spawn_agent_once` in background tokio tasks
-- `workflow.wait(task_ids)` tool lets the planner check task completion status (non-blocking)
+- `workflow_wait(task_ids)` tool lets the planner check task completion status (non-blocking)
 - Child outputs persisted in task result records on completion/failure
-- **Remaining:** Planner resume on join condition satisfaction (Phase 4 integration — currently `workflow.wait` is manual; planner must call it explicitly)
+- **Remaining:** Planner resume on join condition satisfaction (Phase 4 integration — currently `workflow_wait` is manual; planner must call it explicitly)
 
 ### Phase 3: Workflow/task checkpoints ✅
 
@@ -591,17 +591,17 @@ The new workflow layer should sit above them:
 - `update_task_run_status` checks join condition after terminal task updates ✅
 - When all `join_task_ids` reach terminal status → workflow marked `Resumable` + `workflow.join.satisfied` event emitted ✅
 - `WorkflowJoinSatisfied` signal written to planner session directory for signal poller delivery ✅
-- `workflow.wait` supports blocking mode (`timeout_secs > 0`) — polls until join satisfied or timeout ✅
-- **Remaining:** Signal poller delivery of `WorkflowJoinSatisfied` requires a running gateway with signal poller active; the planner session must be listening for `event.ingest` to pick it up. `workflow.wait` blocking mode is the reliable fallback.
+- `workflow_wait` supports blocking mode (`timeout_secs > 0`) — polls until join satisfied or timeout ✅
+- **Remaining:** Signal poller delivery of `WorkflowJoinSatisfied` requires a running gateway with signal poller active; the planner session must be listening for `event.ingest` to pick it up. `workflow_wait` blocking mode is the reliable fallback.
 
 ### Phase 5: Approval barriers ✅
 
 - `ApprovalRequest` and `ApprovalDecision` now carry `workflow_id` and `task_id` (optional) ✅
-- `sandbox.exec` and `agent.install` resolve `workflow_id` from the current session when creating approval requests ✅
+- `sandbox_exec` and `agent.install` resolve `workflow_id` from the current session when creating approval requests ✅
 - On approval resolution (approve or reject), `unblock_task_on_approval` updates the blocked task's status:
   - Approved → `Runnable` (task can resume execution)
   - Rejected → `Failed` (task is marked failed, join condition checks it) ✅
-- **Remaining:** `task_id` population requires the async spawn path to pass the task context to the child session; currently `task_id` is `None` for sync sandbox.exec approvals (they don't block an async task)
+- **Remaining:** `task_id` population requires the async spawn path to pass the task context to the child session; currently `task_id` is `None` for sync sandbox_exec approvals (they don't block an async task)
 
 ### Phase 6: Event stream ✅
 
@@ -617,7 +617,7 @@ The new workflow layer should sit above them:
 
 ### Phase 8: Cleanup and migration ✅
 
-- Planner SKILL.md updated with parallel delegation (async spawn + workflow.wait) guidance ✅
+- Planner SKILL.md updated with parallel delegation (async spawn + workflow_wait) guidance ✅
 - Approval section updated: async spawn not blocked by pending approvals ✅
 - Session-path inference: `root_session_id()` still used in places; full cleanup deferred (non-breaking, backward-compatible)
 
@@ -703,11 +703,11 @@ Reproduce the exact `demo-session-1` scenario:
 The smallest meaningful vertical slice is:
 
 1. add `workflow_id` and `task_id` ✅
-2. make `agent.spawn` asynchronous ✅ (`async: true` + `workflow.wait`)
+2. make `agent_spawn` asynchronous ✅ (`async: true` + `workflow_wait`)
 3. add workflow/task checkpoints ✅ (`WorkflowCheckpoint`, `TaskCheckpoint`, `checkpoint_planner()`, `checkpoint_task()`, versioned persistence)
 4. checkpoint planner into `WaitingChildren` ✅ (join condition + signal on satisfaction)
 5. bind approvals to `task_id` ✅ (`workflow_id`/`task_id` on `ApprovalRequest` + `unblock_task_on_approval`)
-6. resume planner on child completion ✅ (`workflow.wait` blocking + `WorkflowJoinSatisfied` signal)
+6. resume planner on child completion ✅ (`workflow_wait` blocking + `WorkflowJoinSatisfied` signal)
 7. add a simple `trace graph --follow` text view ✅
 
 That slice is enough to fix the current architectural problem and gives us a clean base for richer graph UX later.

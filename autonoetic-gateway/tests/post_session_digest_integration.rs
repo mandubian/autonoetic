@@ -118,7 +118,7 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
         session_id: session_id.to_string(),
         turn_id: Some("turn-000001".to_string()),
         timestamp: chrono::Utc::now().to_rfc3339(),
-        tool_name: "sandbox.exec".to_string(),
+        tool_name: "sandbox_exec".to_string(),
         command: Some("false".to_string()),
         exit_code: Some(1),
         stdout: None,

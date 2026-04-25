@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Currently, every `sandbox.exec` call that contains network access patterns requires a new approval, even if the agent has already been approved to execute the same code. This creates:
+Currently, every `sandbox_exec` call that contains network access patterns requires a new approval, even if the agent has already been approved to execute the same code. This creates:
 
 1. **Approval fatigue** - users start auto-approving everything
 2. **Redundant friction** - same code = repeated prompts
@@ -14,7 +14,7 @@ Cache approved sandbox exec fingerprints so identical future executions skip cre
 
 ## Scope
 
-Phase 1 covers only `sandbox.exec` with network detection. Phase 2 (not in this plan) will add TTL, capability-diff rules, and revocation UX.
+Phase 1 covers only `sandbox_exec` with network detection. Phase 2 (not in this plan) will add TTL, capability-diff rules, and revocation UX.
 
 ## Design
 
@@ -90,7 +90,7 @@ Note: `remote_targets` contains only **concrete hosts** extracted from URL liter
 
 The write point is explicitly **after successful execution with a valid approval_ref**:
 
-1. Agent calls `sandbox.exec` with code containing network patterns
+1. Agent calls `sandbox_exec` with code containing network patterns
 2. Gateway creates approval request, returns `approval_required: true, request_id: apr-xxx`
 3. Operator approves via gateway API
 4. Agent retries with `approval_ref: apr-xxx`
@@ -162,8 +162,8 @@ The exec cache (Phase 1) only works when ALL detected patterns are concrete (`ur
 
 Session approval grants solve this by recording **which hosts were approved** at the session level, independent of code fingerprinting:
 
-- When an operator approves a `sandbox.exec`, the detected hosts are stored as `(root_session_id, host)` pairs in the `session_approval_grants` SQLite table
-- On subsequent `sandbox.exec` calls, the gateway checks if the required hosts are a subset of already-granted hosts for this root session
+- When an operator approves a `sandbox_exec`, the detected hosts are stored as `(root_session_id, host)` pairs in the `session_approval_grants` SQLite table
+- On subsequent `sandbox_exec` calls, the gateway checks if the required hosts are a subset of already-granted hosts for this root session
 - If so, the call is auto-approved without operator interaction
 - Grants are scoped to the root session and cleaned up when the session ends
 - Grants require concrete targets (URL literals/IP addresses) — dynamic patterns are excluded by design

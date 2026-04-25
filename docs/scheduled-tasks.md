@@ -14,7 +14,7 @@ Operators and agents can register recurring tasks that trigger at specified inte
 }
 ```
 
-Call `scheduler.cron.create` with:
+Call `scheduler_cron_create` with:
 - `message` (required): The prompt sent to the target agent on each trigger
 - `schedule_expr` (required): Cron expression or natural-language phrase
 - `target_agent_id` (optional): Defaults to the calling agent
@@ -105,13 +105,13 @@ If enqueueing a task fails (e.g., workflow error), the job:
 
 ## Approval Preservation
 
-Scheduled job execution uses the same workflow execution paths as `agent.spawn`. Any sandbox operations requiring approval (network access, code execution) still go through the standard approval flow. The scheduler does **not** bypass any security gates.
+Scheduled job execution uses the same workflow execution paths as `agent_spawn`. Any sandbox operations requiring approval (network access, code execution) still go through the standard approval flow. The scheduler does **not** bypass any security gates.
 
 ## Best Practices
 
 1. **Use descriptive messages**: The message is the full prompt the agent receives. Include context about what triggered the run.
 2. **Prefer explicit cron for complex schedules**: Natural-language parsing is constrained to common patterns. Use cron syntax for anything non-standard.
-3. **Monitor via `scheduler.cron.list`**: Periodically check job status and `last_error` fields.
+3. **Monitor via `scheduler_cron_list`**: Periodically check job status and `last_error` fields.
 4. **Pause, don't cancel, for temporary stops**: Cancelled jobs are permanent. Use pause for temporary suspension.
 5. **Set reasonable intervals**: The minimum interval is 1 second by default, but very frequent schedules consume scheduler resources.
 6. **Use script mode for high frequency**: If you need intervals below 10 seconds, target an agent with `execution_mode: script`.
@@ -200,9 +200,9 @@ Icons: `+` created, `=` already exists, `-` disabled, `!` missing agent, `o` no 
 | Aspect | System Agent Job | Agent-Created Job |
 |--------|-----------------|-------------------|
 | **Owner** | `"system"` | Calling agent ID |
-| **Trigger** | Gateway startup reconciliation | `scheduler.cron.create` tool call |
+| **Trigger** | Gateway startup reconciliation | `scheduler_cron_create` tool call |
 | **Creation** | Config-driven, idempotent | Runtime, agent-initiated |
-| **Control** | CLI `system-agents bootstrap` | `scheduler.cron.pause/resume/cancel` |
+| **Control** | CLI `system-agents bootstrap` | `scheduler_cron_pause/resume/cancel` |
 | **Persistence** | Same `scheduled_jobs` table | Same `scheduled_jobs` table |
 
 Both use the same execution path — the background scheduler picks up due jobs, enqueues workflow tasks, and runs agents through the standard approval gates. System agent jobs have no special privileges.

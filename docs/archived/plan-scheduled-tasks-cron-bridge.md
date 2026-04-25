@@ -37,11 +37,11 @@ This plan also defines an optional modular bridge for Linux crontab. The bridge 
 
 ### Agent-facing tools
 
-1. scheduler.cron.create
-2. scheduler.cron.list
-3. scheduler.cron.pause
-4. scheduler.cron.resume
-5. scheduler.cron.cancel
+1. scheduler_cron_create
+2. scheduler_cron_list
+3. scheduler_cron_pause
+4. scheduler_cron_resume
+5. scheduler_cron_cancel
 
 ### Minimal create input
 

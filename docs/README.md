@@ -19,7 +19,7 @@ This index links to all documentation under `docs/` and marks what is stable ref
 - [`workflow-orchestration.md`](./workflow-orchestration.md) - Durable workflow/task lifecycle and join semantics.
 - [`approval-system.md`](./approval-system.md) - Approval flow and interaction mechanism semantics.
 - [`approval-notification-delivery.md`](./approval-notification-delivery.md) - Delivery path for workflow vs non-workflow approvals.
-- [`architecture-interaction-mechanisms.md`](./architecture-interaction-mechanisms.md) - Approval vs `user.ask` vs `clarification_needed`.
+- [`architecture-interaction-mechanisms.md`](./architecture-interaction-mechanisms.md) - Approval vs `user_ask` vs `clarification_needed`.
 - [`agent-clarification-protocol.md`](./agent-clarification-protocol.md) - Clarification signal format and parent/child handling.
 - [`quickstart-planner-specialist-chat.md`](./quickstart-planner-specialist-chat.md) - End-to-end planner/specialist chat walkthrough.
 

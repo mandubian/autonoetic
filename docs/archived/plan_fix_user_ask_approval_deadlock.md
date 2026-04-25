@@ -1,25 +1,25 @@
-# Plan: Fix `user.ask` / Approval / Workflow Deadlock
+# Plan: Fix `user_ask` / Approval / Workflow Deadlock
 
 ## Problem
 
-The planner can call `user.ask` while orchestrating child tasks, creating a deadlock:
+The planner can call `user_ask` while orchestrating child tasks, creating a deadlock:
 
 1. Child task hits approval → suspended
-2. Planner calls `user.ask` instead of `workflow.wait` → session checkpoints with `UserInputRequired`
+2. Planner calls `user_ask` instead of `workflow_wait` → session checkpoints with `UserInputRequired`
 3. Session closes as `jsonrpc_spawn_complete_empty` (misleading — looks "done" not "blocked")
 4. Approval resolves → child completes → workflow join satisfied → signal sent to planner
-5. Planner session can't resume (blocked on unanswered `user.ask` interaction)
+5. Planner session can't resume (blocked on unanswered `user_ask` interaction)
 6. Workflow is stranded
 
 ## Root Causes
 
-1. **No runtime guard**: `user.ask` is legal in any state, including during active workflow orchestration
-2. **Misleading outcome**: `user.ask` returns `TurnOutcome::Completed(None)` → `jsonrpc_spawn_complete_empty` instead of a true suspension state
-3. **Skill-only enforcement**: The skill says "DO NOT call `user.ask` for approvals" but the LLM can still violate this
+1. **No runtime guard**: `user_ask` is legal in any state, including during active workflow orchestration
+2. **Misleading outcome**: `user_ask` returns `TurnOutcome::Completed(None)` → `jsonrpc_spawn_complete_empty` instead of a true suspension state
+3. **Skill-only enforcement**: The skill says "DO NOT call `user_ask` for approvals" but the LLM can still violate this
 
 ## Solution: 2-Layer Defense
 
-### Layer 1: Runtime Guard on `user.ask` (Primary Fix)
+### Layer 1: Runtime Guard on `user_ask` (Primary Fix)
 
 **File: `autonoetic-gateway/src/runtime/tools.rs`** — `UserAskTool::execute()`
 
@@ -38,18 +38,18 @@ if let Some(wf_id) = &workflow_id {
         )
     });
     if has_active_children {
-        return Err("user.ask is not available while workflow tasks are active. Use workflow.wait.");
+        return Err("user_ask is not available while workflow tasks are active. Use workflow_wait.");
     }
 }
 
 // Check for pending approvals for this root session
 let pending = store.get_pending_approvals_for_root(&root_sid)?;
 if !pending.is_empty() {
-    return Err("user.ask is not available while approvals are pending.");
+    return Err("user_ask is not available while approvals are pending.");
 }
 ```
 
-**Rule:** Reject `user.ask` for ANY session under an active workflow root — not just the planner session. This prevents child agents from accidentally using `user.ask` during orchestration too.
+**Rule:** Reject `user_ask` for ANY session under an active workflow root — not just the planner session. This prevents child agents from accidentally using `user_ask` during orchestration too.
 
 ### Layer 2: True Suspension Outcome (Already Implemented)
 
@@ -73,7 +73,7 @@ let (workflow_id, task_id) = metadata
     .unwrap_or((None, None));
 ```
 
-This ensures that after approval, the evaluator session resumes from the **turn continuation** (with real `sandbox.exec` results injected into the conversation) rather than starting fresh and re-deriving what to do.
+This ensures that after approval, the evaluator session resumes from the **turn continuation** (with real `sandbox_exec` results injected into the conversation) rather than starting fresh and re-deriving what to do.
 
 ### Layer 4: Artifact-Level Approval Reuse (Cross-Session)
 
@@ -92,12 +92,12 @@ This prevents the evaluator from needing a separate approval when the coder's ar
 ### Layer 5: Skill Text (Defense in Depth)
 
 **File: `agents/lead/planner.default/SKILL.md`** — Already updated:
-- "DO NOT call `user.ask`" for approval handling
+- "DO NOT call `user_ask`" for approval handling
 - Parallel delegation tightened: agent creation is "STRICTLY SEQUENTIAL"
 
 ## What Was NOT Done (Intentionally)
 
-**No auto-resume on workflow signals.** Auto-answering a pending `user.ask` with a synthetic "proceed" when a workflow join arrives would fabricate human intent and collapse two distinct semantics (workflow progress vs explicit user input). The current runtime correctly requires a real answered interaction before resuming (`resume_from_user_interaction` checks `status == Answered`). Layer 1 makes this moot anyway — if `user.ask` can't be called during active orchestration, the deadlock can't happen.
+**No auto-resume on workflow signals.** Auto-answering a pending `user_ask` with a synthetic "proceed" when a workflow join arrives would fabricate human intent and collapse two distinct semantics (workflow progress vs explicit user input). The current runtime correctly requires a real answered interaction before resuming (`resume_from_user_interaction` checks `status == Answered`). Layer 1 makes this moot anyway — if `user_ask` can't be called during active orchestration, the deadlock can't happen.
 
 ## Files Modified
 
@@ -111,7 +111,7 @@ This prevents the evaluator from needing a separate approval when the coder's ar
 ## Testing
 
 - All gateway tests pass (including `user_interaction_resume_integration` and `turn_continuation_approval_integration`)
-- `user.ask` with active children → returns error JSON
-- `user.ask` with idle workflow → creates interaction normally
+- `user_ask` with active children → returns error JSON
+- `user_ask` with idle workflow → creates interaction normally
 - Approval signal delivery includes `task_id` → continuation resume works correctly
 - Artifact approval is reused across sessions under the same root workflow

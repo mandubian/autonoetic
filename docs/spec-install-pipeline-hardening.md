@@ -12,9 +12,9 @@
 Demo-session-1 exposed a cascade of failures in the agent installation pipeline. A weather agent with `NetworkAccess` capability and external Python dependencies (`import requests` via `requirements.txt`) was installed and promoted without:
 
 1. **Dependencies being resolved** — no `packager.default` step was spawned; `requirements.txt` was bundled raw
-2. **Promotion gate evidence** — neither `evaluator.default` nor `auditor.default` called `promotion.record`
+2. **Promotion gate evidence** — neither `evaluator.default` nor `auditor.default` called `promotion_record`
 3. **Dependency detection** — `create_from_intent` didn't notice `requirements.txt` needed a packager step, and didn't detect `import requests` as an unresolved external dependency
-4. **Network failure surfacing** — `sandbox.exec` silently swallowed an HTTPS connection failure (the sandbox blocked it, Python caught the exception, `exit=0` was returned)
+4. **Network failure surfacing** — `sandbox_exec` silently swallowed an HTTPS connection failure (the sandbox blocked it, Python caught the exception, `exit=0` was returned)
 
 ### Root Cause
 
@@ -72,10 +72,10 @@ These are deterministic checks inside gateway tools. They cannot be bypassed by 
 
 **File:** `autonoetic-gateway/src/runtime/tools/agent_revision.rs` — `AgentRevisionPromoteTool::execute`
 
-**Change:** When promoting a revision whose SKILL.md declares high-risk capabilities (`NetworkAccess`, `CodeExecution`, or `AgentSpawn`), `agent.revision.promote` **refuses** unless:
+**Change:** When promoting a revision whose SKILL.md declares high-risk capabilities (`NetworkAccess`, `CodeExecution`, or `AgentSpawn`), `agent_revision_promote` **refuses** unless:
 
-- A `promotion.record` with `pass=true` and `role=evaluator` exists for the revision's `artifact_id`, **AND**
-- A `promotion.record` with `pass=true` and `role=auditor` exists for the same artifact
+- A `promotion_record` with `pass=true` and `role=evaluator` exists for the revision's `artifact_id`, **AND**
+- A `promotion_record` with `pass=true` and `role=auditor` exists for the same artifact
 
 **Pseudocode:**
 
@@ -103,7 +103,7 @@ if is_high_risk {
     let promo_store = PromotionStore::new(gateway_dir)?;
     let record = promo_store.get_promotion(artifact_id)
         .ok_or_else(|| anyhow!(
-            "Promotion gate: no promotion.record found for artifact '{}'. \
+            "Promotion gate: no promotion_record found for artifact '{}'. \
              Agents with NetworkAccess/CodeExecution/AgentSpawn require both \
              evaluator and auditor pass records before promotion.",
             artifact_id
@@ -138,10 +138,10 @@ if is_high_risk {
 
 ```json
 {
-  "error": "Promotion gate: no promotion.record found for artifact 'art_425a482c'. Agents with NetworkAccess/CodeExecution/AgentSpawn require both evaluator and auditor pass records before promotion.",
+  "error": "Promotion gate: no promotion_record found for artifact 'art_425a482c'. Agents with NetworkAccess/CodeExecution/AgentSpawn require both evaluator and auditor pass records before promotion.",
   "required_actions": [
-    "Run evaluator.default against the artifact and call promotion.record(pass=true)",
-    "Run auditor.default against the artifact and call promotion.record(pass=true)"
+    "Run evaluator.default against the artifact and call promotion_record(pass=true)",
+    "Run auditor.default against the artifact and call promotion_record(pass=true)"
   ]
 }
 ```
@@ -339,11 +339,11 @@ Originally lower-priority follow-ups; **3.6–3.11 are implemented** (see Status
 
 | ID | Enhancement | Description | Complexity | Status |
 |----|-------------|-------------|------------|--------|
-| 3.6 | `sandbox.exec` network policy | After execution in a network-isolated sandbox, scan stdout/stderr for typical network-failure fingerprints; if found, return `ok: false`, `error_type: network_isolated`, and structured `network_*` fields so a zero exit from swallowed exceptions cannot masquerade as success. Operator approval path unchanged for commands that statically require network. | High | ✅ Done |
+| 3.6 | `sandbox_exec` network policy | After execution in a network-isolated sandbox, scan stdout/stderr for typical network-failure fingerprints; if found, return `ok: false`, `error_type: network_isolated`, and structured `network_*` fields so a zero exit from swallowed exceptions cannot masquerade as success. Operator approval path unchanged for commands that statically require network. | High | ✅ Done |
 | 3.7 | Gateway SHA computation | Hybrid lock identity: keep compile-time source fingerprint (`build.rs` → `GATEWAY_BUILD_SHA256` + `GATEWAY_BUILD_TAG`) and add runtime-computed executable hash (`gateway.binary_sha256`) from the running gateway binary bytes. | Medium — build/runtime plumbing | ✅ Done |
 | 3.8 | Promotion record digest binding | Bind promotion evidence to canonical revision `content_digest`. Allow evidence recorded before revision creation, but reject/reconcile mismatched digests to prevent evidence replay across different revision contents. | Low | ✅ Done |
 | 3.9 | `create_from_intent` null field cleanup | Omit null optional fields from serialized SKILL.md metadata instead of writing `llm_config: null`, `limits: null`, etc. Reduces noise. | Low | ✅ Done |
-| 3.10 | JSON-RPC ingress authentication | Require auth token on local JSON-RPC ingress (`event.ingest`, `agent.spawn`, and all methods). Gateway now validates request token against `AUTONOETIC_SHARED_SECRET` and rejects unauthenticated requests. | Medium | ✅ Done |
+| 3.10 | JSON-RPC ingress authentication | Require auth token on local JSON-RPC ingress (`event.ingest`, `agent_spawn`, and all methods). Gateway now validates request token against `AUTONOETIC_SHARED_SECRET` and rejects unauthenticated requests. | Medium | ✅ Done |
 | 3.11 | Strict env-override gating | Fail-closed handling for security-sensitive env overrides: `AUTONOETIC_BWRAP_*` and global `AUTONOETIC_LLM_*` overrides are ignored unless explicit allow flags are set (`AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES`, `AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES`). | Medium | ✅ Done |
 
 > **Note:** Auto-dependency resolution (having the gateway automatically invoke packager logic) was considered and **rejected** — it violates the narrow rule enforcer principle. The gateway reports unresolved dependencies; the planner decides whether and how to resolve them.
@@ -387,7 +387,7 @@ For pure-transform agents (no I/O beyond `self.*`), the planner's existing matri
 | External import detection (3.3) | `install_contract.rs` | Scans entrypoint files (or all files) for external imports |
 | Bundle health diagnostic (3.4) | `install_contract.rs` | Structured `BundleHealthReport` for diagnostic feedback |
 | Planner SKILL.md dependency check (3.5) | `planner.default/SKILL.md` | Decision Flow rule to spawn `packager.default` when needed |
-| `sandbox.exec` network-isolation policy (3.6) | `runtime/tools/sandbox.rs` | `detect_network_errors_in_output` + failed tool result (`ok: false`, `error_type: network_isolated`) when isolated run output matches |
+| `sandbox_exec` network-isolation policy (3.6) | `runtime/tools/sandbox.rs` | `detect_network_errors_in_output` + failed tool result (`ok: false`, `error_type: network_isolated`) when isolated run output matches |
 | Gateway lock identity (3.7) | `build.rs`, `install_contract.rs`, `runtime_lock.rs` | Source fingerprint (`sha256`, `build_tag`) + runtime executable digest (`binary_sha256`) populated by gateway |
 | `force_complete` gate (A.1) | `workflow.rs` | Refuses `Succeeded` status without child session evidence |
 | `capability_from_shorthand` gate (A.2) | `install_contract.rs` | Refuses bare shorthand for high-risk caps (e.g. "NetworkAccess") |
@@ -432,7 +432,7 @@ test_detect_external_python_imports_ignores_local_modules         ✅
 test_analyze_bundle_health_warns_on_requirements_without_layers   ✅
 test_analyze_bundle_health_no_warnings_when_layers_present        ✅
 
-# sandbox.exec network fingerprint unit tests (sandbox.rs — network_error_detection_tests)
+# sandbox_exec network fingerprint unit tests (sandbox.rs — network_error_detection_tests)
 empty_output_matches_nothing                                      ✅
 detects_stdlib_url_errors                                         ✅
 detects_requests_traceback                                        ✅
@@ -458,7 +458,7 @@ test_render_skill_document_omits_null_optional_fields             ✅
 ### Manual Verification
 
 1. Re-run the demo-session-1 equivalent workflow
-2. Verify `promote` fails when evaluator doesn't call `promotion.record`
+2. Verify `promote` fails when evaluator doesn't call `promotion_record`
 3. Verify `create_from_intent` warnings show unresolved `requirements.txt`
 4. Verify planner spawns `packager.default` before evaluator when `named_outputs` includes dependency files
 5. Verify `create_from_intent` refuses bare `"NetworkAccess"` and returns scoped capability error
@@ -472,11 +472,11 @@ test_render_skill_document_omits_null_optional_fields             ✅
 
 Codebase audit conducted 2026-04-08. Findings below are ordered by severity.
 
-### A.1 `workflow.force_complete` — Agent can mark tasks as "succeeded" without real evidence
+### A.1 `workflow_force_complete` — Agent can mark tasks as "succeeded" without real evidence
 
 **File:** `autonoetic-gateway/src/runtime/tools/workflow.rs:935–1183`
 
-**What it does:** Any agent with `AgentSpawn` capability can call `workflow.force_complete` to transition a stuck task from `Running` to `Succeeded` or `Failed`. It gathers evidence (session manifest, digest, checkpoint, implicit artifact) but **proceeds regardless** — line 1128:
+**What it does:** Any agent with `AgentSpawn` capability can call `workflow_force_complete` to transition a stuck task from `Running` to `Succeeded` or `Failed`. It gathers evidence (session manifest, digest, checkpoint, implicit artifact) but **proceeds regardless** — line 1128:
 
 ```rust
 if !session_completed {
@@ -544,7 +544,7 @@ Low-risk capabilities (`SandboxFunctions`, `ReadAccess`, `WriteAccess`, `Evaluat
 
 **File:** `autonoetic-gateway/src/runtime/tools/agent_revision.rs:1272–1292`
 
-**What it does:** `agent.revision.promote` accepts an optional `required_eval_run_id` parameter. If provided, it verifies the eval run passed. If omitted, no eval check is performed at all.
+**What it does:** `agent_revision_promote` accepts an optional `required_eval_run_id` parameter. If provided, it verifies the eval run passed. If omitted, no eval check is performed at all.
 
 **Why this violates Rule Zero:** For high-risk agents, eval verification should be **mandatory**, not optional. Currently any agent with `AgentRevision` capability can promote any revision without any eval evidence.
 
@@ -570,24 +570,24 @@ Turn 22  coder writes requirements.txt (import requests)
 Turn 23  coder writes weather_agent.py
          ← MISSING: packager.default should have been spawned here
 Turn 28  planner spawns evaluator.default (no builder step)
-Turn 35  evaluator runs sandbox.exec → works (requests pre-installed on host)
+Turn 35  evaluator runs sandbox_exec → works (requests pre-installed on host)
 Turn 36  evaluator runs live HTTPS call → NetworkError (sandbox blocks it)
 Turn 37  evaluator writes "APPROVE" report
-         ← MISSING: evaluator never called promotion.record
+         ← MISSING: evaluator never called promotion_record
 Turn 39  planner spawns auditor.default
-Turn 41  auditor completes (no promotion.record call)
-         ← MISSING: auditor never called promotion.record
-Turn 43  planner tries artifact.build → permission denied
+Turn 41  auditor completes (no promotion_record call)
+         ← MISSING: auditor never called promotion_record
+Turn 43  planner tries artifact_build → permission denied
 Turn 44  planner spawns specialized_builder
-Turn 52  specialized_builder calls agent.revision.create_from_intent
+Turn 52  specialized_builder calls agent_revision_create_from_intent
          ← MISSING: no warning about requirements.txt without layers
-Turn 53  specialized_builder calls agent.revision.promote
+Turn 53  specialized_builder calls agent_revision_promote
          ← BUG: promote succeeds without any promotion gate evidence
 Turn 54  Agent installed and promoted. Broken at runtime.
 ```
 
 With the proposed changes:
 - Turn 52 would emit warnings about `requirements.txt` and `import requests`
-- Turn 53 would **fail** with: "Promotion gate: no promotion.record found for artifact 'art_425a482c'"
+- Turn 53 would **fail** with: "Promotion gate: no promotion_record found for artifact 'art_425a482c'"
 - The specialized_builder would report this failure to the planner
-- The planner would need to iterate: spawn evaluator → evaluator calls `promotion.record` → spawn auditor → auditor calls `promotion.record` → retry promote
+- The planner would need to iterate: spawn evaluator → evaluator calls `promotion_record` → spawn auditor → auditor calls `promotion_record` → retry promote

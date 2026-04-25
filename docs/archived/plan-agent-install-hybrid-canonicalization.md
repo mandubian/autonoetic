@@ -18,29 +18,29 @@
   - malformed dependency and artifact entries are reported with indexed parse errors,
   - missing gateway-owned lock sections are scaffolded before final canonicalization.
 - Phase 3 landed for the install boundary and import path:
-  - `agent.revision.create` now scaffolds gateway-owned `runtime.lock` sections,
+  - `agent_revision_create` now scaffolds gateway-owned `runtime.lock` sections,
   - `autonoetic/src/cli/agent.rs` now writes canonical `runtime.lock` content for imported skills,
   - shipped agent/example locks were refreshed toward the canonical shape.
-- Phase 5 landed with the read-only `agent.revision.schema` tool and shared schema/example rendering from `install_contract.rs`.
+- Phase 5 landed with the read-only `agent_revision_schema` tool and shared schema/example rendering from `install_contract.rs`.
 - Phase 7.1 landed in `autonoetic-gateway/src/runtime/lifecycle.rs` by extracting `tool_result_counts_as_progress(...)` and stopping structured tool failures from resetting loop progress.
 - Phase 7.2 landed in `autonoetic-gateway/src/scheduler/gateway_store/observability.rs` with a safer FTS fallback decision helper and corrected `LIKE` fallback behavior for dotted plain-text queries.
-- Phase 6 landed: `agent.revision.create_from_intent` in `autonoetic-gateway/src/runtime/tools/agent_revision.rs` with shared `create_revision_from_files`, gateway-rendered canonical `SKILL.md` + `runtime.lock`, and structured tool response (`canonical_skill_metadata`, `canonical_runtime_lock`, autofilled/normalized field lists).
+- Phase 6 landed: `agent_revision_create_from_intent` in `autonoetic-gateway/src/runtime/tools/agent_revision.rs` with shared `create_revision_from_files`, gateway-rendered canonical `SKILL.md` + `runtime.lock`, and structured tool response (`canonical_skill_metadata`, `canonical_runtime_lock`, autofilled/normalized field lists).
 - Phase 4 (intent-first install choreography) landed for built-in agents and docs:
   - `agents/specialists/coder.default/SKILL.md` — code + free-form instructions only; no hand-authored manifest or lock,
   - `agents/evolution/specialized_builder.default/SKILL.md` — canonical install via `create_from_intent` + promote,
   - `agents/lead/planner.default/SKILL.md` — handoff includes semantic install intent,
-  - `docs/AGENTS.md` — intent path documented as preferred; `agent.revision.create` described as low-level strict artifact path.
+  - `docs/AGENTS.md` — intent path documented as preferred; `agent_revision_create` described as low-level strict artifact path.
 
 ### Partially completed / follow-up only
 
-- AgentSkills.io compatibility remains supported via `SkillParser` and strict artifact install (`agent.revision.create`); import/canonicalization behavior unchanged in spirit.
+- AgentSkills.io compatibility remains supported via `SkillParser` and strict artifact install (`agent_revision_create`); import/canonicalization behavior unchanged in spirit.
 - Broader example/quickstart polish can continue incrementally if needed.
 
 ### Remaining (optional / long-tail)
 
 - Phase 7.3 remains optional follow-up unless content/install boundary hints prove insufficient.
 - Dedicated file `autonoetic-gateway/tests/agent_revision_canonicalization_integration.rs` was proposed in the test plan but not required; equivalent coverage now lives in `phase3_eval_integration.rs` for intent materialization, AgentSkills-shaped bundles, and optional live OpenRouter.
-- Regression test for repeated identical `agent.revision.create` failures vs loop guard (Phase 7.1 test plan item) still optional.
+- Regression test for repeated identical `agent_revision_create` failures vs loop guard (Phase 7.1 test plan item) still optional.
 - Long-tail migration of integration-test fixtures toward fully canonical `runtime.lock` shapes can continue incrementally.
 
 ---
@@ -49,11 +49,11 @@
 
 The failed demo session showed that the current install boundary is too dependent on LLM-authored serialization:
 
-1. `agent.revision.create` currently expects a fully correct `SKILL.md` and `runtime.lock` inside the artifact.
+1. `agent_revision_create` currently expects a fully correct `SKILL.md` and `runtime.lock` inside the artifact.
 2. `SkillParser::parse()` in `autonoetic-gateway/src/runtime/parser.rs` first tries `AgentManifest` and then falls back to `StandardSkillFrontmatter`, so install-time errors surface as mixed Autonoetic-vs-AgentSkills parse failures instead of one authoritative install contract.
 3. `RuntimeLock` in `autonoetic-types/src/runtime_lock.rs` requires `gateway`, `sdk`, and `sandbox`, but agents are currently asked to guess those values even though the gateway owns them.
 4. `agents/specialists/coder.default/SKILL.md`, `docs/AGENTS.md`, and `autonoetic/src/cli/agent.rs` currently teach different answers for the same files.
-5. Once install validation starts failing, the planner can loop because structured tool failures still reset progress, and `session.search` is brittle for dotted plain-text queries such as `runtime.lock`.
+5. Once install validation starts failing, the planner can loop because structured tool failures still reset progress, and `session_search` is brittle for dotted plain-text queries such as `runtime.lock`.
 
 The goal is to keep the gateway non-agentic while moving correctness into deterministic gateway behavior.
 
@@ -168,7 +168,7 @@ flowchart LR
     validate[DeterministicValidation]
     canonicalSkill[CanonicalSkillMetadata]
     canonicalLock[CanonicalRuntimeLock]
-    revisionCreate[agent.revision.create]
+    revisionCreate[agent_revision_create]
     revisionDir[RevisionMaterialization]
 
     agentBody --> bundle
@@ -210,8 +210,8 @@ flowchart LR
   - `render_runtime_lock_example(...)`
   - `install_schema_description()`
 - Keep serialization deterministic enough that:
-  - `agent.revision.create`
-  - future `agent.revision.schema`
+  - `agent_revision_create`
+  - future `agent_revision_schema`
   - CLI scaffolds in `autonoetic/src/cli/agent.rs`
   all draw from the same helper layer.
 
@@ -322,7 +322,7 @@ Update or extend import tests in `autonoetic/src/cli/agent.rs` to cover:
 
 ---
 
-## Phase 2: Harden the Existing `agent.revision.create` Path
+## Phase 2: Harden the Existing `agent_revision_create` Path
 
 **Status:** Done
 
@@ -330,7 +330,7 @@ Update or extend import tests in `autonoetic/src/cli/agent.rs` to cover:
 
 ### Task 2.1: Split validation from final deserialization
 
-Add private helpers so `agent.revision.create` no longer goes straight from raw bytes to first serde error:
+Add private helpers so `agent_revision_create` no longer goes straight from raw bytes to first serde error:
 
 - `extract_skill_frontmatter_and_body(...)`
 - `validate_skill_frontmatter_shape(...)`
@@ -376,7 +376,7 @@ The error response should include:
 - all failing paths in one response,
 - the expected canonical path names,
 - a minimal canonical example,
-- an optional hint to call a future `agent.revision.schema` tool.
+- an optional hint to call a future `agent_revision_schema` tool.
 
 ### Task 2.4: Add aggregated `runtime.lock` diagnostics
 
@@ -495,7 +495,7 @@ That avoids immediately breaking tests and fixtures that still write minimal ad 
 
 ### New tool
 
-Add `agent.revision.schema` as a support tool, not as the safety boundary.
+Add `agent_revision_schema` as a support tool, not as the safety boundary.
 
 ### Behavior
 
@@ -514,12 +514,12 @@ Return:
 
 Register the tool alongside:
 
-- `agent.revision.create`
-- `agent.revision.list`
-- `agent.revision.inspect`
-- `agent.revision.promote`
-- `agent.revision.rollback`
-- `agent.revision.diff`
+- `agent_revision_create`
+- `agent_revision_list`
+- `agent_revision_inspect`
+- `agent_revision_promote`
+- `agent_revision_rollback`
+- `agent_revision_diff`
 
 ---
 
@@ -529,7 +529,7 @@ Register the tool alongside:
 
 **Primary file:** `autonoetic-gateway/src/runtime/tools/agent_revision.rs`
 
-**Shipped:** `agent.revision.create_from_intent` — semantic intent + free-form `instructions`, optional fields as in the input contract below; canonical SKILL + lock injected before shared persistence. `agent.revision.create` remains for strict artifact bundles that already contain valid `SKILL.md` (including AgentSkills-mapped frontmatter) and lock handling per existing tool logic.
+**Shipped:** `agent_revision_create_from_intent` — semantic intent + free-form `instructions`, optional fields as in the input contract below; canonical SKILL + lock injected before shared persistence. `agent_revision_create` remains for strict artifact bundles that already contain valid `SKILL.md` (including AgentSkills-mapped frontmatter) and lock handling per existing tool logic.
 
 ### Goal
 
@@ -539,8 +539,8 @@ Remove punctuation-sensitive manifest authoring from the install path without fo
 
 Add a parallel tool rather than overloading the current one. Example names:
 
-- `agent.revision.create_from_intent`
-- `agent.revision.create_structured`
+- `agent_revision_create_from_intent`
+- `agent_revision_create_structured`
 
 ### Input contract
 
@@ -574,7 +574,7 @@ Require only semantic intent plus free-form instructions:
 
 ### Required refactor
 
-Extract a shared internal function from `agent.revision.create`, for example:
+Extract a shared internal function from `agent_revision_create`, for example:
 
 - `create_revision_from_files(...)`
 - `canonicalize_bundle_for_revision(...)`
@@ -616,9 +616,9 @@ These are secondary to the install contract, but they are part of stopping the d
 
 - distinguish transport success from logical progress,
 - do not reset the loop guard on structured install validation failures,
-- add one regression test for repeated identical `agent.revision.create` failures.
+- add one regression test for repeated identical `agent_revision_create` failures.
 
-### Task 7.2: `session.search` must handle plain-text dotted queries
+### Task 7.2: `session_search` must handle plain-text dotted queries
 
 **Files:**
 
@@ -638,7 +638,7 @@ These are secondary to the install contract, but they are part of stopping the d
 Keep steering agents toward:
 
 - `artifact_id`
-- `workflow.wait` outputs
+- `workflow_wait` outputs
 - session-visible names
 
 instead of full SHA handles across install boundaries.
@@ -671,13 +671,13 @@ Implemented:
 
 1. **`test_revision_create_from_intent_materializes_canonical_skill_and_lock`** — code-only bundle; gateway writes canonical `SKILL.md` + `runtime.lock` on intent path.
 2. **`test_revision_create_from_intent_requires_reasoning_llm_config`** — reasoning mode enforces `llm_config` early.
-3. **`test_revision_create_accepts_agentskills_compatible_skill_bundle`** — `agent.revision.create` with AgentSkills-shaped frontmatter (`name`/`description`/`allowed-tools` + `metadata.autonoetic`); revision materializes; inferred capabilities preserved.
+3. **`test_revision_create_accepts_agentskills_compatible_skill_bundle`** — `agent_revision_create` with AgentSkills-shaped frontmatter (`name`/`description`/`allowed-tools` + `metadata.autonoetic`); revision materializes; inferred capabilities preserved.
 4. **`test_revision_create_from_intent_live_openrouter_smoke_if_key_available`** — when `OPENROUTER_API_KEY` is set: create revision via intent → load canonical skill → one real `AgentExecutor` turn; otherwise skips (same pattern as `openrouter_integration.rs`).
 
 Still optional (not required for closing this plan):
 
 - Dedicated file `agent_revision_canonicalization_integration.rs` aggregating malformed-SKILL diagnostics-only cases,
-- explicit loop-guard regression for repeated identical `agent.revision.create` failures.
+- explicit loop-guard regression for repeated identical `agent_revision_create` failures.
 
 ### Existing tests to update
 
@@ -712,11 +712,11 @@ Add or update tests so scaffolded agents match the new canonical helper output f
 **Current state:** steps 1 through 6 are complete for the architectural goals of this plan; 7.3 and fixture long-tail remain optional.
 
 1. Completed: add `install_contract.rs`.
-2. Completed: harden `agent.revision.create` with aggregated validation and runtime-lock scaffolding.
+2. Completed: harden `agent_revision_create` with aggregated validation and runtime-lock scaffolding.
 3. Completed: update CLI scaffolds, docs, prompts, and examples toward the canonical contract; intent-first prompts for built-in coder/planner/specialized_builder.
-4. Completed: add `agent.revision.schema`.
+4. Completed: add `agent_revision_schema`.
 5. Completed: fix loop/search behavior (7.1, 7.2).
-6. Completed: add `agent.revision.create_from_intent`, shared revision persistence, and integration tests (intent path, AgentSkills-shaped bundle, optional live OpenRouter).
+6. Completed: add `agent_revision_create_from_intent`, shared revision persistence, and integration tests (intent path, AgentSkills-shaped bundle, optional live OpenRouter).
 
 ---
 

@@ -2,10 +2,10 @@
 
 ## Problem
 
-Most operational agents just call existing gateway tools (`credential.request`,
-`memory.*`, `web.fetch`, `scheduler.cron.*`) and reason on the results. They have
+Most operational agents just call existing gateway tools (`credential_request`,
+`memory.*`, `web_fetch`, `scheduler.cron.*`) and reason on the results. They have
 no custom code — no Python, no bash, no scripts. Yet the current
-`agent.revision.create_from_intent` requires `artifact_id`, forcing the planner to
+`agent_revision_create_from_intent` requires `artifact_id`, forcing the planner to
 route through the coder just to produce an empty bundle.
 
 This makes the common case (service-oriented reasoning agents) the hard path.
@@ -13,9 +13,9 @@ The rare case (agents with custom code) should be the one that requires extra st
 
 ### Concrete example: Moltbook operational agent
 
-After the planner completes Moltbook registration via `credential.setup`, it needs
+After the planner completes Moltbook registration via `credential_setup`, it needs
 to create a persistent agent that:
-1. Posts to the Moltbook feed via `credential.request`
+1. Posts to the Moltbook feed via `credential_request`
 2. Checks for new replies every 5 minutes via `BackgroundReevaluation`
 3. Decides whether to respond (LLM reasoning)
 4. Persists state between wake-ups via `memory.write`
@@ -30,7 +30,7 @@ After this plan: builder calls `create_from_intent` without `artifact_id` → do
 
 The gateway already enforces capabilities on **every tool call**. A reasoning agent
 with `CredentialAccess: [moltbook]` + `NetworkAccess: [localhost]` can only:
-- Make HTTP calls through `credential.request` (secrets injected server-side)
+- Make HTTP calls through `credential_request` (secrets injected server-side)
 - Reach localhost (gateway blocks all other hosts)
 - Read/write its own memory
 
@@ -205,10 +205,10 @@ Add a section:
 ```markdown
 ### Reasoning-Only Agent Installation (no artifact)
 
-For agents that only use existing gateway tools (credential.request, memory.*,
-web.fetch, scheduler.cron.*, etc.) and contain **no custom code**:
+For agents that only use existing gateway tools (credential_request, memory.*,
+web_fetch, scheduler.cron.*, etc.) and contain **no custom code**:
 
-1. Call `agent.revision.create_from_intent` **without** `artifact_id`:
+1. Call `agent_revision_create_from_intent` **without** `artifact_id`:
    ```json
    {
      "agent_id": "moltbook-ops",
@@ -230,7 +230,7 @@ web.fetch, scheduler.cron.*, etc.) and contain **no custom code**:
    }
    ```
 
-2. Call `agent.revision.promote` with the returned revision_id.
+2. Call `agent_revision_promote` with the returned revision_id.
 
 **Rules for artifact-free agents:**
 - `execution_mode` must be `reasoning` (script agents always need artifacts)
@@ -243,8 +243,8 @@ web.fetch, scheduler.cron.*, etc.) and contain **no custom code**:
 
 ## What does NOT change
 
-- `artifact.build` — untouched (still used for code agents)
-- `credential.setup` / `credential.request` — untouched
+- `artifact_build` — untouched (still used for code agents)
+- `credential_setup` / `credential_request` — untouched
 - Execution engine — reasoning mode already works
 - Script mode agents — still require artifacts
 - Gateway policy/capability enforcement — already enforces on every tool call
@@ -277,6 +277,6 @@ web.fetch, scheduler.cron.*, etc.) and contain **no custom code**:
    - `create_from_intent` without `artifact_id` but with `execution_mode: "script"` → should fail
 5. Full Moltbook demo:
    - Planner reads prose skill.md
-   - Executes registration via `credential.setup`
+   - Executes registration via `credential_setup`
    - Creates operational reasoning agent via builder (no artifact)
    - Operational agent posts to feed, checks for replies on background wake-up

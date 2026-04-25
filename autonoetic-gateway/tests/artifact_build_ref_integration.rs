@@ -76,7 +76,7 @@ fn test_artifact_build_mints_session_scoped_ref() -> anyhow::Result<()> {
 
     let args = serde_json::json!({ "inputs": ["main.txt"] });
     let out = registry.execute(
-        "artifact.build",
+        "artifact_build",
         &manifest,
         &policy,
         &agent_dir,
@@ -137,7 +137,7 @@ fn test_artifact_build_mints_workflow_scoped_ref_when_indexed() -> anyhow::Resul
 
     let args = serde_json::json!({ "inputs": ["f.txt"] });
     let out = registry.execute(
-        "artifact.build",
+        "artifact_build",
         &manifest,
         &policy,
         &agent_dir,
@@ -189,7 +189,7 @@ fn test_artifact_build_reuse_does_not_mint_second_ref() -> anyhow::Result<()> {
 
     let args = serde_json::json!({ "inputs": ["a.txt"] });
     let out1 = registry.execute(
-        "artifact.build",
+        "artifact_build",
         &manifest,
         &policy,
         &agent_dir,
@@ -206,7 +206,7 @@ fn test_artifact_build_reuse_does_not_mint_second_ref() -> anyhow::Result<()> {
     assert!(v1.get("artifact_ref").is_some());
 
     let out2 = registry.execute(
-        "artifact.build",
+        "artifact_build",
         &manifest,
         &policy,
         &agent_dir,
@@ -290,7 +290,7 @@ fn test_artifact_resolve_ref_success() -> anyhow::Result<()> {
 
     let build_args = serde_json::json!({ "inputs": ["data.py"] });
     let build_out = registry.execute(
-        "artifact.build",
+        "artifact_build",
         &writer,
         &writer_policy,
         &agent_dir,
@@ -316,7 +316,7 @@ fn test_artifact_resolve_ref_success() -> anyhow::Result<()> {
         "scope_id": "sess-resolve"
     });
     let resolve_out = registry.execute(
-        "artifact.resolve_ref",
+        "artifact_resolve_ref",
         &reader,
         &reader_policy,
         &agent_dir,
@@ -367,7 +367,7 @@ fn test_artifact_resolve_ref_wrong_scope_fails() -> anyhow::Result<()> {
 
     let build_args = serde_json::json!({ "inputs": ["f.txt"] });
     let build_out = registry.execute(
-        "artifact.build",
+        "artifact_build",
         &writer,
         &writer_policy,
         &agent_dir,
@@ -391,7 +391,7 @@ fn test_artifact_resolve_ref_wrong_scope_fails() -> anyhow::Result<()> {
         "scope_id": "wrong-session-id"
     });
     let result = registry.execute(
-        "artifact.resolve_ref",
+        "artifact_resolve_ref",
         &reader,
         &reader_policy,
         &agent_dir,
@@ -436,7 +436,7 @@ fn test_artifact_resolve_ref_missing_ref_fails() -> anyhow::Result<()> {
         "scope_id": "any-session"
     });
     let result = registry.execute(
-        "artifact.resolve_ref",
+        "artifact_resolve_ref",
         &reader,
         &reader_policy,
         &agent_dir,
@@ -485,7 +485,7 @@ fn test_artifact_resolve_ref_expired_ref_fails() -> anyhow::Result<()> {
 
     let build_args = serde_json::json!({ "inputs": ["e.txt"] });
     let build_out = registry.execute(
-        "artifact.build",
+        "artifact_build",
         &writer,
         &writer_policy,
         &agent_dir,
@@ -524,7 +524,7 @@ fn test_artifact_resolve_ref_expired_ref_fails() -> anyhow::Result<()> {
         "scope_id": "sess-expired"
     });
     let result = registry.execute(
-        "artifact.resolve_ref",
+        "artifact_resolve_ref",
         &reader,
         &reader_policy,
         &agent_dir,
@@ -573,7 +573,7 @@ fn test_artifact_resolve_ref_revoked_ref_fails() -> anyhow::Result<()> {
 
     let build_args = serde_json::json!({ "inputs": ["r.txt"] });
     let build_out = registry.execute(
-        "artifact.build",
+        "artifact_build",
         &writer,
         &writer_policy,
         &agent_dir,
@@ -611,7 +611,7 @@ fn test_artifact_resolve_ref_revoked_ref_fails() -> anyhow::Result<()> {
         "scope_id": "sess-revoked"
     });
     let result = registry.execute(
-        "artifact.resolve_ref",
+        "artifact_resolve_ref",
         &reader,
         &reader_policy,
         &agent_dir,

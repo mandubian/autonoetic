@@ -207,7 +207,7 @@ fn make_stub_responses(command: &str) -> Vec<serde_json::Value> {
                     "id": "tc-exec-001",
                     "type": "function",
                     "function": {
-                        "name": "sandbox.exec",
+                        "name": "sandbox_exec",
                         "arguments": serde_json::json!({ "command": command }).to_string()
                     }
                 }]
@@ -317,7 +317,7 @@ async fn test_approval_continuation_suspends_and_resumes() -> anyhow::Result<()>
         cont.approval_request_id, suspended_request_id,
         "continuation approval_request_id should match suspended_for_approval"
     );
-    assert_eq!(cont.pending_tool_call.tool_name, "sandbox.exec");
+    assert_eq!(cont.pending_tool_call.tool_name, "sandbox_exec");
 
     // -----------------------------------------------------------------------
     // Phase 2: Approve the pending request
@@ -649,7 +649,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         "timeout_secs": 0
     });
     let wait_before_raw = registry.execute(
-        "workflow.wait",
+        "workflow_wait",
         &orchestrator_manifest,
         &policy,
         &orchestrator_dir,
@@ -736,7 +736,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
 
     // Planner view after resume: join now satisfied.
     let wait_after_raw = registry.execute(
-        "workflow.wait",
+        "workflow_wait",
         &orchestrator_manifest,
         &policy,
         &orchestrator_dir,
@@ -1306,7 +1306,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         "timeout_secs": 0
     });
     let wait_mid_raw = registry.execute(
-        "workflow.wait",
+        "workflow_wait",
         &orchestrator_manifest,
         &policy,
         &orchestrator_dir,
@@ -1353,7 +1353,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
     )?;
 
     let wait_end_raw = registry.execute(
-        "workflow.wait",
+        "workflow_wait",
         &orchestrator_manifest,
         &policy,
         &orchestrator_dir,
@@ -1511,7 +1511,7 @@ async fn test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join() -
         "reason": "Cancelled by integration test"
     });
     let cancel_raw = registry.execute(
-        "workflow.cancel_task",
+        "workflow_cancel_task",
         &orchestrator_manifest,
         &policy,
         &orchestrator_dir,

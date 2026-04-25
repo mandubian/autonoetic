@@ -42,7 +42,7 @@ The current overlay system (`agent.adapt` + composition + pre/post hooks) adds ~
 ### 1.4 Expose schemas in agent discovery
 
 **File: `autonoetic-gateway/src/runtime/tools.rs`**
-- [x] Update `agent.discover` tool output to include `io` field from manifest
+- [x] Update `agent_discover` tool output to include `io` field from manifest
 - [x] Planner can now compare schemas mechanically
 
 ### 1.5 Add schema validation in execution
@@ -56,7 +56,7 @@ The current overlay system (`agent.adapt` + composition + pre/post hooks) adds ~
 
 - [x] Unit test: parser extracts I/O schemas from SKILL.md frontmatter
 - [x] Unit test: parser defaults to None when schema absent
-- [x] Unit test: `agent.discover` returns schema in output
+- [x] Unit test: `agent_discover` returns schema in output
 - [x] Integration test: spawn with mismatched input logs warning to causal chain
 - [x] Integration test: spawn with valid input passes schema check
 
@@ -167,7 +167,7 @@ The current overlay system (`agent.adapt` + composition + pre/post hooks) adds ~
 
 ```
 ## Reuse-First Decision Ladder
-1. Call `agent.discover` with required intent and capabilities
+1. Call `agent_discover` with required intent and capabilities
 2. If strong match (schema compatible, fitness score > 20), spawn as-is
 3. If moderate match (schemas incompatible or partial fit), delegate to `agent-adapter.default`
    - Provide: base_agent_id, target I/O spec, behavior gap

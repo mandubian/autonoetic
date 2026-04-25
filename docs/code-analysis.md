@@ -2,7 +2,7 @@
 
 ## Overview
 
-Autonoetic uses a **pluggable analysis architecture** for code security and capability detection during `agent.revision.create`. This allows different analysis strategies to be swapped at runtime, triggered by the gateway (NOT by the planner).
+Autonoetic uses a **pluggable analysis architecture** for code security and capability detection during `agent_revision_create`. This allows different analysis strategies to be swapped at runtime, triggered by the gateway (NOT by the planner).
 
 ### Why Pluggable Analysis?
 
@@ -19,13 +19,13 @@ The gateway does **not** try to prove that code is harmless (that is impossible 
 
 | Layer | Mechanism | When it runs |
 |-------|-----------|----------------|
-| **1. Revision create — bundle analysis** | `AnalysisProvider` (default [`PatternAnalyzer`](../autonoetic-gateway/src/runtime/analysis/pattern.rs)) over **artifact files + SKILL.md** | Every `agent.revision.create` |
-| **2. Revision create — capability contract** | Inferred vs declared capabilities; optional hard reject (`require_capabilities`) | `agent.revision.create` |
+| **1. Revision create — bundle analysis** | `AnalysisProvider` (default [`PatternAnalyzer`](../autonoetic-gateway/src/runtime/analysis/pattern.rs)) over **artifact files + SKILL.md** | Every `agent_revision_create` |
+| **2. Revision create — capability contract** | Inferred vs declared capabilities; optional hard reject (`require_capabilities`) | `agent_revision_create` |
 | **3. Revision promote — human approval** | Risk-based policy (e.g. `NetworkAccess`, broad `WriteAccess`, background, scheduled actions) | When promotion is classified high-risk |
-| **4. Sandbox exec — scan + policy** | [`RemoteAccessAnalyzer`](../autonoetic-gateway/src/runtime/remote_access.rs) on resolved command/script text; `CodeExecution` shell policy; optional **approval** for remote-like patterns | Each `sandbox.exec` |
+| **4. Sandbox exec — scan + policy** | [`RemoteAccessAnalyzer`](../autonoetic-gateway/src/runtime/remote_access.rs) on resolved command/script text; `CodeExecution` shell policy; optional **approval** for remote-like patterns | Each `sandbox_exec` |
 | **5. Tool & sandbox boundary** | Capability-gated tools (`web.*`, `content.*`, …); bubblewrap sandbox | Runtime |
 
-**Why pluggable:** `AnalysisProvider` is the stable seam. Today: fast **pattern** (and optional **composite** / **LLM**). Tomorrow: the same trait can back a provider that invokes **Bandit**, **Semgrep**, or a **tree-sitter** AST walk—without rewriting `agent.revision.create`.
+**Why pluggable:** `AnalysisProvider` is the stable seam. Today: fast **pattern** (and optional **composite** / **LLM**). Tomorrow: the same trait can back a provider that invokes **Bandit**, **Semgrep**, or a **tree-sitter** AST walk—without rewriting `agent_revision_create`.
 
 **Honest limits:** Dynamic imports, C extensions, reflection, and deliberately evasive code can bypass static checks. The architecture assumes **layered controls + stronger providers over time**, not a single perfect pass.
 
@@ -35,7 +35,7 @@ The gateway does **not** try to prove that code is harmless (that is impossible 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                 agent.revision.create                        │
+│                 agent_revision_create                        │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐  │
@@ -56,7 +56,7 @@ The gateway does **not** try to prove that code is harmless (that is impossible 
 
 ### Analysis Flow
 
-1. `agent.revision.create` receives the revision bundle with `artifact_id` referencing `files[]` and `capabilities[]`
+1. `agent_revision_create` receives the revision bundle with `artifact_id` referencing `files[]` and `capabilities[]`
 2. Gateway creates analyzer based on `config.yaml` settings
 3. Analyzer examines code and returns:
    - **Capability Analysis**: What capabilities the code requires
@@ -141,7 +141,7 @@ Combines multiple providers with escalation logic.
 ### config.yaml
 
 ```yaml
-# Code analysis configuration for agent.revision.create
+# Code analysis configuration for agent_revision_create
 code_analysis:
   # Provider for capability detection: "pattern", "python_ast", "llm", "composite", "none"
   capability_provider: "pattern"
@@ -339,7 +339,7 @@ When capability mismatch is detected, the install is rejected:
   "error_type": "validation",
   "message": "Capability mismatch: code requires NetworkAccess but it was not declared in capabilities. Add these capabilities to your install request. (Analyzer: pattern)",
   "recoverable": true,
-  "repair_hint": "Add NetworkAccess capability to your agent.revision.create call"
+  "repair_hint": "Add NetworkAccess capability to your agent_revision_create call"
 }
 ```
 
@@ -349,7 +349,7 @@ When capability mismatch is detected, the install is rejected:
 
 ### Analysis is Gateway-Triggered
 
-- Analysis runs automatically during `agent.revision.create`
+- Analysis runs automatically during `agent_revision_create`
 - NOT triggered by the planner or other agents
 - Gateway controls which provider is used
 - LLM analysis uses gateway's configured LLM, not agent's LLM
@@ -359,7 +359,7 @@ When capability mismatch is detected, the install is rejected:
 - **Capability mismatch** → hard reject (unless `require_capabilities: false`)
 - **Security threats** (install-time) → can fail install or drive policy; severity informs composite/LLM escalation
 - **Remote access (install-time)** → recorded in `SecurityAnalysis.remote_access_detected`; must align with promotion-gate evidence when used
-- **Remote access (`sandbox.exec`)** → if `RemoteAccessAnalyzer` finds patterns and there is no valid `approval_ref`, the tool returns **`approval_required`** (execution blocked until an operator approves and the agent retries with the ref)
+- **Remote access (`sandbox_exec`)** → if `RemoteAccessAnalyzer` finds patterns and there is no valid `approval_ref`, the tool returns **`approval_required`** (execution blocked until an operator approves and the agent retries with the ref)
 
 ### Trust Model
 
@@ -386,7 +386,7 @@ When enabled, the LLM analyzer will:
 1. Send code to configured LLM with analysis prompts
 2. Request structured JSON response with capabilities/threats
 3. Parse and validate response
-4. Return results to `agent.revision.create` flow
+4. Return results to `agent_revision_create` flow
 
 **Prompt template:**
 ```

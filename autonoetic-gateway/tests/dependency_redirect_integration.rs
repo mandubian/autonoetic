@@ -60,7 +60,7 @@ fn exec_sandbox(manifest: &AgentManifest, command: &str) -> serde_json::Value {
 
     let args = serde_json::json!({ "command": command });
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         manifest,
         &policy,
         &agent_dir,
@@ -121,7 +121,7 @@ fn exec_sandbox_with_artifact(
         "artifact_id": artifact_id,
     });
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         manifest,
         &policy,
         &agent_dir,

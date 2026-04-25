@@ -135,8 +135,8 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 - [x] **3A.1** Define `CredentialRecord` struct (credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts)
 - [x] **3A.2** Add `credentials` table schema migration in `gateway_store.rs`
-- [x] **3A.3** Implement `credential.check` tool (query CredentialRecord by service name)
-- [x] **3A.4** Implement `credential.request` tool (fetch secret from Vault, inject into HTTP request via reqwest, sanitize response)
+- [x] **3A.3** Implement `credential_check` tool (query CredentialRecord by service name)
+- [x] **3A.4** Implement `credential_request` tool (fetch secret from Vault, inject into HTTP request via reqwest, sanitize response)
 - [x] **3A.5** Add `CredentialAccess` capability type with service-scoped patterns
 - [x] **3A.6** Tests for check/request flow with pre-configured credentials
 
@@ -146,7 +146,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 #### Phase B — Automated Registration (~350 lines)
 
 - [x] **3B.1** Define `CredentialSetupStep` enum (ApiCall, UserPrompt, UserAction) in `autonoetic-types/src/agent.rs`
-- [x] **3B.2** Implement `credential.setup` tool (multi-step server-side execution, extract_secrets via JSONPath, store in Vault)
+- [x] **3B.2** Implement `credential_setup` tool (multi-step server-side execution, extract_secrets via JSONPath, store in Vault)
 - [x] **3B.3** Extend JSONPath parser to accept `$`-prefixed notation (`parse_json_path()` in `runtime/store.rs`)
 - [x] **3B.4** Wire approval queue integration: UserPrompt step creates `ApprovalRequest` with `ScheduledAction::CredentialPrompt`, returns `approval_request_id`, and breaks iteration
 - [x] **3B.5** Tests for automated registration flow (8 tests: availability, service/network denial, user_action, user_prompt suspension with approval_id, extract_public overlap blocking, JSONPath parsing)
@@ -173,7 +173,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 #### Phase D — Secure User Prompt Channel (~200 lines)
 
 - [x] **3D.1** Implement out-of-band secure prompt (TUI/CLI password prompt) for human-assisted credential entry
-- [x] **3D.2** Wire into `credential.setup` UserPrompt step type
+- [x] **3D.2** Wire into `credential_setup` UserPrompt step type
 - [x] **3D.3** Tests
 
 **Status (2026-04-02):** Fully implemented.
@@ -197,7 +197,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 ## Feature 4: FTS Session Search
 
-**Problem:** `execution.search` covers tool traces only, not conversation content. Session history is only persisted at hibernate points, not at session end. No full-text search across conversations.
+**Problem:** `execution_search` covers tool traces only, not conversation content. Session history is only persisted at hibernate points, not at session end. No full-text search across conversations.
 
 **Key files:** `lifecycle.rs` (persist_history_to_content_store at line 2123, close_session at line 313), `gateway_store.rs`
 
@@ -207,8 +207,8 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - `session_transcripts` table with FTS5 virtual table (`session_transcripts_fts`) and content-sync triggers
 - `extract_searchable_excerpt()` helper (bounded plaintext, max 8KB)
 - `GatewayStore.upsert_session_transcript()` and `GatewayStore.search_session_transcripts()` methods
-- `session.search` native tool (FTS5 MATCH with bm25 ranking, filters by agent_id, root_session_id, status, since; ACL enforcement)
-- `session.peek` native tool (reads transcript via handle, produces bounded summary with turn statistics)
+- `session_search` native tool (FTS5 MATCH with bm25 ranking, filters by agent_id, root_session_id, status, since; ACL enforcement)
+- `session_peek` native tool (reads transcript via handle, produces bounded summary with turn statistics)
 - `SessionTranscriptRecord` type added to `autonoetic-types`
 - All 376 lib tests passing
 
@@ -231,14 +231,14 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - [x] **4C.1** Wire transcript upsert into `persist_history_to_content_store()` flow (after content store write)
 - [x] **4C.2** Update `close_session()` to set `ended_at` and `status` on transcript record (handled by upsert ON CONFLICT)
 
-#### Phase D — session.search Tool (~180 lines)
+#### Phase D — session_search Tool (~180 lines)
 
 - [x] **4D.1** Implement `SessionSearchTool` native tool (FTS5 MATCH with bm25 ranking, filters by agent_id, root_session_id, status, since)
 - [x] **4D.2** Implement `enforce_search_acl()` (agent sees own sessions + child sessions of current root)
 - [x] **4D.3** Register tool in tools module
 - [x] **4D.4** Tests for search, ACL filtering, ranking
 
-#### Phase E — session.peek Tool (optional, ~120 lines)
+#### Phase E — session_peek Tool (optional, ~120 lines)
 
 - [x] **4E.1** Implement `SessionSummarizeTool` (reads full transcripts via transcript_handle, produces bounded summary with turn statistics)
 - [x] **4E.2** Tests
@@ -263,7 +263,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 #### Phase B — Tool Name Bridging (~60 lines)
 
-- [x] **5B.1** Generate tool name mapping table (Bash -> sandbox.exec, Read -> content.read, etc.)
+- [x] **5B.1** Generate tool name mapping table (Bash -> sandbox_exec, Read -> content_read, etc.)
 - [x] **5B.2** Inject mapping as instruction appendix into imported agent's system prompt (~200 tokens)
 
 #### Phase C — Resource Mounting (~100 lines)
@@ -298,7 +298,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - `UserProfileRecord`, `BindingScope`, `UserAgentBinding` types in `autonoetic-types`
 - `UserProfileAccess` capability with read/write scope
 - `ProfileShare` ScheduledAction variant for approval-gated sharing
-- 4 native tools: `user.profile.read`, `user.profile.update`, `user.profile.share`, `user.profile.revoke`
+- 4 native tools: `user_profile_read`, `user_profile_update`, `user_profile_share`, `user_profile_revoke`
 - `user_id` threaded through `NativeToolRunContext` and `AgentExecutor`
 - User context snippet injected into system prompt at session start (bounded to ~500 tokens)
 - `render_user_context_snippet()` respects `full`/`restricted`/`task_only` scopes
@@ -314,10 +314,10 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 
 #### Phase B — Tool Surface (~200 lines)
 
-- [x] **6B.1** Implement `user.profile.read` tool (defaults to caller's bound user, respects binding scope)
-- [x] **6B.2** Implement `user.profile.update` tool (requires user approval or pre-granted scope)
-- [x] **6B.3** Implement `user.profile.share` tool (grants agent access, creates binding)
-- [x] **6B.4** Implement `user.profile.revoke` tool (removes binding)
+- [x] **6B.1** Implement `user_profile_read` tool (defaults to caller's bound user, respects binding scope)
+- [x] **6B.2** Implement `user_profile_update` tool (requires user approval or pre-granted scope)
+- [x] **6B.3** Implement `user_profile_share` tool (grants agent access, creates binding)
+- [x] **6B.4** Implement `user_profile_revoke` tool (removes binding)
 - [x] **6B.5** Add `UserProfileAccess` capability type
 
 #### Phase C — Wake Injection (~80 lines)
@@ -353,7 +353,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 - Presets HashMap borrowed directly (not cloned per-turn)
 - Budget enforcement ordering documented: budget trim runs before compression; recommended to set compression threshold slightly below budget trim threshold
 - Per-agent overrides via `compression` field in `AgentManifest` (threshold, preset, recent_turns_to_keep)
-- Child agent context handoff: `context` field on `agent.spawn` for bounded context summary from parent
+- Child agent context handoff: `context` field on `agent_spawn` for bounded context summary from parent
 - Quality regression framework: `GoldenSession` fixtures, `ReplayDriver`, structural comparison, threshold scanning
 - 23 unit tests (17 compression + 6 quality) covering split logic, config merging, LLM resolution, tool-call groups, re-compression safety, minimum interval, persist roundtrip, replay, comparison, and threshold scanning
 
@@ -396,7 +396,7 @@ All 7 features are independent — no ordering dependency. Priority is based on 
 #### Phase C — Prune Strategy
 
 - [x] **7C.1** For child agent context handoff: `context` field on `SpawnAgentArgs` for bounded context summary; parent curates what child needs, discards rest
-- [x] **7C.2** Wire into `agent.spawn` delegation flow — `context` injected as structured `[Context]` section in kickoff message; schema enforcement includes `context` field
+- [x] **7C.2** Wire into `agent_spawn` delegation flow — `context` injected as structured `[Context]` section in kickoff message; schema enforcement includes `context` field
 
 **Design note:** The `[Context]` / `[Task]` / `[Metadata]` markers are plain text injected into the user message. The child agent's LLM interprets them semantically but has no typed access to the fields. If a child ever needs programmatic access to context vs. task, `context` could be injected as a separate system message instead — but for MVP the textual markers are sufficient and simpler.
 

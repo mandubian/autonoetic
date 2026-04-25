@@ -15,7 +15,7 @@ pub struct DigestAnnotateTool;
 
 impl NativeTool for DigestAnnotateTool {
     fn name(&self) -> &'static str {
-        "digest.annotate"
+        "digest_annotate"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -95,7 +95,7 @@ impl NativeTool for DigestAnnotateTool {
                         source_agent_id: Some(ctx.agent_id.clone()),
                         source_node_id: std::env::var("AUTONOETIC_NODE_ID")
                             .unwrap_or_else(|_| "gateway".to_string()),
-                        event_type: "digest.annotate".to_string(),
+                        event_type: "digest_annotate".to_string(),
                         payload: Some(
                             serde_json::json!({
                                 "type": args.annotation_type,

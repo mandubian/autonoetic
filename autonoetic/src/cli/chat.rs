@@ -624,7 +624,7 @@ fn format_workflow_event_card(
         )),
         "task.awaiting_approval" => {
             let kind = if approval.contains("sandbox") {
-                "sandbox.exec".to_string()
+                "sandbox_exec".to_string()
             } else if approval.contains("agent_install") {
                 "legacy install approval".to_string()
             } else {
@@ -2705,7 +2705,7 @@ mod tests {
         );
         let line = format_workflow_event_card(&event).map(|(s, _)| s).expect("event should render");
         assert!(line.contains("Suspended for approval: task-42"));
-        assert!(line.contains("sandbox.exec"));
+        assert!(line.contains("sandbox_exec"));
         assert!(line.contains("resumes automatically"));
     }
 

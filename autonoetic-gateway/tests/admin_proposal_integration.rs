@@ -252,7 +252,7 @@ fn test_admin_proposal_create_tool() -> anyhow::Result<()> {
     let policy = PolicyEngine::new(manifest.clone());
 
     let result = registry.execute(
-        "admin.proposal.create",
+        "admin_proposal_create",
         &manifest,
         &policy,
         temp_dir.path(),
@@ -299,14 +299,14 @@ fn test_admin_proposal_create_tool_dedup() -> anyhow::Result<()> {
     });
 
     let r1 = registry.execute(
-        "admin.proposal.create", &manifest, &policy,
+        "admin_proposal_create", &manifest, &policy,
         temp_dir.path(), None, &args.to_string(), None, None, None, Some(store.clone()), None,
     )?;
     let p1: serde_json::Value = serde_json::from_str(&r1)?;
     assert_eq!(p1["ok"], true);
 
     let r2 = registry.execute(
-        "admin.proposal.create", &manifest, &policy,
+        "admin_proposal_create", &manifest, &policy,
         temp_dir.path(), None, &json!({
             "title": "Network timeout recurring pattern",
             "category": "protocol",
@@ -333,7 +333,7 @@ fn test_admin_proposal_create_tool_denied_without_approval_queue() -> anyhow::Re
     let registry = default_registry();
     let manifest = test_manifest_no_caps();
     let available = registry.available_definitions(&manifest);
-    let create_tool = available.iter().find(|d| d.name == "admin.proposal.create");
+    let create_tool = available.iter().find(|d| d.name == "admin_proposal_create");
     assert!(create_tool.is_none());
 
     Ok(())
@@ -354,7 +354,7 @@ fn test_admin_proposal_list_tool() -> anyhow::Result<()> {
     let policy = PolicyEngine::new(manifest.clone());
 
     let result = registry.execute(
-        "admin.proposal.list", &manifest, &policy,
+        "admin_proposal_list", &manifest, &policy,
         temp_dir.path(), None, &json!({}).to_string(), None, None, None, Some(store.clone()), None,
     )?;
     let parsed: serde_json::Value = serde_json::from_str(&result)?;
@@ -362,7 +362,7 @@ fn test_admin_proposal_list_tool() -> anyhow::Result<()> {
     assert_eq!(parsed["count"], 3);
 
     let filtered = registry.execute(
-        "admin.proposal.list", &manifest, &policy,
+        "admin_proposal_list", &manifest, &policy,
         temp_dir.path(), None, &json!({"status": "open"}).to_string(), None, None, None, Some(store.clone()), None,
     )?;
     let f: serde_json::Value = serde_json::from_str(&filtered)?;
@@ -380,7 +380,7 @@ fn test_admin_proposal_create_validation() -> anyhow::Result<()> {
     let policy = PolicyEngine::new(manifest.clone());
 
     let bad_category = registry.execute(
-        "admin.proposal.create", &manifest, &policy,
+        "admin_proposal_create", &manifest, &policy,
         temp_dir.path(), None, &json!({
             "title": "Test",
             "category": "invalid_category",
@@ -394,7 +394,7 @@ fn test_admin_proposal_create_validation() -> anyhow::Result<()> {
     assert_eq!(r["ok"], false);
 
     let bad_blast = registry.execute(
-        "admin.proposal.create", &manifest, &policy,
+        "admin_proposal_create", &manifest, &policy,
         temp_dir.path(), None, &json!({
             "title": "Test",
             "category": "tool",

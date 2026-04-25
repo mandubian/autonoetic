@@ -50,9 +50,9 @@ Forbidden commands (blocked by policy): `rm`, `rmdir`, `unlink`, `sudo`, `su`, `
 
 ## Sandbox Failures
 
-When `sandbox.exec` fails:
+When `sandbox_exec` fails:
 1. Analyze stderr for your script's errors — ignore `/etc/profile.d/` noise and `/dev/null: Permission denied` (sandbox artifacts, not code errors)
-2. Use `content.read` for deterministic file inspection
+2. Use `content_read` for deterministic file inspection
 3. Fix the actual error and retry
 
 ## Clarification

@@ -59,7 +59,7 @@ autonoetic gateway status [--json]
 
 ### `autonoetic gateway approvals`
 
-Manage pending approval requests for `agent.revision.promote` and `sandbox.exec` actions.
+Manage pending approval requests for `agent_revision_promote` and `sandbox_exec` actions.
 
 ```bash
 autonoetic gateway approvals list [--json]
@@ -283,8 +283,8 @@ autonoetic agent revision create <agent_id> <artifact_id> [--base-revision-id <R
 Notes:
 - This path expects the artifact to already contain `SKILL.md` and the referenced `runtime.lock`.
 - The gateway validates shape, scaffolds gateway-owned lock fields, and stores canonicalized lock bytes.
-- For schema help from inside agent tooling, use the runtime tool `agent.revision.schema`.
-- For intent-driven installs (gateway renders canonical manifest/lock), agents can use `agent.revision.create_from_intent`.
+- For schema help from inside agent tooling, use the runtime tool `agent_revision_schema`.
+- For intent-driven installs (gateway renders canonical manifest/lock), agents can use `agent_revision_create_from_intent`.
 
 ### `autonoetic agent revision promote`
 

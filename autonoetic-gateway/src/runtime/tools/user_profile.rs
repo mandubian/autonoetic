@@ -30,12 +30,12 @@ struct UserProfileReadTool;
 
 impl NativeTool for UserProfileReadTool {
     fn name(&self) -> &'static str {
-        "user.profile.read"
+        "user_profile_read"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "user.profile.read".to_string(),
+            name: "user_profile_read".to_string(),
             description: "Read a user's profile. Defaults to the bound user for the current agent. Respects binding scope: 'full' returns all profile data, 'restricted' returns only preferences and constraints, 'task_only' returns nothing.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -161,12 +161,12 @@ struct UserProfileUpdateTool;
 
 impl NativeTool for UserProfileUpdateTool {
     fn name(&self) -> &'static str {
-        "user.profile.update"
+        "user_profile_update"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "user.profile.update".to_string(),
+            name: "user_profile_update".to_string(),
             description: "Update a user's profile data. Requires UserProfileAccess with 'write' scope. Creates the profile if it doesn't exist. Merges the provided fields into the existing profile.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -308,12 +308,12 @@ struct UserProfileShareTool;
 
 impl NativeTool for UserProfileShareTool {
     fn name(&self) -> &'static str {
-        "user.profile.share"
+        "user_profile_share"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "user.profile.share".to_string(),
+            name: "user_profile_share".to_string(),
             description: "Request access to a user's profile. Creates an approval request for the user to approve. Once approved, a binding is created between the agent and the user.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -437,12 +437,12 @@ struct UserProfileRevokeTool;
 
 impl NativeTool for UserProfileRevokeTool {
     fn name(&self) -> &'static str {
-        "user.profile.revoke"
+        "user_profile_revoke"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "user.profile.revoke".to_string(),
+            name: "user_profile_revoke".to_string(),
             description: "Revoke an agent's access to a user's profile. Requires UserProfileAccess with 'write' scope.".to_string(),
             input_schema: json!({
                 "type": "object",

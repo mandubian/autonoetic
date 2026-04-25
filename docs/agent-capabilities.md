@@ -21,52 +21,52 @@ This document describes the capability system used by Autonoetic agents. Capabil
 ### Content Tools
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
-| `content.read` | `ReadAccess` | Read from content store |
-| `content.write` | `WriteAccess` | Write to content store with visibility |
+| `content_read` | `ReadAccess` | Read from content store |
+| `content_write` | `WriteAccess` | Write to content store with visibility |
 | `content.search` | `ReadAccess` | Search content (included) |
 
 ### Artifact Tools
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
-| `artifact.build` | `WriteAccess` | Build immutable artifact from session content |
-| `artifact.inspect` | `ReadAccess` | Inspect artifact files and metadata |
+| `artifact_build` | `WriteAccess` | Build immutable artifact from session content |
+| `artifact_inspect` | `ReadAccess` | Inspect artifact files and metadata |
 
 ### Agent Tools
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
-| `agent.spawn` | `AgentSpawn` | Spawn child agent sessions |
-| `agent.exists` | `SandboxFunctions: ["agent."]` | Check if agent exists |
-| `agent.discover` | `SandboxFunctions: ["agent."]` | Discover available agents |
+| `agent_spawn` | `AgentSpawn` | Spawn child agent sessions |
+| `agent_exists` | `SandboxFunctions: ["agent."]` | Check if agent exists |
+| `agent_discover` | `SandboxFunctions: ["agent."]` | Discover available agents |
 
 ### Revision & Activation Tools
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
-| `agent.revision.create` | `AgentRevision` | Create immutable revision from an AgentBundle artifact |
-| `agent.revision.list` | `AgentRevision` | List revisions for an agent |
-| `agent.revision.inspect` | `AgentRevision` | Inspect revision metadata and status |
-| `agent.revision.promote` | `AgentRevision` | Move alias to a revision (activates it) |
-| `agent.revision.rollback` | `AgentRevision` | Roll alias back to a prior revision |
-| `agent.revision.diff` | `AgentRevision` | File-level diff between two revisions |
+| `agent_revision_create` | `AgentRevision` | Create immutable revision from an AgentBundle artifact |
+| `agent_revision_list` | `AgentRevision` | List revisions for an agent |
+| `agent_revision_inspect` | `AgentRevision` | Inspect revision metadata and status |
+| `agent_revision_promote` | `AgentRevision` | Move alias to a revision (activates it) |
+| `agent_revision_rollback` | `AgentRevision` | Roll alias back to a prior revision |
+| `agent_revision_diff` | `AgentRevision` | File-level diff between two revisions |
 
-> **Note:** `agent.install` has been removed from the runtime tool surface. The only path to activate a new logical agent is: `artifact.build` → `agent.revision.create` → `agent.revision.promote`.
+> **Note:** `agent.install` has been removed from the runtime tool surface. The only path to activate a new logical agent is: `artifact_build` → `agent_revision_create` → `agent_revision_promote`.
 
 ### Knowledge Tools
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
-| `knowledge.recall` | `ReadAccess` | Recall stored knowledge (visibility + session + expiry enforced) |
-| `knowledge.store` | `WriteAccess` | Store or update knowledge; `visibility` (`session` default) and `retention` |
-| `knowledge.search` | `ReadAccess` | Search knowledge base |
-| `knowledge.search_by_tags` | `ReadAccess` | Tag-AND search in a scope |
-| `digest.query` | `ReadAccess` | Post-session narrative / digest |
+| `knowledge_recall` | `ReadAccess` | Recall stored knowledge (visibility + session + expiry enforced) |
+| `knowledge_store` | `WriteAccess` | Store or update knowledge; `visibility` (`session` default) and `retention` |
+| `knowledge_search` | `ReadAccess` | Search knowledge base |
+| `knowledge_search_by_tags` | `ReadAccess` | Tag-AND search in a scope |
+| `digest_query` | `ReadAccess` | Post-session narrative / digest |
 
 ### Sandbox Tools
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
-| `sandbox.exec` | `CodeExecution` | Execute scripts with patterns |
+| `sandbox_exec` | `CodeExecution` | Execute scripts with patterns |
 
 ## Important: SandboxFunctions vs Native Tools
 
-**Common misconception**: `SandboxFunctions` with prefix `"content."` grants access to `content.read`, `content.write`, etc.
+**Common misconception**: `SandboxFunctions` with prefix `"content."` grants access to `content_read`, `content_write`, etc.
 
 **Reality**: `SandboxFunctions` is for **MCP (Model Context Protocol) tools only**. Native content tools require `ReadAccess` and `WriteAccess` capabilities.
 
@@ -74,7 +74,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 ❌ WRONG:
   capabilities:
     - type: "SandboxFunctions"
-      allowed: ["content."]  # This does NOT grant content.read access!
+      allowed: ["content."]  # This does NOT grant content_read access!
 
 ✅ CORRECT:
   capabilities:
@@ -130,7 +130,7 @@ capabilities:
   - type: "AgentRevision"
     patterns: ["*"]
 ```
-- **Role**: **EXCLUSIVE** agent activator — only agent that calls `agent.revision.create` + `agent.revision.promote`
+- **Role**: **EXCLUSIVE** agent activator — only agent that calls `agent_revision_create` + `agent_revision_promote`
 - **Cannot**: Execute code, make HTTP requests
 
 #### coder.default
@@ -265,7 +265,7 @@ capabilities:
 
 ### SandboxFunctions (for MCP tools)
 ```json
-{"type": "SandboxFunctions", "allowed": ["web.", "content.read"]}
+{"type": "SandboxFunctions", "allowed": ["web.", "content_read"]}
 ```
 
 ### CodeExecution (script patterns)
@@ -294,12 +294,12 @@ capabilities:
    - Correct: `{"type": "NetworkAccess", "hosts": [...]}`
 
 3. **Planner trying to activate an agent directly**
-   - Wrong: Planner calls `agent.revision.create` or `agent.revision.promote`
-   - Correct: Planner delegates to `specialized_builder.default` via `agent.spawn`
+   - Wrong: Planner calls `agent_revision_create` or `agent_revision_promote`
+   - Correct: Planner delegates to `specialized_builder.default` via `agent_spawn`
 
 4. **Bypassing eval gating for promotion**
-   - `agent.revision.promote` can require a passed `required_eval_run_id`
-   - Pass `eval.run` output to `specialized_builder` so it can include it in the promote call
+   - `agent_revision_promote` can require a passed `required_eval_run_id`
+   - Pass `eval_run` output to `specialized_builder` so it can include it in the promote call
 
 ## See Also
 

@@ -26,7 +26,7 @@
 - [x] Thread overrides through to `bubblewrap_command` and `bubblewrap_shell_command`
 - [x] All existing callers pass `None` (no behavior change)
 
-### Task 1.3: `sandbox.exec` passes capability-derived overrides
+### Task 1.3: `sandbox_exec` passes capability-derived overrides
 
 **File:** `autonoetic-gateway/src/runtime/tools.rs`
 
@@ -39,7 +39,7 @@
 
 - [x] **Root cause**: The `execute_script_in_sandbox` function (line 2709) used local `bubblewrap_command`/`docker_command`/`microvm_command` functions that were completely separate from `sandbox.rs::SandboxRunner`. The local `bubblewrap_command` didn't invoke bwrap — it ran scripts directly with python3/node/ruby.
 - [x] **Fix**: Refactored `execute_script_in_sandbox` to use `SandboxRunner::spawn_with_driver_and_dependencies` from `sandbox.rs`, deriving `BwrapIsolationOverrides` from the agent's capabilities. Removed the dead local sandbox command functions.
-- [x] Script agents spawned via `agent.spawn` now get proper bwrap isolation with capability-driven network access.
+- [x] Script agents spawned via `agent_spawn` now get proper bwrap isolation with capability-driven network access.
 
 ---
 
@@ -92,7 +92,7 @@
 Phase 1 (sandbox overrides)    ← core mechanism, no agent changes
   ├── 1.1 BwrapIsolationOverrides type          ✅
   ├── 1.2 Thread through spawn                  ✅
-  ├── 1.3 sandbox.exec integration              ✅
+  ├── 1.3 sandbox_exec integration              ✅
   └── 1.4 Script agent integration              ✅
 
 Phase 2 (planner fix)          ← Phase 1 not required, can parallel

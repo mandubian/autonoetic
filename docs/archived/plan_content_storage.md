@@ -4,8 +4,8 @@
 
 Replace the current brittle content-sharing strategy with a two-layer model:
 
-1. `content.write` is for collaborative working state inside a session tree
-2. `artifact.build` is the mandatory boundary for anything that will be reviewed, installed, executed, or handed across trust boundaries
+1. `content_write` is for collaborative working state inside a session tree
+2. `artifact_build` is the mandatory boundary for anything that will be reviewed, installed, executed, or handed across trust boundaries
 
 Core rule:
 
@@ -51,7 +51,7 @@ That requires artifacts, not just better content passing.
 
 ## Layer 1: Session Content
 
-`content.write` remains the primitive for creating files during collaboration.
+`content_write` remains the primitive for creating files during collaboration.
 
 It should become:
 
@@ -82,7 +82,7 @@ It does **not** define what is safe to execute.
 
 Introduce a generic artifact primitive:
 
-- `artifact.build(...) -> artifact_id`
+- `artifact_build(...) -> artifact_id`
 
 An artifact is a **closed bundle / closure** of files intended for downstream use.
 
@@ -99,7 +99,7 @@ Raw session content must not be directly promotable.
 
 For any executable-producing workflow:
 
-1. coder writes files via `content.write`
+1. coder writes files via `content_write`
 2. coder builds an artifact from the intended deliverable set
 3. evaluator/auditor review the artifact ID
 4. install / run / publish consumes only the artifact ID
@@ -142,14 +142,14 @@ This is what makes the system robust even if an agent is sloppy or adversarial.
 
 Replace:
 
-- `content.write(name, content)`
+- `content_write(name, content)`
 - `content.persist(handle)`
 - hierarchical parent-child manifest tricks as the main sharing story
 
 With:
 
-- `content.write(name, content, visibility)`
-- visibility-aware `content.read(name_or_handle)`
+- `content_write(name, content, visibility)`
+- visibility-aware `content_read(name_or_handle)`
 - root-session collaboration visibility
 
 Content handles should no longer bypass visibility rules.
@@ -158,8 +158,8 @@ Content handles should no longer bypass visibility rules.
 
 Add:
 
-- `artifact.build(inputs, entrypoints?, mode?) -> artifact_id`
-- `artifact.read(artifact_id)` or `artifact.inspect(artifact_id)`
+- `artifact_build(inputs, entrypoints?, mode?) -> artifact_id`
+- `artifact.read(artifact_id)` or `artifact_inspect(artifact_id)`
 
 The artifact must record:
 
@@ -196,7 +196,7 @@ Artifacts remain mandatory for the next stage.
 
 ## Tool Surface
 
-## `content.write`
+## `content_write`
 
 New shape:
 
@@ -220,15 +220,15 @@ Response:
 }
 ```
 
-## `content.read`
+## `content_read`
 
-`content.read(name_or_handle)` stays, but:
+`content_read(name_or_handle)` stays, but:
 
 - access is checked against visibility rules
 - full handles are identifiers, not bearer tokens
 - short aliases are preferred for agent UX
 
-## `artifact.build`
+## `artifact_build`
 
 Possible request:
 
@@ -260,7 +260,7 @@ Possible response:
 
 The exact schema can change, but the key is that the gateway returns a short artifact ID suitable for LLM use.
 
-## `artifact.inspect`
+## `artifact_inspect`
 
 Used by evaluator/auditor to understand what they are reviewing:
 
@@ -295,7 +295,7 @@ Tasks:
 
 - [ ] remove `content.persist` tool completely
 - [ ] remove `persisted` tracking from content manifests
-- [ ] move to `content.write(... visibility=...)`
+- [ ] move to `content_write(... visibility=...)`
 - [ ] make visibility explicit in write responses
 
 ### 1.2 Root-session visibility
@@ -303,7 +303,7 @@ Tasks:
 Tasks:
 
 - [ ] add explicit `root_session_id` to session metadata / manifest state
-- [ ] when `agent.spawn` creates child sessions, inherit the same root session
+- [ ] when `agent_spawn` creates child sessions, inherit the same root session
 - [ ] make `session` visibility readable anywhere inside that root session
 - [ ] keep `private` local to the writing session
 - [ ] keep `global` readable outside the root session
@@ -332,7 +332,7 @@ Tasks:
 - [ ] store artifact metadata under gateway-controlled storage
 - [ ] map artifact ID to content handles + names + digest + entrypoints
 
-### 2.2 `artifact.build` tool
+### 2.2 `artifact_build` tool
 
 **File**:
 
@@ -340,16 +340,16 @@ Tasks:
 
 Tasks:
 
-- [ ] add `artifact.build(inputs, entrypoints?, metadata?)`
+- [ ] add `artifact_build(inputs, entrypoints?, metadata?)`
 - [ ] resolve inputs from session-visible content
 - [ ] produce one short artifact ID
 - [ ] ensure resulting artifact is immutable once built
 
-### 2.3 `artifact.inspect` tool
+### 2.3 `artifact_inspect` tool
 
 Tasks:
 
-- [ ] add `artifact.inspect(artifact_id)`
+- [ ] add `artifact_inspect(artifact_id)`
 - [ ] expose file list, digests, entrypoints, manifest metadata
 - [ ] make this the normal evaluator/auditor inspection primitive
 
@@ -413,7 +413,7 @@ Files:
 Tasks:
 
 - [ ] remove `content.persist`
-- [ ] document `artifact.build`
+- [ ] document `artifact_build`
 - [ ] document “no artifact, no promotion”
 - [ ] update examples so coder builds artifact before evaluator/auditor stages
 
@@ -479,11 +479,11 @@ These should be settled before implementation starts:
 3. **Should artifact IDs be globally unique short IDs or digest-derived short aliases?**
    - recommended: short stable IDs backed by full digest in metadata
 
-4. **Should `artifact.build` require explicit file list or support directory/entrypoint expansion?**
+4. **Should `artifact_build` require explicit file list or support directory/entrypoint expansion?**
    - recommended Phase 1: explicit file list
    - Phase 2: optional closure expansion from entrypoints
 
-5. **Should raw `sandbox.exec` remain allowed for scratch code?**
+5. **Should raw `sandbox_exec` remain allowed for scratch code?**
    - recommended:
      - yes for scratch/manual experimentation
      - no for reviewed/promotion/install paths
@@ -491,10 +491,10 @@ These should be settled before implementation starts:
 ## Acceptance Criteria
 
 - `content.persist` is gone
-- `content.write(... visibility=...)` is the only content creation primitive
+- `content_write(... visibility=...)` is the only content creation primitive
 - handles no longer bypass visibility rules
 - sibling agents in the same root session can collaborate through `session` visibility
-- `artifact.build` exists and returns a short artifact ID
+- `artifact_build` exists and returns a short artifact ID
 - evaluator/auditor review artifacts, not loose session content
 - install/run/promotion paths require artifacts
 - artifact execution/install is closed to files outside the artifact
@@ -504,8 +504,8 @@ These should be settled before implementation starts:
 
 The robust model is:
 
-- `content.write` for working files
-- `artifact.build` for exact reviewable/executable closure
+- `content_write` for working files
+- `artifact_build` for exact reviewable/executable closure
 - only artifacts cross trust boundaries
 
 That is much stronger than the current “planner passes the right file handles” strategy.

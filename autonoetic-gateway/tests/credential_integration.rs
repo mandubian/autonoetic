@@ -239,7 +239,7 @@ fn test_credential_check_available_with_credential_access() {
     let registry = default_registry();
 
     let defs = registry.available_definitions(&manifest);
-    assert!(defs.iter().any(|d| d.name == "credential.check"));
+    assert!(defs.iter().any(|d| d.name == "credential_check"));
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn test_credential_check_denied_without_credential_access() {
     let registry = default_registry();
 
     let defs = registry.available_definitions(&manifest);
-    assert!(!defs.iter().any(|d| d.name == "credential.check"));
+    assert!(!defs.iter().any(|d| d.name == "credential_check"));
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn test_credential_check_service_scoped_denial() {
 
     let result = registry
         .execute(
-            "credential.check",
+            "credential_check",
             &manifest,
             &policy,
             temp.path(),
@@ -318,7 +318,7 @@ fn test_credential_request_denied_wrong_service() {
 
     let result = registry
         .execute(
-            "credential.request",
+            "credential_request",
             &manifest,
             &policy,
             temp.path(),
@@ -382,7 +382,7 @@ fn test_credential_request_denied_host_not_in_allowed_hosts() {
 
     let result = registry
         .execute(
-            "credential.request",
+            "credential_request",
             &manifest,
             &policy,
             temp.path(),
@@ -455,7 +455,7 @@ fn test_credential_request_allowed_when_host_matches() {
 
     let result = registry
         .execute(
-            "credential.request",
+            "credential_request",
             &manifest,
             &policy,
             temp.path(),
@@ -526,7 +526,7 @@ fn test_credential_request_stored_inject_as_takes_precedence() {
 
     let result = registry
         .execute(
-            "credential.request",
+            "credential_request",
             &manifest,
             &policy,
             temp.path(),
@@ -601,7 +601,7 @@ fn test_credential_request_no_allowed_hosts_uses_network_access_only() {
 
     let result = registry
         .execute(
-            "credential.request",
+            "credential_request",
             &manifest,
             &policy,
             temp.path(),
@@ -665,7 +665,7 @@ fn test_credential_request_denied_expired() {
 
     let result = registry
         .execute(
-            "credential.request",
+            "credential_request",
             &manifest,
             &policy,
             temp.path(),
@@ -730,7 +730,7 @@ fn test_credential_request_denied_malformed_expiry() {
 
     let result = registry
         .execute(
-            "credential.request",
+            "credential_request",
             &manifest,
             &policy,
             temp.path(),
@@ -795,7 +795,7 @@ fn test_credential_request_denied_network_policy() {
 
     let result = registry
         .execute(
-            "credential.request",
+            "credential_request",
             &manifest,
             &policy,
             temp.path(),
@@ -829,7 +829,7 @@ fn test_credential_setup_available_with_credential_access() {
     let registry = default_registry();
 
     let defs = registry.available_definitions(&manifest);
-    assert!(defs.iter().any(|d| d.name == "credential.setup"));
+    assert!(defs.iter().any(|d| d.name == "credential_setup"));
 }
 
 #[test]
@@ -840,7 +840,7 @@ fn test_credential_setup_denied_without_credential_access() {
     let registry = default_registry();
 
     let defs = registry.available_definitions(&manifest);
-    assert!(!defs.iter().any(|d| d.name == "credential.setup"));
+    assert!(!defs.iter().any(|d| d.name == "credential_setup"));
 }
 
 #[test]
@@ -857,7 +857,7 @@ fn test_credential_setup_denied_wrong_service() {
 
     let result = registry
         .execute(
-            "credential.setup",
+            "credential_setup",
             &manifest,
             &policy,
             temp.path(),
@@ -906,7 +906,7 @@ fn test_credential_setup_denied_network_policy() {
 
     let result = registry
         .execute(
-            "credential.setup",
+            "credential_setup",
             &manifest,
             &policy,
             temp.path(),
@@ -955,7 +955,7 @@ fn test_credential_setup_user_action_succeeds() {
 
     let result = registry
         .execute(
-            "credential.setup",
+            "credential_setup",
             &manifest,
             &policy,
             temp.path(),
@@ -1001,7 +1001,7 @@ fn test_credential_setup_user_prompt_suspends_no_further_steps() {
 
     let result = registry
         .execute(
-            "credential.setup",
+            "credential_setup",
             &manifest,
             &policy,
             temp.path(),
@@ -1074,7 +1074,7 @@ fn test_credential_setup_extract_public_blocks_overlapping_secret_path() {
 
     let result = registry
         .execute(
-            "credential.setup",
+            "credential_setup",
             &manifest,
             &policy,
             temp.path(),
@@ -1135,7 +1135,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
     // Step 1: Start credential.setup with a UserPrompt step
     let result = registry
         .execute(
-            "credential.setup",
+            "credential_setup",
             &manifest,
             &policy,
             temp.path(),
@@ -1194,7 +1194,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
     // Step 4: Retry credential.setup with approval_ref
     let result = registry
         .execute(
-            "credential.setup",
+            "credential_setup",
             &manifest,
             &policy,
             temp.path(),
@@ -1258,7 +1258,7 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
     // Start credential.setup with a UserPrompt step
     let result = registry
         .execute(
-            "credential.setup",
+            "credential_setup",
             &manifest,
             &policy,
             temp.path(),

@@ -77,7 +77,7 @@ The problem isn't the adapter pattern — it's the gateway accumulating domain-s
 
 **Current**: Gateway has `planner.default`, `researcher`, `coder`, `debugger`, `evaluator`, `auditor`, `architect`, `memory-curator`, `evolution-steward` — 9 hardcoded role names in the routing model.
 
-**Fix**: The gateway provides `agent.spawn(agent_id, instructions)`. The **planner agent** decides which agents to spawn based on its own SKILL.md. The gateway never knows what a "researcher" is.
+**Fix**: The gateway provides `agent_spawn(agent_id, instructions)`. The **planner agent** decides which agents to spawn based on its own SKILL.md. The gateway never knows what a "researcher" is.
 
 ### 2. Wake Predicates & Reevaluation Logic
 
@@ -115,13 +115,13 @@ Strip the gateway down to its essential primitives:
 
 | Primitive | What It Does |
 |-----------|-------------|
-| `agent.spawn(id, instructions)` | Start an agent, return handle |
+| `agent_spawn(id, instructions)` | Start an agent, return handle |
 | `skill.execute(name, params)` | Run a skill in sandbox with injected secrets |
 | `skill.store.publish(bundle)` | Store a skill (pending approval) |
 | `skill.store.describe(name)` | Load skill description into context |
-| `knowledge.store(id, content, …)` | Write to tier2 with provenance, visibility (`session` / `private` / `global`), retention |
-| `knowledge.recall(id)` | Read one row if visible to this agent/session |
-| `knowledge.search(…)` | Search tier2 with visibility + expiry filters |
+| `knowledge_store(id, content, …)` | Write to tier2 with provenance, visibility (`session` / `private` / `global`), retention |
+| `knowledge_recall(id)` | Read one row if visible to this agent/session |
+| `knowledge_search(…)` | Search tier2 with visibility + expiry filters |
 | `scheduler.interval(id, period)` | Register periodic wake signal |
 | `scheduler.signal(id, name, payload)` | Fire event to agent |
 | `secrets.request(name, for_tool)` | Request secret injection authorization |
@@ -138,13 +138,13 @@ That's it. Fourteen primitives. No role registry. No wake predicates. No implici
 
 The autonoetic properties — self-evolving, memory-bearing, multi-agent — emerge from **agents composing these primitives**, not from the gateway hardcoding patterns:
 
-**Delegation**: Planner agent calls `agent.spawn` based on its own instructions. Gateway validates and executes.
+**Delegation**: Planner agent calls `agent_spawn` based on its own instructions. Gateway validates and executes.
 
 **Reevaluation**: Agent declares `scheduler.interval("every 20m")`. Gateway fires `tick`. Agent decides what to do.
 
 **Evolution**: Coder agent calls `skill.store.publish`. Evaluator calls `approval.queue.decide`. Gateway enforces the gate.
 
-**Memory**: Agent calls `knowledge.store` with a visibility horizon; gateway enforces reads (session match, private, global) and TTL.
+**Memory**: Agent calls `knowledge_store` with a visibility horizon; gateway enforces reads (session match, private, global) and TTL.
 
 The gateway doesn't understand delegation, reevaluation, or evolution. It just validates proposals and executes them. A completely different agent architecture — swarms, consensus-based delegation, ML-driven scheduling — could use the same gateway without changing a line of code.
 
@@ -180,8 +180,8 @@ User: "Research our competitors and build a report"
   ┌─ Planner Agent (reasoning) ─────────────────────┐
   │                                                   │
   │  1. Parse intent → multi-step plan                │
-  │  2. gateway.agent.spawn("researcher", "research") │
-  │  3. gateway.agent.spawn("coder", "build report")  │
+  │  2. gateway.agent_spawn("researcher", "research") │
+  │  3. gateway.agent_spawn("coder", "build report")  │
   │  4. gateway.task.board.post("synthesize findings")│
   │                                                   │
   └────────────────────┬──────────────────────────────┘
@@ -189,7 +189,7 @@ User: "Research our competitors and build a report"
                        ▼
   ┌─ Gateway (execution) ────────────────────────────┐
   │                                                   │
-  │  1. Validate: agent.spawn capability? ✓           │
+  │  1. Validate: agent_spawn capability? ✓           │
   │  2. Validate: "researcher" exists? ✓              │
   │  3. Spawn researcher agent                        │
   │  4. Spawn coder agent                             │
@@ -202,7 +202,7 @@ User: "Research our competitors and build a report"
   ┌─ Researcher Agent ──┐  ┌─ Coder Agent ──────────┐
   │ Researches via web   │  │ Waits for research,    │
   │ Calls memory.remember│  │ then builds report     │
-  │ Reports back         │  │ via sandbox.execute    │
+  │ Reports back         │  │ via sandbox_execute    │
   └──────────────────────┘  └────────────────────────┘
 ```
 

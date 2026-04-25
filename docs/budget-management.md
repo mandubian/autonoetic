@@ -6,7 +6,7 @@ For YAML fields and limit semantics, see [session-budget.md](session-budget.md).
 
 ## Scope
 
-- **Session id** — All counters are keyed by the same session id used for `agent.spawn`, chat, and nested runs. One budget pool per session per gateway process.
+- **Session id** — All counters are keyed by the same session id used for `agent_spawn`, chat, and nested runs. One budget pool per session per gateway process.
 - **Process-local** — `SessionBudgetRegistry` is in-memory; restarting the gateway resets counters.
 - **Not a billing system** — USD figures are **estimates** from OpenRouter’s public model list, not provider invoices.
 

@@ -106,12 +106,12 @@ mod tests {
         let policy = DisclosurePolicy {
             rules: vec![
                 DisclosureRule {
-                    source: "memory.read".to_string(),
+                    source: "memory_read".to_string(),
                     path_pattern: Some("state/secrets/*".to_string()),
                     class: DisclosureClass::Restricted,
                 },
                 DisclosureRule {
-                    source: "memory.read".to_string(),
+                    source: "memory_read".to_string(),
                     path_pattern: None,
                     class: DisclosureClass::Public,
                 },
@@ -122,15 +122,15 @@ mod tests {
         let state = DisclosureState::new(policy);
 
         assert_eq!(
-            state.evaluate_class("memory.read", Some("state/secrets/keys.json")),
+            state.evaluate_class("memory_read", Some("state/secrets/keys.json")),
             DisclosureClass::Restricted
         );
         assert_eq!(
-            state.evaluate_class("memory.read", Some("state/public/data.json")),
+            state.evaluate_class("memory_read", Some("state/public/data.json")),
             DisclosureClass::Public
         );
         assert_eq!(
-            state.evaluate_class("sandbox.exec", None),
+            state.evaluate_class("sandbox_exec", None),
             DisclosureClass::Public
         );
     }
@@ -155,7 +155,7 @@ mod tests {
     fn test_register_result_taints_restricted_values() {
         let policy = DisclosurePolicy {
             rules: vec![DisclosureRule {
-                source: "memory.read".to_string(),
+                source: "memory_read".to_string(),
                 path_pattern: Some("state/secrets/*".to_string()),
                 class: DisclosureClass::Restricted,
             }],
@@ -163,7 +163,7 @@ mod tests {
         };
         let mut state = DisclosureState::new(policy);
 
-        state.register_result("memory.read", Some("state/secrets/pin.txt"), "1234");
+        state.register_result("memory_read", Some("state/secrets/pin.txt"), "1234");
         let filtered = state.filter_reply("The PIN is 1234.");
 
         assert!(filtered.contains("[REDACTED]"));

@@ -160,7 +160,7 @@ fn test_observability_search_tool() -> anyhow::Result<()> {
 
     let args = serde_json::json!({"query": "weather"});
     let result = registry.execute(
-        "observability.search",
+        "observability_search",
         &manifest,
         &policy,
         temp.path(),
@@ -223,7 +223,7 @@ fn test_observability_read_tool() -> anyhow::Result<()> {
         "view": "full"
     });
     let result = registry.execute(
-        "observability.read",
+        "observability_read",
         &manifest,
         &policy,
         temp.path(),
@@ -249,7 +249,7 @@ fn test_observability_read_tool() -> anyhow::Result<()> {
         "uri": "autonoetic://observability/roots/root-read-test/report/overview"
     });
     let result2 = registry.execute(
-        "observability.read",
+        "observability_read",
         &manifest,
         &policy,
         temp.path(),
@@ -270,7 +270,7 @@ fn test_observability_read_tool() -> anyhow::Result<()> {
         "uri": "autonoetic://observability/roots/nonexistent/report"
     });
     let result3 = registry.execute(
-        "observability.read",
+        "observability_read",
         &manifest,
         &policy,
         temp.path(),
@@ -401,7 +401,7 @@ fn test_observability_search_after_publish() -> anyhow::Result<()> {
 
     let args = serde_json::json!({"query": "researcher"});
     let result = registry.execute(
-        "observability.search",
+        "observability_search",
         &manifest,
         &policy,
         temp.path(),
@@ -424,7 +424,7 @@ fn test_observability_search_after_publish() -> anyhow::Result<()> {
         "uri": format!("autonoetic://observability/roots/{}/report", session_id)
     });
     let read_result = registry.execute(
-        "observability.read",
+        "observability_read",
         &manifest,
         &policy,
         temp.path(),

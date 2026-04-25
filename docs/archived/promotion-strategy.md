@@ -27,10 +27,10 @@ Create a **Content Promotion Registry** that links promotion status to specific 
 │  CODER writes content → content.handle = sha256:abc123                  │
 │                                    ↓                                     │
 │  EVALUATOR validates content sha256:abc123                               │
-│    → calls promotion.record(content_handle=sha256:abc123, pass=true)    │
+│    → calls promotion_record(content_handle=sha256:abc123, pass=true)    │
 │                                    ↓                                     │
 │  AUDITOR validates content sha256:abc123                                │
-│    → calls promotion.record(content_handle=sha256:abc123, auditor_pass)  │
+│    → calls promotion_record(content_handle=sha256:abc123, auditor_pass)  │
 │                                    ↓                                     │
 │  SPECIALIZED_BUILDER installs sha256:abc123                             │
 │    → gateway verifies causal chain: did evaluator/auditor validate?      │
@@ -51,7 +51,7 @@ Create a **Content Promotion Registry** that links promotion status to specific 
 - [x] **File**: `autonoetic-types/src/promotion.rs` (new)
 - [x] Define `PromotionRecord` struct
 - [x] Define `Finding` struct with severity, description, evidence
-- [x] Define `promotion.record` tool arguments and response types
+- [x] Define `promotion_record` tool arguments and response types
 - [x] Export new types in `autonoetic-types/src/lib.rs`
 
 #### Checkpoint 1.2: Create PromotionStore
@@ -61,17 +61,17 @@ Create a **Content Promotion Registry** that links promotion status to specific 
 - [x] Implement proper error handling
 - [x] Thread-safe (use Mutex)
 
-#### Checkpoint 1.3: Implement `promotion.record` tool
+#### Checkpoint 1.3: Implement `promotion_record` tool
 - [x] **File**: `autonoetic-gateway/src/runtime/tools_promotion.rs` (new)
-- [x] Tool name: `promotion.record`
+- [x] Tool name: `promotion_record`
 - [x] Arguments: content_handle, role, pass, findings, summary
 - [x] Response: `{ok: true, promotion_record: {...}}`
 - [x] Only allowed for `evaluator.default` and `auditor.default` agents
 - [x] Records to `PromotionStore`
 
-#### Checkpoint 1.4: Implement `promotion.query` tool
+#### Checkpoint 1.4: Implement `promotion_query` tool
 - [x] **File**: `autonoetic-gateway/src/runtime/tools_promotion.rs`
-- [x] Tool name: `promotion.query`
+- [x] Tool name: `promotion_query`
 - [x] Anyone can query
 
 ---
@@ -104,28 +104,28 @@ Create a **Content Promotion Registry** that links promotion status to specific 
 - [x] In `validate_promotion_gate_evidence` (~line 2587)
 - [x] Query `PromotionStore` for this handle
 - [x] Verify `evaluator_pass: true` and `auditor_pass: true`
-- [x] Verify via causal chain that evaluator/auditor actually called `promotion.record`
+- [x] Verify via causal chain that evaluator/auditor actually called `promotion_record`
 - [x] If verification fails → REJECT install with clear error message
 
 #### Checkpoint 3.3: Enhanced error messages
 - [x] Update error messages to be clear about what failed:
   - `"content sha256:... was not validated by evaluator.default"`
   - `"content sha256:... evaluator passed but auditor.default did not validate"`
-  - `"promotion.record call not found in causal chain for content sha256:..."`
+  - `"promotion_record call not found in causal chain for content sha256:..."`
 
 ---
 
 ### Phase 4: Evaluator/Auditor Integration
 
-**Goal**: Update evaluator.default and auditor.default SKILL.md to use `promotion.record`.
+**Goal**: Update evaluator.default and auditor.default SKILL.md to use `promotion_record`.
 
 #### Checkpoint 4.1: Update evaluator.default SKILL.md
 - [x] **File**: `autonoetic/agents/specialists/evaluator.default/SKILL.md`
-- [x] Added "Recording Promotion (CRITICAL)" section requiring `promotion.record` call
+- [x] Added "Recording Promotion (CRITICAL)" section requiring `promotion_record` call
 
 #### Checkpoint 4.2: Update auditor.default SKILL.md
 - [x] **File**: `autonoetic/agents/specialists/auditor.default/SKILL.md`
-- [x] Added "Recording Promotion (CRITICAL)" section requiring `promotion.record` call
+- [x] Added "Recording Promotion (CRITICAL)" section requiring `promotion_record` call
 
 ---
 
@@ -135,7 +135,7 @@ Create a **Content Promotion Registry** that links promotion status to specific 
 
 #### Checkpoint 5.1: Update planner.default SKILL.md agent creation flow
 - [x] **File**: `autonoetic/agents/lead/planner.default/SKILL.md`
-- [x] Updated Steps 3-4 to include promotion.record call requirement
+- [x] Updated Steps 3-4 to include promotion_record call requirement
 - [x] Updated Step 6 to include `source_content_handle`
 - [x] Added CRITICAL ENFORCEMENT section with strict rules
 
@@ -165,8 +165,8 @@ Create a **Content Promotion Registry** that links promotion status to specific 
 
 #### Checkpoint 7.1: Unit tests
 - [x] `PromotionStore` CRUD operations — 6 tests passing
-- [x] `promotion.record` tool args validation — in tools_promotion
-- [x] `promotion.query` responses — in tools_promotion
+- [x] `promotion_record` tool args validation — in tools_promotion
+- [x] `promotion_query` responses — in tools_promotion
 - [x] Causal chain promotion lookup — 3 tests passing
 
 #### Checkpoint 7.2: Integration tests
@@ -186,7 +186,7 @@ Create a **Content Promotion Registry** that links promotion status to specific 
 |------|--------|---------|
 | `autonoetic-types/src/promotion.rs` | ✅ Done | PromotionRecord, Finding types |
 | `autonoetic-gateway/src/runtime/promotion_store.rs` | ✅ Done | PromotionStore implementation |
-| `autonoetic-gateway/src/runtime/tools_promotion.rs` | ✅ Done | promotion.record, promotion.query tools |
+| `autonoetic-gateway/src/runtime/tools_promotion.rs` | ✅ Done | promotion_record, promotion_query tools |
 | `autonoetic-gateway/src/causal_chain/promotion_lookup.rs` | ✅ Done | Causal chain verification |
 | `tests/promotion_record_e2e.rs` | ✅ Done | Integration tests |
 | `tests/promotion_record_reject.rs` | ✅ Done | Rejection tests |
@@ -200,12 +200,12 @@ Create a **Content Promotion Registry** that links promotion status to specific 
 | `autonoetic-types/src/lib.rs` | ✅ Done | Already exports promotion module |
 | `autonoetic-gateway/src/runtime/mod.rs` | ✅ Done | Includes tools_promotion |
 | `autonoetic-gateway/src/runtime/promotion_store.rs` | ✅ Done | PromotionStore implementation |
-| `autonoetic-gateway/src/runtime/tools_promotion.rs` | ✅ Done | promotion.record, promotion.query tools |
+| `autonoetic-gateway/src/runtime/tools_promotion.rs` | ✅ Done | promotion_record, promotion_query tools |
 | `autonoetic-gateway/src/causal_chain/promotion_lookup.rs` | ✅ Done | Causal chain verification |
 | `autonoetic-gateway/src/runtime/tools.rs` | ✅ Done | InstallAgentArgs + validation |
 | `autonoetic/src/cli/agent.rs` | ✅ Done | Fixed evaluator/auditor bootstrap config |
-| `autonoetic/agents/specialists/evaluator.default/SKILL.md` | ✅ Done | Added promotion.record |
-| `autonoetic/agents/specialists/auditor.default/SKILL.md` | ✅ Done | Added promotion.record |
+| `autonoetic/agents/specialists/evaluator.default/SKILL.md` | ✅ Done | Added promotion_record |
+| `autonoetic/agents/specialists/auditor.default/SKILL.md` | ✅ Done | Added promotion_record |
 | `autonoetic/agents/lead/planner.default/SKILL.md` | ✅ Done | Strict workflow |
 
 ## Security Considerations

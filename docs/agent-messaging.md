@@ -5,14 +5,14 @@ To enable direct, asynchronous peer-to-peer (P2P) messaging between distinct run
 
 ## Delegation vs. Messaging
 
-It is important to understand when to use `agent.message` compared to traditional task delegation (`agent.spawn` and `workflow` tools).
+It is important to understand when to use `agent_message` compared to traditional task delegation (`agent_spawn` and `workflow` tools).
 
-**1. Delegation (`agent.spawn`)**
+**1. Delegation (`agent_spawn`)**
 - **Hierarchical:** Always establishes a parent-child relationship.
 - **Task-oriented:** Used to completely hand off a defined unit of work because the current agent lacks the explicit capabilities to perform it (e.g., Planner delegating to Coder to execute code).
-- **Synchronous context:** The caller explicitly waits via `workflow.wait` or `workflow.state` to retrieve the final result and artifacts produced by the child agent.
+- **Synchronous context:** The caller explicitly waits via `workflow_wait` or `workflow_state` to retrieve the final result and artifacts produced by the child agent.
 
-**2. Messaging (`agent.message`)**
+**2. Messaging (`agent_message`)**
 - **Peer-to-Peer:** Non-hierarchical. Messages can be sent across unrelated active sessions.
 - **Signal-oriented:** Used for side-channel coordination, pinging, broadcasting state updates, or nudging an already-running session.
 - **Asynchronous context:** The message is sent asynchronously and is purely injected into the target's conversation history. The sender doesn't formally wait for a structured checkpoint response, making it ideal for event-driven decoupled systems.
@@ -56,4 +56,4 @@ At the beginning of each execution turn (`execute_session_turn` within `AgentExe
 Any undelivered messages are injected directly into the LLM system/user context as synthetic events (e.g., `[Async Message from Agent X]: "..."`) and marked as delivered.
 
 ## Tool Implementation
-The `AgentMessageTool` (`agent.message`) will be officially implemented in the native Registry, accepting `target_session_id` and `message_payload`. The tool enforces the existing `PolicyEngine::can_message_agent()` rules before allowing dispatch.
+The `AgentMessageTool` (`agent_message`) will be officially implemented in the native Registry, accepting `target_session_id` and `message_payload`. The tool enforces the existing `PolicyEngine::can_message_agent()` rules before allowing dispatch.

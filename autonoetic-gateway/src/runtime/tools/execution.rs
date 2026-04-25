@@ -14,7 +14,7 @@ pub struct ExecutionSearchTool;
 
 impl NativeTool for ExecutionSearchTool {
     fn name(&self) -> &'static str {
-        "execution.search"
+        "execution_search"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {

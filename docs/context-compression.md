@@ -108,7 +108,7 @@ Every compression writes the **original uncompressed** history to the content st
 
 ## Child Agent Context Handoff
 
-When a parent agent delegates to a child via `agent.spawn`, the parent can include a bounded context summary:
+When a parent agent delegates to a child via `agent_spawn`, the parent can include a bounded context summary:
 
 ```json
 {

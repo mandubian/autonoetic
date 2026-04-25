@@ -10,7 +10,7 @@
 
 The current runtime mixes two different execution models:
 
-1. **Transient script execution** via `sandbox.exec` / `executor.default`
+1. **Transient script execution** via `sandbox_exec` / `executor.default`
 2. **Durable reusable execution** via promoted agent revisions
 
 This causes awkward approval behavior for artifacts that are already structured like reusable tools:
@@ -44,7 +44,7 @@ The runtime should distinguish two first-class paths:
 
 ### Non-Goal
 
-Do **not** broadly relax generic `sandbox.exec` policy so the executor becomes the durable trust anchor for reusable code. That would work against the separation-of-powers model and keep policy tied to shell-shape heuristics.
+Do **not** broadly relax generic `sandbox_exec` policy so the executor becomes the durable trust anchor for reusable code. That would work against the separation-of-powers model and keep policy tied to shell-shape heuristics.
 
 ### Assumptions
 
@@ -109,7 +109,7 @@ Introduce a first-class execution path for artifact entrypoints.
 
 Preferred shape:
 
-- new tool such as `artifact.exec` or `script.exec`
+- new tool such as `artifact_exec` or `script.exec`
 - inputs: `artifact_id`, `entrypoint`, `args`, optional env/layers/cwd
 - remote-access analysis runs against artifact files and reachable local modules
 - approval reuse is bound to artifact identity and concrete targets
@@ -125,7 +125,7 @@ This path is for:
 
 Use the existing revision lifecycle:
 
-`artifact.build` → `agent.revision.create` or `agent.revision.create_from_intent` → `agent.revision.promote` → spawn via `execution_mode: script`
+`artifact_build` → `agent_revision_create` or `agent_revision_create_from_intent` → `agent_revision_promote` → spawn via `execution_mode: script`
 
 This path is for:
 
@@ -217,7 +217,7 @@ This path is for:
 
 ### Task 3.1: Define a first-class transient execution tool
 
-- [x] Add `artifact.exec` tool in `autonoetic-gateway/src/runtime/tools/artifact_exec.rs`
+- [x] Add `artifact_exec` tool in `autonoetic-gateway/src/runtime/tools/artifact_exec.rs`
 - [x] Accept explicit structured inputs: `artifact_id`, `entrypoint`, `args`, `env`, `approval_ref`
 - [x] Resolve artifact contents before approval analysis
 
@@ -227,10 +227,10 @@ This path is for:
 - [x] Derive approval requests from analyzed code content rather than the shell wrapper string
 - [x] Bind approval reuse to the artifact identity via artifact-id-based fingerprint
 
-### Task 3.3: Keep `sandbox.exec` as the low-level escape hatch
+### Task 3.3: Keep `sandbox_exec` as the low-level escape hatch
 
-- [x] Preserve existing `sandbox.exec` for generic command execution (unchanged)
-- [x] `artifact.exec` uses artifact-bound analysis and fingerprinting; `sandbox.exec` uses command-string analysis
+- [x] Preserve existing `sandbox_exec` for generic command execution (unchanged)
+- [x] `artifact_exec` uses artifact-bound analysis and fingerprinting; `sandbox_exec` uses command-string analysis
 - [x] Both tools share the same dedup infrastructure (exec cache, session grants, approved requests)
 
 ---
@@ -253,15 +253,15 @@ This path is for:
 
 ### Task 4.2: Route durable artifacts through the builder/registration path
 
-- [x] Planner SKILL.md documents the promotion path: `artifact.build → agent.revision.create_from_intent → agent.revision.promote`
+- [x] Planner SKILL.md documents the promotion path: `artifact_build → agent_revision_create_from_intent → agent_revision_promote`
 - [x] Coder SKILL.md instructs returning install intent payload with `execution_mode: "script"` for script agents
 - [x] Promote script agents with declared `NetworkAccess` to eliminate per-command approval churn
 
 ### Task 4.3: Keep transient validation lightweight
 
-- [x] Planner SKILL.md lists `artifact.exec` for transient runs (smoke tests, validation before promotion)
-- [x] Executor SKILL.md documents `artifact.exec` for artifact-bound transient execution
-- [x] Coder SKILL.md documents `artifact.exec` for testing built artifacts
+- [x] Planner SKILL.md lists `artifact_exec` for transient runs (smoke tests, validation before promotion)
+- [x] Executor SKILL.md documents `artifact_exec` for artifact-bound transient execution
+- [x] Coder SKILL.md documents `artifact_exec` for testing built artifacts
 - [x] Promote only when repeated use or durable registration is intended
 
 ---
@@ -295,7 +295,7 @@ This path is for:
 - [x] `test_artifact_fingerprint_stable_across_shell_wrappers` — same artifact_id produces same fingerprint regardless of shell wrapper or args
 - [x] `test_artifact_fingerprint_differs_across_artifacts` — different artifact_ids produce different fingerprints
 - [x] `test_lifecycle_cache_reuse_simulated` — first run records cache, second run hits cache via artifact-id-based fingerprint
-- [x] `test_artifact_exec_tool_registered_and_gated` — artifact.exec registered, gated by CodeExecution capability
+- [x] `test_artifact_exec_tool_registered_and_gated` — artifact_exec registered, gated by CodeExecution capability
 
 ---
 

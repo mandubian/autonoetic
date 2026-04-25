@@ -23,7 +23,7 @@ pub struct ApprovalListTool;
 
 impl NativeTool for ApprovalListTool {
     fn name(&self) -> &'static str {
-        "approval.list"
+        "approval_list"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -122,7 +122,7 @@ pub struct ApprovalWithdrawTool;
 
 impl NativeTool for ApprovalWithdrawTool {
     fn name(&self) -> &'static str {
-        "approval.withdraw"
+        "approval_withdraw"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -214,7 +214,7 @@ impl NativeTool for ApprovalWithdrawTool {
                 )?;
 
                 tracing::info!(
-                    target: "approval.withdraw",
+                    target: "approval_withdraw",
                     request_id = %args.request_id,
                     agent_id = %manifest.agent.id,
                     reason = %reason,

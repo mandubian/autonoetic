@@ -56,7 +56,7 @@ async fn test_live_coder_tool_call_content_write() -> anyhow::Result<()> {
 
     // Define the content.write tool for the LLM
     let content_write_tool = ToolDefinition {
-        name: "content.write".to_string(),
+        name: "content_write".to_string(),
         description:
             "Write content to the session's content store. Returns a content handle (sha256:...)."
                 .to_string(),
@@ -126,7 +126,7 @@ Always write working, syntactically correct Python code."#
     let content_writes: Vec<_> = resp
         .tool_calls
         .iter()
-        .filter(|tc| tc.name == "content.write")
+        .filter(|tc| tc.name == "content_write")
         .collect();
 
     println!("\n=== Content Writes ({} total) ===", content_writes.len());

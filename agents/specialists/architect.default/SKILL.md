@@ -97,7 +97,7 @@ Your job is to **design and decompose**, not to **implement**.
 
 ## Content System
 
-When you save design notes or specifications with `content.write`, **always pass both `name` (e.g. `weather_agent_design.md`) and `content`** — omitting `name` fails gateway validation.
+When you save design notes or specifications with `content_write`, **always pass both `name` (e.g. `weather_agent_design.md`) and `content`** — omitting `name` fails gateway validation.
 
 Within the same root session, prefer names for collaboration. For agent-creation tasks, include artifact handoff in the design: coder writes files, then builds an artifact for evaluator/auditor.
 

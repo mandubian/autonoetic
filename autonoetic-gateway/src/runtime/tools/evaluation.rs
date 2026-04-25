@@ -39,7 +39,7 @@ pub struct EvalSuitePublishTool;
 
 impl NativeTool for EvalSuitePublishTool {
     fn name(&self) -> &'static str {
-        "eval.suite.publish"
+        "eval_suite_publish"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -297,7 +297,7 @@ pub struct EvalRunTool;
 
 impl NativeTool for EvalRunTool {
     fn name(&self) -> &'static str {
-        "eval.run"
+        "eval_run"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -404,7 +404,7 @@ pub struct EvalCompareTool;
 
 impl NativeTool for EvalCompareTool {
     fn name(&self) -> &'static str {
-        "eval.compare"
+        "eval_compare"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -621,7 +621,7 @@ pub struct EvalReportTool;
 
 impl NativeTool for EvalReportTool {
     fn name(&self) -> &'static str {
-        "eval.report"
+        "eval_report"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

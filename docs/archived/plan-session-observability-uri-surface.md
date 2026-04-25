@@ -24,7 +24,7 @@ Current gaps:
 
 1. **`execution_traces.event_id` is always `None`** — the most important join in the system doesn't work. Execution traces and causal events are parallel, unconnected tables.
 2. **Errors exist in the causal chain** but the report layer doesn't use causal `event_id` as its error identity.
-3. **`execution.search` is a second search tool** that overlaps heavily with what `observability.search` should do.
+3. **`execution_search` is a second search tool** that overlaps heavily with what `observability_search` should do.
 4. **Report publishing is hardcoded** in the session close path — there is no hook mechanism for pluggable post-session processing.
 5. **`payload_ref` in the live report** points at session-local filenames under `report-data/`, which are not durable identifiers.
 6. **No redaction model** exists for cross-session observability access.
@@ -41,7 +41,7 @@ The goal: make the causal chain the authoritative spine, fix the execution-trace
 - Gateway event hook system (replaces hardcoded publish logic)
 - Published final session report via hooks
 - Report node URIs with causal `event_id` as the universal node key
-- Two observability tools: `observability.search` and `observability.read`
+- Two observability tools: `observability_search` and `observability_read`
 - Same-root redacted drill-down into causal events and execution traces
 - Privileged cross-root redacted drill-down
 
@@ -59,7 +59,7 @@ Backward compatibility is **not** a goal for this plan.
 
 This plan explicitly allows the following breaking changes:
 
-- **Remove `execution.search`** entirely — replaced by `observability.search`
+- **Remove `execution_search`** entirely — replaced by `observability_search`
 - Make `.gateway/sessions/...` report files projections instead of the canonical source of truth
 - Replace filename-based `payload_ref` references with content-backed identifiers
 - Change the shape of `session_report.json` to use `event_id` as node keys
@@ -95,7 +95,7 @@ Rules:
 4. **No new synthetic IDs.** Use `event_id` for timeline events and errors, `request_id` for approvals, `session_id` for agents, `artifact_id` for artifacts. Introduce no new ID namespaces.
 5. **No filesystem paths in agent-facing APIs.** Filesystem layout is implementation detail, not resource identity.
 6. **Keep policy orthogonal to addressing.** A URI identifies a resource. Access to that resource is a separate ACL decision.
-7. **Two complementary interfaces.** `execution.search` for raw tool traces (same-session debugging), `observability.search` and `observability.read` for cross-session discovery. Not a replacement — they serve different audiences.
+7. **Two complementary interfaces.** `execution_search` for raw tool traces (same-session debugging), `observability_search` and `observability_read` for cross-session discovery. Not a replacement — they serve different audiences.
 8. **Hooks, not hardcoding.** Report publishing, notification, and any post-event processing are driven by configurable hooks, not embedded in session lifecycle code.
 
 ---
@@ -104,9 +104,9 @@ Rules:
 
 1. **Causal `event_id` as universal node key:** No `report_event_id` or `report_error_id`. Timeline nodes and error nodes both use the causal `event_id`. This eliminates an entire ID namespace and makes the report-to-causal join trivial.
 2. **Publication model:** `published_session_reports` catalog table + FTS index. No new content visibility class.
-3. **Tool surface:** Two tools — `observability.search` (discover) and `observability.read` (inspect). `observability.resolve` is merged into `observability.read` with `view: metadata | full`.
+3. **Tool surface:** Two tools — `observability_search` (discover) and `observability_read` (inspect). `observability.resolve` is merged into `observability_read` with `view: metadata | full`.
 4. **Hook system:** Generic event hook mechanism replaces hardcoded report publishing. Report generation is just another hook consumer.
-5. **Keep `execution.search`:** It searches raw `execution_traces` — a complementary low-level surface for same-session tool debugging. `observability.search` searches published session reports — a high-level cross-session discovery surface. Different audiences, different data.
+5. **Keep `execution_search`:** It searches raw `execution_traces` — a complementary low-level surface for same-session tool debugging. `observability_search` searches published session reports — a high-level cross-session discovery surface. Different audiences, different data.
 
 ---
 
@@ -129,7 +129,7 @@ hooks:
     async: true
 
   - on: "session.closed"
-    action: "agent.spawn"
+    action: "agent_spawn"
     agent_id: "report-generator.default"
     message: "Generate cross-session digest for root {{root_session_id}}"
     async: true
@@ -157,7 +157,7 @@ hooks:
 | Action | Description |
 |---|---|
 | `publish_report` | Write session report to content store + publish to catalog |
-| `agent.spawn` | Spawn an agent with the event context as input |
+| `agent_spawn` | Spawn an agent with the event context as input |
 | `deliver_signal` | Send a notification signal to a session |
 | `http.callback` | POST the event payload to an external URL |
 
@@ -330,7 +330,7 @@ Every report node exposes a `links` object with URI backlinks.
   "category": "tool_invoke",
   "action": "completed",
   "status": "ERROR",
-  "summary": "sandbox.exec failed: exit=1",
+  "summary": "sandbox_exec failed: exit=1",
   "links": {
     "self": "autonoetic://observability/roots/demo-root/report/timeline/1f524b9a-0a2f-46b3-9af1-c95d8b18a78e",
     "session": "autonoetic://observability/roots/demo-root/sessions/demo-root%2Fcoder.default-7b2f",
@@ -418,9 +418,9 @@ These work with the existing prefix-based scope checks in `policy.rs`.
 
 ## Tool Contracts
 
-### `observability.search`
+### `observability_search`
 
-Discovers observability resources. **Replaces `execution.search`.**
+Discovers observability resources. **Replaces `execution_search`.**
 
 ```json
 {
@@ -483,7 +483,7 @@ Response:
 }
 ```
 
-### `observability.read`
+### `observability_read`
 
 Fetches a resource by URI. **Merges the former `resolve` and `read` tools.** The `view` parameter controls depth:
 
@@ -529,7 +529,7 @@ Fetches a resource by URI. **Merges the former `resolve` and `read` tools.** The
     {
       "uri": "autonoetic://observability/roots/demo-root/report/timeline/1f524b9a-0a2f-46b3-9af1-c95d8b18a78e",
       "resource_type": "report_timeline_event",
-      "title": "sandbox.exec failed"
+      "title": "sandbox_exec failed"
     }
   ]
 }
@@ -546,10 +546,10 @@ Fetches a resource by URI. **Merges the former `resolve` and `read` tools.** The
   "body": {
     "trace_id": "9b6c58aa-d77b-4d1d-a9d2-66f7fbac6e46",
     "event_id": "1f524b9a-0a2f-46b3-9af1-c95d8b18a78e",
-    "tool_name": "sandbox.exec",
+    "tool_name": "sandbox_exec",
     "success": false,
     "exit_code": 1,
-    "error_summary": "sandbox.exec failed: exit=1",
+    "error_summary": "sandbox_exec failed: exit=1",
     "stdout": "",
     "stderr": "Traceback ..."
   },
@@ -570,7 +570,7 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 
 **Open questions that need resolution before Phase 4:**
 
-1. **What gets redacted for same-root peers?** If agent A reads agent B's causal event from the same root, does it see the raw `sandbox.exec` arguments (which may contain API keys in environment variables)? The current system never exposes this.
+1. **What gets redacted for same-root peers?** If agent A reads agent B's causal event from the same root, does it see the raw `sandbox_exec` arguments (which may contain API keys in environment variables)? The current system never exposes this.
 
 2. **What gets redacted for cross-root introspectors?** Even privileged agents should not see raw secrets. But they may need to see tool arguments to understand failures.
 
@@ -645,35 +645,35 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 
 ### Phase 3: Observability Tools
 
-#### Task 3.1: `observability.search` + `observability.read`
+#### Task 3.1: `observability_search` + `observability_read`
 
 **New file:** `runtime/tools/observability.rs`
 
-- [x] `observability.search` — discovers published reports across sessions
-- [x] `observability.read` — fetches resource by URI, `view` parameter controls depth
+- [x] `observability_search` — discovers published reports across sessions
+- [x] `observability_read` — fetches resource by URI, `view` parameter controls depth
 - [x] Register in the native tool registry
 
-#### Task 3.2: Keep `execution.search` as complementary
+#### Task 3.2: Keep `execution_search` as complementary
 
 **File:** `runtime/tools/execution.rs` (no changes)
 
-- [x] `execution.search` remains unchanged — it searches raw `execution_traces` for same-session tool debugging
-- [x] Updated tool description to clarify the distinction from `observability.search`
+- [x] `execution_search` remains unchanged — it searches raw `execution_traces` for same-session tool debugging
+- [x] Updated tool description to clarify the distinction from `observability_search`
 
 #### Task 3.3: ACL enforcement
 
 **Files:** `observability.rs`, `policy.rs`
 
-- [x] Gate tools by `ReadAccess` capability (same as `content.read`)
+- [x] Gate tools by `ReadAccess` capability (same as `content_read`)
 - [ ] Combine static scope checks with dynamic root-session checks (deferred to v2)
 - [x] Keep transcript/evidence disabled
 
-#### Task 3.4: Remove `execution.search`
+#### Task 3.4: Remove `execution_search`
 
 **Files:** `runtime/tools/execution.rs`, `runtime/tools/mod.rs`
 
-- [ ] Remove `execution.search` tool entirely
-- [x] Update agent SKILL.md docs to reference `observability.search`
+- [ ] Remove `execution_search` tool entirely
+- [x] Update agent SKILL.md docs to reference `observability_search`
 
 ### Phase 4: Redaction (deferred, design TBD)
 
@@ -698,10 +698,10 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 1. `session_tracer.rs` generates stable causal `event_id` values. The missing work is carrying them into trace persistence and report links.
 2. `tool_call_processor.rs` writes `ExecutionTraceRecord.event_id = None` — the main join bug. Fix this first.
 3. Errors are already in the causal chain (`status=ERROR`). No new `report_error_id` is needed.
-4. `session.search`/`session.peek` prove that root-scoped ACL enforcement exists and can be reused.
+4. `session_search`/`session_peek` prove that root-scoped ACL enforcement exists and can be reused.
 5. `policy.rs` supports prefix-based `ReadAccess.scopes` — the new `observability/...` family fits the current engine.
 6. `scheduler/signal.rs` already does event-reactive dispatch (approval resolved, workflow join). Generalize this into the hook system.
-7. `execution.search` should be removed, not narrowed. `observability.search` replaces it.
+7. `execution_search` should be removed, not narrowed. `observability_search` replaces it.
 
 ---
 
@@ -723,7 +723,7 @@ The current `DisclosureState` does per-reply filtering on agent output. It does 
 1. **Fix the `event_id` join first** — this is the single highest-value change
 2. **No new synthetic IDs** — `event_id` is the universal node key
 3. **Hook system drives report publishing** — not hardcoded session logic
-4. **Two tools: `observability.search` and `observability.read`** — replace `execution.search`, merge `resolve` into `read`
+4. **Two tools: `observability_search` and `observability_read`** — replace `execution_search`, merge `resolve` into `read`
 5. **Causal chain is the spine** — execution traces are detail views of causal events
 6. **Redaction design is deferred** — use existing `DisclosureState` as minimum viable in v1
 7. **Same-root drill-down by default, cross-root only for privileged introspectors**

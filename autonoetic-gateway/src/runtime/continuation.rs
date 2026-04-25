@@ -72,7 +72,7 @@ pub struct TurnContinuation {
 pub struct PendingApprovalToolCall {
     /// The LLM-assigned call ID for this invocation.
     pub call_id: String,
-    /// Tool name (e.g. `"sandbox.exec"`, `"agent.install"`).
+    /// Tool name (e.g. `"sandbox_exec"`, `"agent.install"`).
     pub tool_name: String,
     /// JSON-encoded arguments string as produced by the model.
     pub arguments: String,
@@ -220,7 +220,7 @@ pub fn execute_approved_action(
                 "Executing approved sandbox.exec action"
             );
             registry.execute(
-                "sandbox.exec",
+                "sandbox_exec",
                 manifest,
                 &policy,
                 agent_dir,
@@ -291,7 +291,7 @@ pub fn execute_approved_action(
                 "Executing approved credential.request action"
             );
             registry.execute(
-                "credential.request",
+                "credential_request",
                 manifest,
                 &policy,
                 agent_dir,

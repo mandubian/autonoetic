@@ -123,7 +123,7 @@ Three scheduling modes, all expressible with the existing scheduler:
 
 1. **Periodic sweeps** — daily full audit; hourly incremental over the new causal-event range. Default cadence tunable; findings batched.
 
-2. **Pre-promotion gate** — on `agent.revision.promote`, the gateway synchronously invokes the sentinel for a bounded review of the candidate revision. Critical findings block the promotion. This generalizes the `promotion.record` severity-gating pattern that already exists for evaluator/auditor evidence.
+2. **Pre-promotion gate** — on `agent_revision_promote`, the gateway synchronously invokes the sentinel for a bounded review of the candidate revision. Critical findings block the promotion. This generalizes the `promotion_record` severity-gating pattern that already exists for evaluator/auditor evidence.
 
 3. **Event-triggered** — new layer captured, capability declared, approval grant escalation. The gateway emits an event; the sentinel runs a scoped sweep covering only the affected scope.
 
@@ -188,7 +188,7 @@ A sentinel that runs purely mechanical checks. No LLM required. High precision, 
 
 - Credential-pattern regex over agent outputs and causal-event payloads.
 - Capability-accretion detection via SQL over `promotion_history` (composes with #28).
-- Approval-bypass pattern detection: attempted `sandbox.exec` without grants, repeated approval denials, unusual grant reuse patterns.
+- Approval-bypass pattern detection: attempted `sandbox_exec` without grants, repeated approval denials, unusual grant reuse patterns.
 - Sandbox-escape pattern matching in causal event payloads (known-bad command patterns, process-tree anomalies).
 
 ### Phase 2 — LLM-judgment layer
@@ -218,7 +218,7 @@ Depends on #20 (`layer.approval_scope` metadata).
 ### Phase 5 — Scheduling + gate integration
 
 - Periodic sweep scheduler entries (daily, hourly incremental).
-- Synchronous pre-promotion invocation hook in `agent.revision.promote`.
+- Synchronous pre-promotion invocation hook in `agent_revision_promote`.
 - Event-triggered sweeps on `layer_captured`, `capability_delta`, `approval_escalation`.
 
 ### Phase 6 — Calibration & feedback

@@ -28,7 +28,7 @@ pub struct ApprovalStatusTool;
 
 impl NativeTool for ApprovalStatusTool {
     fn name(&self) -> &'static str {
-        "approval.status"
+        "approval_status"
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -308,7 +308,7 @@ where
 
 impl NativeTool for WorkflowWaitTool {
     fn name(&self) -> &'static str {
-        "workflow.wait"
+        "workflow_wait"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -604,7 +604,7 @@ pub struct WorkflowStateTool;
 
 impl NativeTool for WorkflowStateTool {
     fn name(&self) -> &'static str {
-        "workflow.state"
+        "workflow_state"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -846,7 +846,7 @@ pub struct WorkflowCancelTaskTool;
 
 impl NativeTool for WorkflowCancelTaskTool {
     fn name(&self) -> &'static str {
-        "workflow.cancel_task"
+        "workflow_cancel_task"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -970,7 +970,7 @@ pub struct WorkflowForceCompleteTool;
 
 impl NativeTool for WorkflowForceCompleteTool {
     fn name(&self) -> &'static str {
-        "workflow.force_complete"
+        "workflow_force_complete"
     }
 
     fn tier(&self) -> ToolTier {

@@ -156,7 +156,7 @@ impl JsonRpcRouter {
                     None => message.clone(),
                 };
                 (
-                    "agent.spawn",
+                    "agent_spawn",
                     agent_id.clone(),
                     source_agent_id.clone(),
                     kickoff,
@@ -359,7 +359,7 @@ impl JsonRpcRouter {
                     Err(e) => JsonRpcResponse::error(req.id, -32000, e.to_string()),
                 }
             }
-            "agent.spawn" => {
+            "agent_spawn" => {
                 let params: AgentSpawnParams = match serde_json::from_value(req.params) {
                     Ok(v) => v,
                     Err(e) => {
@@ -392,7 +392,7 @@ impl JsonRpcRouter {
                                 self.config.as_ref(),
                                 source_agent_id,
                                 &agent_id,
-                                "agent.spawn",
+                                "agent_spawn",
                                 TaskStatus::Completed,
                                 Some(serde_json::json!({
                                     "session_id": result.session_id.clone(),
@@ -421,7 +421,7 @@ impl JsonRpcRouter {
                                 self.config.as_ref(),
                                 source_agent_id,
                                 &agent_id,
-                                "agent.spawn",
+                                "agent_spawn",
                                 TaskStatus::Failed,
                                 Some(serde_json::json!({
                                     "error": e.clone(),
@@ -430,7 +430,7 @@ impl JsonRpcRouter {
                         }
                         if let Some(mut trace_session) = maybe_trace_session {
                             let _ = trace_session.log_failed(
-                                "agent.spawn",
+                                "agent_spawn",
                                 &e,
                                 Some(serde_json::json!({
                                     "agent_id": agent_id.clone(),
@@ -1104,7 +1104,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: "3".to_string(),
-            method: "agent.spawn".to_string(),
+            method: "agent_spawn".to_string(),
             params: serde_json::json!({
                 "agent_id": "target",
                 "message": "hello",
@@ -1133,7 +1133,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: "3".to_string(),
-            method: "agent.spawn".to_string(),
+            method: "agent_spawn".to_string(),
             params: serde_json::json!({
                 "agent_id": "missing",
                 "message": "hello"
@@ -1156,7 +1156,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: "3b".to_string(),
-            method: "agent.spawn".to_string(),
+            method: "agent_spawn".to_string(),
             params: serde_json::json!({
                 "agent_id": "missing",
                 "message": "hello",
@@ -1204,7 +1204,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: "4".to_string(),
-            method: "agent.spawn".to_string(),
+            method: "agent_spawn".to_string(),
             params: serde_json::json!({
                 "agent_id": "target",
                 "message": "hello",
@@ -1341,7 +1341,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: "7".to_string(),
-            method: "agent.spawn".to_string(),
+            method: "agent_spawn".to_string(),
             params: serde_json::json!({
                 "agent_id": "target",
                 "message": "hello",

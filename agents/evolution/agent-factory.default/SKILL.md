@@ -74,10 +74,10 @@ Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `Netwo
 
 ## Tools for delegation
 
-**IMPORTANT**: To delegate to a sub-agent, always use `agent.spawn` (NOT `workflow.spawn` — that tool does not exist).
-- `agent.spawn` with `async=true` — enqueues a sub-agent and returns a `task_id`
-- `workflow.wait` with `task_ids=[<task_id>]` — blocks until the sub-agent completes
-- `workflow.state` — check current workflow status on resumption
+**IMPORTANT**: To delegate to a sub-agent, always use `agent_spawn` (NOT `workflow.spawn` — that tool does not exist).
+- `agent_spawn` with `async=true` — enqueues a sub-agent and returns a `task_id`
+- `workflow_wait` with `task_ids=[<task_id>]` — blocks until the sub-agent completes
+- `workflow_state` — check current workflow status on resumption
 
 ## Pipeline (all steps strictly sequential)
 
@@ -85,7 +85,7 @@ Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `Netwo
 
 If the spawn message includes `source_artifact_id`, treat it as the canonical install input.
 
-1. Call `artifact.inspect(source_artifact_id)` once.
+1. Call `artifact_inspect(source_artifact_id)` once.
 2. If `source_script_entry` is present and the artifact already contains the required code, skip coder.
 3. If dependency layering is needed, go to Step 3 with the same artifact.
 4. If gates are required, go to Step 4 with the same artifact.
@@ -95,13 +95,13 @@ Do NOT rewrite code, regenerate multiple draft payload files, or rebuild equival
 
 ### Step 1: Architect (if design_needed or complex structure)
 
-Call `agent.spawn` with `agent_id="architect.default"`, `async=true`, passing the purpose and intended capabilities. Then call `workflow.wait` with the returned `task_id` to wait for completion.
+Call `agent_spawn` with `agent_id="architect.default"`, `async=true`, passing the purpose and intended capabilities. Then call `workflow_wait` with the returned `task_id` to wait for completion.
 
 Skip this step for reasoning-only and simple single-file code agents.
 
 ### Step 2a: Reasoning-only install (no custom code)
 
-Skip coder. Call `agent.spawn` with `agent_id="specialized_builder.default"`, `async=true`, delegating:
+Skip coder. Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, delegating:
 ```
 Install a new reasoning agent called '<agent_id>':
 - Purpose: <purpose>
@@ -112,22 +112,22 @@ Install a new reasoning agent called '<agent_id>':
 - llm_config: { provider: "openrouter", model: "google/gemini-3-flash-preview", temperature: 0.2 }
 - Gating: none (reasoning-only, no CodeExecution/AgentSpawn)
 ```
-Then call `workflow.wait` with the returned `task_id`.
+Then call `workflow_wait` with the returned `task_id`.
 
 ### Step 2b: Code path — spawn coder
 
 Use this step only when no reusable `source_artifact_id` was provided, or when the provided artifact is malformed and must be repaired.
 
-Call `agent.spawn` with `agent_id="coder.default"`, `async=true`, passing the implementation requirements (design doc if architect ran). Then call `workflow.wait` with the returned `task_id` to wait for completion.
+Call `agent_spawn` with `agent_id="coder.default"`, `async=true`, passing the implementation requirements (design doc if architect ran). Then call `workflow_wait` with the returned `task_id` to wait for completion.
 
 After coder completes:
-1. Read implicit artifact `impl_task-{task_id}` with `content.read`
+1. Read implicit artifact `impl_task-{task_id}` with `content_read`
 2. Inspect `content.named_outputs` for dependency files: `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`
 3. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
 
 ### Step 3: Packager (if dependency files found)
 
-Call `agent.spawn` with `agent_id="packager.default"`, `async=true`, passing the artifact_id from coder. Then call `workflow.wait` with the returned `task_id` to wait for completion. Packager returns a new `artifact_id` with deps baked into layers.
+Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the artifact_id from coder. Then call `workflow_wait` with the returned `task_id` to wait for completion. Packager returns a new `artifact_id` with deps baked into layers.
 
 ### Step 4: Promotion gates (if required)
 
@@ -142,15 +142,15 @@ Call `agent.spawn` with `agent_id="packager.default"`, `async=true`, passing the
 | CodeExecution or AgentSpawn | Required | Required |
 
 If gates required:
-1. Call `agent.spawn` with `agent_id="evaluator.default"`, `async=true`. Then call `workflow.wait` with the returned `task_id`.
-2. Call `agent.spawn` with `agent_id="auditor.default"`, `async=true`. Then call `workflow.wait` with the returned `task_id`.
-Both must call `promotion.record` with `pass=true`.
+1. Call `agent_spawn` with `agent_id="evaluator.default"`, `async=true`. Then call `workflow_wait` with the returned `task_id`.
+2. Call `agent_spawn` with `agent_id="auditor.default"`, `async=true`. Then call `workflow_wait` with the returned `task_id`.
+Both must call `promotion_record` with `pass=true`.
 
 If gates NOT required: tell specialized_builder `"Gating: none"`.
 
 ### Step 5: Install via specialized_builder
 
-Call `agent.spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent. Then call `workflow.wait` with the returned `task_id`. Include:
+Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent. Then call `workflow_wait` with the returned `task_id`. Include:
 - `artifact_id` (for code agents) or omit (for reasoning agents)
 - `instructions`, `description`, `capabilities`, `execution_mode`
 - `llm_config` (for reasoning mode)
@@ -162,18 +162,18 @@ Compose the install intent in the delegation message itself. Do NOT create itera
 ## Error Handling
 
 - If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to planner. Do NOT attempt to fix errors yourself.
-- If coder returns no `artifact_id`: inspect `files` array and call `artifact.build` to consolidate.
+- If coder returns no `artifact_id`: inspect `files` array and call `artifact_build` to consolidate.
 - If packager fails: report to planner — do NOT skip packager when deps were found.
-- If evaluator/auditor fail functionally (no promotion.record): call `agent.spawn` with `coder.default` to fix, then re-run gates via `agent.spawn` with `evaluator.default`/`auditor.default`.
+- If evaluator/auditor fail functionally (no promotion_record): call `agent_spawn` with `coder.default` to fix, then re-run gates via `agent_spawn` with `evaluator.default`/`auditor.default`.
 - If `specialized_builder.default` does not return a `revision_id`: treat install as failed. Built artifacts or draft payloads alone are not success.
 - After 2 retries on the same stage: report failure to planner and stop.
 
 ## Resumption
 
-On wake-up after interruption: call `workflow.state` first. Check `reuse_guards` and `resume_hint`. Never restart a completed stage.
+On wake-up after interruption: call `workflow_state` first. Check `reuse_guards` and `resume_hint`. Never restart a completed stage.
 
 | If `reuse_guards` shows... | Do NOT... | Do... |
 |---|---|---|
 | `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to packager/gates/install |
 | `has_evaluator_result: true` + `has_auditor_result: true` | Re-run evaluator or auditor | Proceed to install |
-| `pending_approvals: true` | Spawn new tasks | `workflow.wait(timeout_secs=300)` |
+| `pending_approvals: true` | Spawn new tasks | `workflow_wait(timeout_secs=300)` |

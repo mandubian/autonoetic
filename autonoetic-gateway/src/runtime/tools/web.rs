@@ -599,7 +599,7 @@ pub struct WebSearchTool;
 
 impl NativeTool for WebSearchTool {
     fn name(&self) -> &'static str {
-        "web.search"
+        "web_search"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -812,7 +812,7 @@ pub struct WebFetchTool;
 
 impl NativeTool for WebFetchTool {
     fn name(&self) -> &'static str {
-        "web.fetch"
+        "web_fetch"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -950,7 +950,7 @@ pub struct WebCallTool;
 
 impl NativeTool for WebCallTool {
     fn name(&self) -> &'static str {
-        "web.call"
+        "web_call"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

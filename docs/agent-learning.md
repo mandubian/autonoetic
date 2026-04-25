@@ -10,22 +10,22 @@ Every session produces structured data that agents can query later:
 
 | Data | Tool | Table |
 |------|------|-------|
-| Code execution results | `execution.search` | `execution_traces` |
-| Tagged memories/lessons | `knowledge.search_by_tags` | `memories` |
-| Session narratives | `digest.query` | Content store (digest.md) |
+| Code execution results | `execution_search` | `execution_traces` |
+| Tagged memories/lessons | `knowledge_search_by_tags` | `memories` |
+| Session narratives | `digest_query` | Content store (digest.md) |
 
 This enables patterns like:
 - "Have I seen this compilation error before?"
 - "What lessons did I learn about HTTP clients?"
 - "What approaches worked for similar tasks?"
 
-### Storing learnings (`knowledge.store`)
+### Storing learnings (`knowledge_store`)
 
-Use **`knowledge.store`** to persist facts and lessons. **`visibility`** defaults to **`session`**: every agent participating in the **same workflow session** can read the row—no separate share tool. Use **`private`** for writer-only facts, **`global`** for cross-session reference material, and **`retention`** (`stable`, `ephemeral`, `1d`, `30d`) for TTL. To widen who can read an existing id, call **`knowledge.store` again** with the same **`id`** and updated **`visibility`** (upsert).
+Use **`knowledge_store`** to persist facts and lessons. **`visibility`** defaults to **`session`**: every agent participating in the **same workflow session** can read the row—no separate share tool. Use **`private`** for writer-only facts, **`global`** for cross-session reference material, and **`retention`** (`stable`, `ephemeral`, `1d`, `30d`) for TTL. To widen who can read an existing id, call **`knowledge_store` again** with the same **`id`** and updated **`visibility`** (upsert).
 
 ---
 
-## execution.search
+## execution_search
 
 Query past code executions to find patterns, errors, and successful commands.
 
@@ -33,7 +33,7 @@ Query past code executions to find patterns, errors, and successful commands.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `tool_name` | string | Filter by tool (e.g., `sandbox.exec`) |
+| `tool_name` | string | Filter by tool (e.g., `sandbox_exec`) |
 | `success` | boolean | Filter by success/failure |
 | `error_type` | string | Error classification: compilation, runtime, permission, timeout |
 | `command_pattern` | string | SQL LIKE pattern for command |
@@ -44,7 +44,7 @@ Query past code executions to find patterns, errors, and successful commands.
 
 ```json
 {
-  "tool_name": "sandbox.exec",
+  "tool_name": "sandbox_exec",
   "success": false,
   "error_type": "compilation",
   "command_pattern": "%client.rs%",
@@ -70,7 +70,7 @@ Returns:
 
 ```json
 {
-  "tool_name": "sandbox.exec",
+  "tool_name": "sandbox_exec",
   "success": true,
   "command_pattern": "%pytest%",
   "limit": 10
@@ -90,7 +90,7 @@ Returns:
 
 ---
 
-## knowledge.search_by_tags
+## knowledge_search_by_tags
 
 Search tagged memories for lessons, decisions, and facts.
 
@@ -154,7 +154,7 @@ Returns:
 
 ---
 
-## digest.query
+## digest_query
 
 Search past session digests for approaches and reasoning.
 
@@ -199,20 +199,20 @@ Before starting a task, search for related lessons:
 
 ```json
 // 1. Check for error lessons in this domain
-knowledge.search_by_tags({
+knowledge_search_by_tags({
   "tags": ["type:error_lesson", "domain:http"],
   "limit": 5
 })
 
 // 2. Check for past approaches
-knowledge.search_by_tags({
+knowledge_search_by_tags({
   "tags": ["type:approach"],
   "text": "http client",
   "limit": 5
 })
 
 // 3. Check execution history
-execution.search({
+execution_search({
   "command_pattern": "%http%",
   "success": false,
   "limit": 5
@@ -225,7 +225,7 @@ When encountering an error, search for similar past errors:
 
 ```json
 // After a compilation error
-execution.search({
+execution_search({
   "error_type": "compilation",
   "success": false,
   "command_pattern": "%<current_file>%",
@@ -233,7 +233,7 @@ execution.search({
 })
 
 // Check if this error was seen before
-knowledge.search_by_tags({
+knowledge_search_by_tags({
   "tags": ["type:error_lesson"],
   "text": "<error_message_snippet>",
   "limit": 3
@@ -245,7 +245,7 @@ knowledge.search_by_tags({
 Before making a significant decision, review past decisions:
 
 ```json
-knowledge.search_by_tags({
+knowledge_search_by_tags({
   "tags": ["type:decision"],
   "text": "<relevant_keyword>",
   "limit": 5

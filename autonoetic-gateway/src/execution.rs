@@ -809,7 +809,7 @@ impl GatewayExecutionService {
                 if let Some(ref mut r) = report {
                     let _ = r.start_session(message);
                     let _ = r.record_tool_requested(
-                        "sandbox.exec",
+                        "sandbox_exec",
                         &format!("run {}", script_entry),
                         None,
                     );
@@ -855,7 +855,7 @@ impl GatewayExecutionService {
                             })
                             .to_string();
                             let _ = r.record_tool_completed(
-                                "sandbox.exec",
+                                "sandbox_exec",
                                 &result_json,
                                 None,
                                 None,
@@ -876,7 +876,7 @@ impl GatewayExecutionService {
                     Err(e) => {
                         if let Some(ref mut r) = report {
                             let _ = r.record_execution_failure(
-                                "sandbox.exec",
+                                "sandbox_exec",
                                 &e.to_string(),
                                 None,
                                 None,
@@ -3103,7 +3103,7 @@ fn pending_user_ask_call_from_history(history: &[Message]) -> anyhow::Result<(St
         anyhow::bail!("checkpoint history has no pending tool call (batch missing result)");
     }
     let tc = &assistant.tool_calls[tc_idx];
-    if tc.name != "user.ask" {
+    if tc.name != "user_ask" {
         anyhow::bail!(
             "expected pending tool user.ask for UserInputRequired checkpoint, found {}",
             tc.name
@@ -3628,7 +3628,7 @@ fn pending_user_ask_call_from_history_finds_first_missing_result() {
         },
         ToolCall {
             id: "c2".into(),
-            name: "user.ask".into(),
+            name: "user_ask".into(),
             arguments: "{}".into(),
         },
     ];
@@ -3639,7 +3639,7 @@ fn pending_user_ask_call_from_history_finds_first_missing_result() {
     ];
     let (id, name) = pending_user_ask_call_from_history(&history).unwrap();
     assert_eq!(id, "c2");
-    assert_eq!(name, "user.ask");
+    assert_eq!(name, "user_ask");
 }
 
 #[cfg(test)]
@@ -3653,7 +3653,7 @@ fn resolve_pending_prefers_checkpoint_pending_tool_state() {
         completed_tool_results: vec![],
         pending_tool_call: PendingToolCall {
             call_id: "tid-99".into(),
-            tool_name: "user.ask".into(),
+            tool_name: "user_ask".into(),
             arguments: "{}".into(),
             approval_response: None,
         },
@@ -3695,7 +3695,7 @@ fn resolve_pending_prefers_checkpoint_pending_tool_state() {
     };
     let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
     assert_eq!(id, "tid-99");
-    assert_eq!(name, "user.ask");
+    assert_eq!(name, "user_ask");
 }
 
 #[cfg(test)]

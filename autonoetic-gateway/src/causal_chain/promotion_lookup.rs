@@ -30,7 +30,7 @@ impl PromotionLookup {
         let mut matching = Vec::new();
 
         for entry in entries {
-            if entry.category == "tool" && entry.action == "promotion.record" {
+            if entry.category == "tool" && entry.action == "promotion_record" {
                 if let Some(payload) = &entry.payload {
                     if let Some(args) = payload.get("arguments") {
                         if let Some(recorded_artifact_id) = args.get("artifact_id") {
@@ -130,7 +130,7 @@ mod tests {
                 Some("turn-1"),
                 1,
                 "tool",
-                "promotion.record",
+                "promotion_record",
                 autonoetic_types::causal_chain::EntryStatus::Success,
                 Some(serde_json::json!({
                     "arguments": {
@@ -164,7 +164,7 @@ mod tests {
                 Some("turn-1"),
                 1,
                 "tool",
-                "promotion.record",
+                "promotion_record",
                 autonoetic_types::causal_chain::EntryStatus::Success,
                 Some(serde_json::json!({
                     "arguments": {
@@ -198,7 +198,7 @@ mod tests {
                 Some("turn-1"),
                 1,
                 "tool",
-                "promotion.record",
+                "promotion_record",
                 autonoetic_types::causal_chain::EntryStatus::Success,
                 Some(serde_json::json!({
                     "arguments": {

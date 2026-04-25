@@ -22,7 +22,7 @@ Every agent is defined by a `SKILL.md` file containing YAML frontmatter and a Ma
 Install-time ownership split:
 - Agent-owned: markdown instruction body + semantic intent fields.
 - Gateway-owned: canonical metadata shape and gateway/runtime lock closure fields.
-- Use `agent.revision.schema` to inspect the current install contract at runtime.
+- Use `agent_revision_schema` to inspect the current install contract at runtime.
 
 ### Minimal Example
 
@@ -128,8 +128,8 @@ print(json.dumps({"result": input_data}))
 ```
 
 **Input schema contract:**
-- The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest. The gateway surfaces these through `agent.list` so callers can shape `message` correctly before calling `agent.spawn`.
-- When `io.accepts` is present, the gateway parses the caller's `message` and validates it against the schema. On mismatch, `agent.spawn` returns `{ "ok": false, "error": "schema_validation_failed", "expected_schema": ..., "fields_with_errors": [...], "hint": ... }` — the calling LLM reads this and retries with a corrected payload. Type coercion (default values, type defaults for required fields) is applied silently.
+- The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest. The gateway surfaces these through `agent_list` so callers can shape `message` correctly before calling `agent_spawn`.
+- When `io.accepts` is present, the gateway parses the caller's `message` and validates it against the schema. On mismatch, `agent_spawn` returns `{ "ok": false, "error": "schema_validation_failed", "expected_schema": ..., "fields_with_errors": [...], "hint": ... }` — the calling LLM reads this and retries with a corrected payload. Type coercion (default values, type defaults for required fields) is applied silently.
 - When `io.returns` is present, the gateway validates the child agent's final reply before returning the `SpawnResult` to the caller. If no explicit `response_contract.output_schema` overrides it, `io.returns` becomes the default output schema. Mismatches are rejected at the gateway boundary and recorded as contract events so drift is visible in traces.
 - When `io.accepts` is absent, `message` is passed through unchanged. The script is responsible for parsing it.
 - The gateway does **not** invent a default schema: `create_from_intent` without an explicit `io` installs the agent with `io: None`.
@@ -219,7 +219,7 @@ io:
 **Purpose:**
 - Validates incoming payloads against the accepts schema
 - Enables adapter agents to generate wrappers for schema mismatch
-- Exposed in `agent.discover` for planner routing decisions
+- Exposed in `agent_discover` for planner routing decisions
 
 ---
 
@@ -323,7 +323,7 @@ Autonoetic provides two memory tiers:
 ### Tier 2 (Durable Memory)
 
 - Gateway-managed SQLite storage (`gateway.db` / `memories`)
-- Cross-session and cross-agent recall with **visibility** (`private`, `session`, `global`) — sharing is `knowledge.store` + `visibility`, not a separate tool
+- Cross-session and cross-agent recall with **visibility** (`private`, `session`, `global`) — sharing is `knowledge_store` + `visibility`, not a separate tool
 - Optional **retention** TTL on stored rows
 - Full provenance tracking
 
@@ -331,10 +331,10 @@ Autonoetic provides two memory tiers:
 
 | Tool | Description |
 |------|-------------|
-| `knowledge.store` | Store or upsert a durable fact (`visibility`, `retention`, tags, …) |
-| `knowledge.recall` | Retrieve by id if visible |
-| `knowledge.search` | Search by scope and text |
-| `knowledge.search_by_tags` | AND search on tags |
+| `knowledge_store` | Store or upsert a durable fact (`visibility`, `retention`, tags, …) |
+| `knowledge_recall` | Retrieve by id if visible |
+| `knowledge_search` | Search by scope and text |
+| `knowledge_search_by_tags` | AND search on tags |
 
 Tier 1 working files still map to SDK helpers / `content.*` for session files under `state/`.
 

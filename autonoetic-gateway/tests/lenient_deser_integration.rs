@@ -120,7 +120,7 @@ async fn test_agent_spawn_message_object_coerced_to_string() -> anyhow::Result<(
         "message": { "location": "Paris", "date": "tomorrow" }
     });
 
-    let result = send_tool(&mut client, "test-spawn-object-msg", "agent.spawn", payload).await?;
+    let result = send_tool(&mut client, "test-spawn-object-msg", "agent_spawn", payload).await?;
 
     assert!(
         result.get("error").is_none(),
@@ -175,7 +175,7 @@ async fn test_agent_spawn_async_string_bool_coerced() -> anyhow::Result<()> {
         "async": "true"
     });
 
-    let result = send_tool(&mut client, "test-spawn-string-bool", "agent.spawn", payload).await?;
+    let result = send_tool(&mut client, "test-spawn-string-bool", "agent_spawn", payload).await?;
 
     assert!(
         result.get("error").is_none(),

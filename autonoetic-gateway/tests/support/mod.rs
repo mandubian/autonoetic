@@ -458,7 +458,7 @@ impl JsonRpcClient {
         self.send(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: id.into(),
-            method: "agent.spawn".to_string(),
+            method: "agent_spawn".to_string(),
             params,
             auth_token: std::env::var("AUTONOETIC_SHARED_SECRET").ok(),
         })

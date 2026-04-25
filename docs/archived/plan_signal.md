@@ -32,7 +32,7 @@ This note captures the current understanding of the approval and signal mechanis
 Approvals are created by runtime tools when a gated action requires operator authorization.
 
 - `agent.install` creates a pending `ApprovalRequest`
-- `sandbox.exec` creates a pending `ApprovalRequest` for remote access
+- `sandbox_exec` creates a pending `ApprovalRequest` for remote access
 - pending approvals are stored under:
   - `.gateway/scheduler/approvals/pending/<request_id>.json`
 - install payloads are also stored for deterministic retry:
@@ -58,7 +58,7 @@ When the operator runs the CLI approval command:
 After approval:
 
 - `agent.install` may be auto-executed immediately from the stored payload
-- `sandbox.exec` is not auto-executed in the same way; the waiting agent is expected to retry with `approval_ref`
+- `sandbox_exec` is not auto-executed in the same way; the waiting agent is expected to retry with `approval_ref`
 
 ### 4. Session resume after approval
 

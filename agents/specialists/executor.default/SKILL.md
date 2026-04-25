@@ -56,34 +56,34 @@ If the task is primarily root-cause analysis, tell the planner to use `debugger.
 ## Behavior
 
 - Prefer the smallest working command or script
-- Use `content.write` only for temporary scripts, always with both `name` and `content`
+- Use `content_write` only for temporary scripts, always with both `name` and `content`
 - Prefer scratch files in the current session over reusable project artifacts
 - Summarize stdout/stderr clearly and concisely
-- Do not call `artifact.build`
+- Do not call `artifact_build`
 - Do not produce install intent or agent bundle outputs
 
 ## Running Built Artifacts
 
-When asked to run or test a previously built artifact, use `artifact.exec` instead of `sandbox.exec`:
+When asked to run or test a previously built artifact, use `artifact_exec` instead of `sandbox_exec`:
 
 ```json
-artifact.exec({
+artifact_exec({
   "artifact_id": "art-abc123",
   "entrypoint": "main.py",
   "args": ["Paris"]
 })
 ```
 
-`artifact.exec` analyzes the artifact's actual source files for remote access (not the shell command string) and binds approval reuse to the artifact identity. Use it for transient validation, smoke tests, and ad hoc runs.
+`artifact_exec` analyzes the artifact's actual source files for remote access (not the shell command string) and binds approval reuse to the artifact identity. Use it for transient validation, smoke tests, and ad hoc runs.
 
-Do NOT use `artifact.exec` for generic shell commands — use `sandbox.exec` for those.
+Do NOT use `artifact_exec` for generic shell commands — use `sandbox_exec` for those.
 
 ## Injecting Credentials
 
-When the planner delegates a task that requires an API key or secret, use `artifact.prepare` to resolve everything in one pass before executing:
+When the planner delegates a task that requires an API key or secret, use `artifact_prepare` to resolve everything in one pass before executing:
 
 ```json
-artifact.prepare({
+artifact_prepare({
   "artifact_id": "art_5bda3712",
   "entrypoint": "weather_lookup.py",
   "args": ["London", "tomorrow"],
@@ -98,7 +98,7 @@ This returns a `deployment_ticket`. If credentials are missing, it fails immedia
 Once you have the ticket, execute:
 
 ```json
-artifact.exec({
+artifact_exec({
   "deployment_ticket": "dtk-abc12345def",
   "artifact_id": "art_5bda3712",
   "entrypoint": "weather_lookup.py",
@@ -108,10 +108,10 @@ artifact.exec({
 
 The gateway resolves the secret from the encrypted vault and injects it as an environment variable inside the sandbox. The secret value never appears in your context.
 
-For simple sandbox.exec calls without artifacts, use `credential_env` directly:
+For simple sandbox_exec calls without artifacts, use `credential_env` directly:
 
 ```json
-sandbox.exec({
+sandbox_exec({
   "command": "python3 /tmp/script.py",
   "credential_env": [
     { "credential_id": "cred_abc123", "env_var": "OPENWEATHER_API_KEY" }
@@ -123,9 +123,9 @@ sandbox.exec({
 
 If the user provides information that changes a pending approval (e.g., different domain, updated credential), you can withdraw and re-submit:
 
-1. List pending: `approval.list({})`
-2. Check specific: `approval.status({ "approval_id": "apr-2f85bc63" })`
-3. Withdraw stale: `approval.withdraw({ "request_id": "apr-2f85bc63", "reason": "User provided updated domain" })`
+1. List pending: `approval_list({})`
+2. Check specific: `approval_status({ "approval_id": "apr-2f85bc63" })`
+3. Withdraw stale: `approval_withdraw({ "request_id": "apr-2f85bc63", "reason": "User provided updated domain" })`
 4. Re-submit with corrected parameters
 
 You can only withdraw approvals created by your own agent. Only pending approvals can be withdrawn.

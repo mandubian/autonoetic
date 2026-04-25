@@ -28,7 +28,7 @@ Current systems:
 6. Memory search ignores tags — the `tags` field exists but `memory.search` only does SQL LIKE on content.
 7. No cross-session learning — each session is isolated; there's no mechanism for agents to learn from past errors, successful approaches, or execution patterns.
 8. No first-class human interaction primitive — agents can ask in plain text or rely on approval flows, but there is no structured way to ask the user a question, present choices, suspend execution, and resume deterministically with the answer.
-9. No operator-grade emergency stop — `workflow.cancel_task` only handles queued or waiting work, not already running tasks or sandbox child processes.
+9. No operator-grade emergency stop — `workflow_cancel_task` only handles queued or waiting work, not already running tasks or sandbox child processes.
 
 **Design principles:**
 - Agents are meant to be increasingly autonomous, self-evolving, and learning (while staying immutable in their SKILL.md definition). Every storage system must be evaluated through this lens: does it help agents learn and improve?
@@ -156,7 +156,7 @@ CREATE TABLE artifact_shares (
 
 #### Resolution contract (fail-fast)
 
-`artifact.resolve_ref({ref_id, scope_type, scope_id})`:
+`artifact_resolve_ref({ref_id, scope_type, scope_id})`:
 1. Lookup exact row in `artifact_refs`
 2. Reject if expired/revoked
 3. Load artifact manifest by `artifact_id`
@@ -266,11 +266,11 @@ pub enum YieldReason {
 
 **Relationship to TurnContinuation:** TurnContinuation is kept as a specialized structure for the approval resume path (it has `pending_tool_call`, `remaining_tool_calls`, `completed_tool_results` which are specific to mid-tool-batch suspension). The general checkpoint covers all other yield reasons. When an approval suspension occurs, BOTH a TurnContinuation and a checkpoint are written — the continuation drives the scheduler resume, the checkpoint enables general respawn.
 
-**Relationship to user ask:** Human clarification should use the same checkpoint/resume model as approvals, but without reusing approval-specific state. When an agent calls `user.ask`, the gateway persists a `user_interactions` row, writes a checkpoint with `YieldReason::UserInputRequired`, returns control to the chat surface, and later resumes from checkpoint once the user answers. This makes human clarification a first-class suspension point rather than an ad hoc plain-text convention.
+**Relationship to user ask:** Human clarification should use the same checkpoint/resume model as approvals, but without reusing approval-specific state. When an agent calls `user_ask`, the gateway persists a `user_interactions` row, writes a checkpoint with `YieldReason::UserInputRequired`, returns control to the chat surface, and later resumes from checkpoint once the user answers. This makes human clarification a first-class suspension point rather than an ad hoc plain-text convention.
 
 ---
 
-### System 1B: Human Interaction and `user.ask`
+### System 1B: Human Interaction and `user_ask`
 
 **Purpose:** Let an agent ask the human a question, optionally present structured choices, suspend execution, and resume deterministically with the answer.
 
@@ -308,7 +308,7 @@ CREATE INDEX idx_user_interactions_status ON user_interactions(status);
 CREATE INDEX idx_user_interactions_agent ON user_interactions(agent_id, created_at);
 ```
 
-#### Tool contract: `user.ask`
+#### Tool contract: `user_ask`
 
 ```json
 {
@@ -379,11 +379,11 @@ Expected behavior:
   - revise the plan and spawn new tasks
   - cancel superseded tasks
   - wait for current tasks and incorporate the new message later
-  - escalate to `user.ask` / `workflow.wait` / cancel tools as needed
+  - escalate to `user_ask` / `workflow_wait` / cancel tools as needed
 
 This keeps the planner as the single authority for orchestration changes while preserving background task durability. It also avoids broadcasting the same user message to every child session.
 
-**Design rule:** direct user messages are planner-managed by default; worker sessions only receive human input explicitly via `user.ask` resume or an explicit targeted routing mechanism.
+**Design rule:** direct user messages are planner-managed by default; worker sessions only receive human input explicitly via `user_ask` resume or an explicit targeted routing mechanism.
 
 #### Query examples
 
@@ -397,7 +397,7 @@ This keeps the planner as the single authority for orchestration changes while p
 
 **Purpose:** Let the root session be halted immediately, including all active child work, already running workflow tasks, and sandbox child processes.
 
-**Why this is separate from `workflow.cancel_task`:** `workflow.cancel_task` is a planner-facing orchestration tool for graceful cancellation. Today it only cancels `Pending`, `Runnable`, and `AwaitingApproval` tasks. Emergency stop is a gateway-owned safety control that must also target `Running` work and prevent automatic resume.
+**Why this is separate from `workflow_cancel_task`:** `workflow_cancel_task` is a planner-facing orchestration tool for graceful cancellation. Today it only cancels `Pending`, `Runnable`, and `AwaitingApproval` tasks. Emergency stop is a gateway-owned safety control that must also target `Running` work and prevent automatic resume.
 
 **Primary control boundary:** emergency stop is a **root-session** operation first. Internally it fans out to workflow, task, and process scopes, but the user-facing and policy-facing control surface should be `root_session.emergency_stop(root_session_id, reason)`.
 
@@ -589,7 +589,7 @@ CREATE INDEX idx_causal_timestamp ON causal_events(timestamp);
 
 **Query examples agents can make:**
 - "All errors in my last 5 sessions": `WHERE agent_id = ? AND status = 'ERROR' ORDER BY timestamp DESC`
-- "All sandbox.exec failures": `WHERE category = 'tool_invoke' AND target = 'sandbox.exec' AND status = 'ERROR'`
+- "All sandbox_exec failures": `WHERE category = 'tool_invoke' AND target = 'sandbox_exec' AND status = 'ERROR'`
 - "What happened in session X": `WHERE session_id = ? ORDER BY event_seq`
 
 #### 2b: `execution_traces` table
@@ -604,8 +604,8 @@ CREATE TABLE execution_traces (
     session_id   TEXT NOT NULL,
     turn_id      TEXT,
     timestamp    TEXT NOT NULL,
-    tool_name    TEXT NOT NULL,          -- sandbox.exec, agent.install, etc.
-    command      TEXT,                   -- the command that was executed (for sandbox.exec)
+    tool_name    TEXT NOT NULL,          -- sandbox_exec, agent.install, etc.
+    command      TEXT,                   -- the command that was executed (for sandbox_exec)
     exit_code    INTEGER,               -- process exit code (null if not applicable)
     stdout       TEXT,                   -- full stdout (not truncated)
     stderr       TEXT,                   -- full stderr (not truncated)
@@ -626,13 +626,13 @@ CREATE INDEX idx_exec_error_type ON execution_traces(error_type);
 CREATE INDEX idx_exec_command ON execution_traces(command);
 ```
 
-**Write path:** In `tool_call_processor.rs`, after every tool execution (not just errors), insert a row. For `sandbox.exec` results, parse the JSON to extract `exit_code`, `stdout`, `stderr`. For other tools, store the full result.
+**Write path:** In `tool_call_processor.rs`, after every tool execution (not just errors), insert a row. For `sandbox_exec` results, parse the JSON to extract `exit_code`, `stdout`, `stderr`. For other tools, store the full result.
 
 **Why a separate table from `causal_events`?** Execution traces have structured fields (exit_code, stdout, stderr, duration_ms, error_type) that enable efficient queries. Storing these as parsed columns rather than buried in a JSON payload blob means agents can query: "show me all compilations that failed with exit_code 1 in the last week" without parsing JSON in SQL.
 
 **Query examples for agent learning:**
 - "All compilation errors I've seen": `WHERE error_type = 'compilation' AND success = 0`
-- "What commands worked for this task pattern": `WHERE tool_name = 'sandbox.exec' AND success = 1 AND command LIKE '%pytest%'`
+- "What commands worked for this task pattern": `WHERE tool_name = 'sandbox_exec' AND success = 1 AND command LIKE '%pytest%'`
 - "Errors involving this file": `WHERE stderr LIKE '%src/http/client.rs%' AND success = 0`
 - "Average execution time for test suites": `SELECT AVG(duration_ms) FROM execution_traces WHERE command LIKE '%test%' AND success = 1`
 
@@ -654,7 +654,7 @@ Task: {initial_user_message_preview}
 ---
 
 ## Turn 1 — {timestamp}
-**Action:** Called `sandbox.exec` with `python3 tests/run_all.py`
+**Action:** Called `sandbox_exec` with `python3 tests/run_all.py`
 **Result:** 12 tests passed, 1 failed (test_retry_backoff: timeout after 5s)
 **Reasoning:** Running full test suite first to establish baseline before changes.
 
@@ -672,7 +672,7 @@ Task: {initial_user_message_preview}
 **Artifact:** Modified `src/http/client.rs` (33 lines changed)
 
 ## Turn 4 — {timestamp}
-**Action:** Called `sandbox.exec` with `python3 tests/run_all.py`
+**Action:** Called `sandbox_exec` with `python3 tests/run_all.py`
 **Result:** 13 tests passed, 0 failed. ✓
 
 ---
@@ -692,15 +692,15 @@ The Live Digest is NOT generated by the agent itself (that would add unreliable 
 1. **Tool results** → formatted from tool name + arguments + result (existing data in `process_tool_calls`)
 2. **LLM response metadata** → stop reason, token usage (existing from `StopReason`)
 3. **Errors** → tool errors already classified by `ToolError` (permission, validation, resource, etc.)
-4. **Agent annotations** → NEW: a lightweight `digest.annotate` tool that lets the agent emit reasoning/decision notes without affecting the LLM conversation history
+4. **Agent annotations** → NEW: a lightweight `digest_annotate` tool that lets the agent emit reasoning/decision notes without affecting the LLM conversation history
 
-The `digest.annotate` tool is key: it's how reasoning gets captured. The agent calls it to explain decisions, note alternatives, or flag open items. It's cheap (no LLM call, just appends to digest) and optional (digest still works without it, just with less reasoning context).
+The `digest_annotate` tool is key: it's how reasoning gets captured. The agent calls it to explain decisions, note alternatives, or flag open items. It's cheap (no LLM call, just appends to digest) and optional (digest still works without it, just with less reasoning context).
 
 ```rust
 pub struct DigestAnnotateTool;
 
 impl NativeTool for DigestAnnotateTool {
-    fn name(&self) -> &'static str { "digest.annotate" }
+    fn name(&self) -> &'static str { "digest_annotate" }
 
     // Always available — no capability requirement
     fn is_available(&self, _manifest: &AgentManifest) -> bool { true }
@@ -798,13 +798,13 @@ ORDER BY updated_at DESC
 
 Returns memories matching ALL specified tags AND optional text search. This is what agents use for learning: "show me error lessons related to HTTP retries."
 
-**New tool: `execution.search`:**
+**New tool: `execution_search`:**
 
 Direct query interface to `execution_traces` table. Agents can search past code executions.
 
 ```json
 {
-  "tool_name": "sandbox.exec",
+  "tool_name": "sandbox_exec",
   "success": false,
   "error_type": "compilation",
   "command_pattern": "%client.rs%",
@@ -849,14 +849,14 @@ During Session:
   execute_with_history() ──turn loop──►             │  Live Digest     │
        │                                            │  (digest.md)     │
        │  tool results, errors, LLM metadata        │  progressive MD  │
-       │  agent annotations (digest.annotate)        └─────────────────┘
+       │  agent annotations (digest_annotate)        └─────────────────┘
        │
        ├── at each yield point ──────────────►      ┌─────────────────┐
        │                                            │  Checkpoint      │
        │                                            │  (opaque JSON)   │
        │                                            └─────────────────┘
       │
-      ├── user.ask ─────────────────────────►      ┌─────────────────┐
+      ├── user_ask ─────────────────────────►      ┌─────────────────┐
       │                                            │ user_interactions│
       │                                            │ gateway.db       │
       │                                            └─────────────────┘
@@ -924,7 +924,7 @@ On User Answer:
 
 Agent Learning (cross-session):
   ┌──────────────┐
-  │ gateway.db   │◄──── execution.search (past errors, patterns)
+  │ gateway.db   │◄──── execution_search (past errors, patterns)
   │              │◄──── memory.search_by_tags (lessons, decisions)
   │              │◄──── causal_events queries (what happened when)
   └──────────────┘
@@ -957,23 +957,23 @@ Make causal chain data and execution results queryable. This is foundation for a
 - [x] **1.1** Add `causal_events` table to `GatewayStore::open()` in `gateway_store.rs`. Schema as defined above with indexes on (agent_id, session_id), (category, action), (status), (target), (timestamp).
 - [x] **1.2** Add `execution_traces` table to `GatewayStore::open()`. Schema as defined above with indexes on (agent_id, session_id), (tool_name), (success), (error_type), (command).
 - [x] **1.3** Dual-write in `SessionTracer`: every `log_event()` call writes to BOTH the JSONL causal chain AND inserts into `causal_events` table. Pass `GatewayStore` reference to `SessionTracer`.
-- [x] **1.4** Write execution traces in `tool_call_processor.rs`: after every tool execution (not just errors), insert into `execution_traces`. For `sandbox.exec`, parse result JSON to extract `exit_code`, `stdout`, `stderr`. For other tools, store full result. Classify `error_type` from `ToolError` categories (compilation, runtime, permission, timeout, validation, resource).
-- [x] **1.5** Implement `execution.search` native tool in `tools.rs`. Arguments: `{ tool_name, success, error_type, command_pattern, agent_id, limit }`. Queries `execution_traces` table. Returns structured results. Available to all agents (no capability gate — agents should learn from all visible executions).
+- [x] **1.4** Write execution traces in `tool_call_processor.rs`: after every tool execution (not just errors), insert into `execution_traces`. For `sandbox_exec`, parse result JSON to extract `exit_code`, `stdout`, `stderr`. For other tools, store full result. Classify `error_type` from `ToolError` categories (compilation, runtime, permission, timeout, validation, resource).
+- [x] **1.5** Implement `execution_search` native tool in `tools.rs`. Arguments: `{ tool_name, success, error_type, command_pattern, agent_id, limit }`. Queries `execution_traces` table. Returns structured results. Available to all agents (no capability gate — agents should learn from all visible executions).
 - [x] **1.6** Remove gateway causal chain (`.gateway/history/causal_chain.jsonl`). Stop calling `init_gateway_causal_logger()` and `log_gateway_causal_event()` in `execution.rs`. Gateway-level events that matter (agent spawn, approvals) are already in `gateway.db` tables or can be written to agent causal chains.
 - [x] **1.7** Update `trace session` CLI to query `causal_events` table instead of reading JSONL files. Add `--agent` filter. Show evidence_ref when available.
 - [x] **1.8** Make evidence mode a config option (not just env var). Support `full`/`errors`/`off`. Default: `full` in dev, recommend `errors` in production.
 - [x] **1.9** Unit test: dual-write produces identical event data in JSONL and causal_events table.
-- [x] **1.10** Unit test: execution_traces captures full stdout/stderr for both successful and failed sandbox.exec calls.
-- [x] **1.11** Integration test: agent runs sandbox.exec → fails → execution_traces has full error → agent uses `execution.search` to find the error → gets structured result.
+- [x] **1.10** Unit test: execution_traces captures full stdout/stderr for both successful and failed sandbox_exec calls.
+- [x] **1.11** Integration test: agent runs sandbox_exec → fails → execution_traces has full error → agent uses `execution_search` to find the error → gets structured result.
 - [x] **1.12** Add `artifact_refs` table in `GatewayStore` (schema above). Scoped short ref mapping (`session`/`workflow`/`global`) to canonical artifact identity, plus store APIs (`create`/`resolve`/`revoke`/`list`) and unit coverage for migration idempotency, strict scope isolation, and expiry/revocation filtering.
-- [x] **1.13** Update `artifact.build` output to include both `artifact_id` and canonical `artifact_digest` (additive alias for existing `digest`); mint scoped short ref in `artifact_refs` when `GatewayStore` is wired (workflow scope when root session is workflow-indexed, else session scope). New ref rows are minted only on first materialization (`reused: false`).
-- [x] **1.14** Implement `artifact.resolve_ref` tool with strict scope lookup + digest revalidation. Hard-fail on missing/expired/revoked refs (no fallback).
+- [x] **1.13** Update `artifact_build` output to include both `artifact_id` and canonical `artifact_digest` (additive alias for existing `digest`); mint scoped short ref in `artifact_refs` when `GatewayStore` is wired (workflow scope when root session is workflow-indexed, else session scope). New ref rows are minted only on first materialization (`reused: false`).
+- [x] **1.14** Implement `artifact_resolve_ref` tool with strict scope lookup + digest revalidation. Hard-fail on missing/expired/revoked refs (no fallback).
 - [x] **1.15** Add collision safety in artifact reuse path: if an existing `artifact_id` is found but on-disk manifest identity (sorted name/handle pairs + entrypoints) does not match the requested build, fail loudly (no silent reuse).
 - [x] **1.16** Integration test: child task returns short `artifact_ref`; parent resolves and inspects artifact successfully without file-handle inlining.
 - [ ] **1.17** (Optional) Add `artifact_shares` table + signed share envelope workflow for cross-gateway artifact transfer.
 
 **Post-review remediation (2026-03-25):**
-- [x] **1.4a** Runtime wiring fix: `tool_call_processor.rs` now persists `execution_traces` for both success and failure paths during live tool execution (including `sandbox.exec` stdout/stderr/exit_code extraction and normalized error typing).
+- [x] **1.4a** Runtime wiring fix: `tool_call_processor.rs` now persists `execution_traces` for both success and failure paths during live tool execution (including `sandbox_exec` stdout/stderr/exit_code extraction and normalized error typing).
 - [x] **1.8a** Config enforcement fix: lifecycle now resolves evidence mode from `GatewayConfig.evidence_mode` (env var only as fallback when config is absent), and tracer construction uses the resolved mode directly.
 
 #### Phase 1A: Concrete PR Slices (Artifact Refs) — ✅ Completed
@@ -1001,7 +1001,7 @@ This breaks `1.12`–`1.17` into independently shippable PRs with explicit file 
 **PR-B (artifact build path hardening + ref minting): ✅ Completed**
 - Files:
   - `autonoetic-gateway/src/artifact_store.rs`
-  - `autonoetic-gateway/src/runtime/tools.rs` (`artifact.build`)
+  - `autonoetic-gateway/src/runtime/tools.rs` (`artifact_build`)
 - Changes:
   - Ensure dedup/reuse verifies canonical digest match before returning existing artifact
   - Keep existing `artifact_id` response, add:
@@ -1013,11 +1013,11 @@ This breaks `1.12`–`1.17` into independently shippable PRs with explicit file 
 - Tests:
   - Unit test: same manifest -> same digest, safe reuse
   - Unit test: synthetic ID collision path fails hard on digest mismatch
-  - Integration test: `artifact.build` returns both digest + short ref
+  - Integration test: `artifact_build` returns both digest + short ref
 
 **PR-C (resolution tool + agent contract): ✅ Completed**
 - Files:
-  - `autonoetic-gateway/src/runtime/tools.rs` (new `artifact.resolve_ref`)
+  - `autonoetic-gateway/src/runtime/tools.rs` (new `artifact_resolve_ref`)
   - `autonoetic-gateway/tests/artifact_build_ref_integration.rs` (integration tests)
 - Tool contract:
   - Input: `{ ref_id, scope_type, scope_id }`
@@ -1046,10 +1046,10 @@ This breaks `1.12`–`1.17` into independently shippable PRs with explicit file 
 
 #### Rollout / Compatibility Rules
 
-1. `artifact.build` continues returning existing fields (`artifact_id`, `files`, etc.) for backward compatibility.
+1. `artifact_build` continues returning existing fields (`artifact_id`, `files`, etc.) for backward compatibility.
 2. New fields (`artifact_digest`, `artifact_ref`) are additive in the first rollout.
 3. Prompt/tooling migration can switch agent playbooks to prefer `artifact_ref` after PR-C lands.
-4. No destructive migration for existing artifacts: refs are minted lazily on future `artifact.build` calls (or optional one-time backfill job).
+4. No destructive migration for existing artifacts: refs are minted lazily on future `artifact_build` calls (or optional one-time backfill job).
 
 #### Simpler fallback (if schedule pressure is high)
 
@@ -1078,17 +1078,17 @@ Generalize `TurnContinuation` into a universal `SessionCheckpoint` at all yield 
 - [x] **2.7b** Safety fix: checkpoint files are deleted only after successful resumed execution (both in `spawn_agent_once` consumption and `respawn_from_checkpoint`), preventing recovery-state loss on mid-resume failure.
 
 ### Phase 2B: Human Interaction Suspension
-Add a first-class `user.ask` tool that suspends execution and resumes from checkpoint with the human's answer.
+Add a first-class `user_ask` tool that suspends execution and resumes from checkpoint with the human's answer.
 
 - [x] **2B.1** Add `user_interactions` table to `GatewayStore::open()` in `gateway_store.rs`. Schema as defined above with indexes on session/root_session/workflow/status.
 - [x] **2B.2** Extend `YieldReason` with `UserInputRequired { interaction_id }` in `checkpoint.rs`.
-- [x] **2B.3** Implement `user.ask` native tool in `tools.rs`. Arguments: `{ kind, question, context, options, allow_freeform }`. Always available.
-- [x] **2B.4** On `user.ask`, persist interaction row, save checkpoint, and stop the current turn cleanly.
+- [x] **2B.3** Implement `user_ask` native tool in `tools.rs`. Arguments: `{ kind, question, context, options, allow_freeform }`. Always available.
+- [x] **2B.4** On `user_ask`, persist interaction row, save checkpoint, and stop the current turn cleanly.
 - [x] **2B.5** Add gateway APIs / CLI plumbing to answer an interaction by `interaction_id` with either `answer_option_id` or `answer_text`. CLI: `gateway interactions {list, answer, cancel}`.
 - [x] **2B.6** Implement `resume_from_user_interaction()` in `execution.rs`: load checkpoint, inject the recorded answer into resumed state, and continue execution. (`spawn_agent_once` resumes when latest checkpoint is `UserInputRequired` and the store row is `answered`; checkpoint now saves assistant prefix + `pending_tool_state`.)
 - [x] **2B.7** Wire chat UI rendering so questions with options are shown as structured prompts instead of plain assistant text only. (Chat polls `user_interactions` via gateway store; renders Signal cards with numbered options + CLI hints; suppresses placeholder `[No response]` when a card was added.)
 - [x] **2B.8** Extend `trace` commands to display user interactions alongside workflow and causal history.
-- [x] **2B.9** Integration test: agent calls `user.ask` → session suspends → user answers → agent resumes from checkpoint with preserved loop guard and history.
+- [x] **2B.9** Integration test: agent calls `user_ask` → session suspends → user answers → agent resumes from checkpoint with preserved loop guard and history.
 - [x] **2B.10** Integration test: option-based answer resumes with selected option id and canonical value.
 - [x] **2B.11** Integration test: freeform answer resumes with raw user text and is captured in digest + causal history. (Freeform text asserted in persisted `session_history`; `execution_traces` rows cover dispatched native tools — injected resume tool results are not re-logged as new traces.)
 - [x] **2B.12** Document and enforce incoming user message routing during active workflows: default route to lead/planner session; do not auto-interrupt running child tasks.
@@ -1109,7 +1109,7 @@ Add a true root-session emergency stop path for running workflows, sessions, and
 - [x] **2C.8** Surface emergency-stop state in `trace` / workflow inspection commands, including partial-stop failures and any `lost` active executions after restart.
 - [x] **2C.9** Integration test: root workflow with two running async children receives emergency stop → queued work cancelled, running tasks aborted, workflow ends `EmergencyStopped`.
 - [x] **2C.10** Integration test: sandbox child process running under `wait_with_output()` receives emergency stop → process is killed and task ends `Aborted`.
-- [x] **2C.11** Integration test: emergency stop during pending approval or `user.ask` interaction cancels the pending gate and does not allow resume.
+- [x] **2C.11** Integration test: emergency stop during pending approval or `user_ask` interaction cancels the pending gate and does not allow resume.
 - [x] **2C.12** Restart test: gateway crashes after stop requested but before completion → stale `active_executions` reconciled on startup and stop finishes as `stopped` or `partially_stopped` with audit details.
 - [x] **2C.13** Authorization test: user/operator, gateway security subsystem, and the dedicated emergency-manager agent path are accepted; all other agents are denied.
 
@@ -1119,12 +1119,12 @@ Add a true root-session emergency stop path for running workflows, sessions, and
 Replace `timeline.md` with a richer real-time narrative.
 
 - [x] **3.1** Create `autonoetic-gateway/src/runtime/live_digest.rs` with `LiveDigestWriter`. Methods: `start_session()`, `start_turn()`, `record_action()`, `record_result()`, `record_error()`, `record_annotation()`, `end_turn()`, `write_summary()`. Output: structured Markdown.
-- [x] **3.2** Implement `digest.annotate` native tool in `tools.rs`. Arguments: `{ "type": "reasoning|decision|observation|lesson", "content": "..." }`. Appends to live digest. Always available.
+- [x] **3.2** Implement `digest_annotate` native tool in `tools.rs`. Arguments: `{ "type": "reasoning|decision|observation|lesson", "content": "..." }`. Appends to live digest. Always available.
 - [x] **3.3** Wire `LiveDigestWriter` into `execute_with_history` turn loop. Replace `SessionTimeline` calls with `LiveDigestWriter` calls.
-- [x] **3.4** Add tool result formatting: for `sandbox.exec`, extract exit_code, stdout preview, stderr preview. For errors, extract error_type and message. For artifacts, extract ID and file list. For `user.ask`, record the question, options, and final answer.
+- [x] **3.4** Add tool result formatting: for `sandbox_exec`, extract exit_code, stdout preview, stderr preview. For errors, extract error_type and message. For artifacts, extract ID and file list. For `user_ask`, record the question, options, and final answer.
 - [x] **3.5** Add turn summary and session summary blocks.
 - [x] **3.6** Remove `session_timeline.rs` and all `SessionTimeline` references.
-- [x] **3.7** Update agent system prompts to document `digest.annotate` tool.
+- [x] **3.7** Update agent system prompts to document `digest_annotate` tool.
 - [x] **3.8** Integration test: agent runs session → digest.md has structured entries with actions, results, errors, and annotations.
 
 ### Phase 4: Unified Gateway DB + Enhanced Memory
@@ -1133,7 +1133,7 @@ Tier 2 memory lives in `gateway.db` only (greenfield—no import from a separate
 - [x] **4.1** Add `memories` table to `GatewayStore::open()`.
 - [x] **4.2** Update `memory.rs` to use `GatewayStore` reference instead of own SQLite connection.
 - [x] **4.3** ~~Legacy `memory.db` migration~~ **Skipped** (new project; stray `memory.db` files are not read).
-- [x] **4.4** Implement `memory.search_by_tags` tool. Arguments: `{ scope, tags, text, limit }`. Queries with JSON tag matching. Available to all agents with memory capability. *(Shipped as `knowledge.search_by_tags` alongside other `knowledge.*` tools.)*
+- [x] **4.4** Implement `memory.search_by_tags` tool. Arguments: `{ scope, tags, text, limit }`. Queries with JSON tag matching. Available to all agents with memory capability. *(Shipped as `knowledge_search_by_tags` alongside other `knowledge.*` tools.)*
 - [x] **4.5** Add tag index: `CREATE INDEX idx_memories_tags ON memories(tags)` for JSON extraction queries.
 - [x] **4.6** Remove `memory.db` creation logic.
 - [x] **4.7** Unit test: memory search by tags returns correct results.
@@ -1145,9 +1145,9 @@ LLM-powered summarization and memory extraction.
 - [x] **5.1** Create built-in digest agent: `agents/digest/SKILL.md`. Input: live digest + execution trace summary (successes and failures from `execution_traces`). Output: structured JSON with `narrative` and `memories` array (each memory has `type`, `content`, `tags`, `confidence`).
 - [x] **5.2** Implement post-session digest: at session end (spawn / checkpoint resume). Reads live digest. Queries `execution_traces` for the session branch. Single-shot digest LLM. Stores narrative in content store. Writes memories to `gateway.db`.
 - [x] **5.3** Add session-end trigger. Guard: skip if session < 2 turns or config disabled.
-- [x] **5.4** Implement `digest.query` tool: queries memories by tags + loads session narrative (`post_session_narrative.md` and/or `narrative_handle` using the same resolution as `content.read`). Combines structured memory recall with narrative context.
+- [x] **5.4** Implement `digest_query` tool: queries memories by tags + loads session narrative (`post_session_narrative.md` and/or `narrative_handle` using the same resolution as `content_read`). Combines structured memory recall with narrative context.
 - [x] **5.5** Add `trace digest <session_id>` CLI command.
-- [x] **5.6** Integration tests: digest pipeline (mock LLM) + `digest.query` with narrative handle + CLI `trace digest` reads narrative from the content store.
+- [x] **5.6** Integration tests: digest pipeline (mock LLM) + `digest_query` with narrative handle + CLI `trace digest` reads narrative from the content store.
 
 ### Phase 6: Cleanup & Documentation
 
@@ -1157,7 +1157,7 @@ LLM-powered summarization and memory extraction.
 - [x] **6.4** Add `causal_events` pruning policy (keep last N days or archive to cold storage). Added `retention.causal_events_days` config field (default: 90) and `prune_causal_events` on `GatewayStore`, called via `apply_retention_policy` on gateway startup.
 - [x] **6.5** Update `docs/ARCHITECTURE.md` with new storage model. Added sections for Session Checkpoints, Queryable Event Store, Live Digest, Unified Gateway Database, Emergency Stop, and Retention Policy.
 - [x] **6.6** Update `CLAUDE.md` with checkpoint, event store, and digest architecture. Updated Key Concepts section with new systems.
-- [x] **6.7** Write `docs/agent-learning.md`: how agents use `execution.search`, `memory.search_by_tags`, and `digest.query` to learn from past sessions. New file documenting the three learning tools with examples.
+- [x] **6.7** Write `docs/agent-learning.md`: how agents use `execution_search`, `memory.search_by_tags`, and `digest_query` to learn from past sessions. New file documenting the three learning tools with examples.
 
 #### Phase 6 Optional: Checkpoint Reproducibility Enhancements (Mid-term)
 
@@ -1173,7 +1173,7 @@ These are optional improvements to make checkpoint respawn more strictly reprodu
 
 An agent (e.g., the coder) starting a new session has access to:
 
-1. **`execution.search`** — "Have I seen this error before?"
+1. **`execution_search`** — "Have I seen this error before?"
    ```json
    { "error_type": "compilation", "command_pattern": "%client.rs%", "success": false, "limit": 5 }
    ```
@@ -1185,7 +1185,7 @@ An agent (e.g., the coder) starting a new session has access to:
    ```
    Returns: "Async trait methods require explicit `+ Send` bound" (confidence: 0.95, from session abc123).
 
-3. **`digest.query`** — "What approaches have been tried for this kind of task?"
+3. **`digest_query`** — "What approaches have been tried for this kind of task?"
    ```json
    { "tags": ["type:approach"], "text": "retry backoff" }
    ```
@@ -1205,7 +1205,7 @@ The agent doesn't need to be told to use these — the system prompts document t
 |---|---|
 | `execution_traces` table grows large (full stdout per execution) | Pruning policy (Phase 6.3); stdout/stderr capped at 64KB per field |
 | `causal_events` duplicates causal chain JSONL | JSONL is integrity source (hash chain), DB is query source. Different purposes. |
-| `digest.annotate` adds noise to agent prompts | Zero-cost: no LLM tokens in result, simple `{"ok": true}` return |
+| `digest_annotate` adds noise to agent prompts | Zero-cost: no LLM tokens in result, simple `{"ok": true}` return |
 | Post-session digest agent LLM cost | Input is live digest (1-5KB); skip trivial sessions; configurable |
 | Evidence files consume disk in production | Configurable: `full`/`errors`/`off`. Recommend `errors` for production. |
 | Checkpoint files grow large | Prune old checkpoints (keep last 3); history capped at 400 messages |
@@ -1224,7 +1224,7 @@ The agent doesn't need to be told to use these — the system prompts document t
 1. **Exact respawn:** Agent checkpointed at turn N can be respawned and produces identical turn N+1 output (given same LLM seed).
 2. **Crash recovery:** Agent that crashes mid-session can be resumed from last checkpoint with no visible discontinuity.
 3. **Queryable history:** Agents can search past executions, errors, and decisions via SQL-backed tools — no more grep-only JSONL.
-4. **Execution trace completeness:** Every code execution (sandbox.exec, agent.install) has its full result in `execution_traces`, not truncated to 256 chars.
+4. **Execution trace completeness:** Every code execution (sandbox_exec, agent.install) has its full result in `execution_traces`, not truncated to 256 chars.
 5. **Human readability:** Live digest answers "what happened and why" without cross-referencing other systems.
 6. **Agent learning:** An agent encountering an error can query past sessions for similar errors and their resolutions.
 7. **Fewer redundancies:** Gateway causal chain deleted. Session timeline replaced. memory.db merged. Session snapshot subsumed.
@@ -1249,7 +1249,7 @@ For current priorities, see `docs/plan-agent-revision-evaluation-federation-mvp.
 
 ---
 
-Current state: native Autonoetic agents can share outputs by calling `content.write` and package them via `artifact.build`, but foreign agents that only write files inside the sandbox workspace have no automatic export path into the content store. Implicit artifacts exist, but they currently capture only task metadata/summary, not file outputs.
+Current state: native Autonoetic agents can share outputs by calling `content_write` and package them via `artifact_build`, but foreign agents that only write files inside the sandbox workspace have no automatic export path into the content store. Implicit artifacts exist, but they currently capture only task metadata/summary, not file outputs.
 
 **Goal:** make foreign or legacy agents interoperable without weakening the artifact trust boundary.
 
@@ -1279,7 +1279,7 @@ Current state: native Autonoetic agents can share outputs by calling `content.wr
 
 **Artifact classes / promotion states:**
 
-- `explicit` — built by `artifact.build`; intended package; preferred for review/install/execution
+- `explicit` — built by `artifact_build`; intended package; preferred for review/install/execution
 - `implicit` — gateway-generated from captured outputs; shareable and inspectable; may require repackaging or explicit promotion before install
 - `promotion_state`: `scratch | shareable | reviewable | promotable`
 
@@ -1311,13 +1311,13 @@ Current state: `spawn_agent_once` starts local sandbox processes on the same hos
 
 ## Backlog: Post-Session Digest Full E2E
 
-Today, digest coverage uses direct calls to `run_post_session_digest_with_driver`, CLI fixtures that seed the content store, and isolated `digest.query` tool tests. A **full** E2E goes through the same paths production uses: ingress spawn completes, the gateway runs post-session digest with the configured LLM, then operators or tests read the result via `trace digest` (and optionally agents via `digest.query` over JSON-RPC).
+Today, digest coverage uses direct calls to `run_post_session_digest_with_driver`, CLI fixtures that seed the content store, and isolated `digest_query` tool tests. A **full** E2E goes through the same paths production uses: ingress spawn completes, the gateway runs post-session digest with the configured LLM, then operators or tests read the result via `trace digest` (and optionally agents via `digest_query` over JSON-RPC).
 
 - [ ] **D.E2E.1** Integration test starting from `GatewayExecutionService::spawn_agent_once` (or HTTP JSON-RPC equivalent) with `digest_agent.enabled`, valid `llm_preset` or provider/model, `min_turns` satisfied, and session ending in a completed (non-suspended) state.
 - [ ] **D.E2E.2** Deterministic LLM responses for **both** the main agent loop and the digest step—e.g. HTTP mock for `AUTONOETIC_LLM_BASE_URL`, or a narrow test-only hook to inject `Arc<dyn LlmDriver>` for digest only without weakening production code paths.
 - [ ] **D.E2E.3** Assertions: `post_session_narrative.md` registered under the root session; at least one extracted memory in `gateway.db` with expected scope/tags; `execution_traces` rows visible from the digest prompt path when tools ran.
 - [ ] **D.E2E.4** CLI assertion: `autonoetic trace digest <session_id> --config <temp>` exits 0 and stdout contains a marker string from the digest LLM output (same workspace layout as **D.E2E.1**).
-- [ ] **D.E2E.5** (Optional) Same run: JSON-RPC `digest.query` (or tool batch) returns the narrative fragment and memory ids for parity with agent-visible behavior.
+- [ ] **D.E2E.5** (Optional) Same run: JSON-RPC `digest_query` (or tool batch) returns the narrative fragment and memory ids for parity with agent-visible behavior.
 
 ---
 
@@ -1420,16 +1420,16 @@ metadata:
 
 **Additional artifact hardening (post-RV implementation):**
 
-- [x] **RV.H1** Harden artifact immutability checks: `artifact.inspect` now verifies manifest `artifact_id` and recomputed digest before returning data; persisted artifact manifests are written read-only to make corruption/tampering visible instead of silently trusted.
+- [x] **RV.H1** Harden artifact immutability checks: `artifact_inspect` now verifies manifest `artifact_id` and recomputed digest before returning data; persisted artifact manifests are written read-only to make corruption/tampering visible instead of silently trusted.
 
 **Post-Implementation Corrections (RV Phase):**
 
 After initial RV.7 implementation, three correctness gaps and scaffolding were identified and fixed:
 
 1. **User Interaction Suspension Not Detected** (FIXED):
-   - **Gap**: During repair loop in `validate_and_maybe_repair()`, if agent called `user.ask`, the session would checkpoint with `YieldReason::UserInputRequired` but repair loop would not detect it (only checked `suspended_for_approval`).
+   - **Gap**: During repair loop in `validate_and_maybe_repair()`, if agent called `user_ask`, the session would checkpoint with `YieldReason::UserInputRequired` but repair loop would not detect it (only checked `suspended_for_approval`).
    - **Fix**: Added checkpoint inspection after `respawn_from_checkpoint()` to check if `YieldReason::UserInputRequired` was set; abort repair loop if true.
-   - **Code**: execution.rs lines 1436–1445 (new user.ask suspension check).
+   - **Code**: execution.rs lines 1436–1445 (new user_ask suspension check).
 
 2. **Deadline Guard Was Soft, Not Hard** (FIXED):
    - **Gap**: `validation_max_duration_ms` deadline was only checked before respawn attempt, not after; respawn could take unlimited time and still succeed.
@@ -1438,7 +1438,7 @@ After initial RV.7 implementation, three correctness gaps and scaffolding were i
 
 3. **Revised-Reply Tool Scaffolding Removed** (RESOLVED):
    - **Gap**: Fields `revised_reply: Option<Arc<Mutex<Option<String>>>>` were added to `NativeToolRunContext` and `AgentExecutor` but no tool or consumer was implemented.
-   - **Decision**: Removed scaffolding. The current repair model (plain-text feedback + normal tools) is sufficient; agents can use `content.write`, `artifact.build`, etc. to fix issues. No need for a special `response.revise_reply` tool.
+   - **Decision**: Removed scaffolding. The current repair model (plain-text feedback + normal tools) is sufficient; agents can use `content_write`, `artifact_build`, etc. to fix issues. No need for a special `response.revise_reply` tool.
    - **Code**: Removed from active_execution_registry.rs (line 20), lifecycle.rs (lines 126, 161, 759).
 
 4. **Success-Path Integration Test Added** (COMPLETE):
@@ -1454,7 +1454,7 @@ After initial RV.7 implementation, three correctness gaps and scaffolding were i
 - Bounded repair window uses same guard infrastructure as promotion validation (max loops, max duration).
 - Before `RV.7` lands, repeated validation attempts observe the same immutable `SpawnResult`; in practice keep `validation_max_loops=1` unless validation is changed to re-read durable output state or invoke a real repair round.
 - Matches "separation of powers": agent proposes output, gateway validates and may reject; agent decides how to repair.
-- Compatible with promotion.record flow: promotion records are part of output, can be checked as required artifact.
+- Compatible with promotion_record flow: promotion records are part of output, can be checked as required artifact.
 - Evidence mode (`full`/`errors`/`off`) applies to response validation: capture failed constraints in evidence files.
 - Causal events logged: `action: "response.validation"`, `status: "pass"/"fail"`, violations captured in details.
 - Repair tool (`tools.revise_output()`) is internal, not exposed to agents unless repair window is enabled.

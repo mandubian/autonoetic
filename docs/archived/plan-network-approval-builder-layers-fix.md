@@ -106,7 +106,7 @@ Demo session `demo-session-1` failed because network approvals never fire and th
 **File:** `agents/specialists/packager.default/SKILL.md`
 
 - [x] Added CRITICAL note: packager must NOT include `dependencies` field in layered artifacts
-- [x] Documented that `mount_path` should match the `--target` path used in sandbox.exec
+- [x] Documented that `mount_path` should match the `--target` path used in sandbox_exec
 - [x] Added entrypoint setup guidance (PYTHONPATH for Python, NODE_PATH for Node.js)
 - [x] Gateway already handles this correctly — no code changes needed
 
@@ -117,7 +117,7 @@ Demo session `demo-session-1` failed because network approvals never fire and th
 - [x] Replaced vague decision flow rule with HARD delegation rules:
   - Any artifact with `requirements.txt`, `package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`
   - Code using network libraries (`import requests`, `import httpx`, etc.)
-  - `sandbox.exec` including `dependencies: {packages: [...]}`
+  - `sandbox_exec` including `dependencies: {packages: [...]}`
 - [x] Packager MUST happen between coder and evaluator — **NEVER skip when deps exist**
 - [x] Updated dependencies section with explanation of why packager is mandatory
 
@@ -125,7 +125,7 @@ Demo session `demo-session-1` failed because network approvals never fire and th
 
 ## Phase 4: Bridge to Pluggable AnalysisProvider (Future)
 
-Architectural cleanup — makes `code_analysis` config affect `sandbox.exec`, not just `agent.install`.
+Architectural cleanup — makes `code_analysis` config affect `sandbox_exec`, not just `agent.install`.
 
 ### Task 4.1: RemoteAccessAnalysisProvider adapter
 

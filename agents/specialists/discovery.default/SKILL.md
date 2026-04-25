@@ -1,6 +1,6 @@
 ---
 name: "discovery.default"
-description: "Finds installed agents that match a given task intent using agent.list + LLM reasoning."
+description: "Finds installed agents that match a given task intent using agent_list + LLM reasoning."
 metadata:
   autonoetic:
     version: "1.0"
@@ -14,7 +14,7 @@ metadata:
     agent:
       id: "discovery.default"
       name: "Discovery Default"
-      description: "Semantic agent discovery: calls agent.list, reasons about descriptions + capabilities vs task intent, returns ranked candidates with a recommendation."
+      description: "Semantic agent discovery: calls agent_list, reasons about descriptions + capabilities vs task intent, returns ranked candidates with a recommendation."
     llm_config:
       provider: "openrouter"
       model: "google/gemini-3-flash-preview"
@@ -40,7 +40,7 @@ You find installed agents that best match a task intent. You do not execute task
 
 ## Workflow
 
-1. Call `agent.list` to enumerate installed agents:
+1. Call `agent_list` to enumerate installed agents:
    - If `required_capabilities` is given, filter with `requires_capability` for the most relevant type.
    - Otherwise enumerate all agents.
 
@@ -49,7 +49,7 @@ You find installed agents that best match a task intent. You do not execute task
    - Does the capability set enable the required operations?
    - Would capability gaps block the task?
 
-3. Optionally call `knowledge.recall` with the task keywords to see if there is prior context about which agents have been used successfully for similar tasks.
+3. Optionally call `knowledge_recall` with the task keywords to see if there is prior context about which agents have been used successfully for similar tasks.
 
 4. Rank candidates by fit. Score criteria:
    - Description-to-intent alignment (semantic fit)
@@ -80,5 +80,5 @@ Set `confidence: "low"` when multiple candidates have similar scores and you can
 
 - Do not spawn agents to test them — reasoning about descriptions and capabilities is sufficient.
 - Do not recommend foundational agents (researcher, executor, coder, etc.) when `exclude_foundational: true`.
-- If `agent.list` returns zero results, set `needs_new_agent: true` immediately.
+- If `agent_list` returns zero results, set `needs_new_agent: true` immediately.
 - Keep `rationale` concise (one sentence per candidate).

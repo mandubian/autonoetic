@@ -4,7 +4,7 @@ This quickstart verifies the full routing flow:
 
 1. terminal chat ingress with an explicit `target_agent_id: "planner.default"`
 2. gateway resolves target through alias registry to the active revision
-3. planner delegates to a specialist via `agent.spawn`
+3. planner delegates to a specialist via `agent_spawn`
 4. specialist result returns in the same session
 
 It also includes the required config-file step so `agent bootstrap` does not fall back to unintended defaults.
@@ -69,7 +69,7 @@ A global override `AUTONOETIC_LLM_API_KEY` exists but is not recommended when us
 | `AUTONOETIC_VAULT_KEY` | — | Hex-encoded 32-byte AES-256-GCM master key for vault encryption |
 | `AUTONOETIC_VAULT_KEY_PATH` | — | Path to file containing hex vault key (alternative to inline key) |
 | `AUTONOETIC_LLM_CONTEXT_WINDOW` | — | Override context window for prompt budget enforcement |
-| `AUTONOETIC_GOOGLE_SEARCH_API_KEY` | — | Google Custom Search API key for `web.search` |
+| `AUTONOETIC_GOOGLE_SEARCH_API_KEY` | — | Google Custom Search API key for `web_search` |
 | `AUTONOETIC_GOOGLE_SEARCH_ENGINE_ID` | — | Google Custom Search Engine ID |
 | `AUTONOETIC_HOST_ID` | hostname | Host/process identity for active execution tracking |
 | `AUTONOETIC_MCP_REGISTRY_PATH` | — | Override MCP server registry file path |
@@ -258,7 +258,7 @@ This shows available presets and which template uses which preset.
 
 ### 2c) Researcher and web search (required for "search today's weather" etc.)
 
-The researcher can use native `web.search` and `web.fetch` only if its runtime SKILL has a **NetworkAccess** capability that allows the target hosts (e.g. DuckDuckGo, or `*` for all).
+The researcher can use native `web_search` and `web_fetch` only if its runtime SKILL has a **NetworkAccess** capability that allows the target hosts (e.g. DuckDuckGo, or `*` for all).
 
 - If you see errors when the researcher runs goals like "search today's weather", the runtime researcher may have been created from an older bundle without NetworkAccess. Re-bootstrap so it gets the current researcher (with `NetworkAccess` and `hosts: ["*"]`):
 
@@ -274,7 +274,7 @@ The researcher can use native `web.search` and `web.fetch` only if its runtime S
 
   You should see `hosts: ["*"]` (or at least hosts that include `duckduckgo.com` and any other search/fetch targets).
 
-- **If NetworkAccess is present but the researcher still doesn't use web search** (e.g. for "search today's weather"): the model may be answering from training data instead of calling the tool. Re-bootstrap so the researcher gets the latest instructions (which tell it to always call `web.search` first for current/live info), then restart the gateway and try again. You can also inspect the planner/researcher trace to see whether `web.search` was in the tool list and whether the model requested it:
+- **If NetworkAccess is present but the researcher still doesn't use web search** (e.g. for "search today's weather"): the model may be answering from training data instead of calling the tool. Re-bootstrap so the researcher gets the latest instructions (which tell it to always call `web_search` first for current/live info), then restart the gateway and try again. You can also inspect the planner/researcher trace to see whether `web_search` was in the tool list and whether the model requested it:
 
   ```bash
   cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace show demo-session --agent researcher.default
@@ -284,7 +284,7 @@ The researcher can use native `web.search` and `web.fetch` only if its runtime S
 
 You can still add MCP web tools for richer provider-specific search/fetch behavior.
 
-To enable Google provider in native `web.search`, export:
+To enable Google provider in native `web_search`, export:
 
 ```bash
 export AUTONOETIC_GOOGLE_SEARCH_API_KEY="..."
@@ -298,7 +298,7 @@ export GOOGLE_SEARCH_API_KEY="..."
 export GOOGLE_SEARCH_ENGINE_ID="..."  # or GOOGLE_SEARCH_CX
 ```
 
-Then the researcher can call `web.search` with either explicit Google or auto fallback:
+Then the researcher can call `web_search` with either explicit Google or auto fallback:
 
 ```json
 { "query": "rust async runtime", "provider": "google" }
@@ -315,9 +315,9 @@ Then the researcher can call `web.search` with either explicit Google or auto fa
 `provider: "auto"` tries Google first when credentials are available, then falls back to DuckDuckGo on missing credentials, errors, or empty Google results.
 `cache_ttl_secs` controls in-memory response caching (0 disables cache, max 3600 seconds).
 
-**If `web.search` returns `result_count: 0`** (e.g. for "weather in Paris"): DuckDuckGo's API often returns no results for weather and similar instant-answer queries. The tool call still succeeds (`ok: true`); the researcher just gets an empty result set. For better coverage on live/weather queries, set up the Google provider (see above) and use `provider: "auto"` or `"google"` so the researcher can use Google Custom Search when available.
+**If `web_search` returns `result_count: 0`** (e.g. for "weather in Paris"): DuckDuckGo's API often returns no results for weather and similar instant-answer queries. The tool call still succeeds (`ok: true`); the researcher just gets an empty result set. For better coverage on live/weather queries, set up the Google provider (see above) and use `provider: "auto"` or `"google"` so the researcher can use Google Custom Search when available.
 
-Additional `web.search` options for advanced setups:
+Additional `web_search` options for advanced setups:
 
 - `duckduckgo_engine_url`: override DuckDuckGo endpoint for local/mock engines.
 - `google_engine_url`: override Google endpoint for local/mock engines.
@@ -427,7 +427,7 @@ Research Rust JSON-RPC libraries and summarize tradeoffs.
 Expected behavior:
 
 - gateway ingress resolves to `planner.default` via alias registry → pinned revision
-- planner uses `agent.spawn` to call an appropriate specialist (for example `researcher.default`)
+- planner uses `agent_spawn` to call an appropriate specialist (for example `researcher.default`)
 - planner synthesizes and returns response
 
 ## 7) Memory and state model (current)
@@ -437,7 +437,7 @@ Current runtime behavior is a hybrid:
 - Tier 1 local state lives under each agent directory (`state/`) and is suitable for deterministic, near-term continuity.
 - Tier 2 durable memory is gateway-managed (`memory.db`) and should be used for reusable/cross-session facts.
 - Gateway injects compact session context for same-session continuity; this is not yet a full automatic `state/summary.md` pipeline.
-- **Session transcripts** are automatically persisted at hibernation and session close and indexed with SQLite FTS5 for full-text search. Agents can search past sessions with `session.search` and summarize them with `session.peek` (see `docs/fts-session-search.md`).
+- **Session transcripts** are automatically persisted at hibernation and session close and indexed with SQLite FTS5 for full-text search. Agents can search past sessions with `session_search` and summarize them with `session_peek` (see `docs/fts-session-search.md`).
 
 For multi-step tasks that benefit from explicit textual state, prefer these conventions:
 
@@ -449,8 +449,8 @@ For multi-step tasks that benefit from explicit textual state, prefer these conv
 
 **Where to look:**
 
-- **Gateway causal chain** — `agents/.gateway/history/causal_chain.jsonl` — records every ingress (top-level `event.ingest` when you chat) and every **delegation** (each `agent.spawn` from planner → researcher, coder, etc.). One place to see the full delegation tree for a session.
-- **Per-agent causal chains** — `agents/<agent_id>/history/causal_chain.jsonl` — record that agent's lifecycle, LLM calls, and tool invocations (including `agent.spawn` requests and results as seen by that agent).
+- **Gateway causal chain** — `agents/.gateway/history/causal_chain.jsonl` — records every ingress (top-level `event.ingest` when you chat) and every **delegation** (each `agent_spawn` from planner → researcher, coder, etc.). One place to see the full delegation tree for a session.
+- **Per-agent causal chains** — `agents/<agent_id>/history/causal_chain.jsonl` — record that agent's lifecycle, LLM calls, and tool invocations (including `agent_spawn` requests and results as seen by that agent).
 
 ```bash
 # Gateway log (all delegations for the session)
@@ -464,9 +464,9 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml trace sessi
 
 You should see:
 
-- gateway log: `event.ingest.requested` / `event.ingest.completed` for the chat, then `agent.spawn.requested` / `agent.spawn.completed` for each delegation (researcher, architect, coder, etc.);
+- gateway log: `event.ingest.requested` / `event.ingest.completed` for the chat, then `agent_spawn.requested` / `agent_spawn.completed` for each delegation (researcher, architect, coder, etc.);
 - planner session activity for `demo-session`;
-- tool usage including `agent.spawn` in planner trace;
+- tool usage including `agent_spawn` in planner trace;
 - specialist session activity tied to the same request lineage.
 
 **Human-readable session views:**
@@ -516,8 +516,8 @@ details of `schema_diff.py` and `generate_wrapper.py`, see:
 Agent activation uses an **immutable revision** model:
 
 1. **Create artifact** — agent source files are bundled into a content-addressed `AgentBundle` artifact
-2. **Create revision** — `agent.revision.create` or `agent revision create` produces an immutable revision with content digest, runtime closure, and status (`candidate` or `ready`)
-3. **Promote** — `agent.revision.promote` or `agent revision promote` moves the alias to point to the new revision
+2. **Create revision** — `agent_revision_create` or `agent revision create` produces an immutable revision with content digest, runtime closure, and status (`candidate` or `ready`)
+3. **Promote** — `agent_revision_promote` or `agent revision promote` moves the alias to point to the new revision
 4. **Sessions pin** — when a session starts, a session binding records the exact revision and runtime lock hash; running sessions are unaffected by later promotions
 
 The `agent bootstrap` command performs all three steps automatically. For manual lifecycle:
@@ -557,10 +557,10 @@ export AUTONOETIC_VAULT_KEY_PATH=/tmp/autonoetic-demo/vault.key
 
 ### Credential lifecycle
 
-1. Agent calls `credential.check("github")` → sees if a credential exists (no secret exposed)
-2. Agent calls `credential.setup(...)` → may suspend for human approval if `user_prompt` step
+1. Agent calls `credential_check("github")` → sees if a credential exists (no secret exposed)
+2. Agent calls `credential_setup(...)` → may suspend for human approval if `user_prompt` step
 3. Operator approves via TUI or CLI (secrets entered via masked prompt or `--secret` flag)
-4. Agent calls `credential.request(...)` → gateway injects secret into HTTP request, returns redacted response
+4. Agent calls `credential_request(...)` → gateway injects secret into HTTP request, returns redacted response
 
 ```bash
 # Interactive TUI for approving credential prompts (recommended — masked input)
@@ -619,7 +619,7 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml agent alias
 
 ## Approvals (revision promotion, credentials, and scheduled actions)
 
-When a privileged operation such as `agent.revision.promote` or a credential setup triggers an approval gate, the tool returns `approval_required: true` and a `request_id` (short ID format like `apr-db51b7ad`). The operation does not proceed until an operator approves.
+When a privileged operation such as `agent_revision_promote` or a credential setup triggers an approval gate, the tool returns `approval_required: true` and a `request_id` (short ID format like `apr-db51b7ad`). The operation does not proceed until an operator approves.
 
 **List pending approval requests:**
 
@@ -700,12 +700,12 @@ cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml gateway int
 
 **"AgentRevision capability required" / revision tool errors**
 
-- The agent calling `agent.revision.create` or `agent.revision.promote` does not have the `AgentRevision` capability.
+- The agent calling `agent_revision_create` or `agent_revision_promote` does not have the `AgentRevision` capability.
 - **Fix:** Only `specialized_builder.default` (or `evolution-steward.default`) should call revision tools. Ensure the correct agent is being delegated to. The capability must declare `patterns` matching the target agent ID.
 
-## Shell Execution Safety Policy (sandbox.exec)
+## Shell Execution Safety Policy (sandbox_exec)
 
-Some specialists can execute shell via `sandbox.exec` (typically through `bash -c` or `sh -c`).
+Some specialists can execute shell via `sandbox_exec` (typically through `bash -c` or `sh -c`).
 
 | Class | Examples | Policy |
 |---|---|---|

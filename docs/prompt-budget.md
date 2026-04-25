@@ -58,8 +58,8 @@ Tools are classified into three tiers for progressive disclosure and budget enfo
 
 | Tier | Tools | When included |
 |------|-------|---------------|
-| **Core** | `content.*`, `knowledge.*`, `artifact.*`, `sandbox.exec` | Always (unless explicitly filtered) |
-| **Workflow** | `agent.spawn`, `agent.exists`, `agent.discover`, `approval.*`, `workflow.*`, `eval.*`, `user.*`, `digest.*` | Default; excluded by `core_only` filtering |
+| **Core** | `content.*`, `knowledge.*`, `artifact.*`, `sandbox_exec` | Always (unless explicitly filtered) |
+| **Workflow** | `agent_spawn`, `agent_exists`, `agent_discover`, `approval.*`, `workflow.*`, `eval.*`, `user.*`, `digest.*` | Default; excluded by `core_only` filtering |
 | **Specialized** | `web.*`, `execution.*`, `promotion.*`, `agent.revision.*`, and uncategorized tools | Excluded by `demote_tools` and `core_and_workflow` filtering |
 
 ### Manifest-Level Tier Filtering
@@ -85,7 +85,7 @@ When unset (default), the tier filter is determined by runtime state:
 | Child session (no explicit tiers) | Core only | Child agents get minimal tools unless parent explicitly requests more via `allowed_tool_tiers` |
 | Manifest declares `allowed_tool_tiers` | Explicit tiers + approval tools | Agent-declared restriction always takes precedence |
 
-The approval-exception ensures that `approval.status`, `approval.withdraw`, and other approval-prefixed tools are always available when approvals are pending, so the agent can check and respond to approval decisions.
+The approval-exception ensures that `approval_status`, `approval_withdraw`, and other approval-prefixed tools are always available when approvals are pending, so the agent can check and respond to approval decisions.
 
 ## Tool Schema Compression
 

@@ -65,12 +65,12 @@ struct CredentialCheckTool;
 
 impl NativeTool for CredentialCheckTool {
     fn name(&self) -> &'static str {
-        "credential.check"
+        "credential_check"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "credential.check".to_string(),
+            name: "credential_check".to_string(),
             description: "Check available credentials for a service. Returns credential metadata (not the secret values). Use this before credential.request to verify a credential exists.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -199,12 +199,12 @@ struct CredentialRequestArgs {
 
 impl NativeTool for CredentialRequestTool {
     fn name(&self) -> &'static str {
-        "credential.request"
+        "credential_request"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "credential.request".to_string(),
+            name: "credential_request".to_string(),
             description: "Make an authenticated HTTP request using a stored credential. The gateway injects the secret (e.g. as Authorization header); the secret value never appears in the LLM context. Returns the HTTP response body.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -612,12 +612,12 @@ struct CredentialRefreshTool;
 
 impl NativeTool for CredentialRefreshTool {
     fn name(&self) -> &'static str {
-        "credential.refresh"
+        "credential_refresh"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "credential.refresh".to_string(),
+            name: "credential_refresh".to_string(),
             description: "Refresh an expired credential using a stored refresh token. The gateway sends a request to the configured refresh_url, extracts the new access token from the response, and updates the vault. Returns the updated credential metadata without exposing secrets.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -1094,12 +1094,12 @@ impl SkillStep {
 
 impl NativeTool for CredentialSetupTool {
     fn name(&self) -> &'static str {
-        "credential.setup"
+        "credential_setup"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "credential.setup".to_string(),
+            name: "credential_setup".to_string(),
             description: "Register a new credential through a multi-step setup flow. \
                 Provide `skill_url` to ingest a remote skill.md spec and let the gateway \
                 execute all onboarding steps server-side — secrets are never returned to the LLM. \

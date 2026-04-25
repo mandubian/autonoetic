@@ -20,7 +20,7 @@ struct AdminProposalCreateTool;
 
 impl NativeTool for AdminProposalCreateTool {
     fn name(&self) -> &'static str {
-        "admin.proposal.create"
+        "admin_proposal_create"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -187,13 +187,13 @@ struct AdminProposalListTool;
 
 impl NativeTool for AdminProposalListTool {
     fn name(&self) -> &'static str {
-        "admin.proposal.list"
+        "admin_proposal_list"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         manifest.capabilities.iter().any(|c| {
             matches!(c, Capability::ReadAccess { scopes }
-                if scopes.iter().any(|s| s == "*" || s.starts_with("admin.")))
+                if scopes.iter().any(|s| s == "*" || s.starts_with("admin_")))
         })
     }
 

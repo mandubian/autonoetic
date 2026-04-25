@@ -398,7 +398,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
     });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,
@@ -470,7 +470,7 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
     });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,
@@ -578,7 +578,7 @@ requests.get("https://api.cache-test.dev")"#;
     });
 
     let result = registry.execute(
-        "sandbox.exec",
+        "sandbox_exec",
         &manifest,
         &policy,
         &agent_dir,

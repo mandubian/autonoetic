@@ -34,7 +34,7 @@ struct SkillInstallArgs {
 
 impl NativeTool for SkillInstallTool {
     fn name(&self) -> &'static str {
-        "skill.install"
+        "skill_install"
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -231,7 +231,7 @@ impl NativeTool for SkillInstallTool {
         std::fs::write(target_dir.join("runtime.lock"), &lock_doc)?;
 
         tracing::info!(
-            target: "skill.install",
+            target: "skill_install",
             agent_id = %args.agent_id,
             url = %args.url,
             trust_mode = %trust_mode,
@@ -251,7 +251,7 @@ impl NativeTool for SkillInstallTool {
         };
 
         tracing::info!(
-            target: "skill.install",
+            target: "skill_install",
             agent_id = %args.agent_id,
             activated = activated,
             "Bootstrap complete"

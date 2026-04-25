@@ -11,14 +11,14 @@ The system has three distinct human-interaction mechanisms that serve different 
 | Mechanism | Purpose | Who Resolves | Session Behavior |
 |---|---|---|---|
 | **Approval** | Gate privileged operations (sandbox exec with network access, agent revision promotion) | Operator via `gateway approvals approve` | Suspends child session; Gateway auto-resumes on approval |
-| **user.ask** | Ask human a question (clarification, preferences, choices) | Human via CLI/chat interaction | Suspends session; requires explicit `resume_from_user_interaction` |
+| **user_ask** | Ask human a question (clarification, preferences, choices) | Human via CLI/chat interaction | Suspends session; requires explicit `resume_from_user_interaction` |
 | **clarification_needed** | Child agent signals missing info to parent | Parent agent re-spawns child with clarified task | Child returns structured result; parent decides next action |
 
 ### Approval
 
 **When it triggers:**
-- `sandbox.exec` with remote network access detected (HTTP/HTTPS URLs, socket calls)
-- `agent.revision.promote` for high-risk bundles (NetworkAccess, CodeExecution, broad WriteAccess)
+- `sandbox_exec` with remote network access detected (HTTP/HTTPS URLs, socket calls)
+- `agent_revision_promote` for high-risk bundles (NetworkAccess, CodeExecution, broad WriteAccess)
 - Dangerous operations (sudo, rm -rf, dd, mkfs) — blocked by policy
 
 **When it does NOT trigger (auto-approved):**
@@ -38,15 +38,15 @@ The system has three distinct human-interaction mechanisms that serve different 
 **Key properties:**
 - **Durable**: Approval requests persist to SQLite
 - **Auto-resume**: Gateway automatically resumes the session when approval is resolved
-- **Domain-level reuse**: For `sandbox.exec` with artifact-based analysis, once a domain (e.g., `api.open-meteo.com`) is approved at the root workflow level, other sessions under the same root can reuse the approval without re-asking
-- **Session approval grants**: Once the operator approves network access to specific hosts for a root session, all subsequent `sandbox.exec` calls within that session targeting the same hosts are auto-approved — no repeated operator prompts
-- **Payload preservation**: For `agent.revision.promote`, the full promote args are stored in the approval request; on approval the gateway resumes the suspended turn with the real promotion result, preventing payload drift
-- **Deduplication**: Both `sandbox.exec` and `agent.revision.promote` prevent duplicate approval requests — if an approval is already pending (or recently approved) for the same operation, the existing request ID is returned instead of creating a new one
+- **Domain-level reuse**: For `sandbox_exec` with artifact-based analysis, once a domain (e.g., `api.open-meteo.com`) is approved at the root workflow level, other sessions under the same root can reuse the approval without re-asking
+- **Session approval grants**: Once the operator approves network access to specific hosts for a root session, all subsequent `sandbox_exec` calls within that session targeting the same hosts are auto-approved — no repeated operator prompts
+- **Payload preservation**: For `agent_revision_promote`, the full promote args are stored in the approval request; on approval the gateway resumes the suspended turn with the real promotion result, preventing payload drift
+- **Deduplication**: Both `sandbox_exec` and `agent_revision_promote` prevent duplicate approval requests — if an approval is already pending (or recently approved) for the same operation, the existing request ID is returned instead of creating a new one
 
-### user.ask
+### user_ask
 
 **When it triggers:**
-- Agent explicitly calls `user.ask` tool to ask the human a question
+- Agent explicitly calls `user_ask` tool to ask the human a question
 
 **How it works:**
 1. Tool creates a `UserInteraction` record
@@ -58,12 +58,12 @@ The system has three distinct human-interaction mechanisms that serve different 
 **Key properties:**
 - **Explicit resume required**: Unlike approval, the session doesn't auto-resume
 - **UI primitive, not workflow primitive**: Should NOT be used for approval handling
-- **Restricted during orchestration**: `user.ask` is blocked when the session has active workflow children or pending approvals
+- **Restricted during orchestration**: `user_ask` is blocked when the session has active workflow children or pending approvals
 
 ### clarification_needed
 
 **When it triggers:**
-- Child agent (via `agent.spawn`) returns a result indicating it needs more information
+- Child agent (via `agent_spawn`) returns a result indicating it needs more information
 
 **How it works:**
 1. Child agent returns `{"status": "clarification_needed", "question": "..."}`
@@ -119,11 +119,11 @@ pub enum ScheduledAction {
 }
 ```
 
-### Approval Flow for sandbox.exec
+### Approval Flow for sandbox_exec
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 1. Agent calls sandbox.exec with artifact containing URLs       │
+│ 1. Agent calls sandbox_exec with artifact containing URLs       │
 ├─────────────────────────────────────────────────────────────────┤
 │ 2. RemoteAccessAnalyzer detects URL literals                    │
 │    → Extracts hosts: api.open-meteo.com, api.openweathermap.org │
@@ -149,11 +149,11 @@ pub enum ScheduledAction {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Approval Flow for agent.revision.promote
+### Approval Flow for agent_revision_promote
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 1. specialized_builder calls agent.revision.promote             │
+│ 1. specialized_builder calls agent_revision_promote             │
 ├─────────────────────────────────────────────────────────────────┤
 │ 2. Gateway checks AgentRevision capability + eval gating        │
 │    → Runs RemoteAccessAnalyzer on bundle artifact files         │
@@ -175,9 +175,9 @@ pub enum ScheduledAction {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Domain-Level Approval Reuse (sandbox.exec)
+### Domain-Level Approval Reuse (sandbox_exec)
 
-For `sandbox.exec`, approvals are reusable across sessions under the same root workflow:
+For `sandbox_exec`, approvals are reusable across sessions under the same root workflow:
 
 1. **First session** runs artifact with `api.open-meteo.com` → approval created → operator approves
 2. **Second session** (different agent) runs same artifact → detects same domain → finds existing approved request → **skips approval**, proceeds directly
@@ -189,13 +189,13 @@ This works because:
 
 ### Session Approval Grants
 
-When the operator approves a `sandbox.exec` that accesses specific hosts, the gateway creates **session approval grants** — `(root_session_id, host)` pairs stored in SQLite. These grants prevent repeated operator prompts for the same hosts within the same root session.
+When the operator approves a `sandbox_exec` that accesses specific hosts, the gateway creates **session approval grants** — `(root_session_id, host)` pairs stored in SQLite. These grants prevent repeated operator prompts for the same hosts within the same root session.
 
 **How it works:**
 
-1. Operator approves `sandbox.exec` accessing `api.open-meteo.com` and `nominatim.openstreetmap.org`
+1. Operator approves `sandbox_exec` accessing `api.open-meteo.com` and `nominatim.openstreetmap.org`
 2. Gateway extracts the detected hosts from the approval action and inserts them as session grants
-3. When the same agent (or any other agent in the same root session) calls `sandbox.exec` with code that accesses a **subset** of the already-granted hosts, the gateway auto-approves without operator interaction
+3. When the same agent (or any other agent in the same root session) calls `sandbox_exec` with code that accesses a **subset** of the already-granted hosts, the gateway auto-approves without operator interaction
 
 **Scope:**
 - Grants are scoped to the **root session** — all agents within the root session benefit (e.g., `coder.default` and `evaluator.default` working on the same artifact)
@@ -222,7 +222,7 @@ Hooks are configured in `config.yaml` (see `docs/config-reference.md` → Hooks)
 
 ### Promotion Severity Gating
 
-The `promotion.record` tool mechanically enforces that `pass=true` cannot be set when findings indicate the code hasn't been properly validated:
+The `promotion_record` tool mechanically enforces that `pass=true` cannot be set when findings indicate the code hasn't been properly validated:
 
 - **Error/Critical findings**: `pass=true` is **rejected** — the gateway refuses to record a passing promotion when any finding has `error` or `critical` severity
 - **Warning findings**: `pass=true` is **rejected** unless every warning finding includes a non-empty `evidence` field containing concrete proof (e.g., sandbox output, test results) that the issue was actually investigated — not just an LLM's opinion that the warning is acceptable
@@ -230,9 +230,9 @@ The `promotion.record` tool mechanically enforces that `pass=true` cannot be set
 
 This prevents the scenario where an evaluator sets `pass=true` despite code that has never been functionally validated (e.g., all sandbox exec returned 403 errors). The evidence requirement ensures the evaluator must provide factual proof, not just an assertion.
 
-### Continuation-Based Resume (sandbox.exec)
+### Continuation-Based Resume (sandbox_exec)
 
-When a `sandbox.exec` approval is resolved:
+When a `sandbox_exec` approval is resolved:
 
 1. Signal delivered via `event.ingest` with `approval_request_id` in metadata
 2. Router extracts `task_id` from the approval request
@@ -241,9 +241,9 @@ When a `sandbox.exec` approval is resolved:
 5. Real output (stdout/stderr/exit_code) is injected into the LLM conversation
 6. LLM continues with actual results, not re-deriving what to do
 
-### Continuation-Based Resume (agent.revision.promote)
+### Continuation-Based Resume (agent_revision_promote)
 
-When an `agent.revision.promote` approval is resolved:
+When an `agent_revision_promote` approval is resolved:
 
 1. Signal delivered via `event.ingest` with `approval_request_id` in metadata
 2. Router extracts `task_id` from the approval request
@@ -256,22 +256,22 @@ When an `agent.revision.promote` approval is resolved:
 
 The approval system prevents **approval flooding** — when an agent retries the same operation, it creates a single `apr-*` request rather than one per retry.
 
-### sandbox.exec Deduplication
+### sandbox_exec Deduplication
 
 Session-Level)
 
-For `sandbox.exec`, deduplication is **session-scoped**:
+For `sandbox_exec`, deduplication is **session-scoped**:
 - Before creating a new approval, the gateway checks if thesession` already has a pending `SandboxExec` approval
 - If found, returns the existing `request_id` with `approval_already_pending: true`
 - Each child session in a workflow gets its own independent approval (no cross-session dedup)
 
-**Why session-scoped?** Two child sessions under the same root workflow may both need `sandbox.exec` approvals for different commands. If they shared one approval, only one session would get the resume signal.
+**Why session-scoped?** Two child sessions under the same root workflow may both need `sandbox_exec` approvals for different commands. If they shared one approval, only one session would get the resume signal.
 
  Session-scoped dedup ensures each session can be independently approved and resumed.
 
-### agent.revision.promote Deduplication (Root + Session Level)
+### agent_revision_promote Deduplication (Root + Session Level)
 
-For `agent.revision.promote`, deduplication mirrors the sandbox pattern:
+For `agent_revision_promote`, deduplication mirrors the sandbox pattern:
 1. **Pending check** (root + session): Before creating a new approval, checks both the root-level and session-level pending approvals for an `AgentRevisionPromote` with the same `revision_id`. If found, returns the existing pending request.
  Root-level check catches cases where the planner respawns the builder with a new sub-session ID.
  Session-level check catches any redundant promote calls within the same session.
@@ -306,34 +306,34 @@ apr-9e6420c1                          evaluator.defau…     sandbox_exec      e
 
 ## Common Pitfalls
 
-### 1. Using user.ask for Approval Handling
+### 1. Using user_ask for Approval Handling
 
 **Wrong:**
 ```
 // Planner sees child is awaiting_approval
-user.ask({"question": "Should I approve the network access?"})
+user_ask({"question": "Should I approve the network access?"})
 ```
 
 **Right:**
 ```
 // Tell user in prose, then wait
 // (In response text): "Approval apr-xxx is pending. Run: gateway approvals approve apr-xxx"
-workflow.wait({"task_ids": ["task-xxx"], "timeout_secs": 300})
+workflow_wait({"task_ids": ["task-xxx"], "timeout_secs": 300})
 ```
 
 ### 2. Submitting a New Promote While One is Pending
 
 **Wrong:**
 ```
-// Turn 1: agent calls agent.revision.promote → receives approval_required: apr-xxx
-// Turn 2: agent calls agent.revision.promote AGAIN while apr-xxx is still pending
+// Turn 1: agent calls agent_revision_promote → receives approval_required: apr-xxx
+// Turn 2: agent calls agent_revision_promote AGAIN while apr-xxx is still pending
 ```
 
 The continuation mechanism handles resume automatically. The agent should wait for the suspended turn to resume — not retry.
 
 **Right:**
 ```
-// Turn 1: agent calls agent.revision.promote → receives approval_required: apr-xxx
+// Turn 1: agent calls agent_revision_promote → receives approval_required: apr-xxx
 // Agent reports to user: "Approval apr-xxx pending. Run: gateway approvals approve apr-xxx"
 // After operator approves → gateway auto-resumes the suspended turn with real result
 ```
@@ -350,7 +350,7 @@ The continuation mechanism handles resume automatically. The agent should wait f
 {"capabilities": [{"type": "NetworkAccess", "hosts": ["api.open-meteo.com", "geocoding-api.open-meteo.com"]}]}
 ```
 
-The `agent.revision.create` step auto-detects domains from URL literals in the artifact and includes them in the approval card. Use the detected domains for precise, least-privilege capabilities.
+The `agent_revision_create` step auto-detects domains from URL literals in the artifact and includes them in the approval card. Use the detected domains for precise, least-privilege capabilities.
 
 ## CLI Commands
 
@@ -376,7 +376,7 @@ autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
 | `autonoetic-gateway/src/scheduler/gateway_store/approvals.rs` | Approval persistence (SQLite), session grant CRUD (`insert_session_grant`, `get_session_grants`, `session_grants_cover_targets`, `delete_session_grants`) |
 | `autonoetic-gateway/src/runtime/tools/sandbox.rs` | Approval checks in `SandboxExecTool`; session grant check; sandbox deduplication logic |
 | `autonoetic-gateway/src/runtime/tools/agent.rs` | Approval checks in `AgentRevisionPromoteTool`; promote deduplication logic |
-| `autonoetic-gateway/src/runtime/tools/promotion.rs` | Mechanical severity gating for `promotion.record` — rejects `pass=true` with error/critical findings or warnings without evidence |
+| `autonoetic-gateway/src/runtime/tools/promotion.rs` | Mechanical severity gating for `promotion_record` — rejects `pass=true` with error/critical findings or warnings without evidence |
 | `autonoetic-gateway/src/runtime/remote_access.rs` | URL/domain extraction from code (`RemoteAccessAnalyzer`) |
 | `autonoetic-gateway/src/runtime/approved_exec_cache.rs` | Domain normalization (`normalize_targets`), fingerprinting, host normalization (lowercase + trailing dot stripping) |
 | `autonoetic-gateway/src/runtime/lifecycle.rs` | Session close — grant cleanup for non-suspended sessions |

@@ -41,7 +41,7 @@ pub struct ArtifactPrepareTool;
 
 impl NativeTool for ArtifactPrepareTool {
     fn name(&self) -> &'static str {
-        "artifact.prepare"
+        "artifact_prepare"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -191,7 +191,7 @@ impl NativeTool for ArtifactPrepareTool {
                     );
                 }
                 tracing::info!(
-                    target: "artifact.prepare",
+                    target: "artifact_prepare",
                     credential_id = %rc.credential_id,
                     env_var = %rc.env_var,
                     "Credential resolved"

@@ -71,8 +71,8 @@ Return a JSON object:
 
 ### Step 1: Gather current agent state
 
-1. `agent.revision.inspect(agent_id)` or `agent.revision.list(agent_id)` — get current SKILL.md, capabilities, execution mode, runtime.lock.
-2. `knowledge.search_by_tags(tags=["source:memory_curator", "agent:<agent_id>"])` — historical curated patterns beyond this run's window.
+1. `agent_revision_inspect(agent_id)` or `agent_revision_list(agent_id)` — get current SKILL.md, capabilities, execution mode, runtime.lock.
+2. `knowledge_search_by_tags(tags=["source:memory_curator", "agent:<agent_id>"])` — historical curated patterns beyond this run's window.
 
 ### Step 2: Classify root cause
 
@@ -129,7 +129,7 @@ Spawn `agent-factory.default` with:
 
 ### Step 4: Wait for factory result
 
-Use `workflow.wait` or synchronous spawn to get the factory result.
+Use `workflow_wait` or synchronous spawn to get the factory result.
 
 - **Success**: Return `{ evolved: true, new_revision_id: "<id>", reason: "<instructions_level|code_level>" }`
 - **Factory gate failed** (evaluator or auditor rejected): Return `{ evolved: false, reason: "factory_gate_failed", details: "<why>" }`

@@ -42,19 +42,19 @@ Use distinct emojis or tags for lifecycle events so a human can quickly skim to 
 ### 👑 planner.default
 
 **Turn 29** [22:48:14]
-* 🛠️ **Tool:** `agent.spawn(agent_id="hello-world")`
+* 🛠️ **Tool:** `agent_spawn(agent_id="hello-world")`
 * ❌ **Error:** Script execution failed (Invalid JSON input)
 
 **Turn 30** [22:48:21]
 * 🧠 **Reasoning:** 'hello-world' agent exists but is outdated. Overwriting.
-* 🛠️ **Tool:** `agent.spawn(agent_id="specialized_builder.default")`
+* 🛠️ **Tool:** `agent_spawn(agent_id="specialized_builder.default")`
 * ⏸️ **State:** Hibernating (waiting for child workflow to complete)
 
 ---
 ### 🤖 specialized_builder.default
 
 **Turn 124** [22:48:22]
-* 🛠️ **Tool:** `artifact.inspect(artifact_id="art_bd9603c2")`
+* 🛠️ **Tool:** `artifact_inspect(artifact_id="art_bd9603c2")`
 * 📄 **Result:** 2 files found
 
 **Turn 125** [22:48:35]
@@ -76,14 +76,14 @@ Use distinct emojis or tags for lifecycle events so a human can quickly skim to 
 
 **Turn 46** [22:54:03]
 * ↻ **State:** Resumed from hibernation
-* 📄 **Result:** `workflow.wait` ➔ All tasks completed successfully.
-* 🛠️ **Tool:** `agent.spawn(agent_id="hello-world-v4")`
+* 📄 **Result:** `workflow_wait` ➔ All tasks completed successfully.
+* 🛠️ **Tool:** `agent_spawn(agent_id="hello-world-v4")`
 
 ---
 ### 🤖 specialized_builder.default (Session #2)
 
 **Turn 1** [22:54:09]
-* 🛠️ **Tool:** `artifact.inspect(artifact_id="art_f8f4c2b2")`
+* 🛠️ **Tool:** `artifact_inspect(artifact_id="art_f8f4c2b2")`
 * 📄 **Result:** 2 files found
 ```
 
@@ -92,7 +92,7 @@ Use distinct emojis or tags for lifecycle events so a human can quickly skim to 
 ## Why this design is better
 
 ### For LLM Agents
-1. **Low token cost:** Stripping nanoseconds, giant inline JSON blobs, and repeated headers saves a massive amount of prompt tokens when this digest gets fed back into an agent (via a tool like `digest.query`).
+1. **Low token cost:** Stripping nanoseconds, giant inline JSON blobs, and repeated headers saves a massive amount of prompt tokens when this digest gets fed back into an agent (via a tool like `digest_query`).
 2. **Context Barriers:** The `---` dividers map strongly to "context switching" in LLM attention mechanisms, minimizing confusion between parallel agents.
 3. **Structured Format:** Markdown lists (`* 🛠️ **Tool:** ...`) are vastly more predictable for the LLM to parse than raw text paragraphs.
 

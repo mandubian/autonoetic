@@ -625,7 +625,7 @@ pub struct AgentRevisionCreateTool;
 
 impl NativeTool for AgentRevisionCreateTool {
     fn name(&self) -> &'static str {
-        "agent.revision.create"
+        "agent_revision_create"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -835,7 +835,7 @@ pub struct AgentRevisionCreateFromIntentTool;
 
 impl NativeTool for AgentRevisionCreateFromIntentTool {
     fn name(&self) -> &'static str {
-        "agent.revision.create_from_intent"
+        "agent_revision_create_from_intent"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -1193,7 +1193,7 @@ pub struct AgentRevisionSchemaTool;
 
 impl NativeTool for AgentRevisionSchemaTool {
     fn name(&self) -> &'static str {
-        "agent.revision.schema"
+        "agent_revision_schema"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -1244,7 +1244,7 @@ pub struct AgentRevisionListTool;
 
 impl NativeTool for AgentRevisionListTool {
     fn name(&self) -> &'static str {
-        "agent.revision.list"
+        "agent_revision_list"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -1340,7 +1340,7 @@ pub struct AgentRevisionInspectTool;
 
 impl NativeTool for AgentRevisionInspectTool {
     fn name(&self) -> &'static str {
-        "agent.revision.inspect"
+        "agent_revision_inspect"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -1450,7 +1450,7 @@ pub struct AgentRevisionPromoteTool;
 
 impl NativeTool for AgentRevisionPromoteTool {
     fn name(&self) -> &'static str {
-        "agent.revision.promote"
+        "agent_revision_promote"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -1737,7 +1737,7 @@ pub struct AgentRevisionRollbackTool;
 
 impl NativeTool for AgentRevisionRollbackTool {
     fn name(&self) -> &'static str {
-        "agent.revision.rollback"
+        "agent_revision_rollback"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -1880,7 +1880,7 @@ pub struct AgentRevisionDiffTool;
 
 impl NativeTool for AgentRevisionDiffTool {
     fn name(&self) -> &'static str {
-        "agent.revision.diff"
+        "agent_revision_diff"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

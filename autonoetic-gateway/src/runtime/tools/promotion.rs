@@ -26,7 +26,7 @@ pub struct PromotionRecordTool;
 
 impl NativeTool for PromotionRecordTool {
     fn name(&self) -> &'static str {
-        "promotion.record"
+        "promotion_record"
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -181,7 +181,7 @@ impl NativeTool for PromotionRecordTool {
                 turn_id,
                 0,
                 "tool",
-                "promotion.record",
+                "promotion_record",
                 EntryStatus::Success,
                 Some(serde_json::json!({
                     "arguments": {
@@ -206,7 +206,7 @@ pub struct PromotionQueryTool;
 
 impl NativeTool for PromotionQueryTool {
     fn name(&self) -> &'static str {
-        "promotion.query"
+        "promotion_query"
     }
 
     fn definition(&self) -> ToolDefinition {

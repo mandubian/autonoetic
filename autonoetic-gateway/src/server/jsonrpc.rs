@@ -165,7 +165,7 @@ mod tests {
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": "2",
-            "method": "agent.spawn",
+            "method": "agent_spawn",
             "params": {
                 "agent_id": "missing",
                 "message": "hello"

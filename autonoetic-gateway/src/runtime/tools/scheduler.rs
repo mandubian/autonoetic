@@ -30,7 +30,7 @@ pub struct SchedulerCronCreateTool;
 
 impl NativeTool for SchedulerCronCreateTool {
     fn name(&self) -> &'static str {
-        "scheduler.cron.create"
+        "scheduler_cron_create"
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -65,7 +65,7 @@ impl NativeTool for SchedulerCronCreateTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler.cron.create")
+        policy.can_schedule("scheduler_cron_create")
     }
 
     fn execute(
@@ -88,7 +88,7 @@ impl NativeTool for SchedulerCronCreateTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler.cron.create") {
+        if !policy.can_schedule("scheduler_cron_create") {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.create").to_error_response());
         }
 
@@ -253,7 +253,7 @@ pub struct SchedulerCronListTool;
 
 impl NativeTool for SchedulerCronListTool {
     fn name(&self) -> &'static str {
-        "scheduler.cron.list"
+        "scheduler_cron_list"
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -284,7 +284,7 @@ impl NativeTool for SchedulerCronListTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler.cron.list")
+        policy.can_schedule("scheduler_cron_list")
     }
 
     fn execute(
@@ -307,7 +307,7 @@ impl NativeTool for SchedulerCronListTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler.cron.list") {
+        if !policy.can_schedule("scheduler_cron_list") {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.list").to_error_response());
         }
 
@@ -359,7 +359,7 @@ pub struct SchedulerCronPauseTool;
 
 impl NativeTool for SchedulerCronPauseTool {
     fn name(&self) -> &'static str {
-        "scheduler.cron.pause"
+        "scheduler_cron_pause"
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -383,7 +383,7 @@ impl NativeTool for SchedulerCronPauseTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler.cron.pause")
+        policy.can_schedule("scheduler_cron_pause")
     }
 
     fn execute(
@@ -406,7 +406,7 @@ impl NativeTool for SchedulerCronPauseTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler.cron.pause") {
+        if !policy.can_schedule("scheduler_cron_pause") {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.pause").to_error_response());
         }
 
@@ -444,7 +444,7 @@ pub struct SchedulerCronResumeTool;
 
 impl NativeTool for SchedulerCronResumeTool {
     fn name(&self) -> &'static str {
-        "scheduler.cron.resume"
+        "scheduler_cron_resume"
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -467,7 +467,7 @@ impl NativeTool for SchedulerCronResumeTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler.cron.resume")
+        policy.can_schedule("scheduler_cron_resume")
     }
 
     fn execute(
@@ -490,7 +490,7 @@ impl NativeTool for SchedulerCronResumeTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler.cron.resume") {
+        if !policy.can_schedule("scheduler_cron_resume") {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.resume").to_error_response());
         }
 
@@ -528,7 +528,7 @@ pub struct SchedulerCronCancelTool;
 
 impl NativeTool for SchedulerCronCancelTool {
     fn name(&self) -> &'static str {
-        "scheduler.cron.cancel"
+        "scheduler_cron_cancel"
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -553,7 +553,7 @@ impl NativeTool for SchedulerCronCancelTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler.cron.cancel")
+        policy.can_schedule("scheduler_cron_cancel")
     }
 
     fn execute(
@@ -576,7 +576,7 @@ impl NativeTool for SchedulerCronCancelTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler.cron.cancel") {
+        if !policy.can_schedule("scheduler_cron_cancel") {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.cancel").to_error_response());
         }
 

@@ -25,7 +25,7 @@ pub struct ArtifactBuildTool;
 
 impl NativeTool for ArtifactBuildTool {
     fn name(&self) -> &'static str {
-        "artifact.build"
+        "artifact_build"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -260,7 +260,7 @@ pub struct ArtifactInspectTool;
 
 impl NativeTool for ArtifactInspectTool {
     fn name(&self) -> &'static str {
-        "artifact.inspect"
+        "artifact_inspect"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -349,7 +349,7 @@ pub struct ArtifactResolveRefTool;
 
 impl NativeTool for ArtifactResolveRefTool {
     fn name(&self) -> &'static str {
-        "artifact.resolve_ref"
+        "artifact_resolve_ref"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

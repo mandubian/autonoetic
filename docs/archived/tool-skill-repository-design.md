@@ -101,7 +101,7 @@ Hermes' `skills_hub.py` supports:
 - Trust levels: `builtin`, `trusted`, `community`
 - Security scanning before installation
 
-**What Autonoetic should take:** The multi-source pattern, but as gateway primitives (`skill.install`, `skill.search`) rather than a monolithic hub.
+**What Autonoetic should take:** The multi-source pattern, but as gateway primitives (`skill_install`, `skill.search`) rather than a monolithic hub.
 
 ---
 
@@ -141,7 +141,7 @@ CCOS's CapabilityMarketplace (13 files, ~3500 lines):
 
 ### Agent Composition: Delegation, Not Inheritance
 
-Agents compose via `agent.spawn` — the existing delegation primitive. There is no agent-level `composes:` or inheritance in manifests. If an agent needs architect patterns, it spawns `architect.default` as a separate session. The planner already handles decomposition this way.
+Agents compose via `agent_spawn` — the existing delegation primitive. There is no agent-level `composes:` or inheritance in manifests. If an agent needs architect patterns, it spawns `architect.default` as a separate session. The planner already handles decomposition this way.
 
 The agent-adapter wraps another agent to reshape its I/O interface — that's the extent of "agent composition." No new primitives needed.
 
@@ -152,7 +152,7 @@ Instead of scattered match statements in `tools.rs`, use a declarative registry:
 ```rust
 // In tool_registry.rs (new file, ~150 lines)
 pub struct ToolEntry {
-    pub name: String,              // "content.write"
+    pub name: String,              // "content_write"
     pub schema: Value,             // OpenAI-format JSON Schema
     pub handler: ToolHandler,      // fn(args: Value, ctx: &Context) -> Result<Value>
     pub capability: Capability,    // Required capability to invoke
@@ -173,7 +173,7 @@ impl ToolRegistry {
 
 // Tool files self-register via macro:
 register_tool! {
-    name: "content.write",
+    name: "content_write",
     schema: { ... },
     capability: Capability::WriteAccess,
     handler: content_write_handler,
@@ -246,7 +246,7 @@ Full instructions here...
 |------|-----------|-------------|
 | `skill.list` | `(query?, category?, offset?, limit?) → {skills, total, has_more}` | Paginated metadata search |
 | `skill.view` | `(name: string, file?: string) → content` | Full content or linked file |
-| `skill.install` | `(source: string, name?: string) → result` | Install from remote source |
+| `skill_install` | `(source: string, name?: string) → result` | Install from remote source |
 | `skill.uninstall` | `(name: string) → result` | Remove a skill |
 | `skill.search` | `(query: string, sources?: [string]) → [results]` | Search across sources |
 
@@ -324,8 +324,8 @@ pub enum SkillSource {
 ```
 
 Gateway primitives handle the complexity:
-- `skill.install("github:openai/skills/skill-creator")`
-- `skill.install("well-known:https://example.com/.well-known/skills/")`
+- `skill_install("github:openai/skills/skill-creator")`
+- `skill_install("well-known:https://example.com/.well-known/skills/")`
 - `skill.search("twitter scraping", sources: ["local", "github"])`
 
 Trust levels: `local` (trusted), `github:openai/` (trusted), `github:user/` (community)
@@ -343,7 +343,7 @@ Trust levels: `local` (trusted), `github:openai/` (trusted), `github:user/` (com
 | **Toolset composition** | Domain indexing | `includes` field | Convention in SKILL.md |
 | **MCP integration** | Separate provider type | Register as tools | Register as tools |
 | **Sources** | 9 provider types | 4 source adapters | 4 source types |
-| **Synthesis** | LLM pipeline (complex) | Agent creates via skill_manage | Agent creates via sandbox.exec |
+| **Synthesis** | LLM pipeline (complex) | Agent creates via skill_manage | Agent creates via sandbox_exec |
 | **Discovery** | Discovery agents + marketplace | skills_list + skills_hub | skill.list + skill.search |
 | **Trust levels** | Complex tier system | 3 levels (builtin/trusted/community) | 3 levels (local/trusted/community) |
 
@@ -367,7 +367,7 @@ Compare to:
 
 Autonoetic achieves the same functionality in ~850 lines because:
 1. Rust is more concise for this pattern
-2. No synthesis pipeline (agents do it via sandbox.exec)
+2. No synthesis pipeline (agents do it via sandbox_exec)
 3. Toolsets are convention, not code
 4. Gateway mediation means fewer edge cases
 

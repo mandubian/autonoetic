@@ -1,4 +1,4 @@
-# Interaction Mechanisms: Approval vs user.ask vs clarification_needed
+# Interaction Mechanisms: Approval vs user_ask vs clarification_needed
 
 ## Overview
 
@@ -6,10 +6,10 @@ Autonoetic has three distinct mechanisms for human/agent interaction during work
 
 ## Comparison Table
 
-| Property | Approval | user.ask | clarification_needed |
+| Property | Approval | user_ask | clarification_needed |
 |---|---|---|---|
 | **Purpose** | Gate privileged operations | Ask human questions | Child requests info from parent |
-| **Triggered by** | Tool (sandbox.exec, agent.install) | Agent explicitly calls tool | Child agent return value |
+| **Triggered by** | Tool (sandbox_exec, agent.install) | Agent explicitly calls tool | Child agent return value |
 | **Who resolves** | Operator (CLI) | Human (chat/CLI) | Parent agent |
 | **Session state** | `YieldReason::ApprovalRequired` | `YieldReason::UserInputRequired` | Normal tool result |
 | **Resume mechanism** | Auto-resume by Gateway | Gateway-owned `interaction.answer` / checkpoint resume (`resume_from_user_interaction`) | Parent re-spawns child |
@@ -27,7 +27,7 @@ A **Gateway-enforced security gate** for privileged operations. Before any opera
 
 ### When To Use
 
-- `sandbox.exec` with network access (HTTP requests, socket connections)
+- `sandbox_exec` with network access (HTTP requests, socket connections)
 - `agent.install` for evolution roles
 - Any operation flagged by security analysis as high-risk
 
@@ -59,7 +59,7 @@ Agent → Continues with real tool output
 
 - **Auto-resume**: Gateway automatically resumes the session when approval is resolved
 - **Payload preservation**: For `agent.install`, the full args are stored and replayed on retry (no payload drift)
-- **Domain-level reuse**: For `sandbox.exec`, once a domain is approved at the root workflow level, other sessions can reuse it
+- **Domain-level reuse**: For `sandbox_exec`, once a domain is approved at the root workflow level, other sessions can reuse it
 - **Continuation-based**: The approved command is stored in a continuation file and replayed with real results
 
 ### Example
@@ -80,7 +80,7 @@ Agent → Continues with real tool output
 }
 ```
 
-## user.ask
+## user_ask
 
 ### What It Is
 
@@ -94,14 +94,14 @@ A **UI primitive** that lets an agent ask a human a question and suspend executi
 
 ### When NOT To Use
 
-- **NEVER for approval handling** — use `workflow.wait` instead
+- **NEVER for approval handling** — use `workflow_wait` instead
 - During active workflow orchestration (blocked by runtime guard)
 - When child tasks are pending or approvals are outstanding
 
 ### How It Works
 
 ```
-Agent → user.ask({"question": "What format do you want?"})
+Agent → user_ask({"question": "What format do you want?"})
      → Creates UserInteraction (persisted to SQLite)
      → Returns TurnOutcome::SuspendedUserInput
      → Session suspends (checkpoint saved)
@@ -117,10 +117,10 @@ See [`plan-channel-agnostic-interaction-answering.md`](./plan-channel-agnostic-i
 ### Key Properties
 
 - **Gateway-orchestrated resume**: Use JSON-RPC `interaction.answer` (or shared orchestrator); avoid raw store writes without resume
-- **Blocked during orchestration**: Runtime guard prevents `user.ask` when workflow has active children or pending approvals
-- **Clear suspension state**: When accepted, `user.ask` suspends as `jsonrpc_spawn_suspended_user_input` (not a normal completion)
+- **Blocked during orchestration**: Runtime guard prevents `user_ask` when workflow has active children or pending approvals
+- **Clear suspension state**: When accepted, `user_ask` suspends as `jsonrpc_spawn_suspended_user_input` (not a normal completion)
 
-### `user.interaction.status` Access Scope
+### `user_interaction_status` Access Scope
 
 Status reads are scope-checked by the gateway. Access is allowed when either condition is true:
 
@@ -132,7 +132,7 @@ Cross-root, cross-agent status reads return a permission error.
 ### Example
 
 ```json
-// user.ask tool response
+// user_ask tool response
 {
   "ok": true,
   "interaction_id": "ui-4efaa4c6",
@@ -155,21 +155,21 @@ A **structured child-to-parent signal** indicating the child agent needs more in
 
 ### When NOT To Use
 
-- For approval handling (use `workflow.wait`)
-- For direct human interaction (use `user.ask` sparingly)
+- For approval handling (use `workflow_wait`)
+- For direct human interaction (use `user_ask` sparingly)
 - As a general error signal (use normal error responses)
 
 ### How It Works
 
 ```
-Parent → agent.spawn("coder.default", message="Implement X")
+Parent → agent_spawn("coder.default", message="Implement X")
 
 Child → Analyzes task, realizes missing info
      → Returns {"status": "clarification_needed", "question": "What language? Python or JavaScript?"}
 
 Parent → Sees structured result
        → Re-spawns child with clarified instructions
-       → agent.spawn("coder.default", message="Implement X in Python")
+       → agent_spawn("coder.default", message="Implement X in Python")
 
 Child → Proceeds with clarified task
 ```
@@ -207,9 +207,9 @@ Child → Proceeds with clarified task
 │ NO → Is this a question for a human?                         │
 ├──────────────────────────────────────────────────────────────┤
 │ YES → Is the session orchestrating child tasks?              │
-│       ├── YES → DO NOT use user.ask                          │
-│       │         Tell user in prose, use workflow.wait        │
-│       └── NO → Use user.ask                                  │
+│       ├── YES → DO NOT use user_ask                          │
+│       │         Tell user in prose, use workflow_wait        │
+│       └── NO → Use user_ask                                  │
 │                 Session suspends, explicit resume required   │
 ├──────────────────────────────────────────────────────────────┤
 │ NO → Is this a child agent requesting info from parent?      │
@@ -221,18 +221,18 @@ Child → Proceeds with clarified task
 
 ## Common Mistakes and Fixes
 
-### Mistake 1: Using user.ask for Approval
+### Mistake 1: Using user_ask for Approval
 
 ```
 // WRONG: Creates deadlock
-user.ask({"question": "Should I approve the network access?"})
+user_ask({"question": "Should I approve the network access?"})
 
-// RIGHT: Use workflow.wait
+// RIGHT: Use workflow_wait
 // (Tell user in response text) "Approval apr-xxx pending. Run: gateway approvals approve apr-xxx"
-workflow.wait({"task_ids": ["task-xxx"], "timeout_secs": 300})
+workflow_wait({"task_ids": ["task-xxx"], "timeout_secs": 300})
 ```
 
-**Why it's wrong**: `user.ask` creates a `UserInputRequired` checkpoint that blocks the session. Workflow join signals can't resume a session blocked on user input. The session is stranded.
+**Why it's wrong**: `user_ask` creates a `UserInputRequired` checkpoint that blocks the session. Workflow join signals can't resume a session blocked on user input. The session is stranded.
 
 ### Mistake 2: Changing Payload Between Approval Retries
 
@@ -268,7 +268,7 @@ workflow.wait({"task_ids": ["task-xxx"], "timeout_secs": 300})
 // Evaluator fails → planner re-spawns evaluator → evaluator fails → ...
 
 // RIGHT: Check error type
-// Schema validation error + promotion.record was called → proceed to next step
+// Schema validation error + promotion_record was called → proceed to next step
 // Functional failure → iterate with coder
 ```
 
@@ -278,14 +278,14 @@ workflow.wait({"task_ids": ["task-xxx"], "timeout_secs": 300})
 
 The Gateway enforces several mechanical guards to prevent misuse:
 
-### 1. user.ask Blocked During Orchestration
+### 1. user_ask Blocked During Orchestration
 
 ```rust
 // In UserAskTool::execute()
 if has_active_children || has_pending_approvals {
     return Ok(json!({
         "ok": false,
-        "error": "user.ask is not available while orchestrating workflow tasks. Use workflow.wait."
+        "error": "user_ask is not available while orchestrating workflow tasks. Use workflow_wait."
     }).to_string());
 }
 ```
@@ -314,11 +314,11 @@ if approved.iter().any(|r| detected_hosts.iter().any(|h| r.reason.contains(h))) 
 
 | Use Case | Mechanism |
 |---|---|
-| Network access in sandbox.exec | **Approval** (automatic) |
+| Network access in sandbox_exec | **Approval** (automatic) |
 | Agent installation | **Approval** (automatic) |
-| Asking user for preferences | **user.ask** (when no active workflow) |
+| Asking user for preferences | **user_ask** (when no active workflow) |
 | Child needs more info from parent | **clarification_needed** (structured result) |
-| Waiting for approval resolution | **workflow.wait** (NOT user.ask) |
-| Telling user about pending approval | **Prose in response text** (NOT user.ask) |
+| Waiting for approval resolution | **workflow_wait** (NOT user_ask) |
+| Telling user about pending approval | **Prose in response text** (NOT user_ask) |
 
-The key principle: **Approval is a Gateway-enforced security mechanism. user.ask is a UI convenience. clarification_needed is a structured agent-to-agent signal.** Never confuse them.
+The key principle: **Approval is a Gateway-enforced security mechanism. user_ask is a UI convenience. clarification_needed is a structured agent-to-agent signal.** Never confuse them.

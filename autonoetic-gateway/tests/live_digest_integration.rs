@@ -23,7 +23,7 @@ impl LlmDriver for AnnotateThenStopDriver {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "tc-annotate".to_string(),
-                    name: "digest.annotate".to_string(),
+                    name: "digest_annotate".to_string(),
                     arguments: r#"{"type":"observation","content":"User prefers short answers."}"#
                         .to_string(),
                 }],

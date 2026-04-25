@@ -159,7 +159,7 @@ approve via `runtime/continuation.rs`.
 
 | ID | Rule | Source | Enforcement | Status |
 |---|---|---|---|---|
-| R-2.1 | Remote network access in `sandbox.exec` is statically detected and blocks pending approval. | remote-access-approval.md | `runtime/tools/sandbox.rs:935+` | ENFORCED |
+| R-2.1 | Remote network access in `sandbox_exec` is statically detected and blocks pending approval. | remote-access-approval.md | `runtime/tools/sandbox.rs:935+` | ENFORCED |
 | R-2.2 | Approval requests are persisted with unique IDs. | approval-system.md | `approvals` table | ENFORCED |
 | R-2.3 | Identical operations within a session deduplicate. | approval-system.md | `approved_exec_cache.rs` | ENFORCED |
 | R-2.4 | Approved hosts auto-approve subsequent calls within the root session. | approved-resources-caching.md | `session_approval_grants` table | ENFORCED |
@@ -167,12 +167,12 @@ approve via `runtime/continuation.rs`.
 | R-2.6 | Fingerprint-identical approved executions skip re-approval for the gateway lifetime. | approved-resources-caching.md | `approved_exec_cache.rs` | ENFORCED |
 | R-2.7 | Only concrete targets (URLs, IPs) cache; opaque patterns always re-prompt. | approved-resources-caching.md | `approved_exec_cache::has_concrete_targets` | ENFORCED |
 | R-2.8 | High-risk promotion requires evaluator AND auditor pass. | spec-install-pipeline-hardening.md §3.1 | `runtime/tools/agent_revision.rs::promote` | ENFORCED |
-| R-2.9 | `promotion.record` with `pass=true` rejects on error/critical findings, and on warning findings lacking evidence. | approval-system.md | `runtime/tools/promotion.rs` | ENFORCED |
+| R-2.9 | `promotion_record` with `pass=true` rejects on error/critical findings, and on warning findings lacking evidence. | approval-system.md | `runtime/tools/promotion.rs` | ENFORCED |
 | R-2.10 | Approval-gated turns suspend to a continuation; real tool result replays on approve. | ARCHITECTURE.md | `runtime/continuation.rs:178 execute_approved_action` | ENFORCED |
 | R-2.11 | Suspended turns exceeding timeout mark the task failed and clean the continuation. | ARCHITECTURE.md | scheduler tick | PARTIAL |
 | R-2.12 | Operators approve/reject via durable CLI; decisions persist and dispatch signals. | approval-system.md | `gateway approvals approve/reject` | ENFORCED |
-| R-2.13 | `user.ask` checkpoints the session as `YieldReason::UserInputRequired`. | architecture-interaction-mechanisms.md | `runtime/tools/user_interaction.rs` | ENFORCED |
-| R-2.14 | `user.ask` is refused if the workflow has active children or pending approvals. | architecture-interaction-mechanisms.md | runtime guard | PARTIAL |
+| R-2.13 | `user_ask` checkpoints the session as `YieldReason::UserInputRequired`. | architecture-interaction-mechanisms.md | `runtime/tools/user_interaction.rs` | ENFORCED |
+| R-2.14 | `user_ask` is refused if the workflow has active children or pending approvals. | architecture-interaction-mechanisms.md | runtime guard | PARTIAL |
 | R-2.15 | Spawn payload is preserved verbatim across approval resume. | approval-system.md | `continuation.rs:332` | ENFORCED |
 
 ## 3. Sandbox Isolation
@@ -203,13 +203,13 @@ Vault in `vault.rs`, redaction in `log_redaction.rs`, injection in
 | R-4.2 | Vault uses AES-256-GCM with a random 96-bit nonce per entry. | credential-management.md | `vault.rs:112` | ENFORCED |
 | R-4.3 | Master key is required from `AUTONOETIC_VAULT_KEY` or `AUTONOETIC_VAULT_KEY_PATH`; absence disables vault ops. | credential-management.md | `vault.rs:70,84,95` | ENFORCED |
 | R-4.4 | Credential IDs (`cred_*`) are mechanical references, never secret material. | credential-management.md | `credential.rs` | ENFORCED |
-| R-4.5 | `credential.request` requires `CredentialAccess` matching the service. | credential-management.md | `credential.rs:358` | ENFORCED |
-| R-4.6 | `credential.setup` `user_prompt` step suspends the session for operator approval. | credential-management.md | `credential.rs` + `approval.rs` | ENFORCED |
-| R-4.7 | `credential.request` response is redacted; raw secrets never returned. | credential-management.md | `credential.rs` response builder | ENFORCED |
+| R-4.5 | `credential_request` requires `CredentialAccess` matching the service. | credential-management.md | `credential.rs:358` | ENFORCED |
+| R-4.6 | `credential_setup` `user_prompt` step suspends the session for operator approval. | credential-management.md | `credential.rs` + `approval.rs` | ENFORCED |
+| R-4.7 | `credential_request` response is redacted; raw secrets never returned. | credential-management.md | `credential.rs` response builder | ENFORCED |
 | R-4.8 | Secrets are zeroized from memory after injection. | ARCHITECTURE.md | `SecretString` wrapping in `vault.rs` | PARTIAL |
 | R-4.9 | `credential_env` passes secrets as env vars resolved server-side. | credential-management.md | `sandbox.rs` credential_env path | ENFORCED |
 | R-4.10 | Refresh tokens live in vault, never exposed to agents. | credential-management.md | `vault.rs`, `credential.rs` refresh | ENFORCED |
-| R-4.11 | `credential.refresh` 401 auto-retry fires at most once per request. | credential-management.md | `credential.rs` | ENFORCED |
+| R-4.11 | `credential_refresh` 401 auto-retry fires at most once per request. | credential-management.md | `credential.rs` | ENFORCED |
 | R-4.12 | Secret-shaped text in responses is blocked by `prohibited_text_patterns`. | response-validation-gate.md | `runtime/response_validation.rs:68` | ENFORCED |
 | R-4.13 | Logs, traces, digests, and LLM prompts are redacted via `redact_text_for_logs` before storage. | security-sentinel.md | `log_redaction.rs:128` | ENFORCED |
 | R-4.14 | Redaction happens **before** causal-chain append (ordering invariant). | (R+9) | not pinned | MISSING |
@@ -225,11 +225,11 @@ Enforcement hook for ingress, response validation gate for egress.
 | R-5.3 | Failed coercion returns an actionable `hint`. | schema-enforcement-hook.md | tool response | ENFORCED |
 | R-5.4 | Every enforcement decision is logged (pass/coerce/reject). | schema-enforcement-hook.md | causal event emission | ENFORCED |
 | R-5.5 | Response contract checks `required_artifacts`, `max_artifacts`, `max_total_size_mb`, `max_reply_length_chars`. | response-validation-gate.md | `response_validation.rs:68` | ENFORCED |
-| R-5.6 | Contract verification uses authoritative runtime state (content-store byte sizes, successful `artifact.build` traces) — not LLM claims. | response-validation-gate.md | `response_validation.rs` | ENFORCED |
+| R-5.6 | Contract verification uses authoritative runtime state (content-store byte sizes, successful `artifact_build` traces) — not LLM claims. | response-validation-gate.md | `response_validation.rs` | ENFORCED |
 | R-5.7 | `output_schema` validates JSON final replies. | response-validation-gate.md | `validate_json_against_schema:563` | ENFORCED |
 | R-5.8 | Validation failures trigger a bounded repair loop (`max_validation_loops`, `max_validation_duration_ms`); exhaustion returns error. | response-validation-gate.md | `execution.rs:1965 validate_and_maybe_repair` | ENFORCED |
 | R-5.9 | `min_artifact_builds` is verified via execution traces. | response-validation-gate.md | `response_validation.rs` | ENFORCED |
-| R-5.10 | `artifact.inspect` accepts explicit `art_*` IDs only; implicit `impl_task-*` handles are rejected. | content-store.md | `runtime/tools/artifact.rs` | ENFORCED |
+| R-5.10 | `artifact_inspect` accepts explicit `art_*` IDs only; implicit `impl_task-*` handles are rejected. | content-store.md | `runtime/tools/artifact.rs` | ENFORCED |
 | R-5.11 | Native tool errors use a uniform `{error_type, message, repair_hint}` envelope. | ARCHITECTURE.md | per-tool response construction | PARTIAL |
 | R-5.12 | `error_type: fatal` triggers session abort; recoverable types do not. | ARCHITECTURE.md | lifecycle error processing | ENFORCED |
 | R-5.13 | Child → parent tool results validate against `io.produces` on egress. | (R+2) | not pinned | MISSING |
@@ -258,7 +258,7 @@ Per-session registries in `runtime/session_budget.rs`,
 | R-6.15 | Turn continuation atomically replays the pending tool call on approve. | ARCHITECTURE.md | `runtime/continuation.rs` | ENFORCED |
 | R-6.16 | `session.fork` branches from a named checkpoint. | ARCHITECTURE.md | JSON-RPC `session.fork` | ENFORCED |
 | R-6.17 | Checkpoint retention prunes per configuration. | ARCHITECTURE.md | scheduler prune task | PARTIAL |
-| R-6.18 | Workflow orchestration persists `WorkflowRun` on first `agent.spawn`. | workflow-orchestration.md | `workflow_store.rs` | ENFORCED |
+| R-6.18 | Workflow orchestration persists `WorkflowRun` on first `agent_spawn`. | workflow-orchestration.md | `workflow_store.rs` | ENFORCED |
 | R-6.19 | Child task message/metadata is preserved across approval boundaries. | workflow-orchestration.md | `TaskRun` storage | ENFORCED |
 | R-6.20 | User chat addressed to a child `session_id` rewrites to the root session. | workflow-orchestration.md | router `event.ingest` | ENFORCED |
 | R-6.21 | Tree-wide budget aggregated across all descendants of a root session. | (R+4) | not pinned | MISSING |
@@ -278,7 +278,7 @@ Loop guard in `runtime/guard.rs`, emergency stop in
 | R-7.5 | Loop guard trips on `max_tool_failures` per tool (default 5); permission errors do not count. | ARCHITECTURE.md | `guard.rs:66,97` | ENFORCED |
 | R-7.6 | Fatal errors (`error_type: fatal`) abort the session regardless of loop-guard budget. | ARCHITECTURE.md | lifecycle error handling | ENFORCED |
 | R-7.7 | Consecutive LLM steps without a successful tool result trip the loop guard. | ARCHITECTURE.md | `guard.rs:check_loop` | ENFORCED |
-| R-7.8 | Concurrent spawns beyond capability limit return `quota_exceeded`. | agent-capabilities.md | `policy.rs:543` + `agent.spawn` tool | ENFORCED |
+| R-7.8 | Concurrent spawns beyond capability limit return `quota_exceeded`. | agent-capabilities.md | `policy.rs:543` + `agent_spawn` tool | ENFORCED |
 | R-7.9 | `AgentSpawn.max_children` is enforced per agent. | agent-capabilities.md | same | ENFORCED |
 | R-7.10 | Scheduler rejects sub-threshold intervals (`min_interval_secs`); sub-10s requires script-mode target. | ARCHITECTURE.md | `runtime/tools/scheduler.rs` | ENFORCED |
 | R-7.11 | Approval timeout fails the task and cleans the continuation. | ARCHITECTURE.md | scheduler tick | PARTIAL |
@@ -315,7 +315,7 @@ separate. Runtime-lock in `runtime_lock.rs`.
 
 ## 9. Agent Install & Provenance
 
-Three-stage activation: `artifact.build → revision.create →
+Three-stage activation: `artifact_build → revision.create →
 revision.promote`.
 
 | ID | Rule | Source | Enforcement | Status |
@@ -326,13 +326,13 @@ revision.promote`.
 | R-9.4 | The alias registry is the sole source of truth for the "active" revision. | ARCHITECTURE.md | `agent_aliases` table | ENFORCED |
 | R-9.5 | Candidate revisions are runnable via explicit `agent_ref` without promotion. | ARCHITECTURE.md | session binding | ENFORCED |
 | R-9.6 | Revision statuses (`candidate`, `ready`, `rejected`, `archived`) bound what can promote. | ARCHITECTURE.md | `agent_revisions.status` | ENFORCED |
-| R-9.7 | Eval gating: if required, revision mismatch rejects promotion. | ARCHITECTURE.md | `agent.revision.promote` | ENFORCED |
+| R-9.7 | Eval gating: if required, revision mismatch rejects promotion. | ARCHITECTURE.md | `agent_revision_promote` | ENFORCED |
 | R-9.8 | `SKILL.md` is parsed at install; capabilities, limits, and execution mode extracted. | agent-capabilities.md | skill parser | ENFORCED |
 | R-9.9 | High-risk capabilities trigger approval gate on promotion. | spec-install-pipeline-hardening.md | `agent_revision.rs::promote` | ENFORCED |
 | R-9.10 | External Python imports are detected at install. | spec-install-pipeline-hardening.md §3.3 | `install_contract.rs::detect_external_python_imports` | ENFORCED |
 | R-9.11 | Dependency files with no layers block promotion for high-risk agents. | spec-install-pipeline-hardening.md §3.2 | same | ENFORCED |
 | R-9.12 | `BundleHealthReport` is returned in `create_from_intent` responses. | spec-install-pipeline-hardening.md §3.4 | `install_contract.rs::analyze_bundle_health` | ENFORCED |
-| R-9.13 | Agent bundle signatures are verified at `agent.revision.create`. | ARCHITECTURE.md (aspirational) | not implemented | MISSING |
+| R-9.13 | Agent bundle signatures are verified at `agent_revision_create`. | ARCHITECTURE.md (aspirational) | not implemented | MISSING |
 | R-9.14 | Trust domains constrain cross-domain agent spawns. | agent-messaging.md | not implemented | DESIGN DEBT |
 
 ## 10. Federation / Remote
@@ -345,7 +345,7 @@ HTTP in `server/http.rs`, JSON-RPC in `server/jsonrpc.rs`, OFP in
 | R-10.1 | Remote agents authenticate via Bearer token. | ARCHITECTURE.md | `server/http.rs` | ENFORCED |
 | R-10.2 | Content API is exposed over HTTP for remote content access. | content-store.md | HTTP content endpoints | ENFORCED |
 | R-10.3 | JSON-RPC ingress requires `AUTONOETIC_SHARED_SECRET`. | spec-install-pipeline-hardening.md §3.10 | `server/jsonrpc.rs` | ENFORCED |
-| R-10.4 | Remote agents inherit all approval gates. | remote-access-approval.md | sandbox.exec universal logic | ENFORCED |
+| R-10.4 | Remote agents inherit all approval gates. | remote-access-approval.md | sandbox_exec universal logic | ENFORCED |
 | R-10.5 | Layer mounts in remote execution are fetched and cached before sandbox use. | spec-build-layers-dependency-resolution.md §2.6 | HTTP layer download | ENFORCED |
 | R-10.6 | OFP messages preserve session context across gateways. | — | future federation layer | DESIGN DEBT |
 | R-10.7 | Remote agents cannot self-approve network access. | separation-of-powers.md | policy engine + remote validation | PARTIAL |
@@ -355,11 +355,11 @@ HTTP in `server/http.rs`, JSON-RPC in `server/jsonrpc.rs`, OFP in
 
 | ID | Rule | Source | Enforcement | Status |
 |---|---|---|---|---|
-| R-11.1 | Parent → child messages route through `agent.spawn`. | separation-of-powers.md | `runtime/tools/agent.rs` | ENFORCED |
+| R-11.1 | Parent → child messages route through `agent_spawn`. | separation-of-powers.md | `runtime/tools/agent.rs` | ENFORCED |
 | R-11.2 | Child `clarification_needed` status returns as a tool result; parent re-spawns. | architecture-interaction-mechanisms.md | spawn result processing | ENFORCED |
-| R-11.3 | `agent.message` is peer-to-peer between active sessions. | agent-messaging.md | `agent_messages` table | ENFORCED |
+| R-11.3 | `agent_message` is peer-to-peer between active sessions. | agent-messaging.md | `agent_messages` table | ENFORCED |
 | R-11.4 | Messages auto-inject into the target session at turn start. | agent-messaging.md | `execute_session_turn` | ENFORCED |
-| R-11.5 | `agent.message` respects `policy.can_message_agent` ACL. | agent-messaging.md | `policy.rs:554` | ENFORCED |
+| R-11.5 | `agent_message` respects `policy.can_message_agent` ACL. | agent-messaging.md | `policy.rs:554` | ENFORCED |
 | R-11.6 | Spawned children inherit `root_session_id` from parent. | content-store.md | session binding | ENFORCED |
 | R-11.7 | `max_children` is enforced at spawn. | agent-capabilities.md | `policy.rs:543` | ENFORCED |
 | R-11.8 | Spawn payload is preserved across approval and continuation. | approval-system.md | `TurnContinuation` storage | ENFORCED |
@@ -383,7 +383,7 @@ before it moves into its category.
 | R+8 | Vault master-key presence probe at gateway startup. | P2 |
 | R+9 | Redaction-before-write ordering invariant. | P1 |
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | P1 |
-| R+11 | Bundle signature verification at `agent.revision.create`. | P1 |
+| R+11 | Bundle signature verification at `agent_revision_create`. | P1 |
 | R+12 | Orphan-child reaper on parent session termination. | P1 |
 | R+13 | Approval grant TTL. | P2 |
 | R+14 | `can_invoke_tool` denies unknown tool names explicitly. | P2 |

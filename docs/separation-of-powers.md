@@ -44,7 +44,7 @@ Agent (low-privilege):           Gateway (high-privilege):
 
 Approval-gated tool calls are a concrete example of separation-of-powers:
 
-1. **Agent proposes** a privileged action (for example `sandbox.exec` with remote access, or `agent.revision.promote`).
+1. **Agent proposes** a privileged action (for example `sandbox_exec` with remote access, or `agent_revision_promote`).
 2. **Gateway enforces** the approval gate and records a pending request.
 3. **Operator decides** approve/reject.
 4. **Gateway executes** the approved action for workflow-bound continuations and returns the real tool result to the resumed turn.
@@ -68,7 +68,7 @@ The agent's `SKILL.md` declares delegation capabilities:
 ```yaml
 metadata:
   capabilities:
-    - agent.spawn
+    - agent_spawn
   spawn_policy:
     allowed_targets:
       - researcher.default
@@ -84,7 +84,7 @@ Agent thinks:
   1. I need research → propose: spawn researcher.default
   2. I need code     → propose: spawn coder.default
 
-Agent calls: gateway.agent.spawn(target="researcher.default", instructions="...")
+Agent calls: gateway.agent_spawn(target="researcher.default", instructions="...")
 ```
 
 ### Gateway side
@@ -93,7 +93,7 @@ The gateway receives the proposal and checks every boundary:
 
 ```
 Gateway decides:
-  - Does this agent have agent.spawn capability?        ✓
+  - Does this agent have agent_spawn capability?        ✓
   - Is researcher.default an allowed target?             ✓
   - Is concurrency budget available?                     ✓
   - Is target agent manifest valid?                      ✓
@@ -131,8 +131,8 @@ Agent reads: state/reevaluation.json
 Agent thinks:
   - "I have pending_approval_123 from 2 hours ago"
   - "My last scrape task failed with timeout"
-  - Proposed action: gateway.approval.status("pending_approval_123")
-  - Proposed action: agent.spawn(researcher.default, "retry scrape X")
+  - Proposed action: gateway.approval_status("pending_approval_123")
+  - Proposed action: agent_spawn(researcher.default, "retry scrape X")
 ```
 
 ### Gateway side
@@ -186,7 +186,7 @@ The agent receives only a boolean approval. When the gateway executes the sandbo
 
 ## Knowledge visibility (Tier 2)
 
-**Agent proposes** durable facts via `knowledge.store` — including **who may read** them — using **`visibility`**, not a separate share API.
+**Agent proposes** durable facts via `knowledge_store` — including **who may read** them — using **`visibility`**, not a separate share API.
 
 **Gateway enforces** visibility, session binding, scope policy, retention/expiry, and provenance.
 
@@ -202,7 +202,7 @@ The agent receives only a boolean approval. When the gateway executes the sandbo
 
 ```
 Agent thinks: "The planner should see this finding"
-Agent proposes: knowledge.store(
+Agent proposes: knowledge_store(
   id="research_findings",
   content="…",
   scope="project_X",
@@ -210,7 +210,7 @@ Agent proposes: knowledge.store(
 )
 ```
 
-To widen access later (e.g. private → session → global), the agent calls **`knowledge.store` again** with the same `id` and updated `visibility`.
+To widen access later (e.g. private → session → global), the agent calls **`knowledge_store` again** with the same `id` and updated `visibility`.
 
 ### Gateway side
 
@@ -293,6 +293,6 @@ The agent is a reasoning loop with a capabilities vocabulary but no execution au
 
 **The gateway is simple but authoritative.** It doesn't understand delegation patterns, reevaluation heuristics, or knowledge evolution workflows. It just validates proposals against policy and executes them. This keeps it generic: completely different agent architectures can use the same gateway with different composition patterns — swarms, consensus-based delegation, ML-driven reevaluation — without changing a line of gateway code.
 
-**The autonoetic properties emerge from agent composition of gateway primitives**, not from the gateway hardcoding orchestration patterns. A planner agent composes `agent.spawn` + `task.board` into delegation. A background agent composes `scheduler.interval` + `agent.state` into reevaluation. A coder agent composes `skill.store` + `approval.queue` into evolution.
+**The autonoetic properties emerge from agent composition of gateway primitives**, not from the gateway hardcoding orchestration patterns. A planner agent composes `agent_spawn` + `task.board` into delegation. A background agent composes `scheduler.interval` + `agent.state` into reevaluation. A coder agent composes `skill.store` + `approval.queue` into evolution.
 
 The gateway "ensures" autonoetic behavior by making it **possible and auditable**, not by making it **prescriptive**.

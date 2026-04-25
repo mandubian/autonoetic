@@ -564,7 +564,7 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
         msg
     );
     assert!(
-        msg.contains("artifact.build"),
+        msg.contains("artifact_build"),
         "error should explain that artifact.build calls were insufficient, got: {}",
         msg
     );

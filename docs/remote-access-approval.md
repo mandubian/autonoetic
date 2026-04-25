@@ -4,7 +4,7 @@ This document describes the static analysis system for detecting remote/network 
 
 ## Overview
 
-When `sandbox.exec` is called, the code is **statically analyzed** before execution to detect patterns that require network access. If detected, execution is blocked and requires operator approval.
+When `sandbox_exec` is called, the code is **statically analyzed** before execution to detect patterns that require network access. If detected, execution is blocked and requires operator approval.
 
 This is a **deterministic** security check that does not rely on the LLM's self-declaration.
 
@@ -15,7 +15,7 @@ The LLM cannot be trusted to self-declare that code needs remote access:
 ```
 User: "Fetch weather data"
   → LLM generates: import requests; requests.get("https://...")
-  → LLM claims: "sandbox.exec with no network access"
+  → LLM claims: "sandbox_exec with no network access"
   → ❌ LLM is wrong/misleading
 ```
 
@@ -72,7 +72,7 @@ Static analysis inspects the **actual code** to detect remote access patterns de
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ sandbox.exec called                                         │
+│ sandbox_exec called                                         │
 │                                                             │
 │ 1. Policy check (CodeExecution capability)                  │
 │    ↓ allowed                                                │
@@ -89,13 +89,13 @@ Static analysis inspects the **actual code** to detect remote access patterns de
 
 ### Session Approval Grants
 
-When an operator approves `sandbox.exec` for specific hosts, those hosts are recorded as session-level grants. Subsequent `sandbox.exec` calls in the same root session that access a subset of the granted hosts are auto-approved. This prevents the common scenario where the evaluator, coder, and tester all trigger separate approval prompts for the same `api.open-meteo.com`.
+When an operator approves `sandbox_exec` for specific hosts, those hosts are recorded as session-level grants. Subsequent `sandbox_exec` calls in the same root session that access a subset of the granted hosts are auto-approved. This prevents the common scenario where the evaluator, coder, and tester all trigger separate approval prompts for the same `api.open-meteo.com`.
 
 Grants are cleaned up when the session ends. See [Approval System](approval-system.md) for full details.
 
 ### Promotion Severity Gating
 
-The `promotion.record` tool enforces mechanical validation:
+The `promotion_record` tool enforces mechanical validation:
 
 - `pass=true` with `error` or `critical` findings → **rejected by the gateway**
 - `pass=true` with `warning` findings → **rejected** unless every warning includes non-empty `evidence` (e.g., sandbox output proving the issue was investigated)

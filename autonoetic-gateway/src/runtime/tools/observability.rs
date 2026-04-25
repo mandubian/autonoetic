@@ -16,7 +16,7 @@ pub struct ObservabilitySearchTool;
 
 impl NativeTool for ObservabilitySearchTool {
     fn name(&self) -> &'static str {
-        "observability.search"
+        "observability_search"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -121,7 +121,7 @@ pub struct ObservabilityReadTool;
 
 impl NativeTool for ObservabilityReadTool {
     fn name(&self) -> &'static str {
-        "observability.read"
+        "observability_read"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

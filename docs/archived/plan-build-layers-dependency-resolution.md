@@ -58,7 +58,7 @@ No agent-facing changes. Pure storage primitive.
 
 ---
 
-## Phase 2: `capture_paths` on `sandbox.exec`
+## Phase 2: `capture_paths` on `sandbox_exec`
 
 ### Task 2.1: Extend `SandboxExecArgs`
 
@@ -69,7 +69,7 @@ No agent-facing changes. Pure storage primitive.
 
 ### Task 2.2: Implement capture logic
 
-**File:** `autonoetic-gateway/src/runtime/tools.rs` (sandbox.exec handler)
+**File:** `autonoetic-gateway/src/runtime/tools.rs` (sandbox_exec handler)
 
 After `runner.process.wait_with_output()`:
 - [x] If `capture_paths` is Some, iterate paths
@@ -79,9 +79,9 @@ After `runner.process.wait_with_output()`:
 - [x] Clean up temp files
 
 **Tests:**
-- [ ] `sandbox.exec` with `capture_paths` returns `captured_layers`
+- [ ] `sandbox_exec` with `capture_paths` returns `captured_layers`
 - [ ] Captured layer contains expected files
-- [ ] `sandbox.exec` without `capture_paths` has no `captured_layers` in response
+- [ ] `sandbox_exec` without `capture_paths` has no `captured_layers` in response
 - [ ] Capture path that doesn't exist returns error
 - [ ] Multiple capture paths produce multiple layers
 
@@ -89,12 +89,12 @@ After `runner.process.wait_with_output()`:
 
 **File:** `autonoetic-gateway/src/runtime/tools.rs`
 
-- [x] Add `capture_paths` to `sandbox.exec` input schema in tool definition
+- [x] Add `capture_paths` to `sandbox_exec` input schema in tool definition
 - [x] Update description to mention layer capture capability
 
 ---
 
-## Phase 3: Layer-Aware `artifact.build`
+## Phase 3: Layer-Aware `artifact_build`
 
 ### Task 3.1: Accept `layers` parameter
 
@@ -116,14 +116,14 @@ After `runner.process.wait_with_output()`:
 
 **File:** `autonoetic-gateway/src/runtime/tools.rs`
 
-- [x] Add `layers` field to `artifact.build` input schema
+- [x] Add `layers` field to `artifact_build` input schema
 - [x] Parse `layers` arg in handler, pass to `artifact_store.build()`
 
 ---
 
 ## Phase 4: Layer-Aware Sandbox Mounting
 
-### Task 4.1: Extract layers for `sandbox.exec`
+### Task 4.1: Extract layers for `sandbox_exec`
 
 **File:** `autonoetic-gateway/src/runtime/tools.rs` (resolve artifact section)
 
@@ -132,12 +132,12 @@ After `runner.process.wait_with_output()`:
 - [x] Add extraction dir as `SandboxMount` at declared `mount_path`
 
 **Tests:**
-- [ ] `sandbox.exec` with layered artifact mounts files + layer
+- [ ] `sandbox_exec` with layered artifact mounts files + layer
 - [ ] Layer mount path is accessible inside sandbox
 - [ ] Files in layer are readable inside sandbox
 - [ ] Layer files don't conflict with artifact flat files
 
-### Task 4.2: Update `artifact.inspect`
+### Task 4.2: Update `artifact_inspect`
 
 - [x] Return `layers` field in inspect response so agents know what layers an artifact has
 
@@ -151,8 +151,8 @@ After `runner.process.wait_with_output()`:
 
 - [x] Create `SKILL.md` with:
   - Role: build-time dependency resolution and artifact layering
-  - Capabilities: `SandboxFunctions` (content., artifact., sandbox.exec), `ReadAccess`, `WriteAccess`, `CodeExecution`
-  - Instructions: read requirements.txt, install deps via sandbox.exec with capture_paths, build artifact with layers
+  - Capabilities: `SandboxFunctions` (content., artifact., sandbox_exec), `ReadAccess`, `WriteAccess`, `CodeExecution`
+  - Instructions: read requirements.txt, install deps via sandbox_exec with capture_paths, build artifact with layers
 - [x] Create `runtime.lock` with empty dependencies
 - [x] Create `sandbox.conf` with `share_net = true`
 
@@ -188,22 +188,22 @@ After `runner.process.wait_with_output()`:
 
 **File:** `autonoetic-gateway/tests/sandbox_capture_integration.rs`
 
-- [x] `sandbox.exec` writes files → capture_paths → verify captured layer
-- [x] `sandbox.exec` without capture_paths → no layers in response
+- [x] `sandbox_exec` writes files → capture_paths → verify captured layer
+- [x] `sandbox_exec` without capture_paths → no layers in response
 
 ### Task 6.3: Layered artifact integration test
 
 **File:** `autonoetic-gateway/tests/layered_artifact_integration.rs`
 
 - [x] Build artifact with layers → inspect → verify layers in manifest
-- [x] Run `sandbox.exec` with layered artifact → verify layer mounted correctly
+- [x] Run `sandbox_exec` with layered artifact → verify layer mounted correctly
 - [x] Artifacts without layers still work identically
 
 ### Task 6.4: Full lifecycle integration test
 
 **File:** `autonoetic-gateway/tests/build_layer_lifecycle_integration.rs`
 
-- [x] Simulate the full flow: content.write → sandbox.exec with capture → artifact.build with layers → sandbox.exec with artifact
+- [x] Simulate the full flow: content_write → sandbox_exec with capture → artifact_build with layers → sandbox_exec with artifact
 - [x] Verify the weather demo scenario no longer loops
 
 ---
@@ -221,7 +221,7 @@ Phase 2 (capture_paths)     ← depends on 1.1, 1.2
   ├── 2.2 Implement capture logic
   └── 2.3 Tool definition
 
-Phase 3 (layered artifact.build) ← depends on 1.1, 1.3
+Phase 3 (layered artifact_build) ← depends on 1.1, 1.3
   ├── 3.1 Accept layers in build()
   └── 3.2 Tool definition
 

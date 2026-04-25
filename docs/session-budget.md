@@ -2,7 +2,7 @@
 
 For the **end-to-end enforcement flow** and **when the OpenRouter catalog** supplies context vs price estimates, see [budget-management.md](budget-management.md).
 
-Role-agnostic limits on **how much work** one **session id** may consume across all agents that share that session (lead + nested `agent.spawn` runs using the same session).
+Role-agnostic limits on **how much work** one **session id** may consume across all agents that share that session (lead + nested `agent_spawn` runs using the same session).
 
 This complements:
 

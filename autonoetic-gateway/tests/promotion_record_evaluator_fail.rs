@@ -176,7 +176,7 @@ async fn test_promotion_evaluator_fail_rejected() {
 
     let eval_result = registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             &eval_manifest,
             &eval_policy,
             &builder_dir,
@@ -298,7 +298,7 @@ async fn test_promotion_auditor_fail_rejected() {
 
     registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             &evaluator_manifest(),
             &PolicyEngine::new(evaluator_manifest()),
             &builder_dir,
@@ -365,7 +365,7 @@ async fn test_promotion_auditor_fail_rejected() {
 
     registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             &auditor_manifest,
             &PolicyEngine::new(auditor_manifest.clone()),
             &builder_dir,
@@ -470,7 +470,7 @@ fn test_promotion_record_rejects_agent_supplied_content_digest() {
 
     let err = registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             &eval_manifest,
             &eval_policy,
             &builder_dir,

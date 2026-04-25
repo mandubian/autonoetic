@@ -264,7 +264,7 @@ fn test_rollback_restores_previous_alias_target() {
 
     registry
         .execute(
-            "agent.revision.promote",
+            "agent_revision_promote",
             &manifest,
             &policy,
             tmp.path(),
@@ -285,7 +285,7 @@ fn test_rollback_restores_previous_alias_target() {
 
     registry
         .execute(
-            "agent.revision.rollback",
+            "agent_revision_rollback",
             &manifest,
             &policy,
             Path::new("."),
@@ -330,7 +330,7 @@ fn test_promotion_fails_for_mismatched_alias_and_agent() {
 
     let err = registry
         .execute(
-            "agent.revision.promote",
+            "agent_revision_promote",
             &manifest,
             &policy,
             tmp.path(),

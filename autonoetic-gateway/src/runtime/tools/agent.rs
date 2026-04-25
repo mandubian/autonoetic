@@ -112,7 +112,7 @@ pub struct AgentSpawnTool;
 
 impl NativeTool for AgentSpawnTool {
     fn name(&self) -> &'static str {
-        "agent.spawn"
+        "agent_spawn"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -510,7 +510,7 @@ pub struct AgentExistsTool;
 
 impl NativeTool for AgentExistsTool {
     fn name(&self) -> &'static str {
-        "agent.exists"
+        "agent_exists"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -653,7 +653,7 @@ pub struct AgentDiscoverTool;
 
 impl NativeTool for AgentDiscoverTool {
     fn name(&self) -> &'static str {
-        "agent.discover"
+        "agent_discover"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -813,7 +813,7 @@ pub struct AgentListTool;
 
 impl NativeTool for AgentListTool {
     fn name(&self) -> &'static str {
-        "agent.list"
+        "agent_list"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -974,7 +974,7 @@ pub struct AgentMessageTool;
 
 impl NativeTool for AgentMessageTool {
     fn name(&self) -> &'static str {
-        "agent.message"
+        "agent_message"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -1138,7 +1138,7 @@ impl NativeTool for AgentMessageTool {
             if let Err(e) =
                 crate::scheduler::signal::write_signal(Some(&store), &tgt_session, &msg_id, &signal)
             {
-                tracing::debug!(target: "agent.message", error = %e, "Failed to write signal for target session");
+                tracing::debug!(target: "agent_message", error = %e, "Failed to write signal for target session");
             }
         }
 

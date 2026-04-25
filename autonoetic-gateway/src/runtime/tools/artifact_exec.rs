@@ -46,7 +46,7 @@ pub struct ArtifactExecTool;
 
 impl NativeTool for ArtifactExecTool {
     fn name(&self) -> &'static str {
-        "artifact.exec"
+        "artifact_exec"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -141,7 +141,7 @@ impl NativeTool for ArtifactExecTool {
                 )? {
                     if !ticket.approved_domains.is_empty() {
                         tracing::info!(
-                            target: "artifact.exec",
+                            target: "artifact_exec",
                             ticket_id = %ticket_id,
                             domains = ?ticket.approved_domains,
                             "Deployment ticket resolved — skipping approval"
@@ -264,7 +264,7 @@ impl NativeTool for ArtifactExecTool {
             && !approval_validated_for_command
         {
             tracing::info!(
-                target: "artifact.exec",
+                target: "artifact_exec",
                 agent_id = %manifest.agent.id,
                 patterns = ?remote_analysis.detected_patterns,
                 "Agent has NetworkAccess capability — auto-approving"
@@ -290,7 +290,7 @@ impl NativeTool for ArtifactExecTool {
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                         if let Some(entry) = cache.find(&fingerprint) {
                             tracing::info!(
-                                target: "artifact.exec",
+                                target: "artifact_exec",
                                 fingerprint = %fingerprint,
                                 "Cache hit: skipping approval"
                             );
@@ -315,7 +315,7 @@ impl NativeTool for ArtifactExecTool {
                                         gateway_dir,
                                     ) {
                                         tracing::info!(
-                                            target: "artifact.exec",
+                                            target: "artifact_exec",
                                             targets = ?targets,
                                             "Approved request covers targets"
                                         );
@@ -355,7 +355,7 @@ impl NativeTool for ArtifactExecTool {
                             if !targets.is_empty() {
                                 if gw_store.session_grants_cover_targets(&root_sid, &targets) {
                                     tracing::info!(
-                                        target: "artifact.exec",
+                                        target: "artifact_exec",
                                         targets = ?targets,
                                         "Session grant covers targets"
                                     );
@@ -589,7 +589,7 @@ impl NativeTool for ArtifactExecTool {
                             )
                         })?;
                     tracing::info!(
-                        target: "artifact.exec",
+                        target: "artifact_exec",
                         credential_id = %mapping.credential_id,
                         env_var = %mapping.env_var,
                         "Injecting credential into sandbox as environment variable"
@@ -800,7 +800,7 @@ fn execute_with_ticket(
                 )
             })?;
             tracing::info!(
-                target: "artifact.exec",
+                target: "artifact_exec",
                 credential_id = %mapping.credential_id,
                 env_var = %mapping.env_var,
                 "Injecting credential from deployment ticket"
