@@ -90,8 +90,8 @@ impl DeterministicCoercionEnforcer {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
 
-            for (field_name, schema_field) in fields {
-                let value = obj.get(&field_name).cloned();
+            for (field_name, schema_field) in &fields {
+                let value = obj.get(field_name).cloned();
 
                 match (&value, schema_field.get("default")) {
                     (None, Some(default)) => {
@@ -128,6 +128,62 @@ impl DeterministicCoercionEnforcer {
                         }
                     }
                     _ => {}
+                }
+            }
+
+            let handled: std::collections::BTreeSet<String> = transformations
+                .iter()
+                .map(|t| t.field_path.clone())
+                .chain(errors.iter().map(|e| e.field_path.clone()))
+                .collect();
+
+            if let Some(required_arr) = target_schema
+                .get("required")
+                .and_then(|r| r.as_array())
+            {
+                for req in required_arr {
+                    if let Some(field_name) = req.as_str() {
+                        if handled.contains(field_name) {
+                            continue;
+                        }
+                        if obj.contains_key(field_name) {
+                            continue;
+                        }
+                        let schema_field = schema_obj.get(field_name);
+                        if let Some(type_info) =
+                            schema_field.and_then(|f| f.get("type"))
+                        {
+                            if let Some(default) = Self::default_for_type(type_info) {
+                                obj.insert(field_name.to_string(), default.clone());
+                                transformations.push(Transformation {
+                                    kind: TransformationKind::MissingAdded,
+                                    field_path: field_name.to_string(),
+                                    original_value: None,
+                                    new_value: Some(default),
+                                    reason: format!(
+                                        "Required field '{}' missing, using type default",
+                                        field_name
+                                    ),
+                                });
+                            } else {
+                                errors.push(FieldError {
+                                    field_path: field_name.to_string(),
+                                    error: format!(
+                                        "Required field '{}' missing with no type default",
+                                        field_name
+                                    ),
+                                });
+                            }
+                        } else {
+                            errors.push(FieldError {
+                                field_path: field_name.to_string(),
+                                error: format!(
+                                    "Required field '{}' missing and not declared in properties",
+                                    field_name
+                                ),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -238,10 +294,85 @@ mod tests {
                 assert_eq!(details.final_payload["name"], "");
                 assert!(!details.transformations.is_empty());
             }
-            EnforcementResult::Pass => {
-                // Also acceptable - no required check was performed
+            _ => panic!("Expected Coerced result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_required_array_rejects_missing_unknown_type() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": { "type": "string" }
+            },
+            "required": ["data"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        assert!(matches!(result, EnforcementResult::Coerced(_)));
+    }
+
+    #[test]
+    fn test_required_array_with_multiple_fields() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({"location": "Paris"});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" },
+                "date": { "type": "string" }
+            },
+            "required": ["location", "date"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        match result {
+            EnforcementResult::Coerced(details) => {
+                assert_eq!(details.final_payload["location"], "Paris");
+                assert_eq!(details.final_payload["date"], "");
+                assert_eq!(details.transformations.len(), 1);
+                assert_eq!(details.transformations[0].field_path, "date");
             }
-            _ => panic!("Expected Coerced or Pass result"),
+            _ => panic!("Expected Coerced result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_required_array_passes_when_all_present() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({"location": "Paris", "date": "2025-01-01"});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" },
+                "date": { "type": "string" }
+            },
+            "required": ["location", "date"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        assert!(matches!(result, EnforcementResult::Pass));
+    }
+
+    #[test]
+    fn test_required_array_field_not_in_properties_rejects() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": ["unknown_field"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        match result {
+            EnforcementResult::Reject(details) => {
+                assert_eq!(details.fields_with_errors.len(), 1);
+                assert_eq!(details.fields_with_errors[0].field_path, "unknown_field");
+            }
+            _ => panic!("Expected Reject result, got {:?}", result),
         }
     }
 }

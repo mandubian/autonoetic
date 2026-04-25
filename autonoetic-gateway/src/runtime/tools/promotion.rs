@@ -109,6 +109,29 @@ impl NativeTool for PromotionRecordTool {
             "content_digest is gateway-owned and must not be provided to promotion.record"
         );
 
+        let findings_with_errors: Vec<String> = args
+            .findings
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                let mut errs = Vec::new();
+                if f.description.trim().is_empty() {
+                    errs.push("description is empty");
+                }
+                if !errs.is_empty() {
+                    Some(format!("findings[{}]: {}", i, errs.join(", ")))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !findings_with_errors.is_empty() {
+            anyhow::bail!(
+                "Findings schema validation failed:\n  - {}",
+                findings_with_errors.join("\n  - ")
+            );
+        }
+
         let has_error_or_critical = args.findings.iter().any(|f| {
             matches!(
                 f.severity,
