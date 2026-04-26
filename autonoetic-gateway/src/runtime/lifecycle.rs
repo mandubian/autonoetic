@@ -1980,11 +1980,21 @@ impl AgentExecutor {
                             .find(|tc| tc.id == pending_call_id)
                             .expect("pending call id must match a tool call in the response");
 
-                        let pending_action = self
-                            .gateway_store
-                            .as_ref()
-                            .and_then(|store| store.get_approval(&request_id).ok().flatten())
-                            .map(|req| req.action);
+                        let pending_action = match self.gateway_store.as_ref() {
+                            Some(store) => {
+                                let approval = store.get_approval(&request_id)
+                                    .map_err(|e| anyhow::anyhow!(
+                                        "failed to fetch approval {} while saving continuation: {}",
+                                        request_id, e
+                                    ))?;
+                                let approval = approval.ok_or_else(|| anyhow::anyhow!(
+                                    "missing approval {} while saving continuation",
+                                    request_id
+                                ))?;
+                                Some(approval.action)
+                            }
+                            None => None,
+                        };
 
                         let continuation = crate::runtime::continuation::TurnContinuation {
                             history: history.clone(), // snapshot BEFORE assistant_msg

@@ -18,16 +18,41 @@ use crate::runtime::guard::LoopGuardState;
 use crate::server::ofp;
 use autonoetic_types::background::{ApprovalDecision, ScheduledAction};
 use autonoetic_types::config::GatewayConfig;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-type HmacSha256 = Hmac<Sha256>;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// Error returned when a continuation file fails HMAC integrity verification.
+/// Used to distinguish tamper-detection errors from ordinary I/O or parse
+/// failures, so callers can emit the appropriate causal event and cancel the
+/// bound approval.
+#[derive(Debug)]
+pub struct ContinuationIntegrityError {
+    pub task_id: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ContinuationIntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "continuation integrity violation for task '{}': {}",
+            self.task_id, self.message
+        )
+    }
+}
+
+impl std::error::Error for ContinuationIntegrityError {}
+
+/// Returns `true` if the error is a `ContinuationIntegrityError` (HMAC
+/// mismatch / tamper detection).  Used by callers to decide whether to cancel
+/// approvals and emit a tamper causal event.
+pub fn is_integrity_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ContinuationIntegrityError>().is_some()
+}
 
 /// HMAC-signed envelope wrapping a serialised `TurnContinuation` payload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -109,7 +134,10 @@ pub struct PendingApprovalToolCall {
 
 /// Resolve the HMAC key for continuation signing.  Uses the explicit
 /// `continuation_key` config value when set, otherwise derives a key from
-/// `node_id` so every gateway instance has a unique default.
+/// `node_id`.  **Warning:** the `node_id`-derived default is not a secret and
+/// only provides detection of accidental corruption, not protection against a
+/// local attacker who can read the config.  Production deployments should set
+/// `continuation_key` to a high-entropy secret.
 pub fn continuation_hmac_key(config: &GatewayConfig) -> String {
     config
         .continuation_key
@@ -203,10 +231,10 @@ pub fn load_continuation(
                 task_id = %task_id,
                 "HMAC verification failed — continuation file may have been tampered with"
             );
-            anyhow::bail!(
-                "continuation integrity violation: HMAC mismatch for task '{}'",
-                task_id
-            );
+            return Err(ContinuationIntegrityError {
+                task_id: task_id.to_string(),
+                message: "HMAC mismatch".to_string(),
+            }.into());
         }
         let cont: TurnContinuation = serde_json::from_str(&envelope.payload_json)?;
         return Ok(Some(cont));

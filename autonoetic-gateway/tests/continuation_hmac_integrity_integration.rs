@@ -8,8 +8,9 @@
 mod support;
 
 use autonoetic_gateway::runtime::continuation::{
-    continuation_hmac_key, continuations_dir, load_continuation, save_continuation,
-    PendingApprovalToolCall, SignedContinuation, TurnContinuation,
+    continuation_hmac_key, continuations_dir, is_integrity_error, load_continuation,
+    save_continuation, ContinuationIntegrityError, PendingApprovalToolCall, SignedContinuation,
+    TurnContinuation,
 };
 use autonoetic_gateway::runtime::guard::LoopGuardState;
 use autonoetic_gateway::llm::{Message, Role, ToolCall};
@@ -222,4 +223,42 @@ fn test_different_key_rejects_continuation() {
 
     let result = load_continuation(&config_load, "task-key-001");
     assert!(result.is_err(), "different key should reject");
+    assert!(is_integrity_error(&result.unwrap_err()), "should be typed integrity error");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_tamper_returns_typed_integrity_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = make_test_config(tmp.path());
+    let cont = make_test_continuation("req-typed");
+
+    save_continuation(&config, "task-typed", &cont).expect("save");
+
+    let dir = continuations_dir(&config);
+    let path = dir.join("task-typed.json");
+    let raw = std::fs::read_to_string(&path).expect("read");
+    let mut envelope: SignedContinuation = serde_json::from_str(&raw).expect("parse");
+    envelope.hmac_hex = "deadbeef".to_string();
+    std::fs::write(&path, serde_json::to_string_pretty(&envelope).expect("ser")).expect("write");
+
+    let err = load_continuation(&config, "task-typed").unwrap_err();
+    assert!(is_integrity_error(&err), "should be integrity error");
+    let ie = err.downcast_ref::<ContinuationIntegrityError>().expect("downcast");
+    assert_eq!(ie.task_id, "task-typed");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_io_error_is_not_treated_as_tampering() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = make_test_config(tmp.path());
+
+    let dir = continuations_dir(&config);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("task-bad-json.json");
+    std::fs::write(&path, "this is not valid json{{{").expect("write");
+
+    let err = load_continuation(&config, "task-bad-json").unwrap_err();
+    assert!(!is_integrity_error(&err), "parse error should not be integrity error");
 }

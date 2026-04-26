@@ -496,10 +496,16 @@ pub struct GatewayConfig {
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
 
-    /// HMAC-SHA256 key for signing turn continuation files.  When unset the
-    /// gateway derives a deterministic key from `node_id`.  Rotate by
-    /// changing this value (existing continuations will fail integrity
-    /// verification and be rejected).
+    /// HMAC-SHA256 key for signing turn continuation files.
+    /// This value should be a secret, high-entropy key provided from a secret
+    /// source (environment secret or vault); do not derive it from `node_id`
+    /// or any other identifier. Rotate by changing this value (existing
+    /// continuations will fail integrity verification and be rejected).
+    ///
+    /// When unset the gateway derives a deterministic key from `node_id`.
+    /// This is a development convenience only — it does **not** protect
+    /// against a local attacker who can read the config and edit the
+    /// continuation file.  Production deployments should set this field.
     #[serde(default)]
     pub continuation_key: Option<String>,
 

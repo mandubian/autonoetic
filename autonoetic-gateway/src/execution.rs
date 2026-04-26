@@ -975,39 +975,58 @@ impl GatewayExecutionService {
             // 3) Fresh start
             let (outcome, resume_initial_message, consumed_checkpoint_turn_id) = if let Some(t_id) = task_id {
                 let load_result = crate::runtime::continuation::load_continuation(&self.config, t_id);
-                if let Err(e) = &load_result {
-                    tracing::error!(
-                        target: "continuation",
-                        task_id = %t_id,
-                        error = %e,
-                        "Continuation integrity violation — tampering suspected"
-                    );
-                    if let Ok(logger) = init_gateway_causal_logger(&self.config) {
-                        let _ = logger.log(
-                            "gateway",
-                            "",
-                            None,
-                            0,
-                            "background",
-                            "continuation_tampered",
-                            autonoetic_types::causal_chain::EntryStatus::Error,
-                            Some(serde_json::json!({
-                                "task_id": t_id,
-                                "error": e.to_string(),
-                            })),
+                if let Err(ref e) = load_result {
+                    if crate::runtime::continuation::is_integrity_error(e) {
+                        tracing::error!(
+                            target: "continuation",
+                            task_id = %t_id,
+                            error = %e,
+                            "Continuation integrity violation — tampering suspected"
                         );
-                    }
-                    if let Some(store) = self.gateway_store.as_ref() {
-                        let pending = store.get_pending_approvals().unwrap_or_default();
-                        if let Some(p) = pending.iter().find(|p| p.task_id.as_deref() == Some(t_id)) {
-                            let _ = store.cancel_approval(
-                                &p.request_id,
-                                "gateway",
-                                &chrono::Utc::now().to_rfc3339(),
-                            );
+                        if let Some(store) = self.gateway_store.as_ref() {
+                            let pending = store.get_pending_approvals().unwrap_or_default();
+                            let matching: Vec<String> = pending
+                                .iter()
+                                .filter(|p| p.task_id.as_deref() == Some(t_id))
+                                .map(|p| p.request_id.clone())
+                                .collect();
+                            if !matching.is_empty() {
+                                let cancelled_at = chrono::Utc::now().to_rfc3339();
+                                for rid in &matching {
+                                    let _ = store.cancel_approval(rid, "gateway", &cancelled_at);
+                                }
+                                let _ = store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+                                    event_id: uuid::Uuid::new_v4().to_string(),
+                                    agent_id: "gateway".to_string(),
+                                    session_id: String::new(),
+                                    turn_id: None,
+                                    event_seq: 0,
+                                    timestamp: cancelled_at.clone(),
+                                    category: "background".to_string(),
+                                    action: "continuation_tampered".to_string(),
+                                    status: "error".to_string(),
+                                    target: None,
+                                    payload: Some(serde_json::json!({
+                                        "task_id": t_id,
+                                        "reason": "integrity_violation",
+                                        "approval_request_ids": matching,
+                                    }).to_string()),
+                                    payload_ref: None,
+                                    evidence_ref: None,
+                                    reason: Some("HMAC mismatch on continuation load".to_string()),
+                                });
+                            }
                         }
+                        anyhow::bail!("{}", e);
+                    } else {
+                        tracing::error!(
+                            target: "continuation",
+                            task_id = %t_id,
+                            error = %e,
+                            "Failed to load continuation"
+                        );
+                        anyhow::bail!("failed to load continuation for task '{}': {}", t_id, e);
                     }
-                    anyhow::bail!("continuation integrity violation for task '{}': {}", t_id, e);
                 }
                 if let Some(cont) = load_result.unwrap() {
                     tracing::info!(
@@ -1022,24 +1041,34 @@ impl GatewayExecutionService {
                         .as_ref()
                         .and_then(|store| store.get_approval(&cont.approval_request_id).ok().flatten());
 
-                    // Action-equality check: if the continuation carries a pending_action,
-                    // verify it structurally equals the action from the approval row.
-                    // This prevents TOCTOU substitution where the approval row is somehow
-                    // swapped to a different action between suspension and resume.
+                    // Action-equality check: signed continuations must carry a pending_action
+                    // that structurally equals the action from the approval row.  This prevents
+                    // TOCTOU substitution where the approval row is swapped to a different action
+                    // between suspension and resume.  Legacy unsigned continuations (no
+                    // pending_action) are still accepted.
                     if let Some(ref req) = approval_req {
-                        if let Some(ref pending) = cont.pending_action {
-                            if pending != &req.action {
-                                tracing::error!(
+                        match cont.pending_action.as_ref() {
+                            None => {
+                                tracing::warn!(
                                     target: "continuation",
                                     task_id = %t_id,
-                                    approval_request_id = %cont.approval_request_id,
-                                    "Action mismatch between continuation and approval row — possible substitution attack"
+                                    "Continuation missing pending_action — skipping action-equality check (legacy?)"
                                 );
-                                let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
-                                anyhow::bail!(
-                                    "continuation action mismatch: the action stored in the continuation does not match the approved action (task '{}')",
-                                    t_id
-                                );
+                            }
+                            Some(pending) => {
+                                if pending != &req.action {
+                                    tracing::error!(
+                                        target: "continuation",
+                                        task_id = %t_id,
+                                        approval_request_id = %cont.approval_request_id,
+                                        "Action mismatch between continuation and approval row — possible substitution attack"
+                                    );
+                                    let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
+                                    anyhow::bail!(
+                                        "continuation action mismatch: the action stored in the continuation does not match the approved action (task '{}')",
+                                        t_id
+                                    );
+                                }
                             }
                         }
                     }
