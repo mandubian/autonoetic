@@ -81,53 +81,120 @@ impl DeterministicCoercionEnforcer {
         let mut payload = payload.clone();
         let mut errors = Vec::new();
 
-        if let (Some(obj), Some(schema_obj)) = (
-            payload.as_object_mut(),
-            target_schema.get("properties").and_then(|p| p.as_object()),
-        ) {
-            let fields: Vec<(String, serde_json::Value)> = schema_obj
+        if let Some(obj) = payload.as_object_mut() {
+            let schema_obj = target_schema
+                .get("properties")
+                .and_then(|p| p.as_object());
+
+            if let Some(schema_obj) = schema_obj {
+                let fields: Vec<(String, serde_json::Value)> = schema_obj
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
+                for (field_name, schema_field) in &fields {
+                    let value = obj.get(field_name).cloned();
+
+                    match (&value, schema_field.get("default")) {
+                        (None, Some(default)) => {
+                            obj.insert(field_name.clone(), default.clone());
+                            transformations.push(Transformation {
+                                kind: TransformationKind::DefaultValue,
+                                field_path: field_name.clone(),
+                                original_value: None,
+                                new_value: Some(default.clone()),
+                                reason: format!("Field '{}' missing, using default", field_name),
+                            });
+                        }
+                        (None, None) if schema_field.get("required").is_some() => {
+                            if let Some(type_info) = schema_field.get("type") {
+                                if let Some(default) = Self::default_for_type(type_info) {
+                                    obj.insert(field_name.clone(), default.clone());
+                                    transformations.push(Transformation {
+                                        kind: TransformationKind::DefaultValue,
+                                        field_path: field_name.clone(),
+                                        original_value: None,
+                                        new_value: Some(default.clone()),
+                                        reason: format!(
+                                            "Field '{}' required but missing, using type default",
+                                            field_name
+                                        ),
+                                    });
+                                } else {
+                                    errors.push(FieldError {
+                                        field_path: field_name.clone(),
+                                        error: "Required field missing with no default available"
+                                            .to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let handled: std::collections::BTreeSet<String> = transformations
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|t| t.field_path.clone())
+                .chain(errors.iter().map(|e| e.field_path.clone()))
                 .collect();
 
-            for (field_name, schema_field) in fields {
-                let value = obj.get(&field_name).cloned();
-
-                match (&value, schema_field.get("default")) {
-                    (None, Some(default)) => {
-                        obj.insert(field_name.clone(), default.clone());
-                        transformations.push(Transformation {
-                            kind: TransformationKind::DefaultValue,
-                            field_path: field_name.clone(),
-                            original_value: None,
-                            new_value: Some(default.clone()),
-                            reason: format!("Field '{}' missing, using default", field_name),
-                        });
-                    }
-                    (None, None) if schema_field.get("required").is_some() => {
-                        if let Some(type_info) = schema_field.get("type") {
-                            if let Some(default) = Self::default_for_type(type_info) {
-                                obj.insert(field_name.clone(), default.clone());
-                                transformations.push(Transformation {
-                                    kind: TransformationKind::DefaultValue,
-                                    field_path: field_name.clone(),
-                                    original_value: None,
-                                    new_value: Some(default.clone()),
-                                    reason: format!(
-                                        "Field '{}' required but missing, using type default",
+            if let Some(required_arr) = target_schema
+                .get("required")
+                .and_then(|r| r.as_array())
+            {
+                for req in required_arr {
+                    if let Some(field_name) = req.as_str() {
+                        if handled.contains(field_name) {
+                            continue;
+                        }
+                        if obj.contains_key(field_name) {
+                            continue;
+                        }
+                        let schema_field = schema_obj.and_then(|so| so.get(field_name));
+                        if let Some(sf) = schema_field {
+                            if let Some(type_info) = sf.get("type") {
+                                if let Some(default) = Self::default_for_type(type_info) {
+                                    obj.insert(field_name.to_string(), default.clone());
+                                    transformations.push(Transformation {
+                                        kind: TransformationKind::MissingAdded,
+                                        field_path: field_name.to_string(),
+                                        original_value: None,
+                                        new_value: Some(default),
+                                        reason: format!(
+                                            "Required field '{}' missing, using type default",
+                                            field_name
+                                        ),
+                                    });
+                                } else {
+                                    errors.push(FieldError {
+                                        field_path: field_name.to_string(),
+                                        error: format!(
+                                            "Required field '{}' declared with unsupported type, cannot coerce",
+                                            field_name
+                                        ),
+                                    });
+                                }
+                            } else {
+                                errors.push(FieldError {
+                                    field_path: field_name.to_string(),
+                                    error: format!(
+                                        "Required field '{}' declared in properties but missing a type",
                                         field_name
                                     ),
                                 });
-                            } else {
-                                errors.push(FieldError {
-                                    field_path: field_name.clone(),
-                                    error: "Required field missing with no default available"
-                                        .to_string(),
-                                });
                             }
+                        } else {
+                            errors.push(FieldError {
+                                field_path: field_name.to_string(),
+                                error: format!(
+                                    "Required field '{}' not declared in properties",
+                                    field_name
+                                ),
+                            });
                         }
                     }
-                    _ => {}
                 }
             }
         }
@@ -238,10 +305,135 @@ mod tests {
                 assert_eq!(details.final_payload["name"], "");
                 assert!(!details.transformations.is_empty());
             }
-            EnforcementResult::Pass => {
-                // Also acceptable - no required check was performed
+            _ => panic!("Expected Coerced result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_required_array_rejects_unsupported_type() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": { "type": "unknown_type" }
+            },
+            "required": ["data"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        match result {
+            EnforcementResult::Reject(details) => {
+                assert_eq!(details.fields_with_errors.len(), 1);
+                assert_eq!(details.fields_with_errors[0].field_path, "data");
+                assert!(details.fields_with_errors[0].error.contains("unsupported type"));
             }
-            _ => panic!("Expected Coerced or Pass result"),
+            _ => panic!("Expected Reject result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_required_array_with_multiple_fields() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({"location": "Paris"});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" },
+                "date": { "type": "string" }
+            },
+            "required": ["location", "date"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        match result {
+            EnforcementResult::Coerced(details) => {
+                assert_eq!(details.final_payload["location"], "Paris");
+                assert_eq!(details.final_payload["date"], "");
+                assert_eq!(details.transformations.len(), 1);
+                assert_eq!(details.transformations[0].field_path, "date");
+            }
+            _ => panic!("Expected Coerced result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_required_array_passes_when_all_present() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({"location": "Paris", "date": "2025-01-01"});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" },
+                "date": { "type": "string" }
+            },
+            "required": ["location", "date"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        assert!(matches!(result, EnforcementResult::Pass));
+    }
+
+    #[test]
+    fn test_required_array_field_not_in_properties_rejects() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": ["unknown_field"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        match result {
+            EnforcementResult::Reject(details) => {
+                assert_eq!(details.fields_with_errors.len(), 1);
+                assert_eq!(details.fields_with_errors[0].field_path, "unknown_field");
+            }
+            _ => panic!("Expected Reject result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_required_without_properties_rejects() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({});
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["name"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        match result {
+            EnforcementResult::Reject(details) => {
+                assert_eq!(details.fields_with_errors.len(), 1);
+                assert_eq!(details.fields_with_errors[0].field_path, "name");
+                assert!(details.fields_with_errors[0].error.contains("not declared in properties"));
+            }
+            _ => panic!("Expected Reject result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_required_with_field_in_properties_but_no_type() {
+        let enforcer = DeterministicCoercionEnforcer::new();
+        let payload = serde_json::json!({});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": { "description": "some data" }
+            },
+            "required": ["data"]
+        });
+
+        let result = enforcer.enforce(&payload, &schema);
+        match result {
+            EnforcementResult::Reject(details) => {
+                assert_eq!(details.fields_with_errors.len(), 1);
+                assert_eq!(details.fields_with_errors[0].field_path, "data");
+                assert!(details.fields_with_errors[0].error.contains("missing a type"));
+            }
+            _ => panic!("Expected Reject result, got {:?}", result),
         }
     }
 }
