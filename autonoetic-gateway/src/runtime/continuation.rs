@@ -6,12 +6,16 @@
 //! approved action directly, reconstructs the conversation history, and resumes
 //! `execute_with_history` — the LLM sees the real tool result and continues normally.
 //!
-//! This replaces the previous "kill turn + notify agent + agent retries with
-//! approval_ref" pattern, eliminating the source of context loss and the complex
-//! resume message / checkpoint dance.
+//! # Integrity
+//!
+//! Continuation files are HMAC-SHA256 signed using a per-gateway key derived from
+//! `GatewayConfig::continuation_key` (or `node_id` as fallback). On load, the
+//! signature is verified before the payload is deserialized. Tampered files are
+//! rejected, a causal event is emitted, and the bound approval is cancelled.
 
 use crate::llm::{Message, ToolCall};
 use crate::runtime::guard::LoopGuardState;
+use crate::server::ofp;
 use autonoetic_types::background::{ApprovalDecision, ScheduledAction};
 use autonoetic_types::config::GatewayConfig;
 use std::path::{Path, PathBuf};
@@ -20,6 +24,44 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// Error returned when a continuation file fails HMAC integrity verification.
+/// Used to distinguish tamper-detection errors from ordinary I/O or parse
+/// failures, so callers can emit the appropriate causal event and cancel the
+/// bound approval.
+#[derive(Debug)]
+pub struct ContinuationIntegrityError {
+    pub task_id: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ContinuationIntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "continuation integrity violation for task '{}': {}",
+            self.task_id, self.message
+        )
+    }
+}
+
+impl std::error::Error for ContinuationIntegrityError {}
+
+/// Returns `true` if the error is a `ContinuationIntegrityError` (HMAC
+/// mismatch / tamper detection).  Used by callers to decide whether to cancel
+/// approvals and emit a tamper causal event.
+pub fn is_integrity_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ContinuationIntegrityError>().is_some()
+}
+
+/// HMAC-signed envelope wrapping a serialised `TurnContinuation` payload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SignedContinuation {
+    /// Canonical-JSON serialised `TurnContinuation`.
+    pub payload_json: String,
+    /// HMAC-SHA256 hex digest over `payload_json` bytes using the gateway key.
+    pub hmac_hex: String,
+}
 
 /// Serializable snapshot of an agent turn that has been suspended at an
 /// approval boundary.  Saved to disk; loaded on resume to seamlessly continue
@@ -49,6 +91,12 @@ pub struct TurnContinuation {
 
     /// Approval request ID stored in `GatewayStore`.
     pub approval_request_id: String,
+
+    /// The `ScheduledAction` that is pending approval.  Stored so the gateway
+    /// can verify structural equality against the approval row at resume,
+    /// preventing TOCTOU substitution attacks.
+    #[serde(default)]
+    pub pending_action: Option<ScheduledAction>,
 
     /// Workflow / task context — populated by `spawn_task_execution`.
     pub workflow_id: Option<String>,
@@ -81,6 +129,41 @@ pub struct PendingApprovalToolCall {
 }
 
 // ---------------------------------------------------------------------------
+// Key derivation
+// ---------------------------------------------------------------------------
+
+/// Resolve the HMAC key for continuation signing.  Uses the explicit
+/// `continuation_key` config value when set, otherwise derives a key from
+/// `node_id`.  **Warning:** the `node_id`-derived default is not a secret and
+/// only provides detection of accidental corruption, not protection against a
+/// local attacker who can read the config.  Production deployments should set
+/// `continuation_key` to a high-entropy secret.
+pub fn continuation_hmac_key(config: &GatewayConfig) -> String {
+    config
+        .continuation_key
+        .clone()
+        .unwrap_or_else(|| format!("autonoetic-continuation-{}", config.node_id))
+}
+
+// ---------------------------------------------------------------------------
+// Canonical JSON helper
+// ---------------------------------------------------------------------------
+
+/// Produce a deterministic JSON representation.  `serde_json` with sorted keys
+/// ensures the same struct always serialises to the same bytes.
+fn canonical_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
+    let mut buf = serde_json::Serializer::with_formatter(
+        Vec::new(),
+        serde_json::ser::CompactFormatter,
+    );
+    serde::Serialize::serialize(value, &mut buf)?;
+    // Re-parse and re-serialize with sorted keys for determinism
+    let v: serde_json::Value = serde_json::from_slice(&buf.into_inner())?;
+    let sorted = serde_json::to_string(&v)?;
+    Ok(sorted)
+}
+
+// ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
 
@@ -93,7 +176,8 @@ fn continuation_path(config: &GatewayConfig, task_id: &str) -> PathBuf {
     continuations_dir(config).join(format!("{}.json", task_id))
 }
 
-/// Persist a `TurnContinuation` for the given task.
+/// Persist a `TurnContinuation` for the given task, wrapped in a signed
+/// envelope.
 pub fn save_continuation(
     config: &GatewayConfig,
     task_id: &str,
@@ -102,18 +186,32 @@ pub fn save_continuation(
     let dir = continuations_dir(config);
     std::fs::create_dir_all(&dir)?;
     let path = continuation_path(config, task_id);
-    let json = serde_json::to_string_pretty(cont)?;
+
+    let payload_json = canonical_json(cont)?;
+    let key = continuation_hmac_key(config);
+    let hmac_hex = ofp::hmac_sign(&key, payload_json.as_bytes());
+
+    let envelope = SignedContinuation {
+        payload_json,
+        hmac_hex,
+    };
+    let json = serde_json::to_string_pretty(&envelope)?;
     std::fs::write(&path, json)?;
+
     tracing::debug!(
         target: "continuation",
         task_id = %task_id,
         path = %path.display(),
-        "Saved turn continuation"
+        "Saved signed turn continuation"
     );
     Ok(())
 }
 
-/// Load a previously saved `TurnContinuation`, returning `None` if not found.
+/// Load a previously saved `TurnContinuation`, verifying HMAC integrity.
+///
+/// Returns `Ok(None)` if the file does not exist.
+/// Returns `Err` on HMAC verification failure (tampering detected) or
+/// deserialization errors.
 pub fn load_continuation(
     config: &GatewayConfig,
     task_id: &str,
@@ -123,7 +221,33 @@ pub fn load_continuation(
         return Ok(None);
     }
     let json = std::fs::read_to_string(&path)?;
+
+    // Try signed envelope format first.
+    if let Ok(envelope) = serde_json::from_str::<SignedContinuation>(&json) {
+        let key = continuation_hmac_key(config);
+        if !ofp::hmac_verify(&key, envelope.payload_json.as_bytes(), &envelope.hmac_hex) {
+            tracing::error!(
+                target: "continuation",
+                task_id = %task_id,
+                "HMAC verification failed — continuation file may have been tampered with"
+            );
+            return Err(ContinuationIntegrityError {
+                task_id: task_id.to_string(),
+                message: "HMAC mismatch".to_string(),
+            }.into());
+        }
+        let cont: TurnContinuation = serde_json::from_str(&envelope.payload_json)?;
+        return Ok(Some(cont));
+    }
+
+    // Legacy unsigned format — still accepted for existing continuations
+    // written before the signing feature was deployed.
     let cont: TurnContinuation = serde_json::from_str(&json)?;
+    tracing::warn!(
+        target: "continuation",
+        task_id = %task_id,
+        "Loaded unsigned (legacy) continuation — consider re-saving to sign"
+    );
     Ok(Some(cont))
 }
 
@@ -192,8 +316,6 @@ pub fn execute_approved_action(
             dependencies,
             ..
         } => {
-            // Build args JSON with approval_ref set so the handler skips
-            // remote-access detection and proceeds directly to execution.
             let deps_json = match dependencies {
                 Some(d) => serde_json::json!({
                     "runtime": d.runtime,
