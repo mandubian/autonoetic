@@ -142,6 +142,14 @@ pub fn pending_approval_requests_for_session(
     Ok(v)
 }
 
+/// Optional parameters for approving a request with Phase 2 grant options.
+#[derive(Default)]
+pub struct ApproveOptions {
+    pub grant_scope: Option<autonoetic_types::background::GrantScope>,
+    pub grant_targets: Vec<autonoetic_types::background::GrantTarget>,
+    pub grant_expires_at: Option<String>,
+}
+
 pub fn approve_request(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -151,6 +159,23 @@ pub fn approve_request(
     secrets: Option<Vec<(String, String)>>,
     approver_level: Option<&ApprovalLevel>,
     hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
+) -> anyhow::Result<ApprovalDecision> {
+    approve_request_with_options(
+        config, gateway_store, request_id, decided_by, reason, secrets,
+        approver_level, hook_executor, ApproveOptions::default(),
+    )
+}
+
+pub fn approve_request_with_options(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    request_id: &str,
+    decided_by: &str,
+    reason: Option<String>,
+    secrets: Option<Vec<(String, String)>>,
+    approver_level: Option<&ApprovalLevel>,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
+    options: ApproveOptions,
 ) -> anyhow::Result<ApprovalDecision> {
     let store = gateway_store
         .ok_or_else(|| anyhow::anyhow!("GatewayStore is required to approve requests"))?;
@@ -277,13 +302,14 @@ pub fn approve_request(
         );
     }
 
-    let decision = decide_request(
+    let decision = decide_request_with_options(
         config,
         gateway_store,
         request_id,
         decided_by,
         reason,
         ApprovalStatus::Approved,
+        options,
     )?;
 
     // Dumb Gate model: notify the waiting session, do not auto-execute.
@@ -865,6 +891,21 @@ fn decide_request(
     reason: Option<String>,
     status: ApprovalStatus,
 ) -> anyhow::Result<ApprovalDecision> {
+    decide_request_with_options(
+        config, gateway_store, request_id, decided_by, reason, status,
+        ApproveOptions::default(),
+    )
+}
+
+fn decide_request_with_options(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    request_id: &str,
+    decided_by: &str,
+    reason: Option<String>,
+    status: ApprovalStatus,
+    options: ApproveOptions,
+) -> anyhow::Result<ApprovalDecision> {
     let request = if let Some(store) = gateway_store {
         store
             .get_approval(request_id)?
@@ -934,13 +975,26 @@ fn decide_request(
             if !hosts.is_empty() {
                 if let Some(root_sid) = &decision.root_session_id {
                     if let Some(store) = gateway_store {
+                        let scope = options.grant_scope.clone()
+                            .unwrap_or(autonoetic_types::background::GrantScope::RootSession);
+                        let targets = if options.grant_targets.is_empty() {
+                            hosts.iter()
+                                .map(|h| autonoetic_types::background::GrantTarget::ExactHost(h.clone()))
+                                .collect()
+                        } else {
+                            options.grant_targets.clone()
+                        };
+                        let session_id = decision.session_id.as_str();
                         if let Err(e) = store.insert_session_grant(
                             root_sid,
+                            session_id,
                             &decision.agent_id,
-                            &hosts,
+                            &scope,
+                            &targets,
                             &decision.decided_by,
                             &decision.decided_at,
                             Some(&decision.request_id),
+                            options.grant_expires_at.as_deref(),
                         ) {
                             tracing::warn!(
                                 target: "approval",
@@ -954,7 +1008,8 @@ fn decide_request(
                                 request_id = %decision.request_id,
                                 agent_id = %decision.agent_id,
                                 root_session_id = %root_sid,
-                                hosts = ?hosts,
+                                scope = %scope.as_str(),
+                                targets = ?targets,
                                 "Inserted session approval grants for approved sandbox exec"
                             );
                         }

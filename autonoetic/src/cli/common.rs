@@ -41,6 +41,54 @@ impl CliApprovalLevel {
     }
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliGrantScope {
+    Root,
+    Session,
+}
+
+impl CliGrantScope {
+    pub fn to_runtime(self) -> autonoetic_types::background::GrantScope {
+        match self {
+            Self::Root => autonoetic_types::background::GrantScope::RootSession,
+            Self::Session => autonoetic_types::background::GrantScope::Session,
+        }
+    }
+}
+
+pub fn parse_grant_target_spec(spec: &str) -> anyhow::Result<autonoetic_types::background::GrantTarget> {
+    use autonoetic_types::background::GrantTarget;
+    if let Some(val) = spec.strip_prefix("host:") {
+        Ok(GrantTarget::ExactHost(val.to_ascii_lowercase()))
+    } else if let Some(val) = spec.strip_prefix("suffix:") {
+        Ok(GrantTarget::HostSuffix(val.to_ascii_lowercase()))
+    } else if let Some(val) = spec.strip_prefix("hostport:") {
+        let (host, port_str) = val.rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("hostport spec must be 'hostport:host:port', got: {}", spec))?;
+        let port: u16 = port_str.parse()
+            .map_err(|_| anyhow::anyhow!("invalid port in hostport spec: {}", port_str))?;
+        Ok(GrantTarget::HostAndPort { host: host.to_ascii_lowercase(), port })
+    } else if let Some(val) = spec.strip_prefix("url:") {
+        Ok(GrantTarget::UrlPrefix(val.to_ascii_lowercase()))
+    } else {
+        Ok(GrantTarget::ExactHost(spec.to_ascii_lowercase()))
+    }
+}
+
+pub fn parse_ttl(ttl: &str) -> anyhow::Result<String> {
+    let secs = if ttl.ends_with('s') {
+        ttl.trim_end_matches('s').parse::<i64>()?
+    } else if ttl.ends_with('m') {
+        ttl.trim_end_matches('m').parse::<i64>()? * 60
+    } else if ttl.ends_with('h') {
+        ttl.trim_end_matches('h').parse::<i64>()? * 3600
+    } else {
+        ttl.parse::<i64>()? * 60
+    };
+    let expires = chrono::Utc::now() + chrono::Duration::seconds(secs);
+    Ok(expires.to_rfc3339())
+}
+
 pub fn apply_response_validation_override(
     config: &mut GatewayConfig,
     mode: Option<ResponseValidationMode>,
@@ -176,6 +224,21 @@ pub enum GatewayApprovalCommands {
         /// Approver level used to authorize this decision.
         #[arg(long = "approval-level", value_enum, default_value_t = CliApprovalLevel::Operator)]
         approval_level: CliApprovalLevel,
+        /// Grant scope: `root` (default) shares with all children/siblings;
+        /// `session` limits the grant to the specific child session.
+        #[arg(long, value_enum, default_value_t = CliGrantScope::Root)]
+        scope: CliGrantScope,
+        /// Narrow the grant to specific targets (repeatable).
+        /// Syntax: `host:api.github.com`, `suffix:*.github.com`,
+        /// `hostport:api.github.com:443`, `url:https://api.github.com/public/`
+        #[arg(long = "target", value_name = "SPEC")]
+        targets: Vec<String>,
+        /// Time-to-live for the grant (e.g. `10m`, `1h`, `30s`).
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Absolute expiry timestamp (RFC3339).
+        #[arg(long)]
+        until: Option<String>,
     },
     /// Reject one pending request.
     Reject {

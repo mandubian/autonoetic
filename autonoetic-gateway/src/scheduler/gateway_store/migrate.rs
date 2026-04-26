@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 15;
+const SCHEMA_VERSION_LATEST: i64 = 18;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -498,6 +498,9 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_admin_proposals_v13(conn)?;
     apply_memories_revision_provenance_v14(conn)?;
     apply_session_grant_revocation_v15(conn)?;
+    apply_grant_scope_and_session_v16(conn)?;
+    apply_grant_targets_table_v17(conn)?;
+    apply_grant_expiry_v18(conn)?;
 
     Ok(())
 }
@@ -1084,6 +1087,134 @@ fn apply_session_grant_revocation_v15(conn: &mut Connection) -> Result<()> {
         params![
             15_i64,
             "session_grant_revocation",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_grant_scope_and_session_v16(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 16 {
+        return Ok(());
+    }
+
+    for (col, default) in &[
+        ("session_id", "TEXT NOT NULL DEFAULT ''"),
+        ("scope", "TEXT NOT NULL DEFAULT 'root_session'"),
+    ] {
+        let col_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_approval_grants') WHERE name = ?1",
+            [col],
+            |row| row.get(0),
+        )?;
+        if col_count == 0 {
+            conn.execute(
+                &format!("ALTER TABLE session_approval_grants ADD COLUMN {col} {default}"),
+                [],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "UPDATE session_approval_grants SET session_id = root_session_id WHERE session_id = ''",
+        [],
+    )?;
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_session_grants_session_agent
+          ON session_approval_grants(session_id, agent_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            16_i64,
+            "grant_scope_and_session",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_grant_targets_table_v17(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 17 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_approval_grant_targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            grant_id INTEGER NOT NULL REFERENCES session_approval_grants(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            value TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_grant_targets_grant_id
+          ON session_approval_grant_targets(grant_id);",
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, host FROM session_approval_grants",
+    )?;
+    let rows: Vec<(i64, String)> = stmt.query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?.filter_map(|r| r.ok()).collect();
+    drop(stmt);
+
+    for (grant_id, host) in &rows {
+        conn.execute(
+            "INSERT OR IGNORE INTO session_approval_grant_targets (grant_id, kind, value) VALUES (?1, 'exact_host', ?2)",
+            params![grant_id, host],
+        )?;
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            17_i64,
+            "grant_targets_table",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_grant_expiry_v18(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 18 {
+        return Ok(());
+    }
+
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('session_approval_grants') WHERE name = 'expires_at'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute(
+            "ALTER TABLE session_approval_grants ADD COLUMN expires_at TEXT",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            18_i64,
+            "grant_expiry",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

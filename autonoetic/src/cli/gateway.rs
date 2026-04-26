@@ -239,9 +239,28 @@ pub async fn handle_gateway_approvals(
             reason,
             secrets,
             approval_level,
+            scope,
+            targets,
+            ttl,
+            until,
         } => {
             let approval_level = approval_level.to_runtime();
-            let decision = autonoetic_gateway::scheduler::approve_request(
+            let grant_scope = scope.to_runtime();
+
+            let parsed_targets: Vec<autonoetic_types::background::GrantTarget> = if targets.is_empty() {
+                vec![]
+            } else {
+                targets.iter().map(|s| super::common::parse_grant_target_spec(s))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+
+            let expires_at = if let Some(ttl) = ttl {
+                Some(super::common::parse_ttl(&ttl)?)
+            } else {
+                until.clone()
+            };
+
+            let decision = autonoetic_gateway::scheduler::approve_request_with_options(
                 &config,
                 Some(&gateway_store),
                 request_id,
@@ -254,6 +273,11 @@ pub async fn handle_gateway_approvals(
                 },
                 Some(&approval_level),
                 None,
+                autonoetic_gateway::scheduler::ApproveOptions {
+                    grant_scope: Some(grant_scope),
+                    grant_targets: parsed_targets,
+                    grant_expires_at: expires_at,
+                },
             )?;
             println!(
                 "Approved {} for agent {} ({})",
