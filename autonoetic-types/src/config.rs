@@ -68,6 +68,19 @@ pub enum SchemaEnforcementMode {
     Llm,
 }
 
+/// Policy mode for capability-delta gating during revision promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityDeltaGateMode {
+    /// Any capability broadening requires explicit approval.
+    #[default]
+    Strict,
+    /// Broadening inside an existing wildcard envelope is auto-allowed.
+    Evolving,
+    /// Disable capability-delta gating (development only).
+    Bootstrap,
+}
+
 /// Configuration for schema enforcement on agent.spawn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaEnforcementConfig {
@@ -485,6 +498,10 @@ pub struct GatewayConfig {
     /// Controls how the gateway analyzes code for capabilities and security.
     #[serde(default)]
     pub code_analysis: CodeAnalysisConfig,
+
+    /// Capability delta gating mode for `agent.revision.promote`.
+    #[serde(default)]
+    pub capability_delta_gate_mode: CapabilityDeltaGateMode,
 
     /// Optional per-session budgets (LLM rounds, tools, tokens, wall clock).
     #[serde(default)]
@@ -1159,6 +1176,7 @@ impl Default for GatewayConfig {
             llm_presets: HashMap::new(),
             llm_preset_mapping: HashMap::new(),
             code_analysis: CodeAnalysisConfig::default(),
+            capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
             session_budget: SessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),

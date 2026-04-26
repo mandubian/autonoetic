@@ -7,7 +7,7 @@ use autonoetic_types::agent::{
 };
 use autonoetic_types::artifact::{ArtifactBundle, ArtifactKind};
 use autonoetic_types::capability::Capability;
-use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::config::{CapabilityDeltaGateMode, GatewayConfig};
 use autonoetic_types::runtime_lock::{
     LockedArtifact, LockedDependencySet, LockedLayerMount, RuntimeLock,
 };
@@ -298,6 +298,35 @@ where
                 .map_err(|e| serde::de::Error::custom(format!("capabilities[{i}]: {e}")))
         })
         .collect()
+}
+
+fn parse_frontmatter_capabilities(frontmatter: &serde_yaml::Value) -> anyhow::Result<Vec<Capability>> {
+    let frontmatter_json = serde_json::to_value(frontmatter).map_err(|e| {
+        anyhow::anyhow!(
+            "Promotion gate: failed to convert SKILL.md frontmatter to JSON for capability parsing: {e}"
+        )
+    })?;
+    let caps_json = frontmatter_json
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut caps = Vec::new();
+    let mut parse_errors: Vec<String> = Vec::new();
+    for v in caps_json {
+        match normalize_capability_from_llm(v) {
+            Ok(cap) => caps.push(cap),
+            Err(e) => parse_errors.push(e.to_string()),
+        }
+    }
+    if !parse_errors.is_empty() {
+        anyhow::bail!(
+            "Promotion gate: cannot parse one or more capability entries in SKILL.md: {}",
+            parse_errors.join("; ")
+        );
+    }
+    Ok(caps)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1487,7 +1516,7 @@ impl NativeTool for AgentRevisionPromoteTool {
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&GatewayConfig>,
+        config: Option<&GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
@@ -1553,38 +1582,43 @@ impl NativeTool for AgentRevisionPromoteTool {
             )
         })?;
 
+        let current_capabilities = parse_frontmatter_capabilities(&skill_frontmatter)?;
+        let delta_mode = config
+            .map(|c| c.capability_delta_gate_mode)
+            .unwrap_or(CapabilityDeltaGateMode::Strict);
+
+        if let Some(delta) = check_capability_delta(
+            &gateway_store,
+            gateway_dir,
+            &args.agent_id,
+            &args.revision_id,
+            &current_capabilities,
+            delta_mode,
+        )? {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "capability_delta_requires_approval",
+                "delta": {
+                    "added": delta.added,
+                    "broadened": delta.broadened,
+                },
+                "hint": "Capability set broadened relative to outgoing revision. Explicit operator approval is required before promotion.",
+            })
+            .to_string());
+        }
+
         // Deserialize capabilities from the frontmatter using the same lenient pipeline
         // used by create_from_intent, so shorthand strings and field normalization are handled.
         let (needs_artifact_gate, has_high_risk) = {
-            let frontmatter_json =
-                serde_json::to_value(&skill_frontmatter).unwrap_or(serde_json::Value::Null);
-            let caps_json = frontmatter_json
-                .get("capabilities")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
             let mut artifact_required = false;
             let mut high_risk = false;
-            let mut parse_errors: Vec<String> = Vec::new();
-            for v in caps_json {
-                match normalize_capability_from_llm(v.clone()) {
-                    Ok(cap) => {
-                        if crate::runtime::install_contract::requires_artifact_review(&cap) {
-                            artifact_required = true;
-                        }
-                        if crate::runtime::install_contract::is_high_risk_capability(&cap) {
-                            high_risk = true;
-                        }
-                    }
-                    Err(e) => parse_errors.push(e.to_string()),
+            for cap in &current_capabilities {
+                if crate::runtime::install_contract::requires_artifact_review(cap) {
+                    artifact_required = true;
                 }
-            }
-            if !parse_errors.is_empty() {
-                anyhow::bail!(
-                    "Promotion gate: cannot parse one or more capability entries in SKILL.md. \
-                     Refusing to infer risk level from malformed capabilities: {}",
-                    parse_errors.join("; ")
-                );
+                if crate::runtime::install_contract::is_high_risk_capability(cap) {
+                    high_risk = true;
+                }
             }
             (artifact_required, high_risk)
         };
@@ -2025,6 +2059,142 @@ impl NativeTool for AgentRevisionDiffTool {
     }
 }
 
+fn check_capability_delta(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    gateway_dir: &Path,
+    agent_id: &str,
+    revision_id: &str,
+    current_capabilities: &[Capability],
+    mode: CapabilityDeltaGateMode,
+) -> anyhow::Result<Option<autonoetic_types::capability::CapabilityDelta>> {
+    if matches!(mode, CapabilityDeltaGateMode::Bootstrap) {
+        return Ok(None);
+    }
+
+    let Some(alias) = gateway_store.resolve_alias(agent_id)? else {
+        return Ok(None);
+    };
+    if alias.revision_id == revision_id {
+        return Ok(None);
+    }
+
+    let outgoing_revision_dir = gateway_dir
+        .join("revisions/agents")
+        .join(agent_id)
+        .join(&alias.revision_id);
+    let outgoing_skill_path = outgoing_revision_dir.join("SKILL.md");
+    let outgoing_skill_bytes = std::fs::read(&outgoing_skill_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot read SKILL.md for outgoing revision '{}': {}",
+            alias.revision_id,
+            e
+        )
+    })?;
+    let outgoing_skill_text = String::from_utf8_lossy(&outgoing_skill_bytes);
+    let outgoing_frontmatter =
+        crate::runtime::install_contract::extract_frontmatter_raw(&outgoing_skill_text).map_err(
+            |e| {
+                anyhow::anyhow!(
+                    "Cannot parse SKILL.md frontmatter for outgoing revision '{}': {}",
+                    alias.revision_id,
+                    e
+                )
+            },
+        )?;
+    let outgoing_capabilities = parse_frontmatter_capabilities(&outgoing_frontmatter)?;
+
+    let mut delta =
+        autonoetic_types::capability::compute_capability_delta(&outgoing_capabilities, current_capabilities);
+
+    if !delta.has_broadening() {
+        return Ok(None);
+    }
+
+    if matches!(mode, CapabilityDeltaGateMode::Evolving) {
+        delta
+            .broadened
+            .retain(|b| !scope_change_within_existing_envelope(&b.previous_scope, &b.new_scope));
+        if !delta.has_broadening() {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(delta))
+}
+
+fn scope_change_within_existing_envelope(previous_scope: &[String], new_scope: &[String]) -> bool {
+    use std::collections::BTreeSet;
+
+    let previous: BTreeSet<&str> = previous_scope.iter().map(String::as_str).collect();
+    let current: BTreeSet<&str> = new_scope.iter().map(String::as_str).collect();
+
+    let added: Vec<&str> = current
+        .difference(&previous)
+        .copied()
+        .collect::<Vec<&str>>();
+
+    if added.is_empty() {
+        return true;
+    }
+
+    let wildcard_envelopes: Vec<&str> = previous
+        .iter()
+        .copied()
+        .filter(|v| v.contains('*'))
+        .collect();
+
+    if wildcard_envelopes.is_empty() {
+        return false;
+    }
+
+    added
+        .iter()
+        .all(|candidate| wildcard_envelopes.iter().any(|pattern| wildcard_match(pattern, candidate)))
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == value;
+    }
+
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut cursor = 0usize;
+
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 && !pattern.starts_with('*') {
+            let Some(remaining) = value.get(cursor..) else {
+                return false;
+            };
+            if !remaining.starts_with(part) {
+                return false;
+            }
+            cursor += part.len();
+            continue;
+        }
+
+        let Some(remaining) = value.get(cursor..) else {
+            return false;
+        };
+        let Some(found) = remaining.find(part) else {
+            return false;
+        };
+        cursor += found + part.len();
+    }
+
+    if !pattern.ends_with('*') {
+        if let Some(last_non_empty) = parts.iter().rev().find(|p| !p.is_empty()) {
+            return value.ends_with(last_non_empty);
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod capability_lenient_deser_tests {
     use super::*;
@@ -2140,5 +2310,32 @@ mod capability_lenient_deser_tests {
         let j = r#"{"capabilities":["AgentSpawn"]}"#;
         let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
         assert!(e.to_string().contains("capabilities[0]"));
+    }
+
+    #[test]
+    fn wildcard_match_supports_prefix_suffix() {
+        assert!(wildcard_match("*.example.com", "api.example.com"));
+        assert!(wildcard_match("scheduler.*", "scheduler.cron.create"));
+        assert!(!wildcard_match("*.example.com", "example.org"));
+    }
+
+    #[test]
+    fn wildcard_match_is_utf8_safe() {
+        assert!(wildcard_match("pré*", "préfixe"));
+        assert!(!wildcard_match("pré*", "postfixe"));
+    }
+
+    #[test]
+    fn envelope_allows_new_entries_within_wildcard() {
+        let previous = vec!["*.example.com".to_string()];
+        let current = vec!["*.example.com".to_string(), "api.example.com".to_string()];
+        assert!(scope_change_within_existing_envelope(&previous, &current));
+    }
+
+    #[test]
+    fn envelope_rejects_new_entries_outside_wildcard() {
+        let previous = vec!["*.example.com".to_string()];
+        let current = vec!["*.example.com".to_string(), "api.evil.org".to_string()];
+        assert!(!scope_change_within_existing_envelope(&previous, &current));
     }
 }
