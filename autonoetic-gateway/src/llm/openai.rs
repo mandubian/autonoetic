@@ -201,7 +201,7 @@ impl LlmDriver for OpenAiDriver {
 
             if !status.is_success() {
                 let text = response.text().await.unwrap_or_default();
-                tracing::debug!(
+                tracing::warn!(
                     target: "llm::openai",
                     status = %status,
                     model = %self.provider.model,
