@@ -255,9 +255,16 @@ pub async fn handle_gateway_approvals(
             };
 
             let expires_at = if let Some(ttl) = ttl {
+                if until.is_some() {
+                    anyhow::bail!("--ttl and --until are mutually exclusive; provide one or the other");
+                }
                 Some(super::common::parse_ttl(&ttl)?)
-            } else {
+            } else if let Some(ref until_str) = until {
+                let _ = chrono::DateTime::parse_from_rfc3339(until_str)
+                    .map_err(|e| anyhow::anyhow!("invalid --until timestamp (expected RFC3339): {}", e))?;
                 until.clone()
+            } else {
+                None
             };
 
             let decision = autonoetic_gateway::scheduler::approve_request_with_options(

@@ -234,9 +234,7 @@ impl GatewayStore {
             "INSERT INTO session_approval_grants
              (root_session_id, session_id, agent_id, host, scope, granted_by, granted_at, source_approval_id, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(root_session_id, agent_id, host) DO UPDATE SET
-                 session_id = excluded.session_id,
-                 scope = excluded.scope,
+             ON CONFLICT(root_session_id, session_id, agent_id, scope, host) DO UPDATE SET
                  granted_by = excluded.granted_by,
                  granted_at = excluded.granted_at,
                  source_approval_id = excluded.source_approval_id,
@@ -257,8 +255,8 @@ impl GatewayStore {
         )?;
 
         let grant_id: i64 = conn.query_row(
-            "SELECT id FROM session_approval_grants WHERE root_session_id = ?1 AND agent_id = ?2 AND host = ?3",
-            params![root_session_id, agent_id, primary_host],
+            "SELECT id FROM session_approval_grants WHERE root_session_id = ?1 AND session_id = ?2 AND agent_id = ?3 AND scope = ?4 AND host = ?5",
+            params![root_session_id, session_id, agent_id, scope.as_str(), primary_host],
             |row| row.get(0),
         )?;
 
@@ -370,20 +368,50 @@ impl GatewayStore {
 
     fn get_grant_targets_with_conn(&self, conn: &Connection, grant_id: i64) -> Result<Vec<GrantTarget>> {
         let mut stmt = conn.prepare(
-            "SELECT value FROM session_approval_grant_targets WHERE grant_id = ?1",
+            "SELECT kind, value FROM session_approval_grant_targets WHERE grant_id = ?1",
         )?;
         let rows = stmt.query_map(params![grant_id], |row| {
-            let value: String = row.get(0)?;
-            Ok(value)
+            let kind: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            Ok((kind, value))
         })?;
         let mut targets = Vec::new();
         for row in rows {
-            let value = row?;
-            if let Ok(t) = serde_json::from_str::<GrantTarget>(&value) {
+            let (kind, value) = row?;
+            if let Some(t) = Self::parse_grant_target(&kind, &value) {
                 targets.push(t);
+            } else {
+                eprintln!(
+                    "warning: failed to parse session_approval_grant_targets row for grant_id={} (kind={}, value={})",
+                    grant_id, kind, value
+                );
             }
         }
         Ok(targets)
+    }
+
+    fn parse_grant_target(kind: &str, value: &str) -> Option<GrantTarget> {
+        if let Ok(t) = serde_json::from_str::<GrantTarget>(value) {
+            return Some(t);
+        }
+        let tagged = serde_json::json!({"kind": kind, "value": value});
+        if let Ok(t) = serde_json::from_value::<GrantTarget>(tagged) {
+            return Some(t);
+        }
+        match kind {
+            "exact_host" => Some(GrantTarget::ExactHost(value.to_string())),
+            "host_suffix" => Some(GrantTarget::HostSuffix(value.to_string())),
+            "host_and_port" => {
+                if let Some((h, p)) = value.rsplit_once(':') {
+                    if let Ok(port) = p.parse::<u16>() {
+                        return Some(GrantTarget::HostAndPort { host: h.to_string(), port });
+                    }
+                }
+                None
+            }
+            "url_prefix" => Some(GrantTarget::UrlPrefix(value.to_string())),
+            _ => None,
+        }
     }
 
     pub fn session_grants_cover_targets(
@@ -412,13 +440,17 @@ impl GatewayStore {
             Err(_) => return false,
         };
 
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
 
         let active: Vec<&SessionApprovalGrant> = grants
             .iter()
             .filter(|g| {
                 if let Some(ref exp) = g.expires_at {
-                    if exp < &now {
+                    let expires_at = match chrono::DateTime::parse_from_rfc3339(exp) {
+                        Ok(dt) => dt.with_timezone(&chrono::Utc),
+                        Err(_) => return false,
+                    };
+                    if expires_at < now {
                         return false;
                     }
                 }
@@ -486,14 +518,25 @@ impl GatewayStore {
     }
 
     pub fn prune_expired_grants(&self) -> Result<usize> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
         let conn = self.conn.lock().unwrap();
         let expired_ids: Vec<i64> = {
             let mut stmt = conn.prepare(
-                "SELECT id FROM session_approval_grants WHERE expires_at IS NOT NULL AND expires_at < ?1",
+                "SELECT id, expires_at FROM session_approval_grants WHERE expires_at IS NOT NULL",
             )?;
-            let rows = stmt.query_map(params![&now], |row| row.get(0))?;
-            rows.filter_map(|r| r.ok()).collect()
+            let rows = stmt.query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let expires_at: String = row.get(1)?;
+                Ok((id, expires_at))
+            })?;
+            rows.filter_map(|r| r.ok())
+                .filter(|(_, exp)| {
+                    chrono::DateTime::parse_from_rfc3339(exp)
+                        .map(|dt| dt.with_timezone(&chrono::Utc) < now)
+                        .unwrap_or(false)
+                })
+                .map(|(id, _)| id)
+                .collect()
         };
         for gid in &expired_ids {
             let _ = conn.execute(
@@ -501,10 +544,13 @@ impl GatewayStore {
                 params![gid],
             );
         }
-        let count = conn.execute(
-            "DELETE FROM session_approval_grants WHERE expires_at IS NOT NULL AND expires_at < ?1",
-            params![&now],
-        )?;
+        let count = expired_ids.len();
+        for gid in &expired_ids {
+            let _ = conn.execute(
+                "DELETE FROM session_approval_grants WHERE id = ?1",
+                params![gid],
+            );
+        }
         Ok(count)
     }
 }

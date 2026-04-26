@@ -59,6 +59,11 @@ impl CliGrantScope {
 pub fn parse_grant_target_spec(spec: &str) -> anyhow::Result<autonoetic_types::background::GrantTarget> {
     use autonoetic_types::background::GrantTarget;
     if let Some(val) = spec.strip_prefix("host:") {
+        if let Some((h, port_str)) = val.rsplit_once(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                return Ok(GrantTarget::HostAndPort { host: h.to_ascii_lowercase(), port });
+            }
+        }
         Ok(GrantTarget::ExactHost(val.to_ascii_lowercase()))
     } else if let Some(val) = spec.strip_prefix("suffix:") {
         Ok(GrantTarget::HostSuffix(val.to_ascii_lowercase()))

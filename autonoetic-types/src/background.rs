@@ -652,16 +652,36 @@ impl GrantTarget {
                     return true;
                 }
                 request.ends_with(&format!(".{}", suffix))
-                    && !request.ends_with(&format!(".{}.evil", suffix))
             }
             Self::HostAndPort { host, port } => {
                 let expected = format!("{}:{}", host.to_ascii_lowercase(), port);
                 request_target.eq_ignore_ascii_case(&expected)
             }
             Self::UrlPrefix(prefix) => {
-                let request = request_target.to_ascii_lowercase();
-                let prefix = prefix.to_ascii_lowercase();
-                request.starts_with(&prefix)
+                fn lower_authority(url: &str) -> std::borrow::Cow<'_, str> {
+                    let scheme_end = url.find("://").map(|p| p + 3).unwrap_or(0);
+                    let rest = &url[scheme_end..];
+                    if let Some(pos) = rest.find('/') {
+                        let authority = &rest[..pos];
+                        let path = &rest[pos..];
+                        if authority.chars().any(|c| c.is_ascii_uppercase()) {
+                            format!(
+                                "{}{}{}",
+                                &url[..scheme_end].to_ascii_lowercase(),
+                                authority.to_ascii_lowercase(),
+                                path
+                            )
+                            .into()
+                        } else {
+                            std::borrow::Cow::Borrowed(url)
+                        }
+                    } else {
+                        url.to_ascii_lowercase().into()
+                    }
+                }
+                let norm_req = lower_authority(request_target);
+                let norm_pre = lower_authority(prefix);
+                norm_req.starts_with(&*norm_pre)
             }
         }
     }

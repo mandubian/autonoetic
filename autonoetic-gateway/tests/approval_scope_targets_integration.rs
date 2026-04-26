@@ -5,9 +5,8 @@
 //!   2. Root-scoped grants cover all children.
 //!   3. GrantTarget pattern matching works for all four kinds.
 //!   4. Expired grants are excluded from coverage.
-//!   5. Migration preserves existing grants.
-//!   6. Emergency stop cleans up all scopes.
-//!   7. Janitor prunes expired grants.
+//!   5. Emergency stop cleans up all scopes.
+//!   6. Janitor prunes expired grants.
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::{GrantScope, GrantTarget};

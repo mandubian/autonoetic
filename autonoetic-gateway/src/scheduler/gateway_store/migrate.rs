@@ -1103,22 +1103,28 @@ fn apply_grant_scope_and_session_v16(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
-    for (col, default) in &[
-        ("session_id", "TEXT NOT NULL DEFAULT ''"),
-        ("scope", "TEXT NOT NULL DEFAULT 'root_session'"),
-    ] {
-        let col_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('session_approval_grants') WHERE name = ?1",
-            [col],
-            |row| row.get(0),
-        )?;
-        if col_count == 0 {
-            conn.execute(
-                &format!("ALTER TABLE session_approval_grants ADD COLUMN {col} {default}"),
-                [],
-            )?;
-        }
-    }
+    conn.execute_batch(
+        "CREATE TABLE session_approval_grants_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            host TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            source_approval_id TEXT,
+            revoked_at TEXT,
+            revoked_reason TEXT,
+            session_id TEXT NOT NULL DEFAULT '',
+            scope TEXT NOT NULL DEFAULT 'root_session',
+            UNIQUE(root_session_id, session_id, agent_id, scope, host)
+        );
+        INSERT INTO session_approval_grants_new
+            (id, root_session_id, agent_id, host, granted_by, granted_at, source_approval_id, revoked_at, revoked_reason)
+            SELECT id, root_session_id, agent_id, host, granted_by, granted_at, source_approval_id, revoked_at, revoked_reason
+            FROM session_approval_grants;
+        DROP TABLE session_approval_grants;
+        ALTER TABLE session_approval_grants_new RENAME TO session_approval_grants;",
+    )?;
 
     conn.execute(
         "UPDATE session_approval_grants SET session_id = root_session_id WHERE session_id = ''",
@@ -1126,7 +1132,11 @@ fn apply_grant_scope_and_session_v16(conn: &mut Connection) -> Result<()> {
     )?;
 
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_session_grants_session_agent
+        "CREATE INDEX IF NOT EXISTS idx_session_grants_root_agent
+          ON session_approval_grants(root_session_id, agent_id);
+         CREATE INDEX IF NOT EXISTS idx_session_grants_root
+          ON session_approval_grants(root_session_id);
+         CREATE INDEX IF NOT EXISTS idx_session_grants_session_agent
           ON session_approval_grants(session_id, agent_id);",
     )?;
 
@@ -1171,9 +1181,10 @@ fn apply_grant_targets_table_v17(conn: &mut Connection) -> Result<()> {
     drop(stmt);
 
     for (grant_id, host) in &rows {
+        let value = serde_json::json!({"kind": "exact_host", "value": host}).to_string();
         conn.execute(
             "INSERT OR IGNORE INTO session_approval_grant_targets (grant_id, kind, value) VALUES (?1, 'exact_host', ?2)",
-            params![grant_id, host],
+            params![grant_id, value],
         )?;
     }
 
