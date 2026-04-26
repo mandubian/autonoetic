@@ -974,7 +974,42 @@ impl GatewayExecutionService {
             // 2) Session checkpoint (hibernation/budget/max-turns/manual/error)
             // 3) Fresh start
             let (outcome, resume_initial_message, consumed_checkpoint_turn_id) = if let Some(t_id) = task_id {
-                if let Ok(Some(cont)) = crate::runtime::continuation::load_continuation(&self.config, t_id) {
+                let load_result = crate::runtime::continuation::load_continuation(&self.config, t_id);
+                if let Err(e) = &load_result {
+                    tracing::error!(
+                        target: "continuation",
+                        task_id = %t_id,
+                        error = %e,
+                        "Continuation integrity violation — tampering suspected"
+                    );
+                    if let Ok(logger) = init_gateway_causal_logger(&self.config) {
+                        let _ = logger.log(
+                            "gateway",
+                            "",
+                            None,
+                            0,
+                            "background",
+                            "continuation_tampered",
+                            autonoetic_types::causal_chain::EntryStatus::Error,
+                            Some(serde_json::json!({
+                                "task_id": t_id,
+                                "error": e.to_string(),
+                            })),
+                        );
+                    }
+                    if let Some(store) = self.gateway_store.as_ref() {
+                        let pending = store.get_pending_approvals().unwrap_or_default();
+                        if let Some(p) = pending.iter().find(|p| p.task_id.as_deref() == Some(t_id)) {
+                            let _ = store.cancel_approval(
+                                &p.request_id,
+                                "gateway",
+                                &chrono::Utc::now().to_rfc3339(),
+                            );
+                        }
+                    }
+                    anyhow::bail!("continuation integrity violation for task '{}': {}", t_id, e);
+                }
+                if let Some(cont) = load_result.unwrap() {
                     tracing::info!(
                         target: "continuation",
                         task_id = %t_id,
@@ -986,6 +1021,28 @@ impl GatewayExecutionService {
                     let approval_req = self.gateway_store
                         .as_ref()
                         .and_then(|store| store.get_approval(&cont.approval_request_id).ok().flatten());
+
+                    // Action-equality check: if the continuation carries a pending_action,
+                    // verify it structurally equals the action from the approval row.
+                    // This prevents TOCTOU substitution where the approval row is somehow
+                    // swapped to a different action between suspension and resume.
+                    if let Some(ref req) = approval_req {
+                        if let Some(ref pending) = cont.pending_action {
+                            if pending != &req.action {
+                                tracing::error!(
+                                    target: "continuation",
+                                    task_id = %t_id,
+                                    approval_request_id = %cont.approval_request_id,
+                                    "Action mismatch between continuation and approval row — possible substitution attack"
+                                );
+                                let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
+                                anyhow::bail!(
+                                    "continuation action mismatch: the action stored in the continuation does not match the approved action (task '{}')",
+                                    t_id
+                                );
+                            }
+                        }
+                    }
 
                     let approved_result = match approval_req {
                         Some(ref req) if req.status == Some(autonoetic_types::background::ApprovalStatus::Approved) => {

@@ -1980,6 +1980,12 @@ impl AgentExecutor {
                             .find(|tc| tc.id == pending_call_id)
                             .expect("pending call id must match a tool call in the response");
 
+                        let pending_action = self
+                            .gateway_store
+                            .as_ref()
+                            .and_then(|store| store.get_approval(&request_id).ok().flatten())
+                            .map(|req| req.action);
+
                         let continuation = crate::runtime::continuation::TurnContinuation {
                             history: history.clone(), // snapshot BEFORE assistant_msg
                             assistant_message: assistant_msg,
@@ -1993,6 +1999,7 @@ impl AgentExecutor {
                                 },
                             remaining_tool_calls: remaining_calls,
                             approval_request_id: request_id.clone(),
+                            pending_action,
                             workflow_id: self.workflow_id.clone(),
                             task_id: self.task_id.clone(),
                             session_id: session_id.clone(),

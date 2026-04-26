@@ -496,6 +496,13 @@ pub struct GatewayConfig {
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
 
+    /// HMAC-SHA256 key for signing turn continuation files.  When unset the
+    /// gateway derives a deterministic key from `node_id`.  Rotate by
+    /// changing this value (existing continuations will fail integrity
+    /// verification and be rejected).
+    #[serde(default)]
+    pub continuation_key: Option<String>,
+
     /// Heartbeat interval (seconds) for workflow tasks in `Running` state.
     ///
     /// Used by both scheduler-driven async runs and synchronous `agent.spawn` waits to
@@ -1161,6 +1168,7 @@ impl Default for GatewayConfig {
             code_analysis: CodeAnalysisConfig::default(),
             session_budget: SessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
+            continuation_key: None,
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
             evidence_mode: default_evidence_mode(),
