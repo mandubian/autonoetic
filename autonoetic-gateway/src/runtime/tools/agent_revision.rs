@@ -301,7 +301,11 @@ where
 }
 
 fn parse_frontmatter_capabilities(frontmatter: &serde_yaml::Value) -> anyhow::Result<Vec<Capability>> {
-    let frontmatter_json = serde_json::to_value(frontmatter).unwrap_or(serde_json::Value::Null);
+    let frontmatter_json = serde_json::to_value(frontmatter).map_err(|e| {
+        anyhow::anyhow!(
+            "Promotion gate: failed to convert SKILL.md frontmatter to JSON for capability parsing: {e}"
+        )
+    })?;
     let caps_json = frontmatter_json
         .get("capabilities")
         .and_then(|v| v.as_array())
@@ -2164,14 +2168,20 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
             continue;
         }
         if i == 0 && !pattern.starts_with('*') {
-            if !value[cursor..].starts_with(part) {
+            let Some(remaining) = value.get(cursor..) else {
+                return false;
+            };
+            if !remaining.starts_with(part) {
                 return false;
             }
             cursor += part.len();
             continue;
         }
 
-        let Some(found) = value[cursor..].find(part) else {
+        let Some(remaining) = value.get(cursor..) else {
+            return false;
+        };
+        let Some(found) = remaining.find(part) else {
             return false;
         };
         cursor += found + part.len();
@@ -2307,6 +2317,12 @@ mod capability_lenient_deser_tests {
         assert!(wildcard_match("*.example.com", "api.example.com"));
         assert!(wildcard_match("scheduler.*", "scheduler.cron.create"));
         assert!(!wildcard_match("*.example.com", "example.org"));
+    }
+
+    #[test]
+    fn wildcard_match_is_utf8_safe() {
+        assert!(wildcard_match("pré*", "préfixe"));
+        assert!(!wildcard_match("pré*", "postfixe"));
     }
 
     #[test]

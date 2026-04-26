@@ -346,12 +346,15 @@ fn scope_broadening(
 fn is_scope_broadened(previous: &[String], current: &[String]) -> bool {
     let prev_has_all = previous.iter().any(|x| x == "*");
     let curr_has_all = current.iter().any(|x| x == "*");
+    if prev_has_all {
+        return false;
+    }
     if curr_has_all && !prev_has_all {
         return true;
     }
     let prev: BTreeSet<&str> = previous.iter().map(String::as_str).collect();
     let curr: BTreeSet<&str> = current.iter().map(String::as_str).collect();
-    curr.len() > prev.len() && prev.is_subset(&curr)
+    curr.iter().any(|scope| !prev.contains(scope))
 }
 
 fn capability_narrowed(previous: &Capability, current: &Capability) -> bool {
@@ -375,6 +378,9 @@ fn capability_narrowed(previous: &Capability, current: &Capability) -> bool {
 fn is_scope_narrowed(previous: &[String], current: &[String]) -> bool {
     let prev_has_all = previous.iter().any(|x| x == "*");
     let curr_has_all = current.iter().any(|x| x == "*");
+    if curr_has_all {
+        return false;
+    }
     if prev_has_all && !curr_has_all {
         return true;
     }
@@ -431,5 +437,43 @@ mod tests {
         assert!(d.broadened.is_empty());
         assert!(!d.has_broadening());
         assert_eq!(d.narrowed, vec!["NetworkAccess".to_string()]);
+    }
+
+    #[test]
+    fn delta_detects_broadening_when_scope_replaced() {
+        let prev = vec![Capability::NetworkAccess {
+            hosts: vec!["a.example.com".to_string(), "b.example.com".to_string()],
+        }];
+        let curr = vec![Capability::NetworkAccess {
+            hosts: vec!["a.example.com".to_string(), "c.example.com".to_string()],
+        }];
+        let d = compute_capability_delta(&prev, &curr);
+        assert_eq!(d.broadened.len(), 1);
+        assert!(d.has_broadening());
+    }
+
+    #[test]
+    fn delta_does_not_broaden_when_previous_has_wildcard() {
+        let prev = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        let curr = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string(), "api.example.com".to_string()],
+        }];
+        let d = compute_capability_delta(&prev, &curr);
+        assert!(d.broadened.is_empty());
+        assert!(!d.has_broadening());
+    }
+
+    #[test]
+    fn delta_does_not_narrow_when_current_has_wildcard() {
+        let prev = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string(), "api.example.com".to_string()],
+        }];
+        let curr = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        let d = compute_capability_delta(&prev, &curr);
+        assert!(d.narrowed.is_empty());
     }
 }
