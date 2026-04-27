@@ -444,6 +444,28 @@ impl GatewayExecutionService {
             root_session_id,
         )?;
 
+        store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: source_agent_id.unwrap_or("gateway").to_string(),
+            session_id: root_session_id.to_string(),
+            turn_id: None,
+            event_seq: 0,
+            timestamp: requested_at.clone(),
+            category: "background".to_string(),
+            action: format!("emergency_stop.initiated:{}", stop_id),
+            status: "success".to_string(),
+            target: None,
+            payload: Some(serde_json::json!({
+                "reason": reason,
+                "trigger_kind": trigger_kind,
+                "requested_by_type": requested_by_type,
+                "requested_by_id": requested_by_id,
+            }).to_string()),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        })?;
+
         store.insert_emergency_stop(&EmergencyStopRecord {
             stop_id: stop_id.clone(),
             scope_type: "root_session".to_string(),

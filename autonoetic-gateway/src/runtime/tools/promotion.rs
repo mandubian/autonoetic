@@ -180,25 +180,12 @@ impl NativeTool for PromotionRecordTool {
             anyhow::bail!("Promotion store requires gateway directory to be configured");
         };
 
-        let store = PromotionStore::new(gw_dir)?;
-
-        let record = store.record_promotion(
-            args.artifact_id.clone(),
-            args.artifact_digest.clone(),
-            None,
-            args.role.clone(),
-            &manifest.agent.id,
-            args.pass,
-            args.findings.clone(),
-            args.summary.clone(),
-        )?;
-
         let causal_log_path = gw_dir.join("history").join("causal_chain.jsonl");
         if let Some(parent) = causal_log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(logger) = CausalLogger::new(&causal_log_path) {
-            let _ = logger.log(
+            let _ = logger.log_durable(
                 &manifest.agent.id,
                 session_id.unwrap_or("unknown"),
                 turn_id,
@@ -215,6 +202,19 @@ impl NativeTool for PromotionRecordTool {
                 })),
             );
         }
+
+        let store = PromotionStore::new(gw_dir)?;
+
+        let record = store.record_promotion(
+            args.artifact_id.clone(),
+            args.artifact_digest.clone(),
+            None,
+            args.role.clone(),
+            &manifest.agent.id,
+            args.pass,
+            args.findings.clone(),
+            args.summary.clone(),
+        )?;
 
         let response = PromotionRecordResponse {
             ok: true,
