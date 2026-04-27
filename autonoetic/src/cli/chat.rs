@@ -804,7 +804,7 @@ fn format_workflow_event_card(
         )),
         "task.updated" => Some((
             format!("🔄 [{}] Task updated: {}{} ({})", ts_short, task, agent_suffix, status),
-            MessageRole::Signal,
+            MessageRole::SignalLow,
         )),
         other => {
             Some((
@@ -815,6 +815,34 @@ fn format_workflow_event_card(
     };
 
     result
+}
+
+fn push_workflow_event_message(app: &mut App, role: MessageRole, card: String) {
+    match role {
+        MessageRole::SignalLow => {
+            // Keep one rolling low-signal line instead of growing the transcript.
+            if let Some(last_idx) = app
+                .messages
+                .iter()
+                .rposition(|m| matches!(m.role, MessageRole::SignalLow))
+            {
+                app.messages[last_idx].content = card;
+            } else {
+                app.add_message(role, card);
+            }
+        }
+        _ => {
+            // Drop stale low-signal noise when meaningful events arrive.
+            if let Some(last_idx) = app
+                .messages
+                .iter()
+                .rposition(|m| matches!(m.role, MessageRole::SignalLow))
+            {
+                app.messages.remove(last_idx);
+            }
+            app.add_message(role, card);
+        }
+    }
 }
 
 // ============================================================================
@@ -2576,8 +2604,11 @@ async fn check_signals(
                                     let start_idx = events.len().saturating_sub(recap_count);
                                     for event in &events[start_idx..] {
                                         if let Some((card, role)) = format_workflow_event_card(event) {
+                                            if matches!(role, MessageRole::SignalLow) {
+                                                continue;
+                                            }
                                             app.session_overview.latest_signal = Some(card.clone());
-                                            app.add_message(role, card);
+                                            push_workflow_event_message(app, role, card);
                                             processed_any = true;
                                         }
                                     }
@@ -2595,17 +2626,7 @@ async fn check_signals(
                         for event in events {
                             if app.seen_workflow_event_ids.insert(event.event_id.clone()) {
                                 if let Some((card, role)) = format_workflow_event_card(&event) {
-                                    match role {
-                                        MessageRole::SignalLow => {
-                                            app.add_message(role, card.clone());
-                                        }
-                                        _ => {
-                                            if let Some(last_idx) = app.messages.iter().rposition(|m| matches!(m.role, MessageRole::SignalLow)) {
-                                                app.messages.remove(last_idx);
-                                            }
-                                            app.add_message(role, card.clone());
-                                        }
-                                    }
+                                    push_workflow_event_message(app, role, card.clone());
                                     app.session_overview.latest_signal = Some(card.clone());
 
                                     // Track pending approval IDs for inline approval (Ctrl+A)
