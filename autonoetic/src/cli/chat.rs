@@ -45,6 +45,8 @@ const CHAT_APPROVAL_FIELD_MAX_CHARS: usize = 16_384;
 /// Status bar preview of `latest_signal` (first line); main transcript shows full messages.
 const STATUS_BAR_EVENT_PREVIEW_CHARS: usize = 160;
 const RECONNECT_NOTICE_BASE_ATTEMPTS: u32 = 3;
+const RIGHT_PANE_WIDTH: u16 = 44;
+const MIN_MAIN_MESSAGES_WIDTH: u16 = 60;
 
 /// If `handle_chat` enables raw mode / alternate screen then exits early (missing env, I/O error,
 /// `run_loop` failure), the tty stays raw with echo off unless we restore it—keyboard input looks
@@ -165,6 +167,13 @@ struct SessionPollSnapshot {
     pending_interactions: Vec<UserInteraction>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct LiveTaskSummary {
+    task_id: String,
+    agent_id: String,
+    status: String,
+}
+
 struct App {
     messages: Vec<ChatMessage>,
     input: String,
@@ -189,6 +198,7 @@ struct App {
     bootstrapped_workflow_ids: HashSet<String>,
     current_workflow_id: Option<String>,
     session_overview: SessionOverview,
+    live_tasks: Vec<LiveTaskSummary>,
     /// `user.ask` cards we already showed for this TUI session (avoid duplicate polls).
     seen_user_interaction_prompts: HashSet<String>,
     // Persistent clipboard — must stay alive so arboard's background ownership
@@ -228,6 +238,7 @@ impl App {
             bootstrapped_workflow_ids: HashSet::new(),
             current_workflow_id: None,
             session_overview: SessionOverview::default(),
+            live_tasks: Vec::new(),
             seen_user_interaction_prompts: HashSet::new(),
             // Safe clipboard initialization - arboard can panic on headless/SSH systems
             clipboard: std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None),
@@ -1042,6 +1053,53 @@ fn extract_structured_approval(text: &str) -> Option<StructuredApprovalView> {
 // Drawing
 // ============================================================================
 
+struct ChatLayout {
+    status: Rect,
+    separator: Rect,
+    messages: Rect,
+    right_pane: Option<Rect>,
+    input: Rect,
+}
+
+fn compute_chat_layout(area: Rect) -> ChatLayout {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Status
+            Constraint::Length(1), // Separator
+            Constraint::Min(5),    // Body
+            Constraint::Length(3), // Input
+        ])
+        .split(area);
+
+    let body = rows[2];
+    let right_pane_enabled = body.width > RIGHT_PANE_WIDTH + MIN_MAIN_MESSAGES_WIDTH;
+    if right_pane_enabled {
+        let body_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(MIN_MAIN_MESSAGES_WIDTH),
+                Constraint::Length(RIGHT_PANE_WIDTH),
+            ])
+            .split(body);
+        ChatLayout {
+            status: rows[0],
+            separator: rows[1],
+            messages: body_cols[0],
+            right_pane: Some(body_cols[1]),
+            input: rows[3],
+        }
+    } else {
+        ChatLayout {
+            status: rows[0],
+            separator: rows[1],
+            messages: body,
+            right_pane: None,
+            input: rows[3],
+        }
+    }
+}
+
 fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
@@ -1052,40 +1110,111 @@ fn draw(f: &mut Frame, app: &App) {
         return;
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Status
-            Constraint::Length(1), // Separator
-            Constraint::Min(5),    // Messages
-            Constraint::Length(3), // Input
-        ])
-        .split(area);
+    let layout = compute_chat_layout(area);
 
-    // Status
-    draw_status(f, app, chunks[0]);
+    draw_status(f, app, layout.status);
 
-    // Separator
     let sep = Paragraph::new(Line::from(Span::styled(
-        "─".repeat(chunks[1].width as usize),
+        "─".repeat(layout.separator.width as usize),
         Style::default().fg(Color::DarkGray),
     )));
-    f.render_widget(sep, chunks[1]);
+    f.render_widget(sep, layout.separator);
 
-    // Messages
-    draw_messages(f, app, chunks[2]);
+    draw_messages(f, app, layout.messages);
 
-    // Input
-    draw_input(f, app, chunks[3]);
+    if let Some(right) = layout.right_pane {
+        draw_right_pane(f, app, right);
+    }
 
-    // Pin the terminal cursor inside the input box so it never wanders to the
-    // last mouse position during a drag-selection.
-    // Layout: top border = +1 row, "> " prefix = +2 cols, cursor_pos = byte offset.
+    draw_input(f, app, layout.input);
+
     let before_cursor_display_width = app.input[..app.cursor_pos].chars().count() as u16;
-    let cursor_x = (chunks[3].x + 2 + before_cursor_display_width)
-        .min(chunks[3].x + chunks[3].width.saturating_sub(1));
-    let cursor_y = chunks[3].y + 1;
+    let cursor_x = (layout.input.x + 2 + before_cursor_display_width)
+        .min(layout.input.x + layout.input.width.saturating_sub(1));
+    let cursor_y = layout.input.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
+    let wf = &app.session_overview.workflow;
+    let wf_id = wf
+        .workflow_id
+        .as_deref()
+        .map(|id| {
+            if id.len() > 18 {
+                format!("{}…", &id[..18])
+            } else {
+                id.to_string()
+            }
+        })
+        .unwrap_or_else(|| "n/a".to_string());
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled("Live Ops", Style::default().add_modifier(Modifier::BOLD))),
+        Line::raw(format!("workflow: {}", wf_id)),
+        Line::raw(format!("status: {}", if wf.status.is_empty() { "n/a" } else { &wf.status })),
+        Line::raw(format!("run:{}  queue:{}  wait:{}  done:{}", wf.running, wf.queued, wf.awaiting, wf.done)),
+        Line::raw(""),
+        Line::raw(format!("pending RPC: {}", app.pending.len())),
+        Line::raw(format!("approvals: {}", app.pending_approval_ids.len())),
+        Line::raw(format!("questions: {}", app.session_overview.pending_user_interactions)),
+        Line::raw(format!("follow: {}", if app.follow_output { "on" } else { "off" })),
+        Line::raw(format!("paused: {}", if app.session_paused { "yes" } else { "no" })),
+        Line::raw(""),
+        Line::from(Span::styled("Active Agents", Style::default().add_modifier(Modifier::BOLD))),
+    ];
+
+    let mut active_count = 0usize;
+    for task in app.live_tasks.iter().filter(|t| {
+        matches!(
+            t.status.as_str(),
+            "running" | "runnable" | "awaiting_approval" | "pending"
+        )
+    }).take(8)
+    {
+        active_count += 1;
+        let agent = if task.agent_id.len() > 20 {
+            format!("{}…", &task.agent_id[..20])
+        } else {
+            task.agent_id.clone()
+        };
+        let task_short = if task.task_id.len() > 10 {
+            format!("{}…", &task.task_id[..10])
+        } else {
+            task.task_id.clone()
+        };
+        let status_symbol = match task.status.as_str() {
+            "running" => "▶",
+            "awaiting_approval" => "⏸",
+            "runnable" => "↻",
+            "pending" => "…",
+            _ => "·",
+        };
+        lines.push(Line::raw(format!("{} {} [{}]", status_symbol, agent, task_short)));
+    }
+    if active_count == 0 {
+        lines.push(Line::raw("(no active tasks)"));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("Approvals", Style::default().add_modifier(Modifier::BOLD))));
+    if app.pending_approval_ids.is_empty() {
+        lines.push(Line::raw("none"));
+    } else {
+        for apr in app.pending_approval_ids.iter().rev().take(5) {
+            lines.push(Line::raw(format!("- {}", apr)));
+        }
+    }
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .title("Workflow")
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+    f.render_widget(paragraph, area);
 }
 
 fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
@@ -1602,9 +1731,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
         // Only draw when something changed
         if needs_redraw {
-            let area = terminal.size()?;
-            let messages_height = area.height.saturating_sub(5) as usize;
-            let messages_content_width = area.width.saturating_sub(1);
+            let size = terminal.size()?;
+            let area = Rect::new(0, 0, size.width, size.height);
+            let layout = compute_chat_layout(area);
+            let messages_height = layout.messages.height as usize;
+            let messages_content_width = layout.messages.width.saturating_sub(1);
             app.last_max_scroll_offset = app
                 .content_line_count(messages_content_width)
                 .saturating_sub(messages_height);
@@ -2591,6 +2722,21 @@ async fn check_signals(
             monitored_workflow_ids.sort();
             monitored_workflow_ids.dedup();
 
+            if let Ok(tasks) = autonoetic_gateway::scheduler::list_task_runs_for_workflow(
+                config,
+                store,
+                &primary_workflow_id,
+            ) {
+                app.live_tasks = tasks
+                    .into_iter()
+                    .map(|t| LiveTaskSummary {
+                        task_id: t.task_id,
+                        agent_id: t.agent_id,
+                        status: format!("{:?}", t.status).to_lowercase(),
+                    })
+                    .collect();
+            }
+
             for workflow_id in monitored_workflow_ids {
                 let is_primary = workflow_id == primary_workflow_id;
                 match autonoetic_gateway::scheduler::load_workflow_events(config, store, &workflow_id) {
@@ -2687,6 +2833,7 @@ async fn check_signals(
         }
         None => {
             // No workflow found - this is normal if session is not connected to a workflow
+            app.live_tasks.clear();
         }
     }
 
