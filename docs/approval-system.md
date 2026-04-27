@@ -234,7 +234,7 @@ Grants can optionally expire:
 - `--until 2025-12-31T23:59:59Z` — expires at an absolute RFC3339 timestamp
 - Without either, the grant lasts until session end or emergency stop
 
-Expired grants are excluded from coverage checks and cleaned up by the startup janitor.
+Expired grants are excluded from coverage checks. They are not automatically deleted by gateway startup; persisted expired grants may remain until a separate cleanup path removes them.
 
 **Scope:**
 - `RootSession` grants are visible to all agents within the root session
@@ -245,7 +245,7 @@ Expired grants are excluded from coverage checks and cleaned up by the startup j
 
 **The approval check order is:**
 1. Approved exec cache (fingerprint-level, cross-session)
-2. Session approval grants (target-level, scope-aware, within root session)
+2. Session approval grants (target-level, root-session-scoped, within root session)
 3. Existing approved/pending approvals (domain-level)
 4. New approval request
 

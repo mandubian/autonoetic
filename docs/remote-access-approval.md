@@ -81,7 +81,7 @@ Static analysis inspects the **actual code** to detect remote access patterns de
 │    └─ Remote patterns found → proceed to approval checks    │
 │ 3. Approval resolution checks (in order):                   │
 │    a. Exec cache hit (identical code fingerprint) → EXECUTE │
-│    b. Session grant covers targets (scope-aware) → EXECUTE  │
+│    b. Root-session grant covers targets → EXECUTE           │
 │    c. Existing approved/pending approval → REUSE            │
 │    d. None of the above → BLOCK + require approval          │
 └─────────────────────────────────────────────────────────────┘
@@ -157,7 +157,7 @@ The tool returns a structured response instead of executing:
       "command": "python3 weather_client.py",
       "remote_access_detected": true,
       "detected_patterns": [...],
-      "normalized_targets": ["host:api.open-meteo.com"],
+      "normalized_targets": ["api.open-meteo.com"],
       "hosts": ["api.open-meteo.com"]
     }
   }
