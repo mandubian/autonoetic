@@ -182,6 +182,7 @@ dependencies = [
  "autonoetic-gateway",
  "autonoetic-mcp",
  "autonoetic-types",
+ "chrono",
  "clap",
  "crossterm",
  "dirs",

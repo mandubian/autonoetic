@@ -9,7 +9,7 @@ fn make_gateway_dir(tmp: &tempfile::TempDir) -> std::path::PathBuf {
 
 fn seed_grant(store: &GatewayStore, root_sid: &str, agent_id: &str, host: &str) {
     store
-        .insert_session_grant(
+        .insert_session_grant_hosts(
             root_sid,
             agent_id,
             &[host.to_string()],

@@ -1,5 +1,7 @@
 use anyhow::Result;
-use autonoetic_types::background::{ApprovalLevel, ApprovalRequest};
+use autonoetic_types::background::{
+    ApprovalLevel, ApprovalRequest, GrantScope, GrantTarget, SessionApprovalGrant,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::GatewayStore;
@@ -212,32 +214,90 @@ impl GatewayStore {
     pub fn insert_session_grant(
         &self,
         root_session_id: &str,
+        session_id: &str,
+        agent_id: &str,
+        scope: &GrantScope,
+        targets: &[GrantTarget],
+        granted_by: &str,
+        granted_at: &str,
+        source_approval_id: Option<&str>,
+        expires_at: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        let primary_host = targets.iter().find_map(|t| match t {
+            GrantTarget::ExactHost(h) => Some(h.clone()),
+            _ => None,
+        }).unwrap_or_else(|| "_multi_target_".to_string());
+
+        conn.execute(
+            "INSERT INTO session_approval_grants
+             (root_session_id, session_id, agent_id, host, scope, granted_by, granted_at, source_approval_id, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(root_session_id, session_id, agent_id, scope, host) DO UPDATE SET
+                 granted_by = excluded.granted_by,
+                 granted_at = excluded.granted_at,
+                 source_approval_id = excluded.source_approval_id,
+                 expires_at = excluded.expires_at,
+                 revoked_at = NULL,
+                 revoked_reason = NULL",
+            params![
+                root_session_id,
+                session_id,
+                agent_id,
+                primary_host,
+                scope.as_str(),
+                granted_by,
+                granted_at,
+                source_approval_id,
+                expires_at,
+            ],
+        )?;
+
+        let grant_id: i64 = conn.query_row(
+            "SELECT id FROM session_approval_grants WHERE root_session_id = ?1 AND session_id = ?2 AND agent_id = ?3 AND scope = ?4 AND host = ?5",
+            params![root_session_id, session_id, agent_id, scope.as_str(), primary_host],
+            |row| row.get(0),
+        )?;
+
+        conn.execute(
+            "DELETE FROM session_approval_grant_targets WHERE grant_id = ?1",
+            params![grant_id],
+        )?;
+
+        for target in targets {
+            let value = serde_json::to_string(target)?;
+            conn.execute(
+                "INSERT INTO session_approval_grant_targets (grant_id, kind, value) VALUES (?1, ?2, ?3)",
+                params![grant_id, target.kind_str(), value],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Backward-compatible wrapper: inserts ExactHost grants with RootSession scope.
+    pub fn insert_session_grant_hosts(
+        &self,
+        root_session_id: &str,
         agent_id: &str,
         hosts: &[String],
         granted_by: &str,
         granted_at: &str,
         source_approval_id: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
         for host in hosts {
-            conn.execute(
-                "INSERT INTO session_approval_grants
-                 (root_session_id, agent_id, host, granted_by, granted_at, source_approval_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(root_session_id, agent_id, host) DO UPDATE SET
-                     granted_by = excluded.granted_by,
-                     granted_at = excluded.granted_at,
-                     source_approval_id = excluded.source_approval_id,
-                     revoked_at = NULL,
-                     revoked_reason = NULL",
-                params![
-                    root_session_id,
-                    agent_id,
-                    host,
-                    granted_by,
-                    granted_at,
-                    source_approval_id
-                ],
+            let targets = vec![GrantTarget::ExactHost(host.clone())];
+            self.insert_session_grant(
+                root_session_id,
+                root_session_id,
+                agent_id,
+                &GrantScope::RootSession,
+                &targets,
+                granted_by,
+                granted_at,
+                source_approval_id,
+                None,
             )?;
         }
         Ok(())
@@ -262,27 +322,171 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn get_session_grants_structured(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<SessionApprovalGrant>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, root_session_id, session_id, agent_id, scope, granted_by, granted_at,
+                    source_approval_id, expires_at
+             FROM session_approval_grants
+             WHERE root_session_id = ?1 AND revoked_at IS NULL",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            let id: i64 = row.get(0)?;
+            let root_session_id: String = row.get(1)?;
+            let session_id: String = row.get(2)?;
+            let agent_id: String = row.get(3)?;
+            let scope_str: String = row.get(4)?;
+            let granted_by: String = row.get(5)?;
+            let granted_at: String = row.get(6)?;
+            let source_approval_id: Option<String> = row.get(7)?;
+            let expires_at: Option<String> = row.get(8)?;
+            Ok((id, root_session_id, session_id, agent_id, scope_str, granted_by, granted_at, source_approval_id, expires_at))
+        })?;
+
+        let mut results = Vec::new();
+        for row_result in rows {
+            let (id, root_sid, sess_id, agent_id, scope_str, granted_by, granted_at, source_approval_id, expires_at) = row_result?;
+            let targets = self.get_grant_targets_with_conn(&conn, id)?;
+            results.push(SessionApprovalGrant {
+                id,
+                root_session_id: root_sid,
+                session_id: sess_id,
+                agent_id,
+                scope: GrantScope::from_str_lossy(&scope_str),
+                granted_by,
+                granted_at,
+                source_approval_id,
+                expires_at,
+                targets,
+            });
+        }
+        Ok(results)
+    }
+
+    fn get_grant_targets_with_conn(&self, conn: &Connection, grant_id: i64) -> Result<Vec<GrantTarget>> {
+        let mut stmt = conn.prepare(
+            "SELECT kind, value FROM session_approval_grant_targets WHERE grant_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![grant_id], |row| {
+            let kind: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            Ok((kind, value))
+        })?;
+        let mut targets = Vec::new();
+        for row in rows {
+            let (kind, value) = row?;
+            if let Some(t) = Self::parse_grant_target(&kind, &value) {
+                targets.push(t);
+            } else {
+                eprintln!(
+                    "warning: failed to parse session_approval_grant_targets row for grant_id={} (kind={}, value={})",
+                    grant_id, kind, value
+                );
+            }
+        }
+        Ok(targets)
+    }
+
+    fn parse_grant_target(kind: &str, value: &str) -> Option<GrantTarget> {
+        if let Ok(t) = serde_json::from_str::<GrantTarget>(value) {
+            return Some(t);
+        }
+        let tagged = serde_json::json!({"kind": kind, "value": value});
+        if let Ok(t) = serde_json::from_value::<GrantTarget>(tagged) {
+            return Some(t);
+        }
+        match kind {
+            "exact_host" => Some(GrantTarget::ExactHost(value.to_string())),
+            "host_suffix" => Some(GrantTarget::HostSuffix(value.to_string())),
+            "host_and_port" => {
+                if let Some((h, p)) = value.rsplit_once(':') {
+                    if let Ok(port) = p.parse::<u16>() {
+                        return Some(GrantTarget::HostAndPort { host: h.to_string(), port });
+                    }
+                }
+                None
+            }
+            "url_prefix" => Some(GrantTarget::UrlPrefix(value.to_string())),
+            _ => None,
+        }
+    }
+
     pub fn session_grants_cover_targets(
         &self,
+        root_session_id: &str,
+        required_targets: &[String],
+    ) -> bool {
+        self.grants_cover_targets(root_session_id, root_session_id, required_targets)
+    }
+
+    /// Scope-aware grant coverage check.  A request is covered when every
+    /// required target is matched by at least one active (non-revoked,
+    /// non-expired) grant whose scope covers the requesting session.
+    pub fn grants_cover_targets(
+        &self,
+        session_id: &str,
         root_session_id: &str,
         required_targets: &[String],
     ) -> bool {
         if required_targets.is_empty() {
             return false;
         }
-        let granted = match self.get_session_grants(root_session_id) {
+
+        let grants = match self.get_session_grants_structured(root_session_id) {
             Ok(g) => g,
             Err(_) => return false,
         };
-        if granted.is_empty() {
+
+        let now = chrono::Utc::now();
+
+        let active: Vec<&SessionApprovalGrant> = grants
+            .iter()
+            .filter(|g| {
+                if let Some(ref exp) = g.expires_at {
+                    let expires_at = match chrono::DateTime::parse_from_rfc3339(exp) {
+                        Ok(dt) => dt.with_timezone(&chrono::Utc),
+                        Err(_) => return false,
+                    };
+                    if expires_at < now {
+                        return false;
+                    }
+                }
+                match g.scope {
+                    GrantScope::RootSession => true,
+                    GrantScope::Session => g.session_id == session_id,
+                }
+            })
+            .collect();
+
+        if active.is_empty() {
             return false;
         }
-        let granted_set: std::collections::BTreeSet<String> = granted.into_iter().collect();
-        required_targets.iter().all(|t| granted_set.contains(t))
+
+        required_targets.iter().all(|req| {
+            active.iter().any(|grant| {
+                grant.targets.iter().any(|t| t.matches(req))
+            })
+        })
     }
 
     pub fn delete_session_grants(&self, root_session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        let grant_ids: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM session_approval_grants WHERE root_session_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![root_session_id], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for gid in &grant_ids {
+            let _ = conn.execute(
+                "DELETE FROM session_approval_grant_targets WHERE grant_id = ?1",
+                params![gid],
+            );
+        }
         conn.execute(
             "DELETE FROM session_approval_grants WHERE root_session_id = ?1",
             params![root_session_id],
@@ -310,6 +514,43 @@ impl GatewayStore {
                 params![&now, reason, root_session_id],
             )?,
         };
+        Ok(count)
+    }
+
+    pub fn prune_expired_grants(&self) -> Result<usize> {
+        let now = chrono::Utc::now();
+        let conn = self.conn.lock().unwrap();
+        let expired_ids: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, expires_at FROM session_approval_grants WHERE expires_at IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let expires_at: String = row.get(1)?;
+                Ok((id, expires_at))
+            })?;
+            rows.filter_map(|r| r.ok())
+                .filter(|(_, exp)| {
+                    chrono::DateTime::parse_from_rfc3339(exp)
+                        .map(|dt| dt.with_timezone(&chrono::Utc) < now)
+                        .unwrap_or(false)
+                })
+                .map(|(id, _)| id)
+                .collect()
+        };
+        for gid in &expired_ids {
+            let _ = conn.execute(
+                "DELETE FROM session_approval_grant_targets WHERE grant_id = ?1",
+                params![gid],
+            );
+        }
+        let count = expired_ids.len();
+        for gid in &expired_ids {
+            let _ = conn.execute(
+                "DELETE FROM session_approval_grants WHERE id = ?1",
+                params![gid],
+            );
+        }
         Ok(count)
     }
 }

@@ -575,3 +575,129 @@ pub struct UserInteractionResumePayload {
     #[serde(default)]
     pub answer_text: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Grant scope & targets (Phase 2 — approval hardening)
+// ---------------------------------------------------------------------------
+
+/// Scope of a session approval grant.
+///
+/// `RootSession` (default): the grant covers all children/siblings under the
+/// root session — the current behaviour.  `Session`: the grant is limited to
+/// the specific child session that was active when the approval was decided.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantScope {
+    #[default]
+    RootSession,
+    Session,
+}
+
+impl GrantScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RootSession => "root_session",
+            Self::Session => "session",
+        }
+    }
+
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "session" => Self::Session,
+            _ => Self::RootSession,
+        }
+    }
+}
+
+/// A structured grant target describing what network host/path a grant covers.
+///
+/// Each approved `SandboxExec` produces one or more grant targets.  By default
+/// these are `ExactHost` entries derived from the detected hosts, preserving
+/// current behaviour.  Operators can narrow at approval time via `--target`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum GrantTarget {
+    /// Exact hostname match, e.g. `"api.github.com"`.
+    ExactHost(String),
+    /// Matches any subdomain of the suffix, e.g. `"*.github.com"` matches
+    /// `api.github.com` but NOT `github.com.evil.example`.
+    HostSuffix(String),
+    /// Exact host + port, e.g. `"api.github.com:443"`.
+    HostAndPort { host: String, port: u16 },
+    /// Matches URLs starting with this prefix, e.g.
+    /// `"https://api.github.com/public/"`.
+    UrlPrefix(String),
+}
+
+impl GrantTarget {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::ExactHost(_) => "exact_host",
+            Self::HostSuffix(_) => "host_suffix",
+            Self::HostAndPort { .. } => "host_and_port",
+            Self::UrlPrefix(_) => "url_prefix",
+        }
+    }
+
+    /// Check whether a request target (lowercased host or full URL) is covered
+    /// by this grant target.
+    pub fn matches(&self, request_target: &str) -> bool {
+        match self {
+            Self::ExactHost(host) => request_target.eq_ignore_ascii_case(host),
+            Self::HostSuffix(suffix) => {
+                let suffix = suffix.trim_start_matches("*.");
+                let request = request_target.to_ascii_lowercase();
+                let suffix = suffix.to_ascii_lowercase();
+                if request == suffix {
+                    return true;
+                }
+                request.ends_with(&format!(".{}", suffix))
+            }
+            Self::HostAndPort { host, port } => {
+                let expected = format!("{}:{}", host.to_ascii_lowercase(), port);
+                request_target.eq_ignore_ascii_case(&expected)
+            }
+            Self::UrlPrefix(prefix) => {
+                fn lower_authority(url: &str) -> std::borrow::Cow<'_, str> {
+                    let scheme_end = url.find("://").map(|p| p + 3).unwrap_or(0);
+                    let rest = &url[scheme_end..];
+                    if let Some(pos) = rest.find('/') {
+                        let authority = &rest[..pos];
+                        let path = &rest[pos..];
+                        if authority.chars().any(|c| c.is_ascii_uppercase()) {
+                            format!(
+                                "{}{}{}",
+                                &url[..scheme_end].to_ascii_lowercase(),
+                                authority.to_ascii_lowercase(),
+                                path
+                            )
+                            .into()
+                        } else {
+                            std::borrow::Cow::Borrowed(url)
+                        }
+                    } else {
+                        url.to_ascii_lowercase().into()
+                    }
+                }
+                let norm_req = lower_authority(request_target);
+                let norm_pre = lower_authority(prefix);
+                norm_req.starts_with(&*norm_pre)
+            }
+        }
+    }
+}
+
+/// A structured grant row returned from the store for display and matching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionApprovalGrant {
+    pub id: i64,
+    pub root_session_id: String,
+    pub session_id: String,
+    pub agent_id: String,
+    pub scope: GrantScope,
+    pub granted_by: String,
+    pub granted_at: String,
+    pub source_approval_id: Option<String>,
+    pub expires_at: Option<String>,
+    pub targets: Vec<GrantTarget>,
+}
