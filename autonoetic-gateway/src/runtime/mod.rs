@@ -31,6 +31,7 @@ pub mod prompt_budget;
 pub mod reevaluation_state;
 pub mod remote_access;
 pub mod response_validation;
+pub mod root_session_budget;
 pub mod session_budget;
 pub mod session_context;
 pub mod session_report;

@@ -134,6 +134,16 @@ code_analysis:
 #   max_llm_tokens: 5000000
 #   max_wall_clock_secs: 3600
 
+# ── Root Session Tree Budget (R+4 / R-6.21) ───────────────────────────
+# Aggregate limits across ALL sessions sharing the same root_session_id.
+# Applies in addition to per-session limits; the tighter bound wins.
+# root_session_budget:
+#   max_llm_rounds: 500
+#   max_tool_invocations: 2000
+#   max_llm_tokens: 20000000
+#   max_wall_clock_secs: 7200
+#   max_session_price_usd: 5.0
+
 # ── Retention ─────────────────────────────────────────────────────────
 # Days to keep execution_traces and causal_events. 0 = forever.
 retention:

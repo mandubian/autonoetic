@@ -144,6 +144,22 @@ pub struct SessionBudgetConfig {
     pub extensions: Vec<String>,
 }
 
+/// Tree-wide budget limits aggregated across all descendants of a root session.
+/// Applies in addition to per-session limits; the tighter bound wins.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RootSessionBudgetConfig {
+    #[serde(default)]
+    pub max_llm_rounds: Option<u64>,
+    #[serde(default)]
+    pub max_tool_invocations: Option<u64>,
+    #[serde(default)]
+    pub max_llm_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_wall_clock_secs: Option<u64>,
+    #[serde(default)]
+    pub max_session_price_usd: Option<f64>,
+}
+
 /// Post-session digest: LLM summarization and Tier-2 memory extraction after agent sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DigestAgentConfig {
@@ -514,6 +530,11 @@ pub struct GatewayConfig {
     /// Optional per-session budgets (LLM rounds, tools, tokens, wall clock).
     #[serde(default)]
     pub session_budget: SessionBudgetConfig,
+
+    /// Tree-wide budgets aggregated across all descendants of a root session (R+4 / R-6.21).
+    /// Applies in addition to per-session limits; the tighter bound wins.
+    #[serde(default)]
+    pub root_session_budget: RootSessionBudgetConfig,
 
     /// Maximum seconds a workflow task may remain in `AwaitingApproval` before it is
     /// automatically marked `Failed`. Set to 0 to disable (not recommended for production).
@@ -1215,6 +1236,7 @@ impl Default for GatewayConfig {
             code_analysis: CodeAnalysisConfig::default(),
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
             session_budget: SessionBudgetConfig::default(),
+            root_session_budget: RootSessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
             max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
             continuation_key: None,

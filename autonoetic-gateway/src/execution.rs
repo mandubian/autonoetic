@@ -10,6 +10,7 @@ use crate::runtime::live_digest::{
 };
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
+use crate::runtime::root_session_budget::RootSessionBudgetRegistry;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
 use crate::runtime::session_report::SessionReportWriter;
@@ -355,6 +356,7 @@ pub struct GatewayExecutionService {
     agent_admission: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     agent_execution_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     session_budget: Arc<SessionBudgetRegistry>,
+    root_session_budget: Arc<RootSessionBudgetRegistry>,
     gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     active_executions: Arc<ActiveExecutionRegistry>,
     hook_executor: Arc<crate::scheduler::hooks::HookExecutor>,
@@ -366,6 +368,9 @@ impl GatewayExecutionService {
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     ) -> Self {
         let session_budget = Arc::new(SessionBudgetRegistry::new(config.session_budget.clone()));
+        let root_session_budget = Arc::new(RootSessionBudgetRegistry::new(
+            config.root_session_budget.clone(),
+        ));
         let hook_executor = Arc::new(crate::scheduler::hooks::HookExecutor::new(
             config.hooks.clone(),
             gateway_store.clone(),
@@ -379,6 +384,7 @@ impl GatewayExecutionService {
             config: Arc::new(config),
             http_client: reqwest::Client::new(),
             session_budget,
+            root_session_budget,
             gateway_store,
             active_executions: ActiveExecutionRegistry::new(),
             hook_executor,
@@ -1000,6 +1006,7 @@ impl GatewayExecutionService {
             .with_gateway_dir(self.config.agents_dir.join(".gateway"))
             .with_config(self.config.clone())
             .with_session_budget(Some(self.session_budget.clone()))
+            .with_root_session_budget(Some(self.root_session_budget.clone()))
             .with_openrouter_catalog(Some(openrouter_catalog))
             .with_middleware(middleware)
             .with_initial_user_message(message.to_string())
@@ -2559,6 +2566,7 @@ impl GatewayExecutionService {
         .with_gateway_dir(self.config.agents_dir.join(".gateway"))
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
+        .with_root_session_budget(Some(self.root_session_budget.clone()))
         .with_openrouter_catalog(Some(openrouter_catalog))
         .with_middleware(middleware)
         .with_session_id(session_id.to_string())
