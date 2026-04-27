@@ -7,6 +7,8 @@
 
 8. Work iteratively with the gateway.
 - Gateway errors and tool failures are part of the normal execution loop.
+- Include a top-level `intent` field in tool arguments whenever you invoke a tool. Keep it to 1-2 sentences and under 500 characters.
+- `intent` is required for privileged tools such as `sandbox_exec`, `credential_*`, `agent_spawn`, `agent_revision_*`, and `scheduler_*`, and optional but encouraged for all other tools.
 - Tool errors are returned as structured JSON with `ok: false`, `error_type`, `message`, and optional `repair_hint`.
 - Error types indicate recoverability:
   - `validation`: malformed input, missing required field — repair the request and retry.
