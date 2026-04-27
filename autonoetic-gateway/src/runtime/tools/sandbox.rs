@@ -1322,6 +1322,8 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             }
                             _ => None,
                         },
+                        similar_to_request_id: None,
+                        similarity_score: None,
                     };
                     if let Some(store) = &gateway_store {
                         store.create_approval(&request).map_err(|e| {
@@ -1585,6 +1587,8 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                                 }
                                 _ => None,
                             },
+                            similar_to_request_id: None,
+                            similarity_score: None,
                         };
                         if let Some(store) = &gateway_store {
                             store.create_approval(&request).map_err(|e| {
@@ -2244,6 +2248,8 @@ mod approval_binding_tests {
             decided_by: Some("operator".to_string()),
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         assert!(approved_requests_cover_targets(
             &[req.clone()],

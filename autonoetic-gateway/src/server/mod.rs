@@ -61,6 +61,24 @@ impl GatewayServer {
             );
         }
 
+        // Reap orphaned continuation files from crash/restart
+        match crate::runtime::continuation::reap_orphaned_continuations(
+            &self.config,
+            &gateway_store,
+        ) {
+            Ok(n) if n > 0 => tracing::info!(
+                target: "gateway",
+                "Reaped {} orphaned continuation file(s)",
+                n
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                target: "gateway",
+                error = %e,
+                "Continuation reaper failed"
+            ),
+        }
+
         // Reconcile system agents (create cron jobs if missing)
         let reconcile_results = crate::scheduler::system_agents::reconcile_system_agents(
             &self.config,

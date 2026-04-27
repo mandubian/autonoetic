@@ -311,6 +311,8 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
         decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
+        similar_to_request_id: None,
+        similarity_score: None,
     })?;
 
     // Create a pending user interaction

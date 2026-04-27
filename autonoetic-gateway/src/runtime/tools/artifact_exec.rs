@@ -458,6 +458,8 @@ impl NativeTool for ArtifactExecTool {
                             }
                             _ => None,
                         },
+                        similar_to_request_id: None,
+                        similarity_score: None,
                     };
                     if let Some(store) = &gateway_store {
                         store.create_approval(&request)?;

@@ -190,6 +190,8 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store.create_approval(&req).unwrap();
 

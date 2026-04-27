@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 18;
+const SCHEMA_VERSION_LATEST: i64 = 19;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -501,6 +501,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_grant_scope_and_session_v16(conn)?;
     apply_grant_targets_table_v17(conn)?;
     apply_grant_expiry_v18(conn)?;
+    apply_approval_similarity_v19(conn)?;
 
     Ok(())
 }
@@ -1226,6 +1227,44 @@ fn apply_grant_expiry_v18(conn: &mut Connection) -> Result<()> {
         params![
             18_i64,
             "grant_expiry",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_approval_similarity_v19(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 19 {
+        return Ok(());
+    }
+
+    for (col, ty) in &[
+        ("similar_to_request_id", "TEXT"),
+        ("similarity_score", "REAL"),
+    ] {
+        let col_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('approvals') WHERE name = ?1",
+            [col],
+            |row| row.get(0),
+        )?;
+        if col_count == 0 {
+            conn.execute(
+                &format!("ALTER TABLE approvals ADD COLUMN {col} {ty}"),
+                [],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            19_i64,
+            "approval_similarity",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

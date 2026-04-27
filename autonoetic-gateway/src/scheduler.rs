@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::runtime::continuation;
 
 pub mod approval;
+pub mod approval_similarity;
 pub mod cron_parser;
 pub mod decision;
 pub mod eval_runner;

@@ -322,7 +322,7 @@ pub struct BackgroundState {
 /// schedulable action (WriteFile, SandboxExec) that the scheduler will run after approval, or
 /// an approval-only subject (AgentInstall) where the actual install is done by the caller
 /// retrying with install_approval_ref.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApprovalRequest {
     pub request_id: String,
     pub agent_id: String,
@@ -355,6 +355,10 @@ pub struct ApprovalRequest {
     /// Defaults to Operator. Set by the gateway based on config escalation rules.
     #[serde(default)]
     pub approval_level: ApprovalLevel,
+    #[serde(default)]
+    pub similar_to_request_id: Option<String>,
+    #[serde(default)]
+    pub similarity_score: Option<f64>,
 }
 
 impl ApprovalRequest {

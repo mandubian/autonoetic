@@ -418,6 +418,8 @@ impl NativeTool for ArtifactPrepareTool {
                 }
                 _ => None,
             },
+            similar_to_request_id: None,
+            similarity_score: None,
         };
 
         store.create_approval(&request)?;

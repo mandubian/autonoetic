@@ -124,7 +124,7 @@ pub async fn handle_due_wake(
     } else if let Some(action) = reevaluation.pending_scheduled_action.clone() {
         if action.requires_approval() {
             if reevaluation.open_approval_request_ids.is_empty() {
-                let request = ApprovalRequest {
+                let mut request = ApprovalRequest {
                     request_id: uuid::Uuid::new_v4().to_string(),
                     agent_id: agent_id.to_string(),
                     session_id: session_id.to_string(),
@@ -176,8 +176,18 @@ pub async fn handle_due_wake(
                     decided_at: None,
                     decided_by: None,
                     decision_reason: None,
+                    similar_to_request_id: None,
+                    similarity_score: None,
                 };
                 if let Some(store) = execution.gateway_store() {
+                    let candidates = store.get_recent_approvals_for_agent(&request.agent_id, 10)?;
+                    let similar = crate::scheduler::approval_similarity::find_similar_approvals(
+                        &request, &candidates, 1, 0.7,
+                    );
+                    if let Some(best) = similar.first() {
+                        request.similar_to_request_id = Some(best.request_id.clone());
+                        request.similarity_score = Some(best.score);
+                    }
                     store.create_approval(&request)?;
                 } else {
                     anyhow::bail!("GatewayStore is required to create approvals");
