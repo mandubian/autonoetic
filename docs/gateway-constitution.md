@@ -310,7 +310,7 @@ separate. Runtime-lock in `runtime_lock.rs`.
 | R-8.12 | Schema enforcement decisions are logged with target, result, transformations, and enforcer identity. | schema-enforcement-hook.md | causal event emission | ENFORCED |
 | R-8.13 | Knowledge records carry `owner_agent_id`, `writer_agent_id`, `source_ref`; visibility is enforced on recall. | ARCHITECTURE.md | `runtime/memory/*` | ENFORCED |
 | R-8.14 | Session approval grants are tracked by `(root_session_id, host)` and included in cleanup audits. | approved-resources-caching.md | `session_approval_grants` table | ENFORCED |
-| R-8.15 | Causal-chain append is `fsync`-durable before any state transition that depends on it. | (R+6) | not pinned | MISSING |
+| R-8.15 | Causal-chain append is `fsync`-durable before any state transition that depends on it. | (R+6) | `causal_chain.rs:149` `runtime/tools/promotion.rs:189` `execution.rs:455` `gateway_store/mod.rs:112` | ENFORCED |
 | R-8.16 | Retention pruning emits a `retention.pruned` causal event. | (R+17) | not pinned | MISSING |
 
 ## 9. Agent Install & Provenance

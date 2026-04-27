@@ -175,6 +175,8 @@ struct App {
     scroll_offset: usize,
     last_max_scroll_offset: usize,
     follow_output: bool,
+    session_paused: bool,
+    esc_cancel_armed_until: Option<Instant>,
     session_id: String,
     target_hint: String,
     // Mouse selection - stored as CONTENT positions (row, col), not screen positions
@@ -213,6 +215,8 @@ impl App {
             scroll_offset: 0,
             last_max_scroll_offset: 0,
             follow_output: true,
+            session_paused: false,
+            esc_cancel_armed_until: None,
             session_id,
             target_hint,
             selecting: false,
@@ -360,6 +364,20 @@ impl App {
         } else {
             self.scroll_offset.min(self.last_max_scroll_offset)
         }
+    }
+
+    fn cancel_armed(&self) -> bool {
+        self.esc_cancel_armed_until
+            .map(|deadline| Instant::now() <= deadline)
+            .unwrap_or(false)
+    }
+
+    fn arm_cancel_window(&mut self) {
+        self.esc_cancel_armed_until = Some(Instant::now() + Duration::from_secs(2));
+    }
+
+    fn disarm_cancel_window(&mut self) {
+        self.esc_cancel_armed_until = None;
     }
 }
 
@@ -1196,20 +1214,41 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         ""
     };
+    let pause_hint = if app.session_paused {
+        "Paused: ON"
+    } else {
+        "Paused: OFF"
+    };
+    let esc_hint = if app.cancel_armed() {
+        "Esc: armed (press again to cancel)"
+    } else {
+        "Esc: pause"
+    };
+    let follow_hint = if app.follow_output {
+        "Follow: ON"
+    } else {
+        "Follow: OFF (Ctrl+F to jump live)"
+    };
     let text = if !app.pending.is_empty() {
         format!(
-            "{} {} pending | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
+            "{} {} pending | {} | {} | {} | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
             app.spinner(),
             app.pending.len(),
             workflow,
+            pause_hint,
+            esc_hint,
+            follow_hint,
             approve_hint,
         )
     } else {
         format!(
-            "Session: {} | Target: {} | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
+            "Session: {} | Target: {} | {} | {} | {} | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
             &app.session_id[..20.min(app.session_id.len())],
             app.target_hint,
             workflow,
+            pause_hint,
+            esc_hint,
+            follow_hint,
             approve_hint,
         )
     };
@@ -1759,6 +1798,109 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         Event::Key(key) => {
                             match handle_key(key, app, tx)? {
                                 HandleKeyAction::Quit => return Ok(false),
+                                HandleKeyAction::PauseSession => {
+                                    app.session_paused = true;
+                                    let root_session_id = if app.session_overview.root_session_id.is_empty() {
+                                        autonoetic_gateway::runtime::content_store::root_session_id(session_id)
+                                            .to_string()
+                                    } else {
+                                        app.session_overview.root_session_id.clone()
+                                    };
+
+                                    let mut paused_tasks = 0usize;
+                                    if let Some(store) = gateway_store {
+                                        if let Ok(Some(workflow_id)) = autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(
+                                            config,
+                                            &root_session_id,
+                                        ) {
+                                            if let Ok(tasks) = autonoetic_gateway::scheduler::list_task_runs_for_workflow(
+                                                config,
+                                                Some(store),
+                                                &workflow_id,
+                                            ) {
+                                                for task in tasks {
+                                                    if matches!(
+                                                        task.status,
+                                                        autonoetic_types::workflow::TaskRunStatus::Pending
+                                                            | autonoetic_types::workflow::TaskRunStatus::Runnable
+                                                            | autonoetic_types::workflow::TaskRunStatus::Running
+                                                            | autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
+                                                    ) {
+                                                        if autonoetic_gateway::scheduler::workflow_store::update_task_run_status(
+                                                            config,
+                                                            Some(store),
+                                                            &workflow_id,
+                                                            &task.task_id,
+                                                            autonoetic_types::workflow::TaskRunStatus::Paused,
+                                                            Some("paused by operator via chat TUI (Esc)".to_string()),
+                                                            None,
+                                                            None,
+                                                        )
+                                                        .is_ok()
+                                                        {
+                                                            paused_tasks = paused_tasks.saturating_add(1);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    app.add_message(
+                                        MessageRole::System,
+                                        format!(
+                                            "Pause requested via Esc. Paused {} workflow task(s). Press Esc again within 2s to cancel the root session.",
+                                            paused_tasks
+                                        ),
+                                    );
+                                }
+                                HandleKeyAction::CancelSession => {
+                                    let root_session_id = if app.session_overview.root_session_id.is_empty() {
+                                        autonoetic_gateway::runtime::content_store::root_session_id(session_id)
+                                            .to_string()
+                                    } else {
+                                        app.session_overview.root_session_id.clone()
+                                    };
+
+                                    if let Some(exec) = execution_for_interactions {
+                                        match exec
+                                            .emergency_stop_root_session(
+                                                &root_session_id,
+                                                "Cancelled from chat TUI (double Esc)",
+                                                "operator",
+                                                "chat-tui",
+                                                "chat_escape_double",
+                                                None,
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                app.session_paused = true;
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!(
+                                                        "Cancelled root session via emergency stop: {}",
+                                                        root_session_id
+                                                    ),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!(
+                                                        "Failed to cancel root session {}: {}",
+                                                        root_session_id, e
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        app.add_message(
+                                            MessageRole::System,
+                                            "Execution service unavailable: cannot cancel root session from chat TUI.".to_string(),
+                                        );
+                                    }
+                                }
                                 HandleKeyAction::ApproveInline(apr_id) => {
                                     // Handle inline approval
                                     if let Some(store) = gateway_store {
@@ -1903,6 +2045,8 @@ enum HandleKeyAction {
     Continue,
     Quit,
     ApproveInline(String),
+    PauseSession,
+    CancelSession,
 }
 
 fn handle_key(
@@ -1918,7 +2062,12 @@ fn handle_key(
 
         // Send
         KeyCode::Enter => {
-            if !app.input.is_empty() {
+            if app.session_paused {
+                app.add_message(
+                    MessageRole::System,
+                    "Session is paused. Press Esc again within 2s to cancel, or Ctrl+R to resume input.".to_string(),
+                );
+            } else if !app.input.is_empty() {
                 let msg = std::mem::take(&mut app.input);
                 app.cursor_pos = 0;
                 let id = app.next_id();
@@ -1926,6 +2075,16 @@ fn handle_key(
                 app.add_message(MessageRole::User, msg.clone());
                 let _ = tx.send((id, msg));
             }
+        }
+
+        // Escape safety: first hit pauses, second hit within 2s cancels root session.
+        KeyCode::Esc => {
+            if app.cancel_armed() {
+                app.disarm_cancel_window();
+                return Ok(HandleKeyAction::CancelSession);
+            }
+            app.arm_cancel_window();
+            return Ok(HandleKeyAction::PauseSession);
         }
 
         // Cursor
@@ -1978,6 +2137,22 @@ fn handle_key(
                 let apr_id = app.pending_approval_ids.pop().unwrap();
                 return Ok(HandleKeyAction::ApproveInline(apr_id));
             }
+        }
+
+        // Resume local input after an Esc pause.
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.session_paused = false;
+            app.disarm_cancel_window();
+            app.add_message(
+                MessageRole::System,
+                "Session input resumed (Ctrl+R).".to_string(),
+            );
+        }
+
+        // Jump to bottom and re-enable live following.
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.follow_output = true;
+            app.scroll_offset = app.last_max_scroll_offset;
         }
 
         _ => {}

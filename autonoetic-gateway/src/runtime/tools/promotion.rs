@@ -180,6 +180,30 @@ impl NativeTool for PromotionRecordTool {
             anyhow::bail!("Promotion store requires gateway directory to be configured");
         };
 
+        let causal_log_path = gw_dir.join("history").join("causal_chain.jsonl");
+        if let Some(parent) = causal_log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Enforce audit-first ordering: no promotion DB mutation without a durable causal append.
+        let logger = CausalLogger::new(&causal_log_path)?;
+        logger.log_durable(
+            &manifest.agent.id,
+            session_id.unwrap_or("unknown"),
+            turn_id,
+            0,
+            "tool",
+            "promotion_record",
+            EntryStatus::Success,
+            Some(serde_json::json!({
+                "arguments": {
+                    "artifact_id": args.artifact_id,
+                    "role": args.role.as_str(),
+                    "pass": args.pass,
+                }
+            })),
+        )?;
+
         let store = PromotionStore::new(gw_dir)?;
 
         let record = store.record_promotion(
@@ -192,29 +216,6 @@ impl NativeTool for PromotionRecordTool {
             args.findings.clone(),
             args.summary.clone(),
         )?;
-
-        let causal_log_path = gw_dir.join("history").join("causal_chain.jsonl");
-        if let Some(parent) = causal_log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(logger) = CausalLogger::new(&causal_log_path) {
-            let _ = logger.log(
-                &manifest.agent.id,
-                session_id.unwrap_or("unknown"),
-                turn_id,
-                0,
-                "tool",
-                "promotion_record",
-                EntryStatus::Success,
-                Some(serde_json::json!({
-                    "arguments": {
-                        "artifact_id": args.artifact_id,
-                        "role": args.role.as_str(),
-                        "pass": args.pass,
-                    }
-                })),
-            );
-        }
 
         let response = PromotionRecordResponse {
             ok: true,

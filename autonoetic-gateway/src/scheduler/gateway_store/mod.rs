@@ -109,7 +109,9 @@ impl GatewayStore {
         let db_path = gateway_dir.join("gateway.db");
         let conn = Connection::open(&db_path)?;
 
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;",
+        )?;
 
         let store = Self {
             conn: std::sync::Mutex::new(conn),

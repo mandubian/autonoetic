@@ -2,7 +2,6 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
-use autonoetic_types::capability::Capability;
 use tempfile::tempdir;
 
 fn evaluator_manifest() -> AgentManifest {
@@ -60,7 +59,7 @@ fn test_promotion_record_rejects_empty_finding_description() {
 
     let err = registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             &manifest,
             &policy,
             tmp.path(),
@@ -98,7 +97,7 @@ fn test_promotion_record_accepts_valid_findings() {
 
     let result = registry
         .execute(
-            "promotion.record",
+            "promotion_record",
             &manifest,
             &policy,
             tmp.path(),

@@ -142,6 +142,82 @@ impl CausalLogger {
         Ok(())
     }
 
+    /// Append a new action to the Causal Chain and fsync before returning.
+    /// Use this for state-mutating events that gate a privileged operation
+    /// (approval resolve, grant insert, promotion commit, emergency stop).
+    /// Hot-path info events should use `log()` instead.
+    pub fn log_durable(
+        &self,
+        actor_id: &str,
+        session_id: &str,
+        turn_id: Option<&str>,
+        event_seq: u64,
+        category: &str,
+        action: &str,
+        status: EntryStatus,
+        payload: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let mut last_hash_guard = self
+            .last_hash
+            .lock()
+            .map_err(|_| anyhow::anyhow!("causal logger mutex poisoned"))?;
+        let prev_hash = last_hash_guard.clone();
+        let payload_hash = payload_hash(&payload)?;
+
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let log_id = uuid::Uuid::new_v4().to_string();
+        let entry_hash = compute_entry_hash(
+            &timestamp,
+            &log_id,
+            actor_id,
+            session_id,
+            turn_id,
+            event_seq,
+            category,
+            action,
+            &status,
+            payload_hash.as_deref(),
+            &prev_hash,
+        )?;
+
+        let entry = CausalChainEntry {
+            timestamp,
+            log_id,
+            actor_id: actor_id.to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.map(|v| v.to_string()),
+            event_seq,
+            category: category.to_string(),
+            action: action.to_string(),
+            target: None,
+            status,
+            reason: None,
+            payload,
+            payload_hash,
+            prev_hash: prev_hash.clone(),
+            entry_hash: entry_hash.clone(),
+        };
+
+        let entry_json = serde_json::to_string(&entry)?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)?;
+
+        writeln!(file, "{}", entry_json)?;
+        file.flush()?;
+        file.sync_all()?;
+
+        *last_hash_guard = entry_hash;
+
+        if let Ok(mut count) = self.entry_count.lock() {
+            *count += 1;
+        }
+
+        Ok(())
+    }
+
     /// Get the log file path.
     pub fn path(&self) -> &std::path::Path {
         &self.log_path
