@@ -232,7 +232,7 @@ Enforcement hook for ingress, response validation gate for egress.
 | R-5.10 | `artifact_inspect` accepts explicit `art_*` IDs only; implicit `impl_task-*` handles are rejected. | content-store.md | `runtime/tools/artifact.rs` | ENFORCED |
 | R-5.11 | Native tool errors use a uniform `{error_type, message, repair_hint}` envelope. | ARCHITECTURE.md | per-tool response construction | PARTIAL |
 | R-5.12 | `error_type: fatal` triggers session abort; recoverable types do not. | ARCHITECTURE.md | lifecycle error processing | ENFORCED |
-| R-5.13 | Child → parent tool results validate against `io.produces` on egress. | (R+2) | not pinned | MISSING |
+| R-5.13 | Child → parent tool results validate against `io.returns` on egress. | (R+2) | `runtime/response_validation.rs:68` `execution.rs:1903` | ENFORCED |
 
 ## 6. Session, Workflow & Budget
 
@@ -374,7 +374,7 @@ before it moves into its category.
 | ID | Rule | Priority |
 |---|---|---|
 | R+1 | Structured capability scopes mandatory for all capabilities (not only the three high-risk ones). | P1 |
-| R+2 | Child → parent tool results validate against `io.produces` on egress. | P0 |
+| R+2 | Child → parent tool results validate against `io.returns` on egress. | P0 |
 | R+3 | Spawn-chain depth cap — child `max_children` and `max_depth` ≤ parent's; global ceiling applies. | P0 |
 | R+4 | Root-session tree budget — tokens / time / cost aggregated across all descendants. | P0 |
 | R+5 | Approval flood cap per root session; further requests reject `approval_flood`. | P0 |
