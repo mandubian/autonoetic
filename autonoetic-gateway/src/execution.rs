@@ -716,7 +716,13 @@ impl GatewayExecutionService {
                         );
 
                         // ── Spawn-chain depth cap (R+3 / R-7.15) ─────────────
-                        let current_depth = crate::runtime::live_digest::session_depth(session_id) as u32;
+                        // `session_id` here is the *target* session (the child's).
+                        // For the scheduler path this is always `{parent}/{agent}-{uuid}`,
+                        // so its depth = parent_depth + 1. The check below ensures
+                        // the child session's depth stays below the ceiling.
+                        // The router (JSON-RPC) path is operator-controlled via shared
+                        // secret and is not subject to agent manipulation.
+                        let child_depth = crate::runtime::live_digest::session_depth(session_id) as u32;
                         let system_ceiling = self.config.max_spawn_depth;
                         let agent_ceiling = source_policy.spawn_depth_limit().unwrap_or(0);
                         let effective_ceiling = if agent_ceiling > 0 {
@@ -725,10 +731,10 @@ impl GatewayExecutionService {
                             system_ceiling
                         };
                         anyhow::ensure!(
-                            current_depth < effective_ceiling,
-                            "Permission Denied: Source agent '{}' spawn-chain depth ({}) would exceed ceiling ({}) for session '{}'",
+                            child_depth < effective_ceiling,
+                            "Permission Denied: Source agent '{}' spawn at depth {} would reach ceiling ({}) — max_spawn_depth exceeded for session '{}'",
                             source_id,
-                            current_depth + 1,
+                            child_depth,
                             effective_ceiling,
                             session_id
                         );

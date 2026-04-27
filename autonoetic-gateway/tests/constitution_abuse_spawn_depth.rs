@@ -193,13 +193,13 @@ async fn spawn_refused_at_system_ceiling() -> anyhow::Result<()> {
     assert!(result.is_err(), "spawn at depth 2 should be rejected");
     let msg = result.unwrap_err().to_string();
     assert!(
-        msg.contains("spawn-chain depth"),
+        msg.contains("max_spawn_depth exceeded"),
         "expected depth error, got: {}",
         msg
     );
     assert!(
-        msg.contains("ceiling (2)"),
-        "error should mention the ceiling, got: {}",
+        msg.contains("depth 2"),
+        "error should mention the child depth, got: {}",
         msg
     );
 
@@ -272,7 +272,7 @@ async fn spawn_refused_at_agent_ceiling_when_tighter() -> anyhow::Result<()> {
     assert!(result.is_err(), "spawn at depth 1 should be rejected with agent ceiling 1");
     let msg = result.unwrap_err().to_string();
     assert!(
-        msg.contains("spawn-chain depth"),
+        msg.contains("max_spawn_depth exceeded"),
         "expected depth error, got: {}",
         msg
     );

@@ -296,7 +296,13 @@ fn capability_broadening(
             },
         ) => {
             let children_broadened = max_b > max_a;
-            let depth_broadened = *depth_b > *depth_a;
+            let depth_broadened = if *depth_a == 0 && *depth_b > 0 {
+                false
+            } else if *depth_a == 0 && *depth_b == 0 {
+                false
+            } else {
+                *depth_b > *depth_a
+            };
             if children_broadened || depth_broadened {
                 let mut prev = vec![format!("max_children={}", max_a)];
                 let mut next = vec![format!("max_children={}", max_b)];
@@ -491,5 +497,35 @@ mod tests {
         }];
         let d = compute_capability_delta(&prev, &curr);
         assert!(d.narrowed.is_empty());
+    }
+
+    #[test]
+    fn delta_spawn_depth_0_to_3_is_not_broadening() {
+        let prev = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 0,
+        }];
+        let curr = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 3,
+        }];
+        let d = compute_capability_delta(&prev, &curr);
+        assert!(d.broadened.is_empty(), "0→3 should not be broadening (0 = system default)");
+        assert!(!d.has_broadening());
+    }
+
+    #[test]
+    fn delta_spawn_depth_3_to_5_is_broadening() {
+        let prev = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 3,
+        }];
+        let curr = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 5,
+        }];
+        let d = compute_capability_delta(&prev, &curr);
+        assert_eq!(d.broadened.len(), 1);
+        assert!(d.has_broadening());
     }
 }
