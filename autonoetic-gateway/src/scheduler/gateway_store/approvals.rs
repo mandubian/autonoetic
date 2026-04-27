@@ -11,19 +11,21 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
 
         if let Some(ref root_session_id) = request.root_session_id {
-            let pending_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM approvals WHERE root_session_id = ?1 AND status = 'pending'",
-                params![root_session_id],
-                |row| row.get(0),
-            )?;
             let cap = self.approval_flood_cap.load(std::sync::atomic::Ordering::Relaxed);
-            if cap > 0 && (pending_count as usize) >= cap {
-                anyhow::bail!(
-                    "approval_flood: root session '{}' already has {} pending approvals (cap {})",
-                    root_session_id,
-                    pending_count,
-                    cap
-                );
+            if cap > 0 {
+                let pending_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM approvals WHERE root_session_id = ?1 AND status = 'pending'",
+                    params![root_session_id],
+                    |row| row.get(0),
+                )?;
+                if (pending_count as usize) >= cap {
+                    anyhow::bail!(
+                        "approval_flood: root session '{}' already has {} pending approvals (cap {})",
+                        root_session_id,
+                        pending_count,
+                        cap
+                    );
+                }
             }
         }
 

@@ -6,11 +6,8 @@
 
 mod support;
 
-use std::sync::Arc;
-
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
-use autonoetic_types::config::GatewayConfig;
 
 fn make_request(ix: usize, root_session_id: &str) -> ApprovalRequest {
     ApprovalRequest {
