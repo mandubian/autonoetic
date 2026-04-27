@@ -170,6 +170,17 @@ async fn emergency_stop_aborts_tasks_cancels_interaction_and_checkpoint() -> any
     assert_eq!(stops[0].status, "stopped");
     assert_eq!(stops[0].stop_id, stop_id);
 
+    let events = store.search_causal_events(Some(root_session), None, 100)?;
+    let matching: Vec<_> = events
+        .iter()
+        .filter(|e| e.action == format!("emergency_stop.initiated:{stop_id}"))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "emergency stop path should emit a single initiated causal event"
+    );
+
     Ok(())
 }
 
