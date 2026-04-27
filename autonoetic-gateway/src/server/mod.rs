@@ -51,6 +51,7 @@ impl GatewayServer {
         let gateway_store = Arc::new(crate::scheduler::gateway_store::GatewayStore::open(
             &gateway_dir,
         )?);
+        gateway_store.set_approval_flood_cap(self.config.max_pending_approvals_per_root);
 
         // Apply data retention policy on startup
         if let Err(e) = gateway_store.apply_retention_policy(&self.config.retention) {

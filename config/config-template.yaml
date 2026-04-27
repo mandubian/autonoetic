@@ -51,6 +51,9 @@ response_validation:
 # ── Approval Timeout ──────────────────────────────────────────────────
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
 approval_timeout_secs: 600
+# Maximum concurrent pending approvals per root session (R+5). Default: 50.
+# Excess requests are rejected immediately with approval_flood.
+# max_pending_approvals_per_root: 50
 # Optional: heartbeat interval for Running workflow tasks (seconds).
 # Keeps task updated_at fresh during long-running child execution/finalization.
 # If omitted, derives from background_tick_secs (clamped 1..=5). Valid range: 1..=30.
