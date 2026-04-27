@@ -261,7 +261,7 @@ Per-session registries in `runtime/session_budget.rs`,
 | R-6.18 | Workflow orchestration persists `WorkflowRun` on first `agent_spawn`. | workflow-orchestration.md | `workflow_store.rs` | ENFORCED |
 | R-6.19 | Child task message/metadata is preserved across approval boundaries. | workflow-orchestration.md | `TaskRun` storage | ENFORCED |
 | R-6.20 | User chat addressed to a child `session_id` rewrites to the root session. | workflow-orchestration.md | router `event.ingest` | ENFORCED |
-| R-6.21 | Tree-wide budget aggregated across all descendants of a root session. | (R+4) | not pinned | MISSING |
+| R-6.21 | Tree-wide budget aggregated across all descendants of a root session. | (R+4) | `runtime/root_session_budget.rs` `runtime/lifecycle.rs:1238` | ENFORCED |
 | R-6.22 | Continuation chain depth is bounded. | (R+3) | `execution.rs::spawn_agent_once` depth cap | ENFORCED |
 
 ## 7. Abuse / Hard-Stop / Circuit Breakers

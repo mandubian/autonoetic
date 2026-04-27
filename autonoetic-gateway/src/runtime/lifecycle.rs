@@ -497,6 +497,8 @@ pub struct AgentExecutor {
     pub config: Option<Arc<GatewayConfig>>,
     /// Optional per-session LLM/tool/token/wall-clock budgets (shared `Arc` across spawns).
     pub session_budget: Option<Arc<SessionBudgetRegistry>>,
+    pub root_session_budget:
+        Option<Arc<crate::runtime::root_session_budget::RootSessionBudgetRegistry>>,
     /// Middleware hooks declared in the agent manifest.
     pub middleware: Middleware,
     /// Token usage per real LLM completion in the last `execute_with_history` run.
@@ -576,6 +578,7 @@ impl AgentExecutor {
             turn_counter: 0,
             config: None,
             session_budget: None,
+            root_session_budget: None,
             middleware: manifest.middleware.clone().unwrap_or_default(),
             llm_usage_last_run: Vec::new(),
             openrouter_catalog: None,
@@ -613,6 +616,16 @@ impl AgentExecutor {
 
     pub fn with_session_budget(mut self, registry: Option<Arc<SessionBudgetRegistry>>) -> Self {
         self.session_budget = registry;
+        self
+    }
+
+    pub fn with_root_session_budget(
+        mut self,
+        registry: Option<
+            Arc<crate::runtime::root_session_budget::RootSessionBudgetRegistry>,
+        >,
+    ) -> Self {
+        self.root_session_budget = registry;
         self
     }
 
@@ -1235,6 +1248,22 @@ impl AgentExecutor {
                 }
             }
 
+            // Root session tree budget check (R+4 / R-6.21)
+            if let Some(root_budget) = self.root_session_budget.as_ref() {
+                let root =
+                    crate::runtime::content_store::root_session_id(&session_id).to_string();
+                if let Err(e) = root_budget.check_pre_llm(&root) {
+                    let cp = self.build_checkpoint(
+                        history,
+                        &turn_id,
+                        YieldReason::BudgetExhausted,
+                        None,
+                    );
+                    self.save_checkpoint_if_possible(&cp);
+                    return Err(e);
+                }
+            }
+
             if !digest_turn_active {
                 tracer.start_digest_turn()?;
                 digest_turn_active = true;
@@ -1778,6 +1807,28 @@ impl AgentExecutor {
                 }
             }
 
+            if let Some(root_budget) = self.root_session_budget.as_ref() {
+                if !skip_llm {
+                    let root =
+                        crate::runtime::content_store::root_session_id(&session_id).to_string();
+                    if let Err(e) = root_budget.record_llm_completion(
+                        &root,
+                        response.usage.input_tokens,
+                        response.usage.output_tokens,
+                        estimated_cost_usd,
+                    ) {
+                        let cp = self.build_checkpoint(
+                            history,
+                            &turn_id,
+                            YieldReason::BudgetExhausted,
+                            None,
+                        );
+                        self.save_checkpoint_if_possible(&cp);
+                        return Err(e);
+                    }
+                }
+            }
+
             self.log_output_schema_validation(&response, &mut tracer);
 
             // Extract new artifacts from response for logging
@@ -1895,6 +1946,24 @@ impl AgentExecutor {
                         if let Err(e) = budget
                             .reserve_tool_invocations(&session_id, response.tool_calls.len() as u64)
                         {
+                            let cp = self.build_checkpoint(
+                                history,
+                                &turn_id,
+                                YieldReason::BudgetExhausted,
+                                None,
+                            );
+                            self.save_checkpoint_if_possible(&cp);
+                            return Err(e);
+                        }
+                    }
+
+                    if let Some(root_budget) = self.root_session_budget.as_ref() {
+                        let root = crate::runtime::content_store::root_session_id(&session_id)
+                            .to_string();
+                        if let Err(e) = root_budget.reserve_tool_invocations(
+                            &root,
+                            response.tool_calls.len() as u64,
+                        ) {
                             let cp = self.build_checkpoint(
                                 history,
                                 &turn_id,
