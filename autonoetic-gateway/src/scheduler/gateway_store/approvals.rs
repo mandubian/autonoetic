@@ -34,8 +34,8 @@ impl GatewayStore {
             "INSERT INTO approvals (
                 request_id, agent_id, session_id, root_session_id, workflow_id, task_id,
                 action_type, action_payload, reason, evidence_ref, status, created_at,
-                approval_level
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                approval_level, similar_to_request_id, similarity_score
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 request.request_id,
                 request.agent_id,
@@ -49,7 +49,9 @@ impl GatewayStore {
                 request.evidence_ref,
                 "pending",
                 request.created_at,
-                serde_json::to_string(&request.approval_level)?
+                serde_json::to_string(&request.approval_level)?,
+                request.similar_to_request_id,
+                request.similarity_score,
             ],
         )?;
         Ok(())
@@ -74,7 +76,7 @@ impl GatewayStore {
         request_id: &str,
     ) -> Result<Option<ApprovalRequest>> {
         conn.query_row(
-            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason FROM approvals WHERE request_id = ?1",
+            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, similar_to_request_id, similarity_score FROM approvals WHERE request_id = ?1",
             params![request_id],
             |row| {
                 let action_payload: String = row.get(3)?;
@@ -106,6 +108,8 @@ impl GatewayStore {
                     evidence_ref: row.get(12)?,
                     decision_reason: row.get(14)?,
                     approval_level,
+                    similar_to_request_id: row.get(15)?,
+                    similarity_score: row.get(16)?,
                 })
             },
         ).optional().map_err(Into::into)
@@ -245,6 +249,41 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn get_recent_approvals_for_agent(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ApprovalRequest>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id FROM approvals WHERE agent_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![agent_id, limit as i64], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for id_result in rows {
+            let id = id_result?;
+            if let Some(app) = Self::get_approval_with_conn(&conn, &id)? {
+                results.push(app);
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn get_approval_status_by_task_id(&self, task_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT status FROM approvals WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn insert_session_grant(
         &self,
         root_session_id: &str,
@@ -361,6 +400,14 @@ impl GatewayStore {
         root_session_id: &str,
     ) -> Result<Vec<SessionApprovalGrant>> {
         let conn = self.conn.lock().unwrap();
+        self.get_session_grants_structured_with_conn(&conn, root_session_id)
+    }
+
+    fn get_session_grants_structured_with_conn(
+        &self,
+        conn: &Connection,
+        root_session_id: &str,
+    ) -> Result<Vec<SessionApprovalGrant>> {
         let mut stmt = conn.prepare(
             "SELECT id, root_session_id, session_id, agent_id, scope, granted_by, granted_at,
                     source_approval_id, expires_at
@@ -383,7 +430,7 @@ impl GatewayStore {
         let mut results = Vec::new();
         for row_result in rows {
             let (id, root_sid, sess_id, agent_id, scope_str, granted_by, granted_at, source_approval_id, expires_at) = row_result?;
-            let targets = self.get_grant_targets_with_conn(&conn, id)?;
+            let targets = self.get_grant_targets_with_conn(conn, id)?;
             results.push(SessionApprovalGrant {
                 id,
                 root_session_id: root_sid,
@@ -537,11 +584,32 @@ impl GatewayStore {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         let count = match host {
-            Some(h) => conn.execute(
-                "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2
-                 WHERE root_session_id = ?3 AND host = ?4 AND revoked_at IS NULL",
-                params![&now, reason, root_session_id, h],
-            )?,
+            Some(h) => {
+                let active_grants = self.get_session_grants_structured_with_conn(&*conn, root_session_id)?;
+                let mut matching_ids = Vec::new();
+                for g in &active_grants {
+                    if g.targets.iter().any(|t| t.matches(h)) {
+                        matching_ids.push(g.id);
+                    }
+                }
+                if matching_ids.is_empty() {
+                    return Ok(0);
+                }
+                let placeholders: Vec<String> = matching_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 3)).collect();
+                let sql = format!(
+                    "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2 WHERE id IN ({}) AND revoked_at IS NULL",
+                    placeholders.join(", ")
+                );
+                let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                    Box::new(now.clone()),
+                    Box::new(reason.to_string()),
+                ];
+                for id in &matching_ids {
+                    params_vec.push(Box::new(*id));
+                }
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+                conn.execute(&sql, params_refs.as_slice())?
+            }
             None => conn.execute(
                 "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2
                  WHERE root_session_id = ?3 AND revoked_at IS NULL",
@@ -586,5 +654,100 @@ impl GatewayStore {
             );
         }
         Ok(count)
+    }
+
+    pub fn get_approval_stats(
+        &self,
+        agent_id: Option<&str>,
+        root_session_id: Option<&str>,
+        since: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut where_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(aid) = agent_id {
+            where_clauses.push(format!("agent_id = ?{}", param_values.len() + 1));
+            param_values.push(Box::new(aid.to_string()));
+        }
+        if let Some(sid) = root_session_id {
+            where_clauses.push(format!("root_session_id = ?{}", param_values.len() + 1));
+            param_values.push(Box::new(sid.to_string()));
+        }
+        if let Some(s) = since {
+            where_clauses.push(format!("created_at >= ?{}", param_values.len() + 1));
+            param_values.push(Box::new(s.to_string()));
+        }
+
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_clauses.join(" AND "))
+        };
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM approvals {}", where_sql),
+            params_refs.as_slice(),
+            |row| row.get(0),
+        )?;
+
+        let approved_where = if where_sql.is_empty() {
+            "WHERE status = 'approved'".to_string()
+        } else {
+            format!("{} AND status = 'approved'", where_sql)
+        };
+        let approved: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM approvals {}", approved_where),
+            params_refs.as_slice(),
+            |row| row.get(0),
+        )?;
+
+        let rejected_where = if where_sql.is_empty() {
+            "WHERE status = 'rejected'".to_string()
+        } else {
+            format!("{} AND status = 'rejected'", where_sql)
+        };
+        let rejected: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM approvals {}", rejected_where),
+            params_refs.as_slice(),
+            |row| row.get(0),
+        )?;
+
+        let pending_where = if where_sql.is_empty() {
+            "WHERE status IS NULL".to_string()
+        } else {
+            format!("{} AND status IS NULL", where_sql)
+        };
+        let pending: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM approvals {}", pending_where),
+            params_refs.as_slice(),
+            |row| row.get(0),
+        )?;
+
+        let mut top_agents_stmt = conn.prepare(
+            &format!("SELECT agent_id, COUNT(*) as cnt FROM approvals {} GROUP BY agent_id ORDER BY cnt DESC LIMIT 10",
+                if where_sql.is_empty() { String::new() } else { where_sql.clone() }),
+        )?;
+        let top_agents: Vec<serde_json::Value> = top_agents_stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let agent_id: String = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok(serde_json::json!({"agent_id": agent_id, "count": count}))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(serde_json::json!({
+            "total": total,
+            "approved": approved,
+            "rejected": rejected,
+            "pending": pending,
+            "approval_rate": if total > 0 { format!("{:.1}%", (approved as f64 / total as f64) * 100.0) } else { "N/A".to_string() },
+            "rejection_rate": if total > 0 { format!("{:.1}%", (rejected as f64 / total as f64) * 100.0) } else { "N/A".to_string() },
+            "top_agents": top_agents,
+        }))
     }
 }

@@ -196,6 +196,11 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayApprovalCommands,
     },
+    /// Manage session approval grants (revoke, list).
+    Grants {
+        #[command(subcommand)]
+        command: GatewayGrantCommands,
+    },
     /// Inspect or answer pending user interactions.
     Interactions {
         #[command(subcommand)]
@@ -258,6 +263,49 @@ pub enum GatewayApprovalCommands {
         /// Approver level used when approving from the TUI.
         #[arg(long = "approval-level", value_enum, default_value_t = CliApprovalLevel::Operator)]
         approval_level: CliApprovalLevel,
+    },
+    /// Show details of a specific approval request.
+    Show {
+        /// Approval request identifier.
+        request_id: String,
+    },
+    /// Show approval statistics and analytics.
+    Stats {
+        /// Filter by agent ID.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Filter by root session ID.
+        #[arg(long)]
+        session: Option<String>,
+        /// Only include approvals since this time (e.g. `1h`, `24h`, `7d`).
+        #[arg(long)]
+        since: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayGrantCommands {
+    /// List active grants for a root session.
+    List {
+        /// Root session ID.
+        root_session: String,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke one or all grants for a root session.
+    Revoke {
+        /// Root session ID.
+        root_session: String,
+        /// Revoke grants for a specific host only.
+        #[arg(long, conflicts_with = "all")]
+        host: Option<String>,
+        /// Revoke all grants for the session.
+        #[arg(long)]
+        all: bool,
+        /// Reason for revocation (recorded in audit trail).
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 

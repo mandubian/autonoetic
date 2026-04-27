@@ -785,6 +785,8 @@ impl AgentExecutor {
             decided_by: None,
             decision_reason: None,
             approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store.create_approval(&request)?;
         Ok(request_id)

@@ -372,6 +372,10 @@ pub fn reject_request(
     // Unblock the task in the workflow (marks as Failed)
     unblock_task_on_approval(config, gateway_store, &decision);
 
+    if let Some(ref task_id) = decision.task_id {
+        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
+    }
+
     Ok(decision)
 }
 
@@ -393,6 +397,10 @@ pub fn cancel_request(
 
     // Unblock workflow task if bound
     unblock_task_on_approval(config, gateway_store, &decision);
+
+    if let Some(ref task_id) = decision.task_id {
+        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
+    }
 
     Ok(decision)
 }
@@ -1123,6 +1131,8 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store.create_approval(&req).unwrap();
 
@@ -1165,6 +1175,8 @@ mod tests {
             decided_at: None,
             decided_by: None,
             decision_reason: None,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store
             .create_approval(&req("apr-a", "root-a/coder-1"))
@@ -1213,6 +1225,8 @@ mod tests {
             decided_at: None,
             decided_by: None,
             decision_reason: None,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store
             .create_approval(&req("apr-second", "2020-01-02T00:00:00Z"))
@@ -1243,6 +1257,8 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store.create_approval(&install).unwrap();
 
@@ -1463,6 +1479,8 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store.create_approval(&request).unwrap();
 
@@ -1579,6 +1597,8 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Admin,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store.create_approval(&request).unwrap();
 
@@ -1646,6 +1666,8 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
         };
         store.create_approval(&request).unwrap();
 

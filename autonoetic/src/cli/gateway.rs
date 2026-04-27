@@ -226,11 +226,18 @@ pub async fn handle_gateway_approvals(
                     other => format!("{}", other.kind()),
                 };
                 println!(
-                    "{:<38} {:<20} {:<14} {}",
+                    "{:<38} {:<20} {:<14} {}{}",
                     approval.request_id,
                     approval.agent_id,
                     approval.action.kind(),
-                    details
+                    details,
+                    if let (Some(ref sim_id), Some(ref score)) =
+                        (approval.similar_to_request_id, approval.similarity_score)
+                    {
+                        format!(" ~{} ({:.0}%)", &sim_id[..sim_id.len().min(12)], score * 100.0)
+                    } else {
+                        String::new()
+                    }
                 );
             }
         }
@@ -318,6 +325,198 @@ pub async fn handle_gateway_approvals(
         }
         super::common::GatewayApprovalCommands::Interactive { approval_level } => {
             run_interactive_approvals(&config, &gateway_store, *approval_level).await?;
+        }
+        super::common::GatewayApprovalCommands::Show { request_id } => {
+            let approval = gateway_store.get_approval(request_id)?;
+            match approval {
+                None => println!("Approval '{}' not found.", request_id),
+                Some(a) => {
+                    println!("Request ID:    {}", a.request_id);
+                    println!("Agent:         {}", a.agent_id);
+                    println!("Session:       {}", a.session_id);
+                    println!("Status:        {}", a.status.as_ref().map(|s| match s {
+                        autonoetic_types::background::ApprovalStatus::Approved => "approved",
+                        autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
+                        autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
+                    }).unwrap_or("pending"));
+                    println!("Created:       {}", a.created_at);
+                    if let Some(ref at) = a.decided_at { println!("Decided at:    {}", at); }
+                    if let Some(ref by) = a.decided_by { println!("Decided by:    {}", by); }
+                    if let Some(ref r) = a.reason { println!("Reason:        {}", r); }
+                    if let Some(ref r) = a.decision_reason { println!("Decision note: {}", r); }
+
+                    match &a.action {
+                        autonoetic_types::background::ScheduledAction::SandboxExec {
+                            command, detected_hosts, dependencies, ..
+                        } => {
+                            println!("\nAction: sandbox_exec");
+                            println!("  Command: {}", command);
+                            if let Some(hosts) = detected_hosts {
+                                if !hosts.is_empty() {
+                                    println!("  Hosts:   {}", hosts.join(", "));
+                                }
+                            }
+                            if let Some(deps) = dependencies {
+                                println!("  Runtime: {}", deps.runtime);
+                                if !deps.packages.is_empty() {
+                                    println!("  Packages: {}", deps.packages.join(", "));
+                                }
+                            }
+                        }
+                        other => println!("\nAction: {}", other.kind()),
+                    }
+
+                    if let (Some(ref sim_id), Some(ref score)) =
+                        (a.similar_to_request_id, a.similarity_score)
+                    {
+                        println!("\nSimilar to: ~{} ({:.0}%)", sim_id, score * 100.0);
+                        let sim_approval = gateway_store.get_approval(sim_id)?;
+                        if let Some(sa) = &sim_approval {
+                            let status_str = sa.status.as_ref().map(|s| match s {
+                                autonoetic_types::background::ApprovalStatus::Approved => "approved",
+                                autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
+                                autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
+                            }).unwrap_or("pending");
+                            println!("  Similar approval was: {}", status_str);
+                        }
+                    }
+                }
+            }
+        }
+        super::common::GatewayApprovalCommands::Stats { agent, session, since } => {
+            let since_ts = since.as_ref().map(|s| {
+                let secs = if s.ends_with('h') {
+                    s.trim_end_matches('h').parse::<i64>().unwrap_or(1) * 3600
+                } else if s.ends_with('d') {
+                    s.trim_end_matches('d').parse::<i64>().unwrap_or(1) * 86400
+                } else if s.ends_with('m') {
+                    s.trim_end_matches('m').parse::<i64>().unwrap_or(1) * 60
+                } else {
+                    s.parse::<i64>().unwrap_or(3600)
+                };
+                (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
+            });
+            let stats = gateway_store.get_approval_stats(
+                agent.as_deref(),
+                session.as_deref(),
+                since_ts.as_deref(),
+            )?;
+            println!("Approval Statistics");
+            if agent.is_some() || session.is_some() || since.is_some() {
+                let mut filters = Vec::new();
+                if let Some(ref a) = agent { filters.push(format!("agent={}", a)); }
+                if let Some(ref s) = session { filters.push(format!("session={}", s)); }
+                if let Some(ref s) = since { filters.push(format!("since={}", s)); }
+                println!("  Filters: {}", filters.join(", "));
+            }
+            println!();
+            println!("  Total:          {}", stats["total"].as_i64().unwrap_or(0));
+            println!("  Approved:       {}", stats["approved"].as_i64().unwrap_or(0));
+            println!("  Rejected:       {}", stats["rejected"].as_i64().unwrap_or(0));
+            println!("  Pending:        {}", stats["pending"].as_i64().unwrap_or(0));
+            println!("  Approval rate:  {}", stats["approval_rate"].as_str().unwrap_or("N/A"));
+            println!("  Rejection rate: {}", stats["rejection_rate"].as_str().unwrap_or("N/A"));
+            if let Some(top_agents) = stats["top_agents"].as_array() {
+                if !top_agents.is_empty() {
+                    println!();
+                    println!("  Top agents:");
+                    for entry in top_agents {
+                        let aid = entry["agent_id"].as_str().unwrap_or("?");
+                        let cnt = entry["count"].as_i64().unwrap_or(0);
+                        println!("    {:<30} {}", aid, cnt);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn handle_gateway_grants(
+    config_path: &Path,
+    command: &super::common::GatewayGrantCommands,
+) -> anyhow::Result<()> {
+    use super::common::GatewayGrantCommands;
+
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    match command {
+        GatewayGrantCommands::List { root_session, json } => {
+            let grants = gateway_store.get_session_grants_structured(root_session)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&grants)?);
+            } else if grants.is_empty() {
+                println!("No active grants for session {}", root_session);
+            } else {
+                println!("{:<6} {:<36} {:<14} {:<12} {:<12} {}",
+                    "ID", "SESSION", "AGENT", "SCOPE", "EXPIRES", "TARGETS");
+                for g in &grants {
+                    let targets_str: Vec<String> = g.targets.iter().map(|t| match t {
+                        autonoetic_types::background::GrantTarget::ExactHost(h) => h.clone(),
+                        autonoetic_types::background::GrantTarget::HostSuffix(s) => format!("*.{}", s),
+                        autonoetic_types::background::GrantTarget::HostAndPort { host, port } => format!("{}:{}", host, port),
+                        autonoetic_types::background::GrantTarget::UrlPrefix(u) => u.clone(),
+                    }).collect();
+                    let expires = g.expires_at.as_deref().unwrap_or("never");
+                    let short_session = if g.session_id.len() > 34 {
+                        format!("{}...", &g.session_id[..34])
+                    } else {
+                        g.session_id.clone()
+                    };
+                    println!("{:<6} {:<36} {:<14} {:<12} {:<12} {}",
+                        g.id,
+                        short_session,
+                        g.agent_id,
+                        match g.scope {
+                            autonoetic_types::background::GrantScope::RootSession => "root",
+                            autonoetic_types::background::GrantScope::Session => "session",
+                        },
+                        expires,
+                        targets_str.join(", ")
+                    );
+                }
+            }
+        }
+        GatewayGrantCommands::Revoke { root_session, host, all, reason } => {
+            if host.is_none() && !all {
+                anyhow::bail!("Specify --host <host> or --all to revoke grants");
+            }
+            let reason_text = reason.as_deref().unwrap_or("Revoked by operator");
+            let count = gateway_store.revoke_session_grants(
+                root_session,
+                host.as_deref(),
+                reason_text,
+            )?;
+            if count == 0 {
+                println!("No matching grants found for session {}", root_session);
+            } else {
+                println!("Revoked {} grant(s) for session {} (reason: {})", count, root_session, reason_text);
+                if let Some(ref host_val) = host {
+                    println!("  Host filter: {}", host_val);
+                }
+            }
+
+            gateway_store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("grant-revoke-{}", uuid::Uuid::new_v4()),
+                agent_id: "gateway".to_string(),
+                session_id: root_session.clone(),
+                turn_id: None,
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "grant_revocation".to_string(),
+                action: "revoke_grants".to_string(),
+                status: "completed".to_string(),
+                target: host.clone(),
+                payload: Some(serde_json::json!({
+                    "reason": reason_text,
+                    "count": count,
+                }).to_string()),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: reason.clone(),
+            })?;
         }
     }
     Ok(())

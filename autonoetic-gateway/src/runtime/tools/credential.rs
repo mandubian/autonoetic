@@ -410,8 +410,11 @@ impl NativeTool for CredentialRequestTool {
                 reason: Some(format!("HTTP request to {} requires approval", url_host)),
                 evidence_ref: None,
                 decision_reason: None,
-                approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
-            };
+            approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+            similar_to_request_id: None,
+            similarity_score: None,
+        };
+
             store.create_approval(&req)?;
             let message = format!(
                 "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
@@ -1709,6 +1712,8 @@ fn execute_steps(
                             crate::scheduler::approval::resolve_approval_level(c, &approval_action)
                         })
                         .unwrap_or(ApprovalLevel::Operator),
+                    similar_to_request_id: None,
+                    similarity_score: None,
                 };
                 store.create_approval(&approval_req)?;
 

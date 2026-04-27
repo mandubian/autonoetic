@@ -207,11 +207,18 @@ impl NativeTool for ApprovalWithdrawTool {
                 }
 
                 let reason = args.reason.as_deref().unwrap_or("Withdrawn by agent");
+                let task_id_copy = r.task_id.clone();
                 store.cancel_approval(
                     &args.request_id,
                     &format!("agent:{}", manifest.agent.id),
                     &chrono::Utc::now().to_rfc3339(),
                 )?;
+
+                if let Some(ref task_id) = task_id_copy {
+                    if let Some(cfg) = _config {
+                        let _ = crate::runtime::continuation::delete_continuation(cfg, task_id);
+                    }
+                }
 
                 tracing::info!(
                     target: "approval_withdraw",

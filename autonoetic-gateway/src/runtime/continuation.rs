@@ -172,7 +172,7 @@ pub fn continuations_dir(config: &GatewayConfig) -> PathBuf {
     config.agents_dir.join(".gateway").join("continuations")
 }
 
-fn continuation_path(config: &GatewayConfig, task_id: &str) -> PathBuf {
+pub fn continuation_path(config: &GatewayConfig, task_id: &str) -> PathBuf {
     continuations_dir(config).join(format!("{}.json", task_id))
 }
 
@@ -282,6 +282,39 @@ pub fn list_suspended_task_ids(config: &GatewayConfig) -> anyhow::Result<Vec<Str
         }
     }
     Ok(ids)
+}
+
+/// Remove orphaned continuation files whose bound approval is in a terminal
+/// state (approved/rejected/cancelled) or whose approval row no longer exists.
+/// Returns the number of reaped files.
+pub fn reap_orphaned_continuations(
+    config: &GatewayConfig,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<u32> {
+    let suspended = list_suspended_task_ids(config)?;
+    if suspended.is_empty() {
+        return Ok(0);
+    }
+
+    let mut reaped = 0u32;
+    for task_id in &suspended {
+        let status = store.get_approval_status_by_task_id(task_id)?;
+        let is_orphan = match &status {
+            None => true,
+            Some(s) => s != "pending",
+        };
+        if is_orphan {
+            tracing::info!(
+                target: "continuation",
+                task_id = %task_id,
+                approval_status = ?status,
+                "Reaping orphaned continuation file"
+            );
+            delete_continuation(config, task_id)?;
+            reaped += 1;
+        }
+    }
+    Ok(reaped)
 }
 
 // ---------------------------------------------------------------------------
