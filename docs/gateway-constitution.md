@@ -232,7 +232,7 @@ Enforcement hook for ingress, response validation gate for egress.
 | R-5.10 | `artifact_inspect` accepts explicit `art_*` IDs only; implicit `impl_task-*` handles are rejected. | content-store.md | `runtime/tools/artifact.rs` | ENFORCED |
 | R-5.11 | Native tool errors use a uniform `{error_type, message, repair_hint}` envelope. | ARCHITECTURE.md | per-tool response construction | PARTIAL |
 | R-5.12 | `error_type: fatal` triggers session abort; recoverable types do not. | ARCHITECTURE.md | lifecycle error processing | ENFORCED |
-| R-5.13 | Child → parent tool results validate against `io.produces` on egress. | (R+2) | not pinned | MISSING |
+| R-5.13 | Child → parent tool results validate against `io.returns` on egress. | (R+2) | `runtime/response_validation.rs:68` `execution.rs:1903` | ENFORCED |
 
 ## 6. Session, Workflow & Budget
 
