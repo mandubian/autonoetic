@@ -296,3 +296,41 @@ The agent is a reasoning loop with a capabilities vocabulary but no execution au
 **The autonoetic properties emerge from agent composition of gateway primitives**, not from the gateway hardcoding orchestration patterns. A planner agent composes `agent_spawn` + `task.board` into delegation. A background agent composes `scheduler.interval` + `agent.state` into reevaluation. A coder agent composes `skill.store` + `approval.queue` into evolution.
 
 The gateway "ensures" autonoetic behavior by making it **possible and auditable**, not by making it **prescriptive**.
+
+---
+
+## Integrity Guarantees
+
+### HMAC-Signed Continuations
+
+When an agent's turn is suspended at an approval boundary, the gateway writes a **signed continuation file** to disk. The file contains an HMAC-SHA256 signature over the serialized turn state, computed with a per-gateway key derived from `continuation_key` (or `node_id` as fallback).
+
+On resume:
+1. The signature is verified before deserialization
+2. If the signature is invalid (tampered file), the gateway:
+   - Rejects the continuation
+   - Emits a causal event
+   - Cancels the bound approval
+3. The `pending_action` on the continuation is compared to the stored approval action (action-equality check) to detect TOCTOU swaps
+
+### Threat Model
+
+| In scope | Out of scope |
+|----------|-------------|
+| **Malicious agent**: LLM attempting to bypass approval gates, tamper with continuation files, or escalate privileges | **Local filesystem attacker with vault key**: an attacker who has compromised the host and obtained the `continuation_key` or vault master key can forge continuations or decrypt secrets |
+| **Agent retry attacks**: re-submitting near-identical approval requests (detected by similarity scoring) | **Kernel-level compromise**: root-level access to the host |
+| **Continuation tampering**: modifying `.gateway/continuations/<task_id>.json` on disk (detected by HMAC) | **Supply-chain attacks on LLM providers** |
+| **Approval fatigue**: operator approving without review (mitigated by similarity annotations, stats, and diff surface) | |
+
+The security boundary is **gateway vs agent**, not **gateway vs host**. The gateway trusts the local filesystem and its own key material; it does not trust any data produced or influenced by the agent.
+
+### Continuation Cleanup
+
+Continuation files are cleaned up in these scenarios:
+- **Successful resume** after approval (normal path)
+- **Reject, cancel, or withdraw** — the file is deleted immediately
+- **Gateway startup** — a reaper scans for orphaned files whose bound approval is terminal or missing
+- **Emergency stop** — all continuation files for the root session are deleted
+- **Workflow task cancellation** — the file is deleted
+
+This prevents stale continuation files from accumulating on disk after crashes or interrupted sessions.

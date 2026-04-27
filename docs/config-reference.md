@@ -26,6 +26,8 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `node_name` | string | `"gateway"` | Human-readable node name for OFP federation. Overridable by `AUTONOETIC_NODE_NAME` env var. |
 | `max_concurrent_spawns` | usize | `8` | Maximum agent runtime executions allowed concurrently across all sessions. |
 | `max_pending_spawns_per_agent` | usize | `4` | Maximum pending executions admitted per target agent (includes the currently running execution). |
+| `max_pending_approvals_per_root` | usize | `50` | Maximum concurrent pending approvals per root session. When a new request would push the count above this cap, the request is rejected with `approval_flood`. Set to `0` to disable (not recommended). Controls the R+5 / R-7.17 approval flood cap. |
+| `continuation_key` | string | `null` | HMAC-SHA256 key for signing turn continuation files. When unset, the gateway derives a deterministic key from `node_id` (development convenience only). Production deployments should set this to a high-entropy secret. Rotate by changing the value — existing continuations will fail integrity verification and be rejected. |
 | `approval_timeout_secs` | u64 | `600` | Maximum seconds a workflow task can remain in `AwaitingApproval` before auto-failing. `0` disables (not recommended for production). |
 | `workflow_task_heartbeat_secs` | u64 \| null | `null` | Optional heartbeat interval for `Running` workflow tasks (sync + async) to refresh `updated_at` and avoid false stuck resolution during long tails. If `null`, derives from `background_tick_secs` (clamped `1..=5`). Effective range when set: `1..=30`. |
 | `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
@@ -508,6 +510,8 @@ node_name: "gateway"
 max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4
 approval_timeout_secs: 600
+max_pending_approvals_per_root: 50
+# continuation_key: "set-me-in-production-from-a-secret-source"
 workflow_task_heartbeat_secs: 2
 evidence_mode: full
 max_session_turns: 12

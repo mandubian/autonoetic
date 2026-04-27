@@ -81,7 +81,7 @@ Static analysis inspects the **actual code** to detect remote access patterns de
 │    └─ Remote patterns found → proceed to approval checks    │
 │ 3. Approval resolution checks (in order):                   │
 │    a. Exec cache hit (identical code fingerprint) → EXECUTE │
-│    b. Session grant covers targets → EXECUTE                │
+│    b. Session grant covers targets (scope-aware) → EXECUTE  │
 │    c. Existing approved/pending approval → REUSE            │
 │    d. None of the above → BLOCK + require approval          │
 └─────────────────────────────────────────────────────────────┘
@@ -89,9 +89,24 @@ Static analysis inspects the **actual code** to detect remote access patterns de
 
 ### Session Approval Grants
 
-When an operator approves `sandbox_exec` for specific hosts, those hosts are recorded as session-level grants. Subsequent `sandbox_exec` calls in the same root session that access a subset of the granted hosts are auto-approved. This prevents the common scenario where the evaluator, coder, and tester all trigger separate approval prompts for the same `api.open-meteo.com`.
+When an operator approves `sandbox_exec` for specific hosts, those hosts are recorded as **session approval grants** — pattern-based targets stored in SQLite. Subsequent `sandbox_exec` calls whose detected hosts are covered by a grant are auto-approved.
 
-Grants are cleaned up when the session ends. See [Approval System](approval-system.md) for full details.
+**Grant targets** support four kinds (set at approval time via `--target`):
+
+| Target kind | Syntax | Example match |
+|-------------|--------|---------------|
+| `ExactHost` | `host:api.github.com` | `api.github.com` |
+| `HostSuffix` | `suffix:*.github.com` | `api.github.com`, `v2.api.github.com` |
+| `HostAndPort` | `hostport:api.github.com:443` | `api.github.com:443` |
+| `UrlPrefix` | `url:https://api.github.com/public/` | `https://api.github.com/public/users` |
+
+**Grant scope:** `RootSession` (default — all agents in the workflow benefit) or `Session` (only the requesting child session). Set via `--scope root` or `--scope session`.
+
+**Grant expiry:** `--ttl 10m` or `--until 2025-12-31T23:59:59Z`. Without either, the grant lasts until session end or emergency stop.
+
+**Grant revocation:** `autonoetic gateway grants revoke --root-session <id> --host api.example.com --reason "..."` — revokes without emergency stop, emits a causal event.
+
+Grants are cleaned up on session end, emergency stop, or expiry. See [Approval System](approval-system.md) for full details including similarity scoring and analytics.
 
 ### Promotion Severity Gating
 
@@ -142,7 +157,7 @@ The tool returns a structured response instead of executing:
       "command": "python3 weather_client.py",
       "remote_access_detected": true,
       "detected_patterns": [...],
-      "normalized_targets": ["api.open-meteo.com"],
+      "normalized_targets": ["host:api.open-meteo.com"],
       "hosts": ["api.open-meteo.com"]
     }
   }
