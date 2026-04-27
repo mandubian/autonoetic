@@ -287,7 +287,7 @@ Loop guard in `runtime/guard.rs`, emergency stop in
 | R-7.14 | `force_complete` refuses `Succeeded` without real child-session evidence. | spec-install-pipeline-hardening.md §A.1 | `workflow.rs::force_complete` | ENFORCED |
 | R-7.15 | Spawn-chain depth is bounded system-wide; child `max_depth` ≤ parent's. | (R+3) | `execution.rs::spawn_agent_once` depth cap + `policy.rs::spawn_depth_limit` + `GatewayConfig.max_spawn_depth` | ENFORCED |
 | R-7.16 | Orphan children are reaped when the parent session terminates. | (R+12) | not pinned | MISSING |
-| R-7.17 | Approval flood cap — pending approvals per root session bounded. | (R+5) | not pinned | MISSING |
+| R-7.17 | Approval flood cap — pending approvals per root session bounded. | (R+5) | `gateway_store/approvals.rs::create_approval` + `GatewayConfig.max_pending_approvals_per_root` | ENFORCED |
 
 ## 8. Audit & Traceability
 

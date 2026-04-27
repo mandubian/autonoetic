@@ -94,6 +94,7 @@ pub fn default_gateway_host_id() -> String {
 
 pub struct GatewayStore {
     conn: std::sync::Mutex<Connection>,
+    approval_flood_cap: std::sync::atomic::AtomicUsize,
 }
 
 impl GatewayStore {
@@ -112,6 +113,7 @@ impl GatewayStore {
 
         let store = Self {
             conn: std::sync::Mutex::new(conn),
+            approval_flood_cap: std::sync::atomic::AtomicUsize::new(0),
         };
         {
             let mut conn = store.conn.lock().unwrap();

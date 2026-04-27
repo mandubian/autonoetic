@@ -521,6 +521,13 @@ pub struct GatewayConfig {
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
 
+    /// Maximum number of concurrent pending approvals per root_session_id (R+5 / R-7.17).
+    /// When a new approval request would push the count above this cap, the insert is
+    /// rejected with `approval_flood`. Set to 0 to disable (not recommended).
+    /// Default: 50.
+    #[serde(default = "default_max_pending_approvals_per_root")]
+    pub max_pending_approvals_per_root: usize,
+
     /// HMAC-SHA256 key for signing turn continuation files.
     /// This value should be a secret, high-entropy key provided from a secret
     /// source (environment secret or vault); do not derive it from `node_id`
@@ -1024,6 +1031,10 @@ fn default_approval_timeout_secs() -> u64 {
     600
 }
 
+fn default_max_pending_approvals_per_root() -> usize {
+    50
+}
+
 fn default_workflow_task_heartbeat_secs_val() -> Option<u64> {
     None
 }
@@ -1205,6 +1216,7 @@ impl Default for GatewayConfig {
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
             session_budget: SessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
+            max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
             continuation_key: None,
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),

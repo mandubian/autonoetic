@@ -9,6 +9,24 @@ use super::GatewayStore;
 impl GatewayStore {
     pub fn create_approval(&self, request: &ApprovalRequest) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+
+        if let Some(ref root_session_id) = request.root_session_id {
+            let pending_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM approvals WHERE root_session_id = ?1 AND status = 'pending'",
+                params![root_session_id],
+                |row| row.get(0),
+            )?;
+            let cap = self.approval_flood_cap.load(std::sync::atomic::Ordering::Relaxed);
+            if cap > 0 && (pending_count as usize) >= cap {
+                anyhow::bail!(
+                    "approval_flood: root session '{}' already has {} pending approvals (cap {})",
+                    root_session_id,
+                    pending_count,
+                    cap
+                );
+            }
+        }
+
         let action_payload = serde_json::to_string(&request.action)?;
         conn.execute(
             "INSERT INTO approvals (
@@ -33,6 +51,20 @@ impl GatewayStore {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn set_approval_flood_cap(&self, cap: usize) {
+        self.approval_flood_cap.store(cap, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn count_pending_for_root(&self, root_session_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM approvals WHERE root_session_id = ?1 AND status = 'pending'",
+            params![root_session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     fn get_approval_with_conn(
