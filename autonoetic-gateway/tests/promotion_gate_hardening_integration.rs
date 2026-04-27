@@ -143,7 +143,7 @@ fn builder_manifest() -> AgentManifest {
             description: "Builder".to_string(),
         },
         capabilities: vec![
-            Capability::AgentSpawn { max_children: 10 },
+            Capability::AgentSpawn { max_children: 10, max_spawn_depth: 0 },
             Capability::AgentRevision {
                 patterns: vec!["*".to_string()],
             },

@@ -8,6 +8,9 @@ ofp_port: 4200
 tls: false
 max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4
+# System-wide ceiling for spawn-chain depth (R+3). Default: 8.
+# Per-agent AgentSpawn.max_spawn_depth may be tighter; the lower bound wins.
+# max_spawn_depth: 8
 
 # ── Node Identity ─────────────────────────────────────────────────────
 # Identity for OFP federation and causal chain authorship.

@@ -262,7 +262,7 @@ Per-session registries in `runtime/session_budget.rs`,
 | R-6.19 | Child task message/metadata is preserved across approval boundaries. | workflow-orchestration.md | `TaskRun` storage | ENFORCED |
 | R-6.20 | User chat addressed to a child `session_id` rewrites to the root session. | workflow-orchestration.md | router `event.ingest` | ENFORCED |
 | R-6.21 | Tree-wide budget aggregated across all descendants of a root session. | (R+4) | not pinned | MISSING |
-| R-6.22 | Continuation chain depth is bounded. | (R+3) | not pinned | MISSING |
+| R-6.22 | Continuation chain depth is bounded. | (R+3) | `execution.rs::spawn_agent_once` depth cap | ENFORCED |
 
 ## 7. Abuse / Hard-Stop / Circuit Breakers
 
@@ -285,7 +285,7 @@ Loop guard in `runtime/guard.rs`, emergency stop in
 | R-7.12 | Promotion gate has no escape hatch; passes require real evaluator + auditor records. | spec-install-pipeline-hardening.md §3.1 | `agent_revision.rs::promote` | ENFORCED |
 | R-7.13 | Unresolved dependencies block promotion for high-risk agents. | spec-install-pipeline-hardening.md §3.2 | `install_contract.rs` + `promote` | ENFORCED |
 | R-7.14 | `force_complete` refuses `Succeeded` without real child-session evidence. | spec-install-pipeline-hardening.md §A.1 | `workflow.rs::force_complete` | ENFORCED |
-| R-7.15 | Spawn-chain depth is bounded system-wide; child `max_depth` ≤ parent's. | (R+3) | not pinned | MISSING |
+| R-7.15 | Spawn-chain depth is bounded system-wide; child `max_depth` ≤ parent's. | (R+3) | `execution.rs::spawn_agent_once` depth cap + `policy.rs::spawn_depth_limit` + `GatewayConfig.max_spawn_depth` | ENFORCED |
 | R-7.16 | Orphan children are reaped when the parent session terminates. | (R+12) | not pinned | MISSING |
 | R-7.17 | Approval flood cap — pending approvals per root session bounded. | (R+5) | not pinned | MISSING |
 

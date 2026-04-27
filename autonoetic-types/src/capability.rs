@@ -38,7 +38,13 @@ pub enum Capability {
 
     /// Create child agent sessions.
     /// The `max_children` field limits concurrent children.
-    AgentSpawn { max_children: u32 },
+    /// The `max_spawn_depth` field limits how deep the spawn chain may go
+    /// (0 = use system default). Depth is measured by counting `/` in session_id.
+    AgentSpawn {
+        max_children: u32,
+        #[serde(default)]
+        max_spawn_depth: u32,
+    },
 
     /// Send messages to other agents.
     AgentMessage {
@@ -282,16 +288,32 @@ fn capability_broadening(
         (
             Capability::AgentSpawn {
                 max_children: max_a,
+                max_spawn_depth: depth_a,
             },
             Capability::AgentSpawn {
                 max_children: max_b,
+                max_spawn_depth: depth_b,
             },
         ) => {
-            if max_b > max_a {
+            let children_broadened = max_b > max_a;
+            let depth_broadened = if *depth_a == 0 && *depth_b > 0 {
+                false
+            } else if *depth_a == 0 && *depth_b == 0 {
+                false
+            } else {
+                *depth_b > *depth_a
+            };
+            if children_broadened || depth_broadened {
+                let mut prev = vec![format!("max_children={}", max_a)];
+                let mut next = vec![format!("max_children={}", max_b)];
+                if depth_broadened {
+                    prev.push(format!("max_spawn_depth={}", depth_a));
+                    next.push(format!("max_spawn_depth={}", depth_b));
+                }
                 Some(CapabilityBroadening {
                     capability_type: capability_type.to_string(),
-                    previous_scope: vec![max_a.to_string()],
-                    new_scope: vec![max_b.to_string()],
+                    previous_scope: prev,
+                    new_scope: next,
                 })
             } else {
                 None
@@ -475,5 +497,35 @@ mod tests {
         }];
         let d = compute_capability_delta(&prev, &curr);
         assert!(d.narrowed.is_empty());
+    }
+
+    #[test]
+    fn delta_spawn_depth_0_to_3_is_not_broadening() {
+        let prev = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 0,
+        }];
+        let curr = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 3,
+        }];
+        let d = compute_capability_delta(&prev, &curr);
+        assert!(d.broadened.is_empty(), "0→3 should not be broadening (0 = system default)");
+        assert!(!d.has_broadening());
+    }
+
+    #[test]
+    fn delta_spawn_depth_3_to_5_is_broadening() {
+        let prev = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 3,
+        }];
+        let curr = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 5,
+        }];
+        let d = compute_capability_delta(&prev, &curr);
+        assert_eq!(d.broadened.len(), 1);
+        assert!(d.has_broadening());
     }
 }
