@@ -59,16 +59,34 @@ impl RootSessionBudgetRegistry {
             }
         }
 
-        if let Some(max_rounds) = self.limits.max_llm_rounds {
-            if st.llm_rounds >= max_rounds {
-                anyhow::bail!(
-                    "Root session budget exceeded: max_llm_rounds ({}) (root: {})",
-                    max_rounds,
-                    root_session_id
-                );
-            }
-        }
+        Ok(())
+    }
 
+    pub fn reserve_llm_round(&self, root_session_id: &str) -> anyhow::Result<()> {
+        if !self.is_enabled() {
+            return Ok(());
+        }
+        let Some(max_rounds) = self.limits.max_llm_rounds else {
+            return Ok(());
+        };
+        let mut map = self
+            .trees
+            .lock()
+            .map_err(|e| anyhow::anyhow!("root session budget lock poisoned: {e}"))?;
+        let st = map.entry(root_session_id.to_string()).or_default();
+        if st.clock_start.is_none() {
+            st.clock_start = Some(Instant::now());
+        }
+        let next = st.llm_rounds.saturating_add(1);
+        if next > max_rounds {
+            anyhow::bail!(
+                "Root session budget exceeded: max_llm_rounds ({}, would be {}) (root: {})",
+                max_rounds,
+                next,
+                root_session_id
+            );
+        }
+        st.llm_rounds = next;
         Ok(())
     }
 
@@ -90,7 +108,6 @@ impl RootSessionBudgetRegistry {
         if st.clock_start.is_none() {
             st.clock_start = Some(Instant::now());
         }
-        st.llm_rounds = st.llm_rounds.saturating_add(1);
         let add = input_tokens.saturating_add(output_tokens);
         st.llm_tokens = st.llm_tokens.saturating_add(add);
         if let Some(c) = estimated_cost_usd {
@@ -181,19 +198,19 @@ mod tests {
         });
         let root = "root-1";
 
-        reg.check_pre_llm(root).unwrap();
+        reg.reserve_llm_round(root).unwrap();
         reg.record_llm_completion(root, 0, 0, None).unwrap();
 
-        reg.check_pre_llm(root).unwrap();
+        reg.reserve_llm_round(root).unwrap();
         reg.record_llm_completion(root, 0, 0, None).unwrap();
 
-        reg.check_pre_llm(root).unwrap();
+        reg.reserve_llm_round(root).unwrap();
         reg.record_llm_completion(root, 0, 0, None).unwrap();
 
-        reg.check_pre_llm(root).unwrap();
+        reg.reserve_llm_round(root).unwrap();
         reg.record_llm_completion(root, 0, 0, None).unwrap();
 
-        assert!(reg.check_pre_llm(root).is_err());
+        assert!(reg.reserve_llm_round(root).is_err());
     }
 
     #[test]
@@ -247,12 +264,12 @@ mod tests {
         });
         let root = "root-5";
 
-        reg.check_pre_llm(root).unwrap();
+        reg.reserve_llm_round(root).unwrap();
         reg.record_llm_completion(root, 0, 0, None).unwrap();
-        assert!(reg.check_pre_llm(root).is_err());
+        assert!(reg.reserve_llm_round(root).is_err());
 
         reg.remove_tree(root);
-        reg.check_pre_llm(root).unwrap();
+        reg.reserve_llm_round(root).unwrap();
     }
 
     #[test]
@@ -262,16 +279,28 @@ mod tests {
             ..Default::default()
         });
 
-        reg.check_pre_llm("tree-a").unwrap();
+        reg.reserve_llm_round("tree-a").unwrap();
         reg.record_llm_completion("tree-a", 0, 0, None).unwrap();
-        reg.check_pre_llm("tree-a").unwrap();
+        reg.reserve_llm_round("tree-a").unwrap();
         reg.record_llm_completion("tree-a", 0, 0, None).unwrap();
 
-        reg.check_pre_llm("tree-b").unwrap();
+        reg.reserve_llm_round("tree-b").unwrap();
         reg.record_llm_completion("tree-b", 0, 0, None).unwrap();
 
-        assert!(reg.check_pre_llm("tree-a").is_err());
-        assert!(reg.check_pre_llm("tree-b").is_ok());
+        assert!(reg.reserve_llm_round("tree-a").is_err());
+        assert!(reg.reserve_llm_round("tree-b").is_ok());
+    }
+
+    #[test]
+    fn reserved_round_counts_even_without_completion() {
+        let reg = RootSessionBudgetRegistry::new(RootSessionBudgetConfig {
+            max_llm_rounds: Some(2),
+            ..Default::default()
+        });
+
+        reg.reserve_llm_round("root-fail").unwrap();
+        reg.reserve_llm_round("root-fail").unwrap();
+        assert!(reg.reserve_llm_round("root-fail").is_err());
     }
 
     #[test]

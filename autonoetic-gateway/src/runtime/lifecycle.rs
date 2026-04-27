@@ -1224,6 +1224,7 @@ impl AgentExecutor {
         let max_empty_other_retries = max_other_empty_retries();
         let mut empty_other_retries_used = 0usize;
         let mut digest_turn_active = false;
+        let root_session_id = crate::runtime::content_store::root_session_id(&session_id);
 
         loop {
             // Loop guard check — save checkpoint before propagating max-turns error
@@ -1250,9 +1251,7 @@ impl AgentExecutor {
 
             // Root session tree budget check (R+4 / R-6.21)
             if let Some(root_budget) = self.root_session_budget.as_ref() {
-                let root =
-                    crate::runtime::content_store::root_session_id(&session_id).to_string();
-                if let Err(e) = root_budget.check_pre_llm(&root) {
+                if let Err(e) = root_budget.check_pre_llm(root_session_id) {
                     let cp = self.build_checkpoint(
                         history,
                         &turn_id,
@@ -1698,6 +1697,18 @@ impl AgentExecutor {
                     .unwrap_or_default();
 
                 let mut last_err = None;
+                if let Some(root_budget) = self.root_session_budget.as_ref() {
+                    if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
+                        let cp = self.build_checkpoint(
+                            history,
+                            &turn_id,
+                            YieldReason::BudgetExhausted,
+                            None,
+                        );
+                        self.save_checkpoint_if_possible(&cp);
+                        return Err(e);
+                    }
+                }
                 let response = self.llm.complete(&req).await;
                 match response {
                     Ok(resp) => resp,
@@ -1724,6 +1735,18 @@ impl AgentExecutor {
                                 fallback_model = %fb_model,
                                 "Trying fallback model"
                             );
+                            if let Some(root_budget) = self.root_session_budget.as_ref() {
+                                if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
+                                    let cp = self.build_checkpoint(
+                                        history,
+                                        &turn_id,
+                                        YieldReason::BudgetExhausted,
+                                        None,
+                                    );
+                                    self.save_checkpoint_if_possible(&cp);
+                                    return Err(e);
+                                }
+                            }
                             match self.llm.complete(&fallback_req).await {
                                 Ok(resp) => {
                                     tracing::info!(
@@ -1809,10 +1832,8 @@ impl AgentExecutor {
 
             if let Some(root_budget) = self.root_session_budget.as_ref() {
                 if !skip_llm {
-                    let root =
-                        crate::runtime::content_store::root_session_id(&session_id).to_string();
                     if let Err(e) = root_budget.record_llm_completion(
-                        &root,
+                        root_session_id,
                         response.usage.input_tokens,
                         response.usage.output_tokens,
                         estimated_cost_usd,

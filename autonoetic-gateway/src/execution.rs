@@ -2544,6 +2544,7 @@ impl GatewayExecutionService {
         .with_gateway_dir(self.config.agents_dir.join(".gateway"))
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
+        .with_root_session_budget(Some(self.root_session_budget.clone()))
         .with_openrouter_catalog(Some(openrouter_catalog))
         .with_middleware(middleware)
         .with_session_id(session_id.to_string())
