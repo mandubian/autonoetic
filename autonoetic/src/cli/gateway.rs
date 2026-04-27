@@ -410,18 +410,20 @@ pub async fn handle_gateway_approvals(
                 println!("  Filters: {}", filters.join(", "));
             }
             println!();
-            println!("  Total:          {}", stats["total"]);
-            println!("  Approved:       {}", stats["approved"]);
-            println!("  Rejected:       {}", stats["rejected"]);
-            println!("  Pending:        {}", stats["pending"]);
-            println!("  Approval rate:  {}", stats["approval_rate"]);
-            println!("  Rejection rate: {}", stats["rejection_rate"]);
+            println!("  Total:          {}", stats["total"].as_i64().unwrap_or(0));
+            println!("  Approved:       {}", stats["approved"].as_i64().unwrap_or(0));
+            println!("  Rejected:       {}", stats["rejected"].as_i64().unwrap_or(0));
+            println!("  Pending:        {}", stats["pending"].as_i64().unwrap_or(0));
+            println!("  Approval rate:  {}", stats["approval_rate"].as_str().unwrap_or("N/A"));
+            println!("  Rejection rate: {}", stats["rejection_rate"].as_str().unwrap_or("N/A"));
             if let Some(top_agents) = stats["top_agents"].as_array() {
                 if !top_agents.is_empty() {
                     println!();
                     println!("  Top agents:");
                     for entry in top_agents {
-                        println!("    {:<30} {}", entry["agent_id"], entry["count"]);
+                        let aid = entry["agent_id"].as_str().unwrap_or("?");
+                        let cnt = entry["count"].as_i64().unwrap_or(0);
+                        println!("    {:<30} {}", aid, cnt);
                     }
                 }
             }

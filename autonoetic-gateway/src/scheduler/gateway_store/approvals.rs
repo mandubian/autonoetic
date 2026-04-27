@@ -366,6 +366,14 @@ impl GatewayStore {
         root_session_id: &str,
     ) -> Result<Vec<SessionApprovalGrant>> {
         let conn = self.conn.lock().unwrap();
+        self.get_session_grants_structured_with_conn(&conn, root_session_id)
+    }
+
+    fn get_session_grants_structured_with_conn(
+        &self,
+        conn: &Connection,
+        root_session_id: &str,
+    ) -> Result<Vec<SessionApprovalGrant>> {
         let mut stmt = conn.prepare(
             "SELECT id, root_session_id, session_id, agent_id, scope, granted_by, granted_at,
                     source_approval_id, expires_at
@@ -388,7 +396,7 @@ impl GatewayStore {
         let mut results = Vec::new();
         for row_result in rows {
             let (id, root_sid, sess_id, agent_id, scope_str, granted_by, granted_at, source_approval_id, expires_at) = row_result?;
-            let targets = self.get_grant_targets_with_conn(&conn, id)?;
+            let targets = self.get_grant_targets_with_conn(conn, id)?;
             results.push(SessionApprovalGrant {
                 id,
                 root_session_id: root_sid,
@@ -542,11 +550,32 @@ impl GatewayStore {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         let count = match host {
-            Some(h) => conn.execute(
-                "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2
-                 WHERE root_session_id = ?3 AND host = ?4 AND revoked_at IS NULL",
-                params![&now, reason, root_session_id, h],
-            )?,
+            Some(h) => {
+                let active_grants = self.get_session_grants_structured_with_conn(&*conn, root_session_id)?;
+                let mut matching_ids = Vec::new();
+                for g in &active_grants {
+                    if g.targets.iter().any(|t| t.matches(h)) {
+                        matching_ids.push(g.id);
+                    }
+                }
+                if matching_ids.is_empty() {
+                    return Ok(0);
+                }
+                let placeholders: Vec<String> = matching_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 3)).collect();
+                let sql = format!(
+                    "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2 WHERE id IN ({}) AND revoked_at IS NULL",
+                    placeholders.join(", ")
+                );
+                let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                    Box::new(now.clone()),
+                    Box::new(reason.to_string()),
+                ];
+                for id in &matching_ids {
+                    params_vec.push(Box::new(*id));
+                }
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+                conn.execute(&sql, params_refs.as_slice())?
+            }
             None => conn.execute(
                 "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2
                  WHERE root_session_id = ?3 AND revoked_at IS NULL",
@@ -631,28 +660,38 @@ impl GatewayStore {
             |row| row.get(0),
         )?;
 
+        let approved_where = if where_sql.is_empty() {
+            "WHERE status = 'approved'".to_string()
+        } else {
+            format!("{} AND status = 'approved'", where_sql)
+        };
         let approved: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM approvals {} AND status = 'approved'", 
-                if where_sql.is_empty() { String::new() } else { where_sql.clone().replace("WHERE", "WHERE") + " AND" }),
+            &format!("SELECT COUNT(*) FROM approvals {}", approved_where),
             params_refs.as_slice(),
             |row| row.get(0),
-        ).unwrap_or(0);
+        )?;
 
-        let params_refs2: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-
+        let rejected_where = if where_sql.is_empty() {
+            "WHERE status = 'rejected'".to_string()
+        } else {
+            format!("{} AND status = 'rejected'", where_sql)
+        };
         let rejected: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM approvals {} status = 'rejected'",
-                if where_sql.is_empty() { "WHERE".to_string() } else { where_sql.clone() + " AND" }),
-            params_refs2.as_slice(),
+            &format!("SELECT COUNT(*) FROM approvals {}", rejected_where),
+            params_refs.as_slice(),
             |row| row.get(0),
-        ).unwrap_or(0);
+        )?;
 
+        let pending_where = if where_sql.is_empty() {
+            "WHERE status IS NULL".to_string()
+        } else {
+            format!("{} AND status IS NULL", where_sql)
+        };
         let pending: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM approvals {} status = 'pending'",
-                if where_sql.is_empty() { "WHERE".to_string() } else { where_sql.clone() + " AND" }),
-            params_refs2.as_slice(),
+            &format!("SELECT COUNT(*) FROM approvals {}", pending_where),
+            params_refs.as_slice(),
             |row| row.get(0),
-        ).unwrap_or(0);
+        )?;
 
         let mut top_agents_stmt = conn.prepare(
             &format!("SELECT agent_id, COUNT(*) as cnt FROM approvals {} GROUP BY agent_id ORDER BY cnt DESC LIMIT 10",

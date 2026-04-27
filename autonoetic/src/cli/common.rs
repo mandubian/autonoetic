@@ -298,7 +298,7 @@ pub enum GatewayGrantCommands {
         /// Root session ID.
         root_session: String,
         /// Revoke grants for a specific host only.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         host: Option<String>,
         /// Revoke all grants for the session.
         #[arg(long)]
