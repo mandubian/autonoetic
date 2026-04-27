@@ -466,6 +466,14 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_pending_spawns_per_agent")]
     pub max_pending_spawns_per_agent: usize,
 
+    /// System-wide ceiling for spawn-chain depth (R+3 / R-7.15).
+    /// Any agent whose session depth (counting `/` in session_id) equals or exceeds
+    /// this value is refused the right to spawn further children.
+    /// Per-agent `AgentSpawn.max_spawn_depth` may be lower; the tighter bound wins.
+    /// Default: 8.
+    #[serde(default = "default_max_spawn_depth")]
+    pub max_spawn_depth: u32,
+
     /// Enable the gateway-owned background scheduler.
     #[serde(default = "default_background_scheduler_enabled")]
     pub background_scheduler_enabled: bool,
@@ -992,6 +1000,10 @@ fn default_max_pending_spawns_per_agent() -> usize {
     4
 }
 
+fn default_max_spawn_depth() -> u32 {
+    8
+}
+
 fn default_background_scheduler_enabled() -> bool {
     true
 }
@@ -1181,6 +1193,7 @@ impl Default for GatewayConfig {
             node_name: default_node_name(),
             max_concurrent_spawns: default_max_concurrent_spawns(),
             max_pending_spawns_per_agent: default_max_pending_spawns_per_agent(),
+            max_spawn_depth: default_max_spawn_depth(),
             background_scheduler_enabled: default_background_scheduler_enabled(),
             background_tick_secs: default_background_tick_secs(),
             background_min_interval_secs: default_background_min_interval_secs(),

@@ -714,6 +714,24 @@ impl GatewayExecutionService {
                             spawn_limit,
                             session_id
                         );
+
+                        // ── Spawn-chain depth cap (R+3 / R-7.15) ─────────────
+                        let current_depth = crate::runtime::live_digest::session_depth(session_id) as u32;
+                        let system_ceiling = self.config.max_spawn_depth;
+                        let agent_ceiling = source_policy.spawn_depth_limit().unwrap_or(0);
+                        let effective_ceiling = if agent_ceiling > 0 {
+                            std::cmp::min(agent_ceiling, system_ceiling)
+                        } else {
+                            system_ceiling
+                        };
+                        anyhow::ensure!(
+                            current_depth < effective_ceiling,
+                            "Permission Denied: Source agent '{}' spawn-chain depth ({}) would exceed ceiling ({}) for session '{}'",
+                            source_id,
+                            current_depth + 1,
+                            effective_ceiling,
+                            session_id
+                        );
                     }
                 }
             }

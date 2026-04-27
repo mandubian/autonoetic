@@ -1344,7 +1344,8 @@ artifacts: "not_a_sequence"
             commands: vec![],
         }));
         assert!(is_high_risk_capability(&Capability::AgentSpawn {
-            max_children: 10
+            max_children: 10,
+            max_spawn_depth: 0
         }));
         assert!(!is_high_risk_capability(&Capability::ReadAccess {
             scopes: vec!["*".to_string()]

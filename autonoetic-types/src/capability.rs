@@ -38,7 +38,13 @@ pub enum Capability {
 
     /// Create child agent sessions.
     /// The `max_children` field limits concurrent children.
-    AgentSpawn { max_children: u32 },
+    /// The `max_spawn_depth` field limits how deep the spawn chain may go
+    /// (0 = use system default). Depth is measured by counting `/` in session_id.
+    AgentSpawn {
+        max_children: u32,
+        #[serde(default)]
+        max_spawn_depth: u32,
+    },
 
     /// Send messages to other agents.
     AgentMessage {
@@ -282,16 +288,26 @@ fn capability_broadening(
         (
             Capability::AgentSpawn {
                 max_children: max_a,
+                max_spawn_depth: depth_a,
             },
             Capability::AgentSpawn {
                 max_children: max_b,
+                max_spawn_depth: depth_b,
             },
         ) => {
-            if max_b > max_a {
+            let children_broadened = max_b > max_a;
+            let depth_broadened = *depth_b > *depth_a;
+            if children_broadened || depth_broadened {
+                let mut prev = vec![format!("max_children={}", max_a)];
+                let mut next = vec![format!("max_children={}", max_b)];
+                if depth_broadened {
+                    prev.push(format!("max_spawn_depth={}", depth_a));
+                    next.push(format!("max_spawn_depth={}", depth_b));
+                }
                 Some(CapabilityBroadening {
                     capability_type: capability_type.to_string(),
-                    previous_scope: vec![max_a.to_string()],
-                    new_scope: vec![max_b.to_string()],
+                    previous_scope: prev,
+                    new_scope: next,
                 })
             } else {
                 None

@@ -3262,7 +3262,7 @@ mod tests {
 
     #[test]
     fn test_compose_foundation_includes_workflow_for_agent_spawn() {
-        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn { max_children: 5 }]);
+        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn { max_children: 5, max_spawn_depth: 0 }]);
         let foundation = compose_foundation(&manifest);
         assert!(foundation.contains("# Foundation Workflow"));
     }

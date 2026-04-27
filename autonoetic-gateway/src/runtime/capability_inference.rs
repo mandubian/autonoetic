@@ -339,7 +339,7 @@ pub fn types_to_capabilities(types: &[String]) -> Vec<Capability> {
                 patterns: vec!["*".to_string()],
                 commands: vec![],
             },
-            "AgentSpawn" => Capability::AgentSpawn { max_children: 1 },
+            "AgentSpawn" => Capability::AgentSpawn { max_children: 1, max_spawn_depth: 0 },
             "AgentMessage" => Capability::AgentMessage {
                 patterns: vec!["*".to_string()],
             },

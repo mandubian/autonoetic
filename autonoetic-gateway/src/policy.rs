@@ -542,8 +542,20 @@ impl PolicyEngine {
     /// Return the configured child-agent delegation limit, if any.
     pub fn spawn_agent_limit(&self) -> Option<u32> {
         self.manifest.capabilities.iter().find_map(|cap| {
-            if let Capability::AgentSpawn { max_children } = cap {
+            if let Capability::AgentSpawn { max_children, .. } = cap {
                 Some(*max_children)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Return the configured per-agent spawn-depth limit, if any.
+    /// A value of 0 means "use the system default ceiling".
+    pub fn spawn_depth_limit(&self) -> Option<u32> {
+        self.manifest.capabilities.iter().find_map(|cap| {
+            if let Capability::AgentSpawn { max_spawn_depth, .. } = cap {
+                Some(*max_spawn_depth)
             } else {
                 None
             }
