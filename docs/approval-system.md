@@ -189,27 +189,110 @@ This works because:
 
 ### Session Approval Grants
 
-When the operator approves a `sandbox_exec` that accesses specific hosts, the gateway creates **session approval grants** — `(root_session_id, host)` pairs stored in SQLite. These grants prevent repeated operator prompts for the same hosts within the same root session.
+When the operator approves a `sandbox_exec` that accesses specific hosts, the gateway creates **session approval grants** stored in SQLite. These grants prevent repeated operator prompts for the same hosts within the same session.
 
-**How it works:**
+**Grant scope:**
 
-1. Operator approves `sandbox_exec` accessing `api.open-meteo.com` and `nominatim.openstreetmap.org`
-2. Gateway extracts the detected hosts from the approval action and inserts them as session grants
-3. When the same agent (or any other agent in the same root session) calls `sandbox_exec` with code that accesses a **subset** of the already-granted hosts, the gateway auto-approves without operator interaction
+| Scope | Meaning | Use case |
+|-------|---------|----------|
+| `RootSession` (default) | All agents within the root session benefit | Normal operation — the operator trusts the host for the whole workflow |
+| `Session` | Only the specific child session that requested approval | When the operator wants to limit access to a single agent |
+
+Scope is set at approval time via `--scope root` (default) or `--scope session`.
+
+**Grant targets:**
+
+Grants record **pattern-based targets**, not just exact hosts. Four target kinds are available:
+
+| Target kind | Syntax | Matches | Example |
+|-------------|--------|---------|---------|
+| `ExactHost` | `host:api.github.com` | Exact hostname (case-insensitive) | `api.github.com` |
+| `HostSuffix` | `suffix:*.github.com` | Any subdomain of the suffix | `api.github.com`, `v2.api.github.com` |
+| `HostAndPort` | `host:api.github.com:443` or `hostport:api.github.com:443` | Exact host + port | `api.github.com:443` |
+| `UrlPrefix` | `url:https://api.github.com/public/` | URLs starting with this prefix (scheme+host lowercased, path case-sensitive) | `https://api.github.com/public/users` |
+
+By default, grants record one `ExactHost` per detected host. Operators can narrow at approval time:
+
+```bash
+# Grant access to any GitHub subdomain for 1 hour
+autonoetic gateway approvals approve apr-xxx \
+  --scope root \
+  --target "suffix:*.github.com" \
+  --ttl 1h
+
+# Grant access to a specific URL prefix for this session only
+autonoetic gateway approvals approve apr-xxx \
+  --scope session \
+  --target "url:https://api.example.com/public/" \
+  --until "2025-12-31T23:59:59Z"
+```
+
+**Grant expiry:**
+
+Grants can optionally expire:
+- `--ttl 10m` — expires in 10 minutes (supports `s`, `m`, `h` suffixes)
+- `--until 2025-12-31T23:59:59Z` — expires at an absolute RFC3339 timestamp
+- Without either, the grant lasts until session end or emergency stop
+
+Expired grants are excluded from coverage checks. They are not automatically deleted by gateway startup; persisted expired grants may remain until a separate cleanup path removes them.
 
 **Scope:**
-- Grants are scoped to the **root session** — all agents within the root session benefit (e.g., `coder.default` and `evaluator.default` working on the same artifact)
+- `RootSession` grants are visible to all agents within the root session
+- `Session` grants are visible only to the specific child session
 - Grants require **concrete targets** (URL literals or IP addresses) — dynamic URLs that can't be statically resolved don't produce grants
 - Grants are cleaned up when the root session ends (completed, failed, or emergency-stopped)
 - Grants are **not** cleaned up for suspended sessions (which may resume and still need their grants)
 
-**Why root-session scoping?** Agents within a root session cooperate on the same workflow. If the operator trusts `api.open-meteo.com` for one agent in the session, it should be trusted for all. The `agent_id` is stored per grant row for audit/forensics purposes.
-
 **The approval check order is:**
 1. Approved exec cache (fingerprint-level, cross-session)
-2. Session approval grants (host-level, within root session)
+2. Session approval grants (target-level, root-session-scoped, within root session)
 3. Existing approved/pending approvals (domain-level)
 4. New approval request
+
+### Grant Revocation
+
+Operators can revoke grants without emergency-stop using the `gateway grants` commands:
+
+```bash
+# List active grants for a root session
+autonoetic gateway grants list --root-session <id>
+
+# Revoke all grants for a session
+autonoetic gateway grants revoke --root-session <id> --all --reason "rotating credentials"
+
+# Revoke a specific host only
+autonoetic gateway grants revoke --root-session <id> --host api.example.com --reason "suspicious activity"
+```
+
+Revocation emits a `grant_revocation` causal event for audit. Subsequent requests for the revoked host re-prompt the operator.
+
+### Approval Similarity
+
+On approval creation, the gateway computes a **similarity score** against recent approvals for the same agent. The score is based on Jaccard similarity over command tokens (70% weight) and detected hosts (30% weight). This is structural (not raw-text) comparison, so whitespace and comments don't defeat it.
+
+- `approvals list` annotates near-matches: `~apr-xxxx (92%)`
+- `approvals show <id>` displays the similar approval's outcome
+- The `similar_to_request_id` and `similarity_score` columns are stored for audit
+
+```bash
+# Show full details including similarity
+autonoetic gateway approvals show apr-xxx
+```
+
+### Approval Analytics
+
+The `approvals stats` command surfaces approval patterns:
+
+```bash
+# Overall stats
+autonoetic gateway approvals stats
+
+# Filtered by agent, session, or time window
+autonoetic gateway approvals stats --agent coder.default --since 1h
+autonoetic gateway approvals stats --session <root-session-id> --since 24h
+```
+
+Output includes total/approved/rejected/pending counts, approval and rejection rates, and top agents by approval volume. This helps operators spot unusual approval rates, agent spam, or compromise signals without manual SQLite queries.
 
 ### Hook-Based Reactive Dispatch
 
@@ -355,17 +438,26 @@ The `agent_revision_create` step auto-detects domains from URL literals in the a
 ## CLI Commands
 
 ```bash
-# List pending approvals
+# List pending approvals (annotated with similarity)
 autonoetic gateway approvals list --config /path/to/config.yaml
 
-# Approve a request
+# Show full details of a specific approval
+autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
+
+# Approve a request (with optional scope, targets, TTL)
 autonoetic gateway approvals approve apr-xxx --config /path/to/config.yaml
+autonoetic gateway approvals approve apr-xxx --scope root --target "suffix:*.github.com" --ttl 1h
 
 # Reject a request
 autonoetic gateway approvals reject apr-xxx --config /path/to/config.yaml
 
-# Show approval details
-autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
+# Show approval statistics
+autonoetic gateway approvals stats --agent coder.default --since 1h
+
+# Manage session grants
+autonoetic gateway grants list --root-session <id>
+autonoetic gateway grants revoke --root-session <id> --all --reason "rotating credentials"
+autonoetic gateway grants revoke --root-session <id> --host api.example.com
 ```
 
 ## Implementation Files
@@ -373,7 +465,9 @@ autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
 | File | Role |
 |---|---|
 | `autonoetic-gateway/src/scheduler/approval.rs` | Approval lifecycle, resume logic, signal delivery, pending approval queries, session grant insertion on approval |
-| `autonoetic-gateway/src/scheduler/gateway_store/approvals.rs` | Approval persistence (SQLite), session grant CRUD (`insert_session_grant`, `get_session_grants`, `session_grants_cover_targets`, `delete_session_grants`) |
+| `autonoetic-gateway/src/scheduler/gateway_store/approvals.rs` | Approval persistence (SQLite), session grant CRUD (`insert_session_grant`, `get_session_grants`, `get_session_grants_structured`, `grants_cover_targets`, `revoke_session_grants`, `prune_expired_grants`, `get_approval_stats`) |
+| `autonoetic-gateway/src/scheduler/approval_similarity.rs` | Jaccard-based similarity over command tokens + detected hosts |
+| `autonoetic-gateway/src/runtime/continuation.rs` | Turn continuation HMAC signing/verification, `reap_orphaned_continuations` startup janitor |
 | `autonoetic-gateway/src/runtime/tools/sandbox.rs` | Approval checks in `SandboxExecTool`; session grant check; sandbox deduplication logic |
 | `autonoetic-gateway/src/runtime/tools/agent.rs` | Approval checks in `AgentRevisionPromoteTool`; promote deduplication logic |
 | `autonoetic-gateway/src/runtime/tools/promotion.rs` | Mechanical severity gating for `promotion_record` — rejects `pass=true` with error/critical findings or warnings without evidence |
@@ -381,7 +475,7 @@ autonoetic gateway approvals show apr-xxx --config /path/to/config.yaml
 | `autonoetic-gateway/src/runtime/approved_exec_cache.rs` | Domain normalization (`normalize_targets`), fingerprinting, host normalization (lowercase + trailing dot stripping) |
 | `autonoetic-gateway/src/runtime/lifecycle.rs` | Session close — grant cleanup for non-suspended sessions |
 | `autonoetic-gateway/src/execution.rs` | Emergency stop — grant cleanup during circuit breaker |
-| `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Database migration v4: `session_approval_grants` table |
+| `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Database migrations v4: `session_approval_grants` table; v16: scope + session_id; v17: `session_approval_grant_targets` table; v18: `expires_at`; v19: `similar_to_request_id` + `similarity_score` |
 | `autonoetic-gateway/src/scheduler/hooks.rs` | Hook system — configurable reactive dispatch (`publish_report`, `deliver_signal`). Future: hook-based approval auto-resolution |
 | `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Database migration v7: `published_session_reports`, `published_session_reports_fts`, `hook_deliveries` tables |
 | `autonoetic-types/src/background.rs` | `ApprovalRequest`, `ScheduledAction` (with `detected_hosts`), `ApprovalStatus` types |

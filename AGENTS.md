@@ -74,10 +74,17 @@ agents/                  Agent bundles (SKILL.md manifests)
 4. Update `LoopGuardState` if the checkpoint format changes
 
 ### Approval system
-Three layers of approval dedup (checked in order):
+Four layers of approval dedup (checked in order):
 1. **Exec cache** (fingerprint-level, cross-session) — only when all patterns are concrete (url_literal/ip_address)
-2. **Session approval grants** (host-level, within root session) — `session_approval_grants` table, created on approval, cleaned up on session close/emergency stop
+2. **Session approval grants** (target-level, scope-aware, within root session) — `session_approval_grants` + `session_approval_grant_targets` tables; supports `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`; scoped `RootSession` or `Session`; optional expiry (`expires_at`)
 3. **Existing approved/pending approvals** (domain-level matching)
+4. **Approval flood cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`
+
+Additional approval features:
+- **Similarity scoring**: on creation, Jaccard similarity over command tokens (70%) + hosts (30%) against recent same-agent approvals. Stored as `similar_to_request_id` + `similarity_score`.
+- **Grant revocation**: `gateway grants revoke --root-session <id> --host X` without emergency stop; emits `grant_revocation` causal event.
+- **Continuation HMAC**: signed with `continuation_key` (or derived from `node_id`); verified on resume; action-equality check vs stored approval.
+- **Continuation cleanup**: on resume, reject/cancel/withdraw, gateway startup reaper, emergency stop, task cancellation.
 
 ### Promotion severity gating
 `promotion.record` mechanically rejects:
@@ -104,6 +111,11 @@ Notable test suites:
 - `approved_exec_cache_integration.rs` — cache fingerprint, normalization, full cycle
 - `emergency_stop_root_session_integration.rs` — circuit breaker, grant cleanup
 - `promotion_record_e2e.rs` / `promotion_gate_hardening_integration.rs` — severity gating
+- `continuation_hmac_integrity_integration.rs` — HMAC signing, verification, tamper detection
+- `continuation_cleanup_integration.rs` — delete on reject/cancel/withdraw, startup reaper, emergency stop
+- `approval_scope_targets_integration.rs` — session-scoped grants, pattern-based targets, expiry
+- `approval_grant_revocation_integration.rs` — revoke all/specific host, causal event
+- `constitution_abuse_approval_flood.rs` — flood cap enforcement, cap=0 bypass
 
 ## SDKs
 
