@@ -591,7 +591,12 @@ impl SessionTracer {
         Ok(())
     }
 
-    pub fn log_tool_requested(&mut self, tool_name: &str, arguments: &str) -> anyhow::Result<()> {
+    pub fn log_tool_requested(
+        &mut self,
+        tool_name: &str,
+        arguments: &str,
+        intent: Option<&str>,
+    ) -> anyhow::Result<()> {
         let redacted_args = redact_text_for_logs(arguments);
         if tool_name != "digest_annotate" {
             if let Some(w) = &self.live_digest {
@@ -635,6 +640,7 @@ impl SessionTracer {
             Some(serde_json::json!({
                 "tool_name": tool_name,
                 "arguments": redacted_args.clone(),
+                "intent": intent,
             })),
         );
         let mut requested_payload = serde_json::json!({
@@ -642,9 +648,13 @@ impl SessionTracer {
             "arguments": redacted_args,
             "arguments_sha256": sha256_hex(arguments)
         });
+        if let Some(intent) = intent {
+            requested_payload["intent"] = serde_json::json!(intent);
+        }
         let requested_evidence = serde_json::json!({
             "tool_name": tool_name,
-            "arguments": redacted_args
+            "arguments": redacted_args,
+            "intent": intent,
         });
         if let Some(evidence_ref) = self.evidence_store.capture_json(
             self.turn_id.as_deref(),

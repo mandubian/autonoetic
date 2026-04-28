@@ -142,9 +142,26 @@ impl<'a> ToolCallProcessor<'a> {
         let mut had_any_success = false;
 
         for tc in tool_calls {
-            tracer.log_tool_requested(&tc.name, &tc.arguments)?;
             let started_at = Instant::now();
             let approval_ref = extract_approval_ref_from_args(&tc.arguments);
+            let tool_name = Self::canonical_tool_name(&tc.name).to_string();
+            let intent = match validate_tool_intent(&tool_name, &tc.arguments) {
+                Ok(intent) => intent,
+                Err(tool_error) => {
+                    let error_json = tool_error.to_json_string();
+                    let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
+                    self.record_execution_trace(
+                        tc,
+                        &error_json,
+                        started_at.elapsed(),
+                        Some(&tool_error),
+                        Some(failure_event_id),
+                    )?;
+                    results.push((tc.id.clone(), tc.name.clone(), error_json));
+                    continue;
+                }
+            };
+            tracer.log_tool_requested(&tc.name, &tc.arguments, intent.as_deref())?;
 
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
@@ -400,6 +417,57 @@ fn tool_result_requires_approval(result: &str) -> bool {
         .ok()
         .and_then(|parsed| parsed.get("approval_required").and_then(|v| v.as_bool()))
         .unwrap_or(false)
+}
+
+fn validate_tool_intent(tool_name: &str, arguments_json: &str) -> Result<Option<String>, ToolError> {
+    let sanitized_args = strip_gemma_token_artifacts(arguments_json);
+    let sanitized_args = fix_stringified_json_values(&sanitized_args);
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&sanitized_args) else {
+        return Ok(None);
+    };
+
+    let intent_value = parsed.get("intent");
+    let requires_intent = crate::runtime::tools::tool_requires_intent(tool_name);
+
+    let Some(intent_value) = intent_value else {
+        if requires_intent {
+            return Err(intent_required_error());
+        }
+        return Ok(None);
+    };
+
+    let Some(intent) = intent_value.as_str() else {
+        return Err(ToolError::validation(
+            "intent must be a string no longer than 500 characters",
+            Some("Set the top-level 'intent' field to a short natural-language reason for the call."),
+        ));
+    };
+
+    if intent.trim().is_empty() {
+        if requires_intent {
+            return Err(intent_required_error());
+        }
+        return Err(ToolError::validation(
+            "intent must not be empty when provided",
+            Some("Either omit 'intent' for non-privileged tools or provide a short 1-2 sentence reason."),
+        ));
+    }
+
+    if intent.chars().count() > 500 {
+        return Err(ToolError::validation(
+            "intent must be at most 500 characters",
+            Some("Shorten the top-level 'intent' field to 1-2 concise sentences."),
+        ));
+    }
+
+    Ok(Some(intent.to_string()))
+}
+
+fn intent_required_error() -> ToolError {
+    ToolError::validation(
+        "intent_required: privileged tool calls must include a non-empty top-level 'intent' field",
+        Some("Add 'intent' as a short 1-2 sentence reason for invoking this privileged tool, then retry."),
+    )
 }
 
 fn tool_result_requires_escalation(result: &str) -> bool {

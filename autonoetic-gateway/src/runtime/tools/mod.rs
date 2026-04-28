@@ -9,6 +9,7 @@ use autonoetic_types::background::ApprovalRequest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::tagged;
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 use std::path::Path;
 
@@ -156,7 +157,7 @@ impl NativeToolRegistry {
         self.tools
             .iter()
             .filter(|t| t.is_available(manifest))
-            .map(|t| t.definition())
+            .map(|t| with_intent_schema(t.definition()))
             .collect()
     }
 
@@ -179,7 +180,7 @@ impl NativeToolRegistry {
                     .map(|f| f.allows_tool(t.name(), t.tier()))
                     .unwrap_or(true)
             })
-            .map(|t| t.definition())
+            .map(|t| with_intent_schema(t.definition()))
             .collect()
     }
 
@@ -228,6 +229,49 @@ impl NativeToolRegistry {
             .map(|t| t.extract_metadata(arguments_json))
             .unwrap_or_default()
     }
+}
+
+pub(crate) fn tool_requires_intent(tool_name: &str) -> bool {
+    tool_name == "sandbox_exec"
+        || tool_name == "agent_spawn"
+        || tool_name.starts_with("credential_")
+        || tool_name.starts_with("agent_revision_")
+        || tool_name.starts_with("scheduler_")
+}
+
+fn with_intent_schema(mut definition: ToolDefinition) -> ToolDefinition {
+    let Some(schema) = definition.input_schema.as_object_mut() else {
+        return definition;
+    };
+
+    let properties = schema
+        .entry("properties")
+        .or_insert_with(|| json!({}));
+    let Some(properties_map) = properties.as_object_mut() else {
+        return definition;
+    };
+
+    properties_map.insert(
+        "intent".to_string(),
+        json!({
+            "type": "string",
+            "description": "Why you are invoking this tool in 1-2 sentences. Required for privileged tools and strongly encouraged everywhere else.",
+            "maxLength": 500
+        }),
+    );
+
+    if tool_requires_intent(&definition.name) {
+        let required = schema
+            .entry("required")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(required_arr) = required.as_array_mut() {
+            if !required_arr.iter().any(|value| value.as_str() == Some("intent")) {
+                required_arr.push(Value::String("intent".to_string()));
+            }
+        }
+    }
+
+    definition
 }
 
 pub(crate) fn validate_relative_agent_path(path: &str) -> anyhow::Result<()> {
