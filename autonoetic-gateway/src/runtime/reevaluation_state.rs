@@ -62,7 +62,7 @@ pub fn execute_scheduled_action(
                 "scheduled file path must stay within the agent directory"
             );
             anyhow::ensure!(
-                policy.can_write_path(path),
+                policy.can_write_path(path).is_allowed(),
                 "scheduled file write denied by WriteAccess policy"
             );
             let target = agent_dir.join(path);

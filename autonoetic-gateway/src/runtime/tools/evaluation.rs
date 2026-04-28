@@ -106,7 +106,7 @@ impl NativeTool for EvalSuitePublishTool {
             return Err(anyhow::anyhow!("GatewayStore is required"));
         };
 
-        if !policy.can_evaluate_suite_publish(&args.name) {
+        if !policy.can_evaluate_suite_publish(&args.name).is_allowed() {
             return Err(anyhow::anyhow!(
                 "Permission Denied: agent '{}' lacks 'Evaluation' capability to publish suite '{}'",
                 manifest.agent.id,
@@ -350,7 +350,7 @@ impl NativeTool for EvalRunTool {
         let (agent_ref, _rev) =
             repo.resolve_agent(&args.agent_ref, Some(gateway_store.as_ref()))?;
 
-        if !policy.can_evaluate_suite(&args.suite_id, &agent_ref.agent_id) {
+        if !policy.can_evaluate_suite(&args.suite_id, &agent_ref.agent_id).is_allowed() {
             return Err(anyhow::anyhow!(
                 "Permission Denied: agent '{}' lacks 'Evaluation' capability to run suite '{}' against agent '{}'",
                 manifest.agent.id, args.suite_id, agent_ref.agent_id
@@ -466,7 +466,8 @@ impl NativeTool for EvalCompareTool {
             candidate_ref.agent_id
         );
         anyhow::ensure!(
-            policy.can_evaluate_suite(&args.suite_id, &candidate_ref.agent_id),
+            policy.can_evaluate_suite(&args.suite_id, &candidate_ref.agent_id)
+                .is_allowed(),
             "Permission Denied: agent '{}' lacks Evaluation capability to compare suite '{}' for '{}'",
             manifest.agent.id,
             args.suite_id,
@@ -672,7 +673,7 @@ impl NativeTool for EvalReportTool {
             .get_eval_run(&args.eval_run_id)?
             .ok_or_else(|| anyhow::anyhow!("Eval run '{}' not found", args.eval_run_id))?;
 
-        if !policy.can_evaluate_suite(&run.suite_id, &run.subject_agent_id) {
+        if !policy.can_evaluate_suite(&run.suite_id, &run.subject_agent_id).is_allowed() {
             return Err(anyhow::anyhow!(
                 "Permission Denied: agent '{}' lacks 'Evaluation' capability to view report for suite '{}' against agent '{}'",
                 manifest.agent.id, run.suite_id, run.subject_agent_id

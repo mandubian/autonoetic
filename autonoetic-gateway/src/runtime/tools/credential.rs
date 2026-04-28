@@ -355,7 +355,7 @@ impl NativeTool for CredentialRequestTool {
         };
 
         // Check network policy unless this exact request has been explicitly approved.
-        if !policy.can_connect_net(&url_host) && !approval_validated {
+        if !policy.can_connect_net(&url_host).is_allowed() && !approval_validated {
             let Some(cfg) = _config else {
                 let message = format!("Network access denied for host: {}", url_host);
                 return Ok(json!({
@@ -1304,7 +1304,7 @@ impl NativeTool for CredentialSetupTool {
             if let Some(ref url) = args.skill_url {
                 // Policy-check the skill_url host.
                 let url_host = extract_host(url)?;
-                if url_host.is_empty() || !policy.can_connect_net(&url_host) {
+                if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
                     let message = format!("Network access denied for skill_url host: {}", url_host);
                     return Ok(json!({
                         "ok": false,
@@ -1430,7 +1430,7 @@ impl NativeTool for CredentialSetupTool {
         for step in &steps {
             if let CredentialSetupStep::ApiCall { url, .. } = step {
                 let host = extract_host(url)?;
-                if host.is_empty() || !policy.can_connect_net(&host) {
+                if host.is_empty() || !policy.can_connect_net(&host).is_allowed() {
                     let denied_host = if host.is_empty() { "<empty>" } else { &host };
                     return Ok(json!({
                         "ok": false,

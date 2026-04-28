@@ -436,7 +436,7 @@ impl GatewayExecutionService {
                 repo.get_sync_from_store(aid, &gateway_dir, self.gateway_store.as_deref())?;
             let policy = crate::policy::PolicyEngine::new(loaded.manifest);
             anyhow::ensure!(
-                policy.can_request_emergency_stop(),
+                policy.can_request_emergency_stop().is_allowed(),
                 "Permission Denied: agent '{}' cannot request emergency stop",
                 aid
             );
@@ -460,6 +460,7 @@ impl GatewayExecutionService {
             category: "background".to_string(),
             action: format!("emergency_stop.initiated:{}", stop_id),
             status: "success".to_string(),
+            enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
             target: None,
             payload: Some(serde_json::json!({
                 "reason": reason,
@@ -712,7 +713,7 @@ impl GatewayExecutionService {
 
                     if is_message {
                         anyhow::ensure!(
-                            source_policy.can_message_agent(agent_id),
+                            source_policy.can_message_agent(agent_id).is_allowed(),
                             "Permission Denied: Source agent '{}' lacks 'AgentMessage' capability to message '{}'",
                             source_id,
                             agent_id
@@ -1058,6 +1059,7 @@ impl GatewayExecutionService {
                                     category: "background".to_string(),
                                     action: "continuation_tampered".to_string(),
                                     status: "error".to_string(),
+                                    enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
                                     target: None,
                                     payload: Some(serde_json::json!({
                                         "task_id": t_id,
@@ -2982,6 +2984,7 @@ fn log_contract_enforcement_event_to_gateway(
         category: "contract".to_string(),
         action: action.to_string(),
         status: status.to_string(),
+        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
         target: target_agent_id.map(ToOwned::to_owned),
         payload: payload_str,
         payload_ref: None,
@@ -3066,6 +3069,7 @@ fn script_causal_event(
         category: "script".to_string(),
         action: action.to_string(),
         status: status.to_string(),
+        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
         target: None,
         payload: Some(payload.to_string()),
         payload_ref: None,

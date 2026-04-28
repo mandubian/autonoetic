@@ -37,6 +37,50 @@ pub struct SecurityAnalysis {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PolicyDecision {
+    pub allowed: bool,
+    pub enforced_rules: Vec<&'static str>,
+    pub security_analysis: Option<SecurityAnalysis>,
+}
+
+impl PolicyDecision {
+    pub fn allow(rule_id: &'static str) -> Self {
+        Self {
+            allowed: true,
+            enforced_rules: vec![rule_id],
+            security_analysis: None,
+        }
+    }
+
+    pub fn deny(rule_id: &'static str) -> Self {
+        Self {
+            allowed: false,
+            enforced_rules: vec![rule_id],
+            security_analysis: None,
+        }
+    }
+
+    pub fn deny_with_analysis(rule_id: &'static str, security_analysis: SecurityAnalysis) -> Self {
+        Self {
+            allowed: false,
+            enforced_rules: vec![rule_id],
+            security_analysis: Some(security_analysis),
+        }
+    }
+
+    pub fn is_allowed(&self) -> bool {
+        self.allowed
+    }
+
+    pub fn into_rule_ids(self) -> Vec<String> {
+        self.enforced_rules
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
 /// Analyzes shell commands for security threats.
 pub struct SecurityAnalyzer;
 
@@ -402,12 +446,11 @@ impl PolicyEngine {
 
     /// Check if the agent is allowed to execute a given command string.
     /// First runs security analysis, then checks against capability patterns.
-    /// Returns (allowed, Option<SecurityAnalysis>) - analysis is Some if rejected.
-    pub fn can_exec_shell_detailed(&self, command: &str) -> (bool, Option<SecurityAnalysis>) {
+    pub fn can_exec_shell_detailed(&self, command: &str) -> PolicyDecision {
         // First, run security analysis
         let security = SecurityAnalyzer::analyze_command(command);
         if !security.is_safe {
-            return (false, Some(security));
+            return PolicyDecision::deny_with_analysis("R-3.8", security);
         }
 
         // Then check against capability patterns
@@ -426,7 +469,7 @@ impl PolicyEngine {
                             continue;
                         }
                         if trimmed.starts_with(prefix) {
-                            return (true, None);
+                            return PolicyDecision::allow("R-1.9");
                         }
                     }
                 }
@@ -448,7 +491,7 @@ impl PolicyEngine {
                         }
                         for cmd in commands {
                             if SecurityAnalyzer::contains_shell_word(trimmed, cmd) {
-                                return (true, None);
+                                return PolicyDecision::allow("R-1.9");
                             }
                         }
                     }
@@ -456,87 +499,93 @@ impl PolicyEngine {
             }
         }
 
-        (false, None)
+        PolicyDecision::deny("R-1.9")
     }
 
     /// Check if the agent is allowed to execute a given command string.
-    pub fn can_exec_shell(&self, command: &str) -> bool {
-        self.can_exec_shell_detailed(command).0
+    pub fn can_exec_shell(&self, command: &str) -> PolicyDecision {
+        self.can_exec_shell_detailed(command)
     }
 
     /// Check if the agent is allowed to connect to a specific host.
-    pub fn can_connect_net(&self, host: &str) -> bool {
+    pub fn can_connect_net(&self, host: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::NetworkAccess { hosts } = cap {
                 if hosts.iter().any(|h| h == host || h == "*") {
-                    return true;
+                    return PolicyDecision::allow("R-1.5");
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.5")
     }
 
     /// Check if the agent is allowed to invoke a named tool (typically MCP tools).
-    pub fn can_invoke_tool(&self, tool_name: &str) -> bool {
+    pub fn can_invoke_tool(&self, tool_name: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::SandboxFunctions { allowed } = cap {
                 for pattern in allowed {
                     let prefix = pattern.trim_end_matches('*');
                     if tool_name.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-1.1");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.1")
     }
 
     /// Check if the agent is allowed to read from a relative file path.
-    pub fn can_read_path(&self, path: &str) -> bool {
+    pub fn can_read_path(&self, path: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::ReadAccess { scopes } = cap {
                 for scope in scopes {
                     let prefix = scope.trim_end_matches('*');
                     if path.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-1.4");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.4")
     }
 
     /// Check if the agent is allowed to write to a relative file path.
-    pub fn can_write_path(&self, path: &str) -> bool {
+    pub fn can_write_path(&self, path: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::WriteAccess { scopes } = cap {
                 for scope in scopes {
                     let prefix = scope.trim_end_matches('*');
                     if path.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-1.4");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.4")
     }
 
     /// Check if the agent is allowed to spawn child agents.
-    pub fn can_spawn_agent(&self) -> bool {
+    pub fn can_spawn_agent(&self) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if matches!(cap, Capability::AgentSpawn { .. }) {
-                return true;
+                return PolicyDecision::allow("R-1.7");
             }
         }
-        false
+        PolicyDecision::deny("R-1.7")
     }
 
     /// Privileged: request gateway emergency stop for a root session.
-    pub fn can_request_emergency_stop(&self) -> bool {
-        self.manifest
+    pub fn can_request_emergency_stop(&self) -> PolicyDecision {
+        if self
+            .manifest
             .capabilities
             .iter()
             .any(|c| matches!(c, Capability::EmergencyStop))
+        {
+            PolicyDecision::allow("R-7.1")
+        } else {
+            PolicyDecision::deny("R-7.1")
+        }
     }
 
     /// Return the configured child-agent delegation limit, if any.
@@ -563,63 +612,63 @@ impl PolicyEngine {
     }
 
     /// Check if the agent is allowed to message a target agent.
-    pub fn can_message_agent(&self, target_agent: &str) -> bool {
+    pub fn can_message_agent(&self, target_agent: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::AgentMessage { patterns } = cap {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if target_agent.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-11.5");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-11.5")
     }
 
-    pub fn can_agent_revision(&self, target: &str) -> bool {
+    pub fn can_agent_revision(&self, target: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::AgentRevision { patterns } = cap {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if target.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-1.3");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.3")
     }
 
-    pub fn can_evaluate_suite(&self, suite_id: &str, subject_agent_id: &str) -> bool {
+    pub fn can_evaluate_suite(&self, suite_id: &str, subject_agent_id: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::Evaluation { patterns } = cap {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if suite_id.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-1.1");
                     }
                     if !subject_agent_id.is_empty() && subject_agent_id.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-1.1");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.1")
     }
 
-    pub fn can_evaluate_suite_publish(&self, suite_name: &str) -> bool {
+    pub fn can_evaluate_suite_publish(&self, suite_name: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::Evaluation { patterns } = cap {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if suite_name.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-1.1");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.1")
     }
 
     /// Return background reevaluation limits, if configured.
@@ -639,13 +688,13 @@ impl PolicyEngine {
 
     /// Check if the agent is allowed to search memory.
     /// Searching is included in ReadAccess capability.
-    pub fn can_search_memory(&self, scope: &str) -> bool {
+    pub fn can_search_memory(&self, scope: &str) -> PolicyDecision {
         // Search uses the same scopes as read
         self.can_read_memory_scope(scope)
     }
 
     /// Check if the agent can write to a Tier 2 memory scope.
-    pub fn can_write_memory_scope(&self, scope: &str) -> bool {
+    pub fn can_write_memory_scope(&self, scope: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::WriteAccess { scopes } = cap {
                 // Wildcard allows all scopes
@@ -653,21 +702,21 @@ impl PolicyEngine {
                     .iter()
                     .any(|s| s == "*" || s.trim_end_matches('*').is_empty())
                 {
-                    return true;
+                    return PolicyDecision::allow("R-1.4");
                 }
                 for allowed_scope in scopes {
                     let prefix = allowed_scope.trim_end_matches('*');
                     if scope.starts_with(prefix) || scope == allowed_scope {
-                        return true;
+                        return PolicyDecision::allow("R-1.4");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.4")
     }
 
     /// Check if the agent can read from a Tier 2 memory scope.
-    pub fn can_read_memory_scope(&self, scope: &str) -> bool {
+    pub fn can_read_memory_scope(&self, scope: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::ReadAccess { scopes } = cap {
                 // Wildcard allows all scopes
@@ -675,46 +724,46 @@ impl PolicyEngine {
                     .iter()
                     .any(|s| s == "*" || s.trim_end_matches('*').is_empty())
                 {
-                    return true;
+                    return PolicyDecision::allow("R-1.4");
                 }
                 for allowed_scope in scopes {
                     let prefix = allowed_scope.trim_end_matches('*');
                     if scope.starts_with(prefix) || scope == allowed_scope {
-                        return true;
+                        return PolicyDecision::allow("R-1.4");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.4")
     }
 
     /// Check if the agent is allowed to perform a scheduler/cron operation.
-    pub fn can_schedule(&self, operation: &str) -> bool {
+    pub fn can_schedule(&self, operation: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::SchedulerAccess { patterns } = cap {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if operation.starts_with(prefix) {
-                        return true;
+                        return PolicyDecision::allow("R-1.1");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.1")
     }
 
     /// Check if the agent is allowed to install a skill from a given URL host.
-    pub fn can_install_skill(&self, url_host: &str) -> bool {
+    pub fn can_install_skill(&self, url_host: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::SkillInstall { allowed_sources } = cap {
                 for source in allowed_sources {
                     if source == "*" || source == url_host {
-                        return true;
+                        return PolicyDecision::allow("R-1.1");
                     }
                 }
             }
         }
-        false
+        PolicyDecision::deny("R-1.1")
     }
 }
 
@@ -766,9 +815,9 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
 
-        assert!(policy.can_invoke_tool("mcp_web_search"));
-        assert!(policy.can_invoke_tool("mcp_docs_fetch"));
-        assert!(!policy.can_invoke_tool("mcp_web_fetch"));
+        assert!(policy.can_invoke_tool("mcp_web_search").is_allowed());
+        assert!(policy.can_invoke_tool("mcp_docs_fetch").is_allowed());
+        assert!(!policy.can_invoke_tool("mcp_web_fetch").is_allowed());
     }
 
     #[test]
@@ -777,7 +826,7 @@ mod tests {
             scopes: vec!["*".to_string()],
         }]);
         let policy = PolicyEngine::new(manifest);
-        assert!(!policy.can_invoke_tool("mcp_web_search"));
+        assert!(!policy.can_invoke_tool("mcp_web_search").is_allowed());
     }
 
     // SecurityAnalyzer tests
@@ -899,9 +948,9 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
 
-        let (allowed, analysis) = policy.can_exec_shell_detailed("bash -c 'printf hello'");
-        assert!(allowed);
-        assert!(analysis.is_none());
+        let decision = policy.can_exec_shell_detailed("bash -c 'printf hello'");
+        assert!(decision.is_allowed());
+        assert!(decision.security_analysis.is_none());
     }
 
     #[test]
@@ -912,9 +961,11 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
 
-        let (allowed, analysis) = policy.can_exec_shell_detailed("bash -c 'rm /tmp/a'");
-        assert!(!allowed);
-        let analysis = analysis.expect("security analysis should be present for denial");
+        let decision = policy.can_exec_shell_detailed("bash -c 'rm /tmp/a'");
+        assert!(!decision.is_allowed());
+        let analysis = decision
+            .security_analysis
+            .expect("security analysis should be present for denial");
         assert!(analysis.threats.contains(&SecurityThreat::Destructive));
     }
 
@@ -926,9 +977,11 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
 
-        let (allowed, analysis) = policy.can_exec_shell_detailed("bash -c 'printenv'");
-        assert!(!allowed);
-        let analysis = analysis.expect("security analysis should be present for denial");
+        let decision = policy.can_exec_shell_detailed("bash -c 'printenv'");
+        assert!(!decision.is_allowed());
+        let analysis = decision
+            .security_analysis
+            .expect("security analysis should be present for denial");
         assert!(analysis
             .threats
             .contains(&SecurityThreat::EnvironmentDisclosure));
@@ -942,13 +995,13 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
 
-        let (allowed, analysis) = policy.can_exec_shell_detailed("date");
-        assert!(allowed);
-        assert!(analysis.is_none());
+        let decision = policy.can_exec_shell_detailed("date");
+        assert!(decision.is_allowed());
+        assert!(decision.security_analysis.is_none());
 
-        let (allowed, analysis) = policy.can_exec_shell_detailed("ls -la /tmp");
-        assert!(allowed);
-        assert!(analysis.is_none());
+        let decision = policy.can_exec_shell_detailed("ls -la /tmp");
+        assert!(decision.is_allowed());
+        assert!(decision.security_analysis.is_none());
     }
 
     #[test]
@@ -959,8 +1012,8 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
 
-        let (allowed, _analysis) = policy.can_exec_shell_detailed("whoami");
-        assert!(!allowed);
+        let decision = policy.can_exec_shell_detailed("whoami");
+        assert!(!decision.is_allowed());
     }
 
     #[test]
@@ -971,11 +1024,11 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
 
-        let (allowed, _) = policy.can_exec_shell_detailed("ls -la");
-        assert!(allowed);
+        let decision = policy.can_exec_shell_detailed("ls -la");
+        assert!(decision.is_allowed());
 
-        let (allowed, _) = policy.can_exec_shell_detailed("lsof");
-        assert!(!allowed);
+        let decision = policy.can_exec_shell_detailed("lsof");
+        assert!(!decision.is_allowed());
     }
 
     #[test]
@@ -986,9 +1039,11 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
 
-        let (allowed, analysis) = policy.can_exec_shell_detailed("rm /tmp/a");
-        assert!(!allowed);
-        let analysis = analysis.expect("security analysis should be present");
+        let decision = policy.can_exec_shell_detailed("rm /tmp/a");
+        assert!(!decision.is_allowed());
+        let analysis = decision
+            .security_analysis
+            .expect("security analysis should be present");
         assert!(analysis.threats.contains(&SecurityThreat::Destructive));
     }
 }

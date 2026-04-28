@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 20;
+const SCHEMA_VERSION_LATEST: i64 = 21;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -104,6 +104,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
             category     TEXT NOT NULL,
             action       TEXT NOT NULL,
             status       TEXT NOT NULL,
+            enforced_rules TEXT NOT NULL DEFAULT '[\"R+++3\"]',
             target       TEXT,
             payload      TEXT,
             payload_ref  TEXT,
@@ -503,6 +504,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_grant_expiry_v18(conn)?;
     apply_approval_similarity_v19(conn)?;
     apply_artifact_canonical_digest_v20(conn)?;
+    apply_causal_event_enforced_rules_v21(conn)?;
 
     Ok(())
 }
@@ -1301,6 +1303,40 @@ fn apply_artifact_canonical_digest_v20(conn: &mut Connection) -> Result<()> {
             "artifact_canonical_digest",
             chrono::Utc::now().to_rfc3339()
         ],
+    )?;
+    Ok(())
+}
+
+fn apply_causal_event_enforced_rules_v21(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 21 {
+        return Ok(());
+    }
+
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('causal_events') WHERE name = 'enforced_rules'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute(
+            "ALTER TABLE causal_events ADD COLUMN enforced_rules TEXT NOT NULL DEFAULT '[\"R+++3\"]'",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "UPDATE causal_events SET enforced_rules = '[\"R+++3\"]' WHERE enforced_rules IS NULL OR trim(enforced_rules) = ''",
+        [],
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![21_i64, "causal_event_enforced_rules", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

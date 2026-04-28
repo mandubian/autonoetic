@@ -393,6 +393,18 @@ impl SessionTracer {
                 .and_then(|v| v.get("target"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let enforced_rules = payload
+                .as_ref()
+                .and_then(|v| v.get("enforced_rules"))
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<String>>()
+                })
+                .filter(|items| !items.is_empty())
+                .unwrap_or_else(autonoetic_types::causal_chain::default_enforced_rules);
 
             if let Err(e) =
                 store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
@@ -405,6 +417,7 @@ impl SessionTracer {
                     category: category.to_string(),
                     action: action.to_string(),
                     status: status.to_string(),
+                    enforced_rules,
                     target,
                     payload: payload_str.clone(),
                     payload_ref,

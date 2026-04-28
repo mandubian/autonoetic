@@ -704,7 +704,7 @@ impl NativeTool for AgentRevisionCreateTool {
             "artifact_id must not be empty"
         );
         anyhow::ensure!(
-            policy.can_agent_revision(&args.agent_id),
+            policy.can_agent_revision(&args.agent_id).is_allowed(),
             "Permission Denied: agent '{}' lacks AgentRevision capability for '{}'",
             manifest.agent.id,
             args.agent_id
@@ -934,7 +934,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             "description must not be empty"
         );
         anyhow::ensure!(
-            policy.can_agent_revision(&args.agent_id),
+            policy.can_agent_revision(&args.agent_id).is_allowed(),
             "Permission Denied: agent '{}' lacks AgentRevision capability for '{}'",
             manifest.agent.id,
             args.agent_id
@@ -1320,7 +1320,7 @@ impl NativeTool for AgentRevisionListTool {
         if let Some(agent_id) = &args.agent_id {
             crate::runtime::tools::validate_agent_id(agent_id)?;
             anyhow::ensure!(
-                policy.can_agent_revision(agent_id),
+                policy.can_agent_revision(agent_id).is_allowed(),
                 "Permission Denied: missing AgentRevision capability for '{}'",
                 agent_id
             );
@@ -1435,7 +1435,7 @@ impl NativeTool for AgentRevisionInspectTool {
             .get_agent_revision(&revision_id)?
             .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", revision_id))?;
         anyhow::ensure!(
-            policy.can_agent_revision(&rev.agent_id),
+            policy.can_agent_revision(&rev.agent_id).is_allowed(),
             "Permission Denied: missing AgentRevision capability for '{}'",
             rev.agent_id
         );
@@ -1525,7 +1525,7 @@ impl NativeTool for AgentRevisionPromoteTool {
 
         crate::runtime::tools::validate_agent_id(&args.agent_id)?;
         anyhow::ensure!(
-            policy.can_agent_revision(&args.agent_id),
+            policy.can_agent_revision(&args.agent_id).is_allowed(),
             "Permission Denied: missing AgentRevision capability for '{}'",
             args.agent_id
         );
@@ -1816,7 +1816,7 @@ impl NativeTool for AgentRevisionRollbackTool {
 
         crate::runtime::tools::validate_agent_id(&args.agent_id)?;
         anyhow::ensure!(
-            policy.can_agent_revision(&args.agent_id),
+            policy.can_agent_revision(&args.agent_id).is_allowed(),
             "Permission Denied: missing AgentRevision capability for '{}'",
             args.agent_id
         );
@@ -1977,8 +1977,8 @@ impl NativeTool for AgentRevisionDiffTool {
             gateway_store.as_ref(),
         )?;
         anyhow::ensure!(
-            policy.can_agent_revision(&from_ref.agent_id)
-                && policy.can_agent_revision(&to_ref.agent_id),
+            policy.can_agent_revision(&from_ref.agent_id).is_allowed()
+                && policy.can_agent_revision(&to_ref.agent_id).is_allowed(),
             "Permission Denied: agent '{}' lacks AgentRevision capability for requested targets",
             manifest.agent.id
         );

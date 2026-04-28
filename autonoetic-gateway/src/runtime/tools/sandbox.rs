@@ -843,9 +843,9 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
             );
         }
 
-        let (allowed, analysis) = policy.can_exec_shell_detailed(&effective_command);
-        if !allowed {
-            let reason = match &analysis {
+        let decision = policy.can_exec_shell_detailed(&effective_command);
+        if !decision.is_allowed() {
+            let reason = match decision.security_analysis.as_ref() {
                 Some(a) if !a.threats.is_empty() => {
                     format!(
                         "sandbox command denied by security policy: {}",

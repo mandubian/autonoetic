@@ -65,7 +65,7 @@ impl NativeTool for SchedulerCronCreateTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler_cron_create")
+        policy.can_schedule("scheduler_cron_create").is_allowed()
     }
 
     fn execute(
@@ -88,7 +88,7 @@ impl NativeTool for SchedulerCronCreateTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_create") {
+        if !policy.can_schedule("scheduler_cron_create").is_allowed() {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.create").to_error_response());
         }
 
@@ -284,7 +284,7 @@ impl NativeTool for SchedulerCronListTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler_cron_list")
+        policy.can_schedule("scheduler_cron_list").is_allowed()
     }
 
     fn execute(
@@ -307,7 +307,7 @@ impl NativeTool for SchedulerCronListTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_list") {
+        if !policy.can_schedule("scheduler_cron_list").is_allowed() {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.list").to_error_response());
         }
 
@@ -383,7 +383,7 @@ impl NativeTool for SchedulerCronPauseTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler_cron_pause")
+        policy.can_schedule("scheduler_cron_pause").is_allowed()
     }
 
     fn execute(
@@ -406,7 +406,7 @@ impl NativeTool for SchedulerCronPauseTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_pause") {
+        if !policy.can_schedule("scheduler_cron_pause").is_allowed() {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.pause").to_error_response());
         }
 
@@ -467,7 +467,7 @@ impl NativeTool for SchedulerCronResumeTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler_cron_resume")
+        policy.can_schedule("scheduler_cron_resume").is_allowed()
     }
 
     fn execute(
@@ -490,7 +490,7 @@ impl NativeTool for SchedulerCronResumeTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_resume") {
+        if !policy.can_schedule("scheduler_cron_resume").is_allowed() {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.resume").to_error_response());
         }
 
@@ -553,7 +553,7 @@ impl NativeTool for SchedulerCronCancelTool {
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         let policy = PolicyEngine::new(manifest.clone());
-        policy.can_schedule("scheduler_cron_cancel")
+        policy.can_schedule("scheduler_cron_cancel").is_allowed()
     }
 
     fn execute(
@@ -576,7 +576,7 @@ impl NativeTool for SchedulerCronCancelTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_cancel") {
+        if !policy.can_schedule("scheduler_cron_cancel").is_allowed() {
             return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.cancel").to_error_response());
         }
 

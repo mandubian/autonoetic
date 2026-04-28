@@ -308,12 +308,16 @@ impl<'a> ToolCallProcessor<'a> {
         let sanitized_args = fix_stringified_json_values(&sanitized_args);
 
         let mut result = if self.mcp_runtime.has_tool(tool_name) {
-            if !policy.can_invoke_tool(tool_name) {
+            let tool_policy = policy.can_invoke_tool(tool_name);
+            if !tool_policy.is_allowed() {
                 return Err(anyhow::Error::from(
-                    autonoetic_types::tool_error::tagged::Tagged::permission(anyhow::anyhow!(
-                        "Tool '{}' is not allowed by ToolInvoke capability",
-                        tool_name
-                    )),
+                    autonoetic_types::tool_error::tagged::Tagged::permission_with_rules(
+                        anyhow::anyhow!(
+                            "Tool '{}' is not allowed by ToolInvoke capability",
+                            tool_name
+                        ),
+                        tool_policy.into_rule_ids(),
+                    ),
                 ));
             }
             self.mcp_runtime
@@ -370,6 +374,7 @@ impl<'a> ToolCallProcessor<'a> {
             "error_type": error.error_type,
             "message": error.message,
             "repair_hint": error.repair_hint,
+            "enforced_rules": error.enforced_rules,
             "recoverable": error.is_recoverable(),
         });
 

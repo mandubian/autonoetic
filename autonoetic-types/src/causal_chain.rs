@@ -46,6 +46,12 @@ pub struct CausalChainEntry {
     pub entry_hash: String,
 }
 
+pub const RULE_ID_EVENT_ATTRIBUTION: &str = "R+++3";
+
+pub fn default_enforced_rules() -> Vec<String> {
+    vec![RULE_ID_EVENT_ATTRIBUTION.to_string()]
+}
+
 /// Causal event record for storage in gateway.db causal_events table.
 /// Matches the schema for queryable event storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +65,8 @@ pub struct CausalEventRecord {
     pub category: String,
     pub action: String,
     pub status: String,
+    #[serde(default = "default_enforced_rules")]
+    pub enforced_rules: Vec<String>,
     pub target: Option<String>,
     pub payload: Option<String>,
     pub payload_ref: Option<String>,
