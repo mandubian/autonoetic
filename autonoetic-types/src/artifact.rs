@@ -73,7 +73,8 @@ pub struct ArtifactBundle {
     /// Artifact semantic kind for downstream validation.
     #[serde(default = "default_artifact_bundle_kind")]
     pub kind: ArtifactKind,
-    /// Short unique ID (e.g., "art_a1b2c3d4")
+    /// Short unique ID (e.g., "art_a1b2c3d4") — gateway-internal store locator only.
+    /// Not exposed to agents; agents use artifact_ref handles.
     pub artifact_id: String,
     /// Files included in the artifact
     pub files: Vec<ArtifactFileEntry>,
@@ -83,8 +84,13 @@ pub struct ArtifactBundle {
     /// Optional entrypoints (e.g., ["src/main.py"])
     #[serde(default)]
     pub entrypoints: Vec<String>,
-    /// SHA-256 digest of the full manifest (content-addressable identity)
-    pub digest: String,
+    /// SHA-256 of the artifact closure (kind + sorted files + entrypoints + layers).
+    /// Identical for the same logical content on any node — stable across nodes and tenants.
+    pub artifact_canonical_digest: String,
+    /// SHA-256 of the full persisted manifest for integrity verification.
+    /// Includes provenance fields (created_at, builder_session_id) so it differs
+    /// between independent builds of the same closure.
+    pub artifact_manifest_digest: String,
     /// ISO 8601 creation timestamp
     pub created_at: String,
     /// Session that built this artifact
@@ -133,16 +139,18 @@ impl ArtifactRefScopeType {
 /// Durable mapping from a short, LLM-friendly ref_id to a canonical artifact identity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactRefRecord {
-    /// Short alias used by agents in prompts/tool args (example: "ar.wf9f3.004.k7p2").
+    /// Short alias used by agents in prompts/tool args (e.g., "ar.aabb1234ef56").
     pub ref_id: String,
     /// Scope namespace this ref belongs to.
     pub scope_type: ArtifactRefScopeType,
     /// Session ID, workflow ID, or "__global__" depending on scope_type.
     pub scope_id: String,
-    /// Artifact ID (art_*).
+    /// Artifact ID (art_*) — gateway-internal store locator.
     pub artifact_id: String,
-    /// Canonical SHA-256 digest of artifact manifest for integrity verification.
-    pub artifact_digest: String,
+    /// SHA-256 of the persisted manifest for integrity verification on resolution.
+    pub artifact_manifest_digest: String,
+    /// SHA-256 of the artifact closure — stable identity across nodes and tenants.
+    pub artifact_canonical_digest: String,
     /// Agent that created this short reference.
     pub created_by_agent_id: String,
     /// RFC3339 creation timestamp.

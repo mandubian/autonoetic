@@ -91,6 +91,10 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     /// For Role::Tool turns, the matching call ID.
     pub tool_call_id: Option<String>,
+    /// Provider-specific assistant reasoning content that must be replayed on
+    /// subsequent turns for some thinking/reasoning models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl Message {
@@ -101,6 +105,7 @@ impl Message {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -111,6 +116,7 @@ impl Message {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -121,6 +127,7 @@ impl Message {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -136,6 +143,7 @@ impl Message {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.into()),
+            reasoning_content: None,
         }
     }
 }
@@ -204,6 +212,10 @@ pub struct CompletionResponse {
     pub text: String,
     /// Tool calls requested by the model (may be empty).
     pub tool_calls: Vec<ToolCall>,
+    /// Provider-specific assistant reasoning content that should be replayed
+    /// with the assistant turn when required by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
 }
@@ -213,6 +225,7 @@ impl CompletionResponse {
         Self {
             text,
             tool_calls: vec![],
+            reasoning_content: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }

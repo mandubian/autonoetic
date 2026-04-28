@@ -160,13 +160,13 @@ impl NativeTool for ContentReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Read content from the session's content store. Prefer `name`, 8-char `alias`, or `cnt_<alias>` ref from content.write. Also supports `art_<id>:<filename>` or `art_<id>/<filename>` to read a specific file from an artifact. Full `sha256:...` digest still works for backward compatibility.".to_string(),
+            description: "Read content from the session's content store. Prefer `name`, 8-char `alias`, or `cnt_<alias>` ref from content.write. Also supports `ar.<ref>:<filename>` to read a specific file from an artifact by its scoped ref. Full `sha256:...` digest still works.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name_or_handle": {
                         "type": "string",
-                        "description": "Content name (e.g. 'main.py'), 8-hex alias, cnt_<alias> ref, art_<id>:<filename>, or sha256 digest — not a sandbox path"
+                        "description": "Content name (e.g. 'main.py'), 8-hex alias, cnt_<alias> ref, ar.<ref>:<filename>, or sha256 digest — not a sandbox path"
                     }
                 },
                 "required": ["name_or_handle"],
@@ -185,7 +185,7 @@ impl NativeTool for ContentReadTool {
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
@@ -209,12 +209,13 @@ impl NativeTool for ContentReadTool {
 
         let input = args.name_or_handle.trim();
 
-        let content = if input.starts_with("art_") {
-            match try_read_artifact_file(gw_dir, input) {
+        let content = if input.starts_with("ar.") {
+            let sid = _session_id.unwrap_or(&_manifest.agent.id);
+            match try_read_artifact_ref_file(gw_dir, gateway_store.as_deref(), input, sid) {
                 Ok(c) => c,
                 Err(e) => {
                     anyhow::bail!(
-                        "Content '{}' not found: {}. Use `artifact.inspect` to verify the artifact ID and file list. Supported formats: `art_<id>:<filename>` or `art_<id>/<filename>`.",
+                        "Content '{}' not found: {}. Use `artifact_inspect` with the artifact_ref to verify the file list. Format: `ar.<ref>:<filename>`.",
                         input,
                         e
                     );
@@ -275,32 +276,43 @@ fn find_available_artifacts(
     let mut hints = Vec::new();
 
     hints.push(serde_json::json!({
-        "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with an implicit artifact_id.",
-        "example": "Call workflow.state first, then use the artifact_id from completed_tasks[].output to read the child's result."
+        "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with named_outputs and artifacts[].artifact_ref.",
+        "example": "Call workflow.state first, then read completed_tasks[].output via content.read using named_outputs[*].ref or ar.<ref>:<filename>."
     }));
 
     hints
 }
 
-fn try_read_artifact_file(gw_dir: &Path, name_or_handle: &str) -> anyhow::Result<Vec<u8>> {
-    if !name_or_handle.starts_with("art_") {
+fn try_read_artifact_ref_file(
+    gw_dir: &Path,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    name_or_handle: &str,
+    session_id: &str,
+) -> anyhow::Result<Vec<u8>> {
+    // Format: ar.<ref_id>:<filename>
+    if !name_or_handle.starts_with("ar.") {
         anyhow::bail!("not an artifact ref");
     }
 
-    let (artifact_id, filename) = if let Some(idx) = name_or_handle.rfind(':') {
-        (&name_or_handle[..idx], &name_or_handle[idx + 1..])
-    } else if let Some(idx) = name_or_handle.find('/') {
-        (&name_or_handle[..idx], &name_or_handle[idx + 1..])
-    } else {
+    let Some(colon_idx) = name_or_handle.find(':') else {
         anyhow::bail!(
-            "artifact ref must be in format `art_<id>:<filename>` or `art_<id>/<filename>`"
+            "artifact ref must be in format `ar.<ref>:<filename>` (colon separator required)"
         );
     };
+    let ref_id = &name_or_handle[..colon_idx];
+    let filename = &name_or_handle[colon_idx + 1..];
+
+    let gs = gateway_store
+        .ok_or_else(|| anyhow::anyhow!("GatewayStore required to resolve artifact refs"))?;
+
+    let ref_record = gs
+        .resolve_artifact_ref_any_scope(ref_id, session_id)?
+        .ok_or_else(|| anyhow::anyhow!("artifact_ref '{}' not found, expired, or revoked", ref_id))?;
 
     let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
     let bundle = artifact_store
-        .inspect(artifact_id)
-        .map_err(|e| anyhow::anyhow!("artifact '{}' not found: {}", artifact_id, e))?;
+        .inspect(&ref_record.artifact_id)
+        .map_err(|e| anyhow::anyhow!("artifact '{}' not found: {}", ref_record.artifact_id, e))?;
 
     let file_entry = bundle
         .files
@@ -311,22 +323,20 @@ fn try_read_artifact_file(gw_dir: &Path, name_or_handle: &str) -> anyhow::Result
             anyhow::anyhow!(
                 "file '{}' not found in artifact '{}'. Available files: {:?}",
                 filename,
-                artifact_id,
+                ref_record.artifact_id,
                 available
             )
         })?;
 
-    let content = artifact_store
+    artifact_store
         .content_store()
         .read(&file_entry.handle)
         .map_err(|e| {
             anyhow::anyhow!(
                 "failed to read content for file '{}' in artifact '{}': {}",
                 filename,
-                artifact_id,
+                ref_record.artifact_id,
                 e
             )
-        })?;
-
-    Ok(content)
+        })
 }

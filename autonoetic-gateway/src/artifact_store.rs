@@ -53,10 +53,11 @@ impl ArtifactStore {
         })
     }
 
-    /// Computes a deterministic artifact ID from sorted inputs, entrypoints, and
-    /// full layer mount identity.
-    /// Same inputs + entrypoints + layer mounts always produce the same artifact ID.
-    fn compute_deterministic_artifact_id(
+    /// Computes the full SHA-256 canonical artifact digest from closure-only fields.
+    ///
+    /// Stable across nodes/tenants for the same logical artifact closure.
+    /// Excludes all provenance metadata (artifact_id, created_at, builder_session_id).
+    fn compute_canonical_artifact_digest(
         file_handles: &[String],
         entrypoints: Option<&[String]>,
         layers: &[ArtifactLayer],
@@ -67,15 +68,13 @@ impl ArtifactStore {
         hasher.update(kind_bytes.as_bytes());
         hasher.update(b"\0");
 
-        // Sort file handles for determinism
         let mut sorted_handles = file_handles.to_vec();
         sorted_handles.sort();
         for handle in sorted_handles {
             hasher.update(handle.as_bytes());
-            hasher.update(b"\0"); // Separator
+            hasher.update(b"\0");
         }
 
-        // Sort entrypoints for determinism
         if let Some(eps) = entrypoints {
             let mut sorted_eps = eps.to_vec();
             sorted_eps.sort();
@@ -85,7 +84,6 @@ impl ArtifactStore {
             }
         }
 
-        // Sort full layer identity for determinism (digest + mount shape matters).
         let mut sorted_layers: Vec<(String, String, String, String)> = layers
             .iter()
             .map(|l| {
@@ -109,13 +107,22 @@ impl ArtifactStore {
             hasher.update(b"\0");
         }
 
-        let hash = hasher.finalize();
-        // Use first 8 hex chars for short ID (same length as UUID-based)
-        format!(
-            "{}{:08x}",
-            ARTIFACT_ID_PREFIX,
-            u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
-        )
+        format!("sha256:{:x}", hasher.finalize())
+    }
+
+    /// Computes a deterministic artifact ID from sorted inputs, entrypoints, and
+    /// full layer mount identity.
+    /// Same inputs + entrypoints + layer mounts always produce the same artifact ID.
+    fn compute_deterministic_artifact_id(
+        file_handles: &[String],
+        entrypoints: Option<&[String]>,
+        layers: &[ArtifactLayer],
+        kind: &ArtifactKind,
+    ) -> String {
+        let canonical = Self::compute_canonical_artifact_digest(file_handles, entrypoints, layers, kind);
+        // Derive the short local locator from the first 4 bytes (8 hex chars) of the canonical digest
+        let hex = &canonical["sha256:".len()..];
+        format!("{}{:.8}", ARTIFACT_ID_PREFIX, hex)
     }
 
     /// Checks if an artifact with the given ID exists.
@@ -139,7 +146,7 @@ impl ArtifactStore {
     /// matching the build-time computation.
     fn compute_bundle_digest(bundle: &ArtifactBundle) -> anyhow::Result<String> {
         let mut canonical = bundle.clone();
-        canonical.digest.clear();
+        canonical.artifact_manifest_digest.clear();
         let bundle_json = serde_json::to_string(&canonical)?;
         Ok(Self::compute_digest(&bundle_json))
     }
@@ -377,6 +384,12 @@ impl ArtifactStore {
             &layers_vec,
             &kind,
         );
+        let artifact_canonical_digest = Self::compute_canonical_artifact_digest(
+            &file_handles,
+            Some(ep.as_slice()),
+            &layers_vec,
+            &kind,
+        );
 
         // Phase 3: Check if artifact already exists (deduplication)
         if self.artifact_exists(&artifact_id) {
@@ -419,17 +432,18 @@ impl ArtifactStore {
             files,
             layers: layers_vec,
             entrypoints: ep,
-            digest: String::new(), // computed below
+            artifact_canonical_digest,
+            artifact_manifest_digest: String::new(), // computed below
             created_at,
             builder_session_id: builder_session_id.to_string(),
             reused: false,
         };
 
-        // Compute digest from canonical JSON
+        // Compute manifest digest from canonical JSON
         let bundle_json = serde_json::to_string(&bundle)?;
-        let digest = Self::compute_digest(&bundle_json);
+        let artifact_manifest_digest = Self::compute_digest(&bundle_json);
 
-        let bundle = ArtifactBundle { digest, ..bundle };
+        let bundle = ArtifactBundle { artifact_manifest_digest, ..bundle };
 
         // Persist to disk
         self.persist_bundle(&bundle)?;
@@ -528,7 +542,8 @@ impl ArtifactStore {
         let mut lines = vec![
             format!("# Artifact `{}`", bundle.artifact_id),
             String::new(),
-            format!("- Digest: `{}`", bundle.digest),
+            format!("- Canonical Digest: `{}`", bundle.artifact_canonical_digest),
+            format!("- Manifest Digest: `{}`", bundle.artifact_manifest_digest),
             format!("- Created At: `{}`", bundle.created_at),
             format!("- Builder Session: `{}`", bundle.builder_session_id),
             String::new(),
@@ -589,10 +604,10 @@ impl ArtifactStore {
         );
         let expected_digest = Self::compute_bundle_digest(&bundle)?;
         anyhow::ensure!(
-            bundle.digest == expected_digest,
+            bundle.artifact_manifest_digest == expected_digest,
             "artifact '{}' digest mismatch: manifest has '{}' but recomputed digest is '{}'. Possible tampering or corruption.",
             artifact_id,
-            bundle.digest,
+            bundle.artifact_manifest_digest,
             expected_digest
         );
         Ok(bundle)
@@ -665,14 +680,14 @@ mod tests {
         assert!(bundle.artifact_id.starts_with("art_"));
         assert_eq!(bundle.files.len(), 2);
         assert_eq!(bundle.entrypoints, vec!["main.py"]);
-        assert!(bundle.digest.starts_with("sha256:"));
+        assert!(bundle.artifact_manifest_digest.starts_with("sha256:"));
         assert_eq!(bundle.builder_session_id, "session-1");
 
         // Inspect artifact
         let inspected = store.inspect(&bundle.artifact_id).unwrap();
         assert_eq!(inspected.artifact_id, bundle.artifact_id);
         assert_eq!(inspected.files.len(), 2);
-        assert_eq!(inspected.digest, bundle.digest);
+        assert_eq!(inspected.artifact_manifest_digest, bundle.artifact_manifest_digest);
 
         // Resolve files
         let resolved = store.resolve_files(&bundle.artifact_id).unwrap();

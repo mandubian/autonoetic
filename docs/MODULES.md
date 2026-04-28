@@ -94,11 +94,13 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | `tools/web.rs` | `web_search`, `web_fetch` |
 | `tools/knowledge.rs` | `knowledge.*`, `digest_query` |
 | `tools/agent.rs` | `agent_spawn`, `agent_exists`, `agent_discover` |
-| `tools/agent_revision.rs` | `agent.revision.*` |
+| `tools/agent_revision.rs` | `agent_revision_*` |
 | `tools/evaluation.rs` | `eval.*` |
 | `tools/workflow.rs` | `workflow.*`, `approval_status` |
 | `tools/user_interaction.rs` | `user_ask`, `user_interaction_status` |
-| `tools/artifact.rs` | `artifact.*` |
+| `tools/artifact.rs` | `artifact_build`, `artifact_inspect`, `artifact_resolve_ref` |
+| `tools/artifact_prepare.rs` | `artifact_prepare` |
+| `tools/artifact_exec.rs` | `artifact_exec` |
 | `tools/content.rs` | `content_write`, `content_read` |
 | `tools/promotion.rs` | `promotion_record`, `promotion_query` |
 | `tools/session.rs` | `session_escalate` |
@@ -114,7 +116,7 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | `openrouter_catalog.rs` | Cached OpenRouter Models API metadata (`context_length`, per-token pricing) for UX and `max_session_price_usd` |
 | `reevaluation_state.rs` | Background state persistence |
 | `memory.rs` | Tier 2 durable memory (SQLite) |
-| `foundation_instructions.md` | System prompt rules injected for all agents |
+| `foundation_core.md` / `foundation_workflow.md` / `foundation_artifact.md` / `foundation_script.md` / `foundation_digest.md` / `foundation_sdk.md` | Layered system prompt rules injected by capability/execution mode |
 
 ### Scheduler (`src/scheduler/`)
 

@@ -40,7 +40,7 @@ If B uses A's output, they cannot be parallelized. Only tasks with no data depen
 
 ### 6. Artifact IDs come from structured results
 
-Never type artifact IDs from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Run `artifact_inspect(artifact_id)` as a preflight before spawning any dependent child. Wrong artifact IDs create avoidable retry loops.
+Never type artifact refs from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Run `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child. Wrong artifact refs create avoidable retry loops.
 
 ---
 

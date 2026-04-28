@@ -28,7 +28,7 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 
 #[derive(Debug, Deserialize)]
 struct ArtifactExecArgs {
-    artifact_id: String,
+    artifact_ref: String,
     entrypoint: String,
     #[serde(default)]
     args: Vec<String>,
@@ -63,9 +63,9 @@ impl NativeTool for ArtifactExecTool {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "artifact_id": {
+                    "artifact_ref": {
                         "type": "string",
-                        "description": "Artifact ID to execute"
+                        "description": "Artifact ref to execute (e.g., 'ar.aabb1234ef56')"
                     },
                     "entrypoint": {
                         "type": "string",
@@ -102,7 +102,7 @@ impl NativeTool for ArtifactExecTool {
                         "description": "Deployment ticket from artifact.prepare. When provided, remote-access approval and credential injection are resolved from the ticket — no separate approval_ref or credential_env needed."
                     }
                 },
-                "required": ["artifact_id", "entrypoint"],
+                "required": ["artifact_ref", "entrypoint"],
                 "additionalProperties": false
             }),
         }
@@ -127,12 +127,21 @@ impl NativeTool for ArtifactExecTool {
         let gw_dir = gateway_dir
             .ok_or_else(|| anyhow::anyhow!("artifact.exec requires a gateway directory"))?;
 
-        if args.artifact_id.starts_with("impl_") {
-            return Ok(
-                crate::runtime::tools::implicit_artifact_id_error(self.name(), &args.artifact_id)
-                    .to_string(),
-            );
-        }
+        // Resolve artifact_ref → artifact_id
+        let artifact_id = if let Some(store) = &gateway_store {
+            let sid = session_id.unwrap_or_default();
+            store
+                .resolve_artifact_ref_any_scope(&args.artifact_ref, sid)?
+                .map(|r| r.artifact_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "artifact_ref '{}' not found, expired, or revoked",
+                        args.artifact_ref
+                    )
+                })?
+        } else {
+            anyhow::bail!("artifact_exec requires GatewayStore to be configured");
+        };
 
         if let Some(ticket_id) = &args.deployment_ticket {
             if let Some(store) = &gateway_store {
@@ -157,17 +166,17 @@ impl NativeTool for ArtifactExecTool {
         }
 
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
-        let bundle = artifact_store.inspect(&args.artifact_id)?;
+        let bundle = artifact_store.inspect(&artifact_id)?;
 
         let entrypoint = &args.entrypoint;
         anyhow::ensure!(
             bundle.files.iter().any(|f| f.name == *entrypoint),
             "entrypoint '{}' not found in artifact '{}'",
             entrypoint,
-            args.artifact_id
+            artifact_id
         );
 
-        let resolved_files = artifact_store.resolve_files(&args.artifact_id)?;
+        let resolved_files = artifact_store.resolve_files(&artifact_id)?;
 
         let mut artifact_code = String::new();
         let mut workspace_files: Vec<(String, String)> = Vec::new();
@@ -184,7 +193,7 @@ impl NativeTool for ArtifactExecTool {
             !artifact_code.is_empty(),
             "entrypoint '{}' could not be read as text from artifact '{}'",
             entrypoint,
-            args.artifact_id
+            artifact_id
         );
 
         let mut approval_validated_for_command = false;
@@ -210,7 +219,7 @@ impl NativeTool for ArtifactExecTool {
                         &manifest.agent.id,
                         &normalized_targets,
                         &artifact_code,
-                        Some(&args.artifact_id),
+                        Some(&bundle.artifact_canonical_digest),
                     );
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                         if cache.find(&fingerprint).is_none() {
@@ -284,7 +293,7 @@ impl NativeTool for ArtifactExecTool {
                         &manifest.agent.id,
                         &targets,
                         &artifact_code,
-                        Some(&args.artifact_id),
+                        Some(&bundle.artifact_canonical_digest),
                     );
 
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
@@ -385,10 +394,10 @@ impl NativeTool for ArtifactExecTool {
                         let approval = build_approval_details(
                             primary,
                             "artifact_exec",
-                            format!("Artifact {}: remote access detected", args.artifact_id),
+                            format!("Artifact {}: remote access detected", artifact_id),
                             "approval_ref",
                             serde_json::json!({
-                                "artifact_id": args.artifact_id,
+                                "artifact_ref": args.artifact_ref,
                                 "entrypoint": entrypoint,
                                 "approval_already_pending": true,
                             }),
@@ -397,7 +406,7 @@ impl NativeTool for ArtifactExecTool {
                             "ok": false,
                             "exit_code": null,
                             "stdout": "",
-                            "stderr": format!("Remote access detected in artifact {}. Approval already pending.", args.artifact_id),
+                            "stderr": format!("Remote access detected in artifact {}. Approval already pending.", artifact_id),
                             "approval_required": true,
                             "approval_already_pending": true,
                             "suspended": true,
@@ -413,7 +422,7 @@ impl NativeTool for ArtifactExecTool {
                 if let Some(cfg) = config {
                     let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
                     let summary =
-                        format!("Artifact {}: {}", args.artifact_id, remote_analysis.summary);
+                        format!("Artifact {}: {}", artifact_id, remote_analysis.summary);
                     let action = ScheduledAction::SandboxExec {
                         command: command.clone(),
                         dependencies: None,
@@ -442,7 +451,7 @@ impl NativeTool for ArtifactExecTool {
                         decided_by: None,
                         reason: Some(format!(
                             "Artifact exec: {} → {}",
-                            args.artifact_id, remote_analysis.summary
+                            artifact_id, remote_analysis.summary
                         )),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
@@ -473,7 +482,7 @@ impl NativeTool for ArtifactExecTool {
                         summary,
                         "approval_ref",
                         serde_json::json!({
-                            "artifact_id": args.artifact_id,
+                            "artifact_ref": args.artifact_ref,
                             "entrypoint": entrypoint,
                             "remote_access_detected": true,
                             "detected_patterns": detected_patterns,
@@ -484,7 +493,7 @@ impl NativeTool for ArtifactExecTool {
                         "ok": false,
                         "exit_code": null,
                         "stdout": "",
-                        "stderr": format!("Remote access detected in artifact {}. Operator approval required.", args.artifact_id),
+                        "stderr": format!("Remote access detected in artifact {}. Operator approval required.", artifact_id),
                         "approval_required": true,
                         "request_id": request_id,
                         "suspended": true,
@@ -498,7 +507,7 @@ impl NativeTool for ArtifactExecTool {
                     "ok": false,
                     "exit_code": null,
                     "stdout": "",
-                    "stderr": format!("Remote access detected in artifact {}. Operator approval required.", args.artifact_id),
+                    "stderr": format!("Remote access detected in artifact {}. Operator approval required.", artifact_id),
                     "approval_required": true,
                     "suspended": true,
                 })
@@ -514,7 +523,7 @@ impl NativeTool for ArtifactExecTool {
         let mut mounts = Vec::new();
         let temp_base = std::env::temp_dir()
             .join("autonoetic_artifact")
-            .join(args.artifact_id.replace('/', "_"));
+            .join(artifact_id.replace('/', "_"));
         std::fs::create_dir_all(&temp_base)?;
 
         for (name, content) in resolved_files {
@@ -631,7 +640,7 @@ impl NativeTool for ArtifactExecTool {
             "exit_code": output.status.code(),
             "stdout": stdout,
             "stderr": stderr,
-            "artifact_id": args.artifact_id,
+            "artifact_ref": args.artifact_ref,
             "entrypoint": entrypoint,
         });
 
@@ -726,8 +735,8 @@ fn execute_with_ticket(
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
 ) -> anyhow::Result<String> {
     let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
-    let bundle = artifact_store.inspect(&args.artifact_id)?;
-    let resolved_files = artifact_store.resolve_files(&args.artifact_id)?;
+    let bundle = artifact_store.inspect(&ticket.artifact_id)?;
+    let resolved_files = artifact_store.resolve_files(&ticket.artifact_id)?;
 
     let driver = SandboxDriverKind::parse(&manifest.runtime.sandbox)?;
     let agent_dir_str = agent_dir
@@ -737,7 +746,7 @@ fn execute_with_ticket(
     let mut mounts = Vec::new();
     let temp_base = std::env::temp_dir()
         .join("autonoetic_artifact")
-        .join(args.artifact_id.replace('/', "_"));
+        .join(args.artifact_ref.replace('/', "_"));
     std::fs::create_dir_all(&temp_base)?;
 
     for (name, content) in resolved_files {
@@ -837,7 +846,7 @@ fn execute_with_ticket(
         "exit_code": output.status.code(),
         "stdout": stdout,
         "stderr": stderr,
-        "artifact_id": args.artifact_id,
+        "artifact_ref": args.artifact_ref,
         "entrypoint": args.entrypoint,
         "deployment_ticket": args.deployment_ticket,
     });

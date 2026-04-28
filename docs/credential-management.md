@@ -174,9 +174,9 @@ api_key = os.environ.get("OPENWEATHER_API_KEY")
 1. Operator: autonoetic agent credential put --service openweathermap --secret-name OPENWEATHER_API_KEY
 2. Planner: delegates to coder: "Write a weather script using os.environ['OPENWEATHER_API_KEY']"
 3. Planner: delegates to executor: "Run the script, inject cred_abc123 as OPENWEATHER_API_KEY"
-4. Executor: artifact_prepare({ artifact_id, entrypoint, required_credentials })
+4. Executor: artifact_prepare({ artifact_ref, entrypoint, required_credentials })
 5. Gateway: resolves credentials, checks approval, returns deployment_ticket
-6. Executor: artifact_exec({ deployment_ticket, artifact_id, entrypoint, args })
+6. Executor: artifact_exec({ deployment_ticket, artifact_ref, entrypoint, args })
 7. Gateway: injects secret as env var, executes with network access
 8. Script: reads os.environ["OPENWEATHER_API_KEY"], makes API call
 ```

@@ -29,7 +29,7 @@ struct RequiredCredential {
 
 #[derive(Debug, Deserialize)]
 struct ArtifactPrepareArgs {
-    artifact_id: String,
+    artifact_ref: String,
     entrypoint: String,
     #[serde(default)]
     args: Vec<String>,
@@ -58,9 +58,9 @@ impl NativeTool for ArtifactPrepareTool {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "artifact_id": {
+                    "artifact_ref": {
                         "type": "string",
-                        "description": "Artifact ID to prepare for execution"
+                        "description": "Artifact ref to prepare for execution (e.g., 'ar.aabb1234ef56')"
                     },
                     "entrypoint": {
                         "type": "string",
@@ -90,7 +90,7 @@ impl NativeTool for ArtifactPrepareTool {
                         }
                     }
                 },
-                "required": ["artifact_id", "entrypoint"],
+                "required": ["artifact_ref", "entrypoint"],
                 "additionalProperties": false
             }),
         }
@@ -125,25 +125,27 @@ impl NativeTool for ArtifactPrepareTool {
             anyhow::anyhow!("artifact.prepare requires a session_id")
         })?;
 
-        // Implicit artifacts (impl_task-...) are content-store metadata records, not
-        // executable artifact bundles.
-        if args.artifact_id.starts_with("impl_") {
-            return Ok(
-                crate::runtime::tools::implicit_artifact_id_error(self.name(), &args.artifact_id)
-                    .to_string(),
-            );
-        }
+        // Resolve artifact_ref → internal artifact_id
+        let artifact_id = store
+            .resolve_artifact_ref_any_scope(&args.artifact_ref, sid)?
+            .map(|r| r.artifact_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "artifact_ref '{}' not found, expired, or revoked",
+                    args.artifact_ref
+                )
+            })?;
 
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
-        let bundle = artifact_store.inspect(&args.artifact_id)?;
+        let bundle = artifact_store.inspect(&artifact_id)?;
         anyhow::ensure!(
             bundle.files.iter().any(|f| f.name == args.entrypoint),
             "entrypoint '{}' not found in artifact '{}'",
             args.entrypoint,
-            args.artifact_id
+            artifact_id
         );
 
-        let resolved_files = artifact_store.resolve_files(&args.artifact_id)?;
+        let resolved_files = artifact_store.resolve_files(&artifact_id)?;
         let mut artifact_code = String::new();
         let mut workspace_files: Vec<(String, String)> = Vec::new();
         for (name, content) in &resolved_files {
@@ -158,7 +160,7 @@ impl NativeTool for ArtifactPrepareTool {
             !artifact_code.is_empty(),
             "entrypoint '{}' could not be read as text from artifact '{}'",
             args.entrypoint,
-            args.artifact_id
+            artifact_id
         );
 
         let remote_analysis =
@@ -208,7 +210,7 @@ impl NativeTool for ArtifactPrepareTool {
             store_deployment_ticket(
                 &store,
                 &ticket_id,
-                &args.artifact_id,
+                &artifact_id,
                 &args.entrypoint,
                 &resolved_credential_env,
                 &[],
@@ -216,7 +218,7 @@ impl NativeTool for ArtifactPrepareTool {
             return Ok(serde_json::json!({
                 "ok": true,
                 "deployment_ticket": ticket_id,
-                "artifact_id": args.artifact_id,
+                "artifact_ref": args.artifact_ref,
                 "entrypoint": args.entrypoint,
                 "remote_access": {
                     "detected": remote_analysis.requires_approval,
@@ -244,7 +246,7 @@ impl NativeTool for ArtifactPrepareTool {
                 &manifest.agent.id,
                 targets,
                 &artifact_code,
-                Some(&args.artifact_id),
+                Some(&bundle.artifact_canonical_digest),
             );
 
             if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
@@ -253,7 +255,7 @@ impl NativeTool for ArtifactPrepareTool {
                     store_deployment_ticket(
                         &store,
                         &ticket_id,
-                        &args.artifact_id,
+                        &artifact_id,
                         &args.entrypoint,
                         &resolved_credential_env,
                         targets,
@@ -261,7 +263,7 @@ impl NativeTool for ArtifactPrepareTool {
                     return Ok(serde_json::json!({
                         "ok": true,
                         "deployment_ticket": ticket_id,
-                        "artifact_id": args.artifact_id,
+                        "artifact_ref": args.artifact_ref,
                         "entrypoint": args.entrypoint,
                         "remote_access": {
                             "detected": true,
@@ -306,7 +308,7 @@ impl NativeTool for ArtifactPrepareTool {
                         store_deployment_ticket(
                             &store,
                             &ticket_id,
-                            &args.artifact_id,
+                            &artifact_id,
                             &args.entrypoint,
                             &resolved_credential_env,
                             targets,
@@ -314,7 +316,7 @@ impl NativeTool for ArtifactPrepareTool {
                         return Ok(serde_json::json!({
                             "ok": true,
                             "deployment_ticket": ticket_id,
-                            "artifact_id": args.artifact_id,
+                            "artifact_ref": args.artifact_ref,
                             "entrypoint": args.entrypoint,
                             "remote_access": {
                                 "detected": true,
@@ -333,7 +335,7 @@ impl NativeTool for ArtifactPrepareTool {
                     store_deployment_ticket(
                         &store,
                         &ticket_id,
-                        &args.artifact_id,
+                        &artifact_id,
                         &args.entrypoint,
                         &resolved_credential_env,
                         targets,
@@ -341,7 +343,7 @@ impl NativeTool for ArtifactPrepareTool {
                     return Ok(serde_json::json!({
                         "ok": true,
                         "deployment_ticket": ticket_id,
-                        "artifact_id": args.artifact_id,
+                        "artifact_ref": args.artifact_ref,
                         "entrypoint": args.entrypoint,
                         "remote_access": {
                             "detected": true,
@@ -370,12 +372,12 @@ impl NativeTool for ArtifactPrepareTool {
         let summary = if resolved_credential_env.is_empty() {
             format!(
                 "Artifact {}: {}",
-                args.artifact_id, remote_analysis.summary
+                artifact_id, remote_analysis.summary
             )
         } else {
             format!(
                 "Artifact {}: {} + {} credential(s) injected as env vars",
-                args.artifact_id,
+                artifact_id,
                 remote_analysis.summary,
                 resolved_credential_env.len()
             )
@@ -430,7 +432,7 @@ impl NativeTool for ArtifactPrepareTool {
             summary.clone(),
             "approval_ref",
             serde_json::json!({
-                "artifact_id": args.artifact_id,
+                "artifact_ref": args.artifact_ref,
                 "entrypoint": args.entrypoint,
                 "remote_access_detected": true,
                 "detected_patterns": detected_patterns,
@@ -443,7 +445,7 @@ impl NativeTool for ArtifactPrepareTool {
         store_deployment_ticket(
             &store,
             &pending_ticket_id,
-            &args.artifact_id,
+            &artifact_id,
             &args.entrypoint,
             &resolved_credential_env,
             &targets,
@@ -452,7 +454,7 @@ impl NativeTool for ArtifactPrepareTool {
         Ok(serde_json::json!({
             "ok": false,
             "deployment_ticket": pending_ticket_id,
-            "artifact_id": args.artifact_id,
+            "artifact_ref": args.artifact_ref,
             "entrypoint": args.entrypoint,
             "remote_access": {
                 "detected": true,

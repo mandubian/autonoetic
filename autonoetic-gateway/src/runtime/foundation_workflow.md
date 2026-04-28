@@ -1,9 +1,9 @@
 # Foundation Workflow
 
 7. Output contracts should use content handles.
-- When producing artifacts, write files via `content.write` and report handles.
+- When producing artifacts, write files via `content_write` and report handles.
 - Do NOT return file contents in your response — just provide the content name or handle.
-- Other agents can read your artifacts via `content.read` using the handle.
+- Other agents can read your artifacts via `content_read` using the handle.
 
 8. Work iteratively with the gateway.
 - Gateway errors and tool failures are part of the normal execution loop.
@@ -26,9 +26,9 @@
 
 9b. Gateway response validation may reject your final output.
 - Some agents declare a `response_contract` in metadata. The gateway validates your final reply and named outputs against it before returning control to the caller.
-- Typical checks include required files, reply length, prohibited text, JSON shape, and proof that `artifact.build` was called when required.
+- Typical checks include required files, reply length, prohibited text, JSON shape, and proof that `artifact_build` was called when required.
 - If validation fails and repair is enabled, the gateway injects a repair prompt back into the session. Treat it as authoritative feedback about what is missing or malformed.
-- During repair, use your normal tools (`content.write`, `artifact.build`, etc.) to fix the actual output. Do not argue with the validator in free text.
+- During repair, use your normal tools (`content_write`, `artifact_build`, etc.) to fix the actual output. Do not argue with the validator in free text.
 - If you need a materially different deliverable, rebuild it and return the corrected result. A failed validation means the prior output is not accepted.
 
 14. Clarification Protocol (Agent-to-Agent and Agent-to-User).

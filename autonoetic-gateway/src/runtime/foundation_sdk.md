@@ -57,7 +57,7 @@ if __name__ == "__main__":
 ## Important Notes
 
 - **There is no `sdk.knowledge` module.** Use `sdk.memory.remember()` / `sdk.memory.recall()` for persistence.
-- **Memory visibility**: `sdk.memory.remember()` stores data with `session` visibility by default — any agent in the same root session can read it via `sdk.memory.recall()` or the native `knowledge.recall`/`knowledge.search` tools. Use Tier 1 `sdk.memory.write()` for private scratch data that should not be shared.
+- **Memory visibility**: `sdk.memory.remember()` stores data with `session` visibility by default — any agent in the same root session can read it via `sdk.memory.recall()` or the native `knowledge_recall`/`knowledge_search` tools. Use Tier 1 `sdk.memory.write()` for private scratch data that should not be shared.
 - The SDK bridge only supports the methods listed above. Calling unsupported methods (e.g., `sdk.secrets.get`, `sdk.message.send`) will raise `AutonoeticSdkError`.
 - The SDK is injected via `PYTHONPATH` and communicates with the gateway over a Unix socket. No network access is required.
 

@@ -670,12 +670,12 @@ pub(crate) fn implicit_artifact_id_error(tool_name: &str, artifact_id: &str) -> 
         "error_type": "validation",
         "error": "invalid_artifact_id",
         "message": format!(
-            "'{}' is an implicit task artifact (a content record), not an executable artifact bundle. {} only accepts art_... IDs produced by artifact.build.",
+            "'{}' is an implicit task artifact (a content record), not an executable artifact bundle. {} only accepts artifact_ref handles produced by artifact_build.",
             artifact_id,
             tool_name
         ),
         "repair_hint": format!(
-            "Call content.read('{}') to inspect the implicit artifact JSON. Pick an entry from content.artifacts[*].artifact_id (art_...) and retry {} with that explicit artifact ID.",
+            "Call content.read('{}') to inspect the implicit artifact JSON. Pick an entry from content.artifacts[*].artifact_ref and retry {} with that artifact_ref.",
             artifact_id,
             tool_name
         ),

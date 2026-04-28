@@ -1688,6 +1688,7 @@ impl AgentExecutor {
                 crate::llm::CompletionResponse {
                     text: assistant_reply,
                     tool_calls: vec![],
+                    reasoning_content: None,
                     usage: crate::llm::TokenUsage::default(),
                     stop_reason: crate::llm::StopReason::EndTurn,
                 }
@@ -1963,6 +1964,7 @@ impl AgentExecutor {
                     // Keep the assistant message aside — we only push it to history
                     // if no suspension occurs (continuation reconstruction re-injects it).
                     let mut assistant_msg = Message::assistant(response.text.clone());
+                    assistant_msg.reasoning_content = response.reasoning_content.clone();
                     assistant_msg.tool_calls = response.tool_calls.clone();
 
                     if let Some(budget) = self.session_budget.as_ref() {
@@ -2315,7 +2317,9 @@ impl AgentExecutor {
                 }
                 StopReason::EndTurn | StopReason::StopSequence => {
                     if !response.text.trim().is_empty() {
-                        history.push(Message::assistant(response.text.clone()));
+                        let mut assistant_msg = Message::assistant(response.text.clone());
+                        assistant_msg.reasoning_content = response.reasoning_content.clone();
+                        history.push(assistant_msg);
                     }
                     tracer.log_hibernate(&format!("{:?}", response.stop_reason));
 
@@ -2421,7 +2425,9 @@ impl AgentExecutor {
                 }
                 StopReason::MaxTokens | StopReason::Other(_) => {
                     if !response.text.trim().is_empty() {
-                        history.push(Message::assistant(response.text.clone()));
+                        let mut assistant_msg = Message::assistant(response.text.clone());
+                        assistant_msg.reasoning_content = response.reasoning_content.clone();
+                        history.push(assistant_msg);
                     }
                     tracer.log_stopped(&format!("{:?}", response.stop_reason));
                     let _ = tracer.end_digest_turn();

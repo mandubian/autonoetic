@@ -68,7 +68,7 @@ When asked to run or test a previously built artifact, use `artifact_exec` inste
 
 ```json
 artifact_exec({
-  "artifact_id": "art-abc123",
+  "artifact_ref": "ar.example",
   "entrypoint": "main.py",
   "args": ["Paris"]
 })
@@ -84,7 +84,7 @@ When the planner delegates a task that requires an API key or secret, use `artif
 
 ```json
 artifact_prepare({
-  "artifact_id": "art_5bda3712",
+  "artifact_ref": "ar.example",
   "entrypoint": "weather_lookup.py",
   "args": ["London", "tomorrow"],
   "required_credentials": [
@@ -100,7 +100,7 @@ Once you have the ticket, execute:
 ```json
 artifact_exec({
   "deployment_ticket": "dtk-abc12345def",
-  "artifact_id": "art_5bda3712",
+  "artifact_ref": "ar.example",
   "entrypoint": "weather_lookup.py",
   "args": ["London", "tomorrow"]
 })

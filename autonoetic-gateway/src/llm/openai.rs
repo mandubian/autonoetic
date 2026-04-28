@@ -86,6 +86,9 @@ impl OpenAiDriver {
                 if let Some(ref id) = m.tool_call_id {
                     msg["tool_call_id"] = json!(id);
                 }
+                if let Some(ref reasoning_content) = m.reasoning_content {
+                    msg["reasoning_content"] = json!(reasoning_content);
+                }
                 msg
             })
             .collect();
@@ -245,6 +248,7 @@ impl LlmDriver for OpenAiDriver {
         }
 
         let mut text_accum = String::new();
+        let mut reasoning_accum = String::new();
         let mut tool_calls_accum: Vec<ToolCall> = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut buffer = String::new();
@@ -278,6 +282,12 @@ impl LlmDriver for OpenAiDriver {
                     if !text.is_empty() {
                         text_accum.push_str(text);
                         let _ = tx.send(StreamEvent::TextDelta(text.to_string())).await;
+                    }
+                }
+
+                if let Some(reasoning) = delta["reasoning_content"].as_str() {
+                    if !reasoning.is_empty() {
+                        reasoning_accum.push_str(reasoning);
                     }
                 }
 
@@ -324,6 +334,11 @@ impl LlmDriver for OpenAiDriver {
         let resp = CompletionResponse {
             text: text_accum,
             tool_calls: tool_calls_accum,
+            reasoning_content: if reasoning_accum.is_empty() {
+                None
+            } else {
+                Some(reasoning_accum)
+            },
             stop_reason: stop_reason.clone(),
             usage: TokenUsage::default(),
         };
@@ -341,6 +356,7 @@ impl LlmDriver for OpenAiDriver {
 fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     let choice = &j["choices"][0];
     let text = extract_text_content(&choice["message"]["content"]);
+    let reasoning_content = extract_reasoning_content(&choice["message"]);
 
     let tool_calls = choice["message"]["tool_calls"]
         .as_array()
@@ -377,9 +393,19 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     CompletionResponse {
         text,
         tool_calls,
+        reasoning_content,
         stop_reason,
         usage,
     }
+}
+
+fn extract_reasoning_content(message: &serde_json::Value) -> Option<String> {
+    if let Some(s) = message["reasoning_content"].as_str() {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    None
 }
 
 fn extract_text_content(content: &serde_json::Value) -> String {

@@ -5,24 +5,24 @@ You are executing inside the Autonoetic gateway runtime.
 Core runtime model:
 
 1. Content storage is the primary way to persist files and data.
-- Use `content.write(name, content)` to save files, scripts, and data to the session.
-- Use `content.read(name_or_handle)` to retrieve content by name or SHA-256 handle.
+- Use `content_write(name, content)` to save files, scripts, and data to the session.
+- Use `content_read(name_or_handle)` to retrieve content by name or SHA-256 handle.
 - Default visibility is `session` — visible to all agents under the same root session.
 - Use `visibility: "private"` for scratchpads, drafts, or intermediate outputs.
 - Content works locally and remotely — agents don't need filesystem access.
 
 2. Artifacts are the mandatory boundary for review/install/execution.
-- Use `artifact.build(inputs, entrypoints?)` to build an immutable artifact bundle.
-- Use `artifact.inspect(artifact_id)` to review an artifact's files and metadata.
+- Use `artifact_build(inputs, entrypoints?)` to build an immutable artifact bundle.
+- Use `artifact_inspect(artifact_id)` to review an artifact's files and metadata.
 - NO artifact = NO review = NO install = NO execution beyond scratch.
 - Artifacts are the ONLY units that may cross trust boundaries.
 
 3. Knowledge is for durable facts with provenance.
-- Use `knowledge.store(id, content, ...)` to persist facts. **`visibility`** defaults to **`session`**: any agent in the same workflow session can read the row; use **`private`** for writer/owner only, or **`global`** for all agents. **`retention`** selects TTL (`stable`, `ephemeral`, `1d`, `30d`). To share something that was private, call **`knowledge.store` again** with the same `id` and a wider `visibility` (upsert). ⚠️ **`content` must be a plain string** — passing a JSON object as `content` is a schema error. If storing structured data, serialize it to a JSON string first.
-- Use `knowledge.recall(id)` to retrieve a specific fact (only if visible to you in the current session).
-- Use `knowledge.search(scope, query)` to find facts by scope and content.
-- Use `knowledge.search_by_tags(scope, tags, text?, limit?)` when tags matter: every tag you list must appear on the stored record (AND semantics), with optional substring filter on content.
-- There is **no** `knowledge.share` tool — sharing is expressed entirely through `knowledge.store` and `visibility`.
+- Use `knowledge_store(id, content, ...)` to persist facts. **`visibility`** defaults to **`session`**: any agent in the same workflow session can read the row; use **`private`** for writer/owner only, or **`global`** for all agents. **`retention`** selects TTL (`stable`, `ephemeral`, `1d`, `30d`). To share something that was private, call **`knowledge_store` again** with the same `id` and a wider `visibility` (upsert). ⚠️ **`content` must be a plain string** — passing a JSON object as `content` is a schema error. If storing structured data, serialize it to a JSON string first.
+- Use `knowledge_recall(id)` to retrieve a specific fact (only if visible to you in the current session).
+- Use `knowledge_search(scope, query)` to find facts by scope and content.
+- Use `knowledge_search_by_tags(scope, tags, text?, limit?)` when tags matter: every tag you list must appear on the stored record (AND semantics), with optional substring filter on content.
+- There is **no** `knowledge_share` tool — sharing is expressed entirely through `knowledge_store` and `visibility`.
 - Knowledge includes full provenance tracking (who wrote it, when, from what source).
 
 4. Content vs Knowledge vs Artifacts — choose the right tool:

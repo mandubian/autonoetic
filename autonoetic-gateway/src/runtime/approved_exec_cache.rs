@@ -156,25 +156,25 @@ pub fn normalize_targets(patterns: &[DetectedPattern]) -> Vec<String> {
 ///
 /// Fingerprint = SHA256(agent_id + "|" + sorted_targets + "|" + identity)
 ///
-/// When `artifact_id` is provided, identity is `artifact:<artifact_id>` — this
-/// makes the fingerprint stable across different shell wrappers for the same artifact
-/// (artifacts are immutable, so the ID is a stable identity).
+/// When `artifact_canonical_digest` is provided, identity is `artifact:<canonical_digest>` —
+/// this makes the fingerprint stable across different shell wrappers for the same artifact
+/// closure (canonical digest is stable across nodes/tenants for the same logical content).
 ///
 /// When absent, identity is `code:<code_to_analyze>` — exact code match.
 pub fn compute_fingerprint(
     agent_id: &str,
     targets: &[String],
     code_to_analyze: &str,
-    artifact_id: Option<&str>,
+    artifact_canonical_digest: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(agent_id.as_bytes());
     hasher.update(b"|");
     hasher.update(targets.join(",").as_bytes());
     hasher.update(b"|");
-    if let Some(aid) = artifact_id {
+    if let Some(canonical) = artifact_canonical_digest {
         hasher.update(b"artifact:");
-        hasher.update(aid.as_bytes());
+        hasher.update(canonical.as_bytes());
     } else {
         hasher.update(b"code:");
         hasher.update(code_to_analyze.as_bytes());

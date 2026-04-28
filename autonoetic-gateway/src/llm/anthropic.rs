@@ -306,6 +306,7 @@ impl LlmDriver for AnthropicDriver {
             let resp = CompletionResponse {
                 text: text_accum,
                 tool_calls,
+                reasoning_content: None,
                 stop_reason: stop_reason.clone(),
                 usage: usage.clone(),
             };
@@ -351,6 +352,7 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     CompletionResponse {
         text,
         tool_calls,
+        reasoning_content: None,
         stop_reason,
         usage,
     }

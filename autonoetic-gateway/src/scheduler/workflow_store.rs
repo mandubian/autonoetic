@@ -544,7 +544,7 @@ pub fn update_task_run_status(
 
     // Create implicit artifact when task succeeds (transition to Succeeded)
     if is_now_succeeded && !was_succeeded {
-        if let Err(e) = create_implicit_artifact(config, &task, result_summary.as_deref()) {
+        if let Err(e) = create_implicit_artifact(config, store, &task, result_summary.as_deref()) {
             tracing::warn!(
                 target: "workflow",
                 task_id = %task_id,
@@ -720,6 +720,7 @@ pub fn update_task_run_status(
 /// without needing to know the child's internal filenames in advance.
 fn create_implicit_artifact(
     config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     task: &TaskRun,
     result_summary: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -749,9 +750,21 @@ fn create_implicit_artifact(
 
     let named_outputs_count = named_outputs.len();
 
-    // Collect art_... artifacts built by the child session and expose enough
+    // Collect built artifacts for this child session and expose enough
     // metadata for agents to pick the right one without gateway-side heuristics.
     let artifact_store = crate::artifact_store::ArtifactStore::new(&gw_dir);
+    let refs_by_artifact_id: std::collections::HashMap<String, String> = gateway_store
+        .map(|gs| {
+            gs.list_artifact_refs_for_scope(
+                autonoetic_types::artifact::ArtifactRefScopeType::Session,
+                &task.session_id,
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (r.artifact_id, r.ref_id))
+            .collect()
+        })
+        .unwrap_or_default();
     let built_artifacts: Vec<serde_json::Value> = artifact_store
         .map(|store| {
             let mut items: Vec<serde_json::Value> = store
@@ -763,8 +776,10 @@ fn create_implicit_artifact(
                     if bundle.builder_session_id != task.session_id {
                         return None;
                     }
+                    let artifact_ref = refs_by_artifact_id.get(&bundle.artifact_id).cloned();
                     Some(serde_json::json!({
-                        "artifact_id": bundle.artifact_id,
+                        "artifact_ref": artifact_ref,
+                        "artifact_canonical_digest": bundle.artifact_canonical_digest,
                         "kind": bundle.kind,
                         "entrypoints": bundle.entrypoints,
                         "file_count": bundle.files.len(),
@@ -774,11 +789,11 @@ fn create_implicit_artifact(
                 .collect();
             items.sort_by(|a, b| {
                 let aid = a
-                    .get("artifact_id")
+                    .get("artifact_ref")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 let bid = b
-                    .get("artifact_id")
+                    .get("artifact_ref")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 aid.cmp(bid)
@@ -789,7 +804,7 @@ fn create_implicit_artifact(
 
     // Build implicit artifact — spec §4.2 structure.
     let implicit_data = serde_json::json!({
-        "artifact_id": artifact_id,
+        "implicit_artifact_id": artifact_id,
         "artifact_type": "implicit",
         "task_id": task.task_id,
         "agent_id": task.agent_id,

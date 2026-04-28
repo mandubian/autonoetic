@@ -68,13 +68,13 @@ When auditing an artifact for install, set `auditor_pass: true` only when **all 
 
 Set `auditor_pass: false` when any critical finding exists or security checklist items fail.
 
-**After completing your audit, call `promotion_record` with the `artifact_id` you reviewed.** Include the `artifact_id` in your summary. This is required for the install gate to verify your audit occurred. Record both pass and fail outcomes.
+**After completing your audit, call `promotion_record` with the `artifact_ref` you reviewed.** Include the `artifact_ref` in your summary. This is required for the install gate to verify your audit occurred. Record both pass and fail outcomes.
 
 Use this exact argument shape:
 
 ```json
 {
-  "artifact_id": "art_xxxxxxxx",
+  "artifact_ref": "ar.example",
   "role": "auditor",
   "pass": true,
   "findings": [
@@ -84,7 +84,7 @@ Use this exact argument shape:
       "evidence": "optional supporting evidence"
     }
   ],
-  "summary": "Artifact art_xxxxxxxx: audit summary"
+  "summary": "Artifact ar.example: audit summary"
 }
 ```
 

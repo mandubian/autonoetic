@@ -243,6 +243,7 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     CompletionResponse {
         text,
         tool_calls,
+        reasoning_content: None,
         stop_reason,
         usage,
     }

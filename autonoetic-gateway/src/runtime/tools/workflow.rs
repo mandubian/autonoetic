@@ -239,9 +239,22 @@ fn check_task_statuses(
                                     serde_json::from_slice::<serde_json::Value>(&content)
                                 {
                                     let output = serde_json::json!({
-                                        "artifact_id": artifact_data.get("artifact_id").and_then(|v| v.as_str()),
+                                        "implicit_artifact_id": artifact_data
+                                            .get("implicit_artifact_id")
+                                            .and_then(|v| v.as_str())
+                                            .or(Some(implicit_name.as_str())),
                                         "summary": artifact_data.get("summary").and_then(|v| v.as_str()),
                                         "created_at": artifact_data.get("created_at").and_then(|v| v.as_str()),
+                                        "named_outputs": artifact_data
+                                            .get("content")
+                                            .and_then(|c| c.get("named_outputs"))
+                                            .cloned()
+                                            .unwrap_or(serde_json::Value::Array(Vec::new())),
+                                        "artifacts": artifact_data
+                                            .get("content")
+                                            .and_then(|c| c.get("artifacts"))
+                                            .cloned()
+                                            .unwrap_or(serde_json::Value::Array(Vec::new())),
                                     });
                                     entry["output"] = output;
                                 }
@@ -321,7 +334,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with a stable implicit artifact_id (e.g., 'impl_task-abc123') — use content.read with that ID to consume the child's result. This is the canonical parent-child output handoff mechanism for ordinary agents. With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires.".to_string(),
+            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -617,7 +630,7 @@ impl NativeTool for WorkflowStateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Returns compact, structured workflow state for deterministic resume. Use this instead of re-inferring state from conversation history. Returns: current step, completed tasks with artifact IDs, pending approvals, active tasks, and reuse guards.".to_string(),
+            description: "Returns compact, structured workflow state for deterministic resume. Use this instead of re-inferring state from conversation history. Returns: current step, completed tasks with implicit artifact handles, pending approvals, active tasks, and reuse guards.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

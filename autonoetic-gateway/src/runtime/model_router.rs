@@ -399,12 +399,14 @@ impl ModelRouter for LlmClassifierRouter {
                 content: CLASSIFIER_PROMPT.to_string(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                reasoning_content: None,
             },
             Message {
                 role: Role::User,
                 content: prompt,
                 tool_calls: vec![],
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
 

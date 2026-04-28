@@ -53,7 +53,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
 5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` + `workflow_wait`.
 
-6. **Artifact IDs come from structured results.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Call `artifact_inspect(artifact_id)` as a preflight before spawning any dependent child. When turning already-built code into a durable agent, pass the existing `artifact_id` downstream instead of only `cnt_...` handles.
+6. **Artifact refs come from structured results.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Call `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child. When turning already-built code into a durable agent, pass the existing `artifact_ref` downstream instead of only `cnt_...` handles.
 
 > When the gateway blocks an action, it's because of Principle 1 or 3. The error message names the missing capability — route to an agent that has it.
 
@@ -97,10 +97,10 @@ On every wake-up after interruption (approval, timeout, join, hibernation):
 | `pending_approvals: true` | Spawn new tasks | `workflow_wait(timeout_secs=300)` |
 | `active_tasks_running: true` | Spawn duplicate tasks | Wait with `workflow_wait` |
 
-**Reading child outputs:** After a child completes, read its implicit artifact first:
+**Reading child outputs:** After a child completes, inspect `workflow_state` output for that task, then read named handles from `named_outputs`:
 ```json
-content_read({ "name_or_handle": "impl_task-de2e8792" })
-// Returns: { "summary": "...", "content": { "named_outputs": [{ "name": "file.py", "ref": "cnt_abc" }] } }
+content_read({ "name_or_handle": "cnt_abc" })
+// Returns content associated with named_outputs[*].ref from completed task output
 ```
 Never guess content names — always get them from `named_outputs`. If `named_outputs` is empty, use the `summary` field.
 
@@ -115,7 +115,7 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 
 2. New persistent agent needed
   → agent-factory.default (give it: agent_id, purpose, intended_capabilities)
-  → If a proven artifact already exists, also give it: artifact_id, script_entry, and whether the artifact was already validated. Prefer this over loose content handles.
+  → If a proven artifact already exists, also give it: artifact_ref, script_entry, and whether the artifact was already validated. Prefer this over loose content handles.
    → When agent-factory completes, the agent is installed and ready. Do NOT spawn additional specialized_builder, coder, or promotion tasks. The agent-factory handles the full pipeline internally.
 
 3. Research / evidence / URL fetch
@@ -191,7 +191,7 @@ artifact_build → agent_revision_create_from_intent → agent_revision_promote
 (spawn specialized_builder.default for the install step)
 ```
 
-If a suitable artifact already exists, reuse that same `artifact_id` for packaging/install instead of rebuilding from loose files.
+If a suitable artifact already exists, reuse that same `artifact_ref` for packaging/install instead of rebuilding from loose files.
 
 Promoted script agents run via `execution_mode: "script"` and bypass per-command approval when their declared `NetworkAccess` covers the required hosts.
 
@@ -253,7 +253,7 @@ Inform user. If they want to continue, respawn (creates a new approval). One ret
 When `workflow_wait` returns `any_failed: true`:
 
 - **Output schema error** (`"reply is not valid JSON"` or `"[output_schema]"`): If `promotion_record` was called, the work completed — proceed to the next stage. Do NOT re-spawn.
-- **Dependency layer required** (`"dependency_layer_required"` or `"artifact missing required layers"`): Spawn `packager.default`, wait, then retry with the layered artifact_id.
+- **Dependency layer required** (`"dependency_layer_required"` or `"artifact missing required layers"`): Spawn `packager.default`, wait, then retry with the layered artifact_ref.
 - **LoopGuard trip on evaluator**: Check if failure was dependency-related (pip install, ModuleNotFoundError) → packager first. Otherwise route to `coder.default` or `debugger.default`. Never escalate to auditor or specialized_builder when evaluator failed without `promotion_record`.
 - **Functional failure** (no promotion record, no results): Retry once with coder. After 2 retries, spawn `debugger.default` for root cause.
 - **`failed_task_count >= 2`**: Call `session_escalate(target: "human", urgency: "high")`. Do not spawn more tasks.
@@ -290,7 +290,7 @@ Include metadata in every `agent_spawn` call for audit trail:
 
 For promotion-gate delegations, add:
 ```json
-{ "promotion_role": "evaluator", "promotion_artifact_id": "art_xxx", "require_promotion_record": true }
+{ "promotion_role": "evaluator", "promotion_artifact_ref": "ar.example", "require_promotion_record": true }
 ```
 
 ---

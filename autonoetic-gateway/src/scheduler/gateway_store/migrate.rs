@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 19;
+const SCHEMA_VERSION_LATEST: i64 = 20;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -502,6 +502,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_grant_targets_table_v17(conn)?;
     apply_grant_expiry_v18(conn)?;
     apply_approval_similarity_v19(conn)?;
+    apply_artifact_canonical_digest_v20(conn)?;
 
     Ok(())
 }
@@ -1265,6 +1266,39 @@ fn apply_approval_similarity_v19(conn: &mut Connection) -> Result<()> {
         params![
             19_i64,
             "approval_similarity",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_artifact_canonical_digest_v20(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 20 {
+        return Ok(());
+    }
+
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('artifact_refs') WHERE name = 'artifact_canonical_digest'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute(
+            "ALTER TABLE artifact_refs ADD COLUMN artifact_canonical_digest TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            20_i64,
+            "artifact_canonical_digest",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

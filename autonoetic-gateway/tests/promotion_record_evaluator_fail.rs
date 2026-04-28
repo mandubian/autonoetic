@@ -37,7 +37,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
     let promotion_store = PromotionStore::new(&gateway_dir).unwrap();
     let _ = promotion_store.record_promotion(
         bundle.artifact_id.clone(),
-        Some(bundle.digest.clone()),
+        Some(bundle.artifact_manifest_digest.clone()),
         None,
         PromotionRole::Evaluator,
         "evaluator.default",
@@ -47,7 +47,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
     );
     let _ = promotion_store.record_promotion(
         bundle.artifact_id.clone(),
-        Some(bundle.digest.clone()),
+        Some(bundle.artifact_manifest_digest.clone()),
         None,
         PromotionRole::Auditor,
         "auditor.default",

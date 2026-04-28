@@ -193,18 +193,18 @@ impl NativeTool for ArtifactBuildTool {
         if let Some(gs) = gateway_store {
             if !bundle.reused {
                 let ref_id = mint_artifact_ref_id();
-                let record = autonoetic_types::artifact::ArtifactRefRecord {
+                gs.create_artifact_ref(&autonoetic_types::artifact::ArtifactRefRecord {
                     ref_id: ref_id.clone(),
                     scope_type,
                     scope_id: scope_id.clone(),
                     artifact_id: bundle.artifact_id.clone(),
-                    artifact_digest: bundle.digest.clone(),
+                    artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                    artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
                     created_by_agent_id: _manifest.agent.id.clone(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     expires_at: None,
                     revoked_at: None,
-                };
-                gs.create_artifact_ref(&record)?;
+                })?;
                 artifact_ref = Some(ref_id);
                 artifact_ref_scope = Some(serde_json::json!({
                     "type": scope_type.as_str(),
@@ -215,11 +215,10 @@ impl NativeTool for ArtifactBuildTool {
 
         let mut out = serde_json::json!({
             "ok": true,
-            "artifact_id": bundle.artifact_id,
+            "artifact_canonical_digest": bundle.artifact_canonical_digest,
+            "artifact_manifest_digest": bundle.artifact_manifest_digest,
             "kind": serde_json::to_value(&bundle.kind)
                 .unwrap_or(serde_json::Value::String("binary".to_string())),
-            "digest": bundle.digest,
-            "artifact_digest": bundle.digest,
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
                 "handle": f.handle,
@@ -273,16 +272,16 @@ impl NativeTool for ArtifactInspectTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Inspect an artifact by ID. Returns file list, entrypoints, layers, digests, and metadata. Use this for specialist-boundary review (evaluation, audit, installation). For ordinary content sharing between agents, prefer content.read with implicit output handles from workflow.wait.".to_string(),
+            description: "Inspect an artifact by its scoped ref. Returns file list, entrypoints, layers, digests, and metadata. Use this for specialist-boundary review (evaluation, audit, installation). Pass the artifact_ref returned by artifact_build or received from a child task.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "artifact_id": {
+                    "artifact_ref": {
                         "type": "string",
-                        "description": "The artifact ID to inspect (e.g., 'art_a1b2c3d4')"
+                        "description": "The artifact ref to inspect (e.g., 'ar.aabb1234ef56')"
                     }
                 },
-                "required": ["artifact_id"],
+                "required": ["artifact_ref"],
                 "additionalProperties": false
             }),
         }
@@ -295,41 +294,59 @@ impl NativeTool for ArtifactInspectTool {
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
-            artifact_id: String,
+            artifact_ref: String,
         }
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        if args.artifact_id.starts_with("impl_") {
-            return Ok(
-                crate::runtime::tools::implicit_artifact_id_error(self.name(), &args.artifact_id)
-                    .to_string(),
-            );
-        }
-
         let Some(gw_dir) = gateway_dir else {
             anyhow::bail!("Artifact store requires gateway directory to be configured");
         };
+        let Some(gs) = gateway_store else {
+            anyhow::bail!("artifact_inspect requires GatewayStore to be configured");
+        };
+        let sid = session_id.unwrap_or_default();
+
+        let ref_record = gs
+            .resolve_artifact_ref_any_scope(&args.artifact_ref, sid)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "artifact_ref '{}' not found, expired, or revoked",
+                    args.artifact_ref
+                )
+            })?;
 
         let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
-        let bundle = store.inspect(&args.artifact_id)?;
+        let bundle = store.inspect(&ref_record.artifact_id)?;
+
+        if bundle.artifact_manifest_digest != ref_record.artifact_manifest_digest {
+            anyhow::bail!(
+                "artifact_ref '{}' digest mismatch — possible tampering. Ref claims '{}', manifest has '{}'.",
+                args.artifact_ref,
+                ref_record.artifact_manifest_digest,
+                bundle.artifact_manifest_digest,
+            );
+        }
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
-            "artifact_id": bundle.artifact_id,
-            "digest": bundle.digest,
+            "artifact_ref": args.artifact_ref,
+            "artifact_canonical_digest": bundle.artifact_canonical_digest,
+            "artifact_manifest_digest": bundle.artifact_manifest_digest,
+            "kind": serde_json::to_value(&bundle.kind)
+                .unwrap_or(serde_json::Value::String("binary".to_string())),
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
                 "alias": f.alias,
-                "content_read_ref": format!("{}:{}", bundle.artifact_id, f.name),
+                "content_read_ref": format!("{}:{}", args.artifact_ref, f.name),
             })).collect::<Vec<_>>(),
             "layers": bundle.layers.iter().map(|l| serde_json::json!({
                 "layer_id": l.layer_id,
@@ -339,7 +356,6 @@ impl NativeTool for ArtifactInspectTool {
             })).collect::<Vec<_>>(),
             "entrypoints": bundle.entrypoints,
             "created_at": bundle.created_at,
-            "builder_session_id": bundle.builder_session_id,
         }))
         .map_err(Into::into)
     }
@@ -448,29 +464,31 @@ impl NativeTool for ArtifactResolveRefTool {
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
         let bundle = artifact_store.inspect(&ref_record.artifact_id)?;
 
-        if bundle.digest != ref_record.artifact_digest {
+        if bundle.artifact_manifest_digest != ref_record.artifact_manifest_digest {
             return Err(anyhow::Error::from(autonoetic_types::tool_error::tagged::Tagged::validation(
                 anyhow::anyhow!(
                     "Artifact digest mismatch for ref '{}'. Ref claims '{}' but artifact manifest has '{}'. Possible tampering or corruption.",
                     args.ref_id,
-                    ref_record.artifact_digest,
-                    bundle.digest
+                    ref_record.artifact_manifest_digest,
+                    bundle.artifact_manifest_digest
                 )
             )).into());
         }
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
-            "artifact_id": bundle.artifact_id,
-            "artifact_digest": bundle.digest,
+            "artifact_ref": args.ref_id,
+            "artifact_canonical_digest": bundle.artifact_canonical_digest,
+            "artifact_manifest_digest": bundle.artifact_manifest_digest,
+            "kind": serde_json::to_value(&bundle.kind)
+                .unwrap_or(serde_json::Value::String("binary".to_string())),
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
-                "handle": f.handle,
                 "alias": f.alias,
+                "content_read_ref": format!("{}:{}", args.ref_id, f.name),
             })).collect::<Vec<_>>(),
             "entrypoints": bundle.entrypoints,
             "created_at": bundle.created_at,
-            "builder_session_id": bundle.builder_session_id,
             "ref_created_at": ref_record.created_at,
             "ref_created_by": ref_record.created_by_agent_id,
         }))

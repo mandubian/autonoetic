@@ -23,7 +23,7 @@ The content store provides **content-addressable storage** (SHA-256 based) for a
 
 .gateway/artifacts/          ← Immutable artifact bundles
 ├── index.json
-└── art_a1b2c3d4/
+└── art_a1b2c3d4/            ← Gateway-internal storage dir (not agent-facing)
     └── manifest.json
 ```
 
@@ -115,9 +115,29 @@ Read by name, handle, or alias with root-based resolution.
 ```
 
 Resolution order:
-1. If `sha256:...` → direct content lookup
-2. If 8 hex chars → alias lookup (session, then root)
-3. Otherwise → name lookup (session, then root)
+1. If `art_<id>:<filename>` or `art_<id>/<filename>` → read that file directly from the artifact bundle
+2. If `cnt_<8 hex>` (or `cnt:<8 hex>`) → alias lookup (session, then root, then global)
+3. If `sha256:...` → direct content lookup (with `sha256:<8 hex>` treated as alias fallback)
+4. If bare 8 hex chars → alias lookup (session, then root, then global)
+5. Otherwise → name lookup (session, then root, then global)
+
+### `content_read` vs `artifact_inspect`
+
+These tools intentionally overlap a bit, but they serve different jobs:
+
+- `artifact_inspect` is for **artifact structure and trust-boundary review**: file list, entrypoints, layers, digest, builder metadata.
+- `content_read` is for **retrieving bytes/text**: either session content (`name`, alias, handle) or a specific artifact file (`ar.<ref>:<filename>`).
+
+Why this is usually not an issue:
+
+- The trust boundary remains artifact-centric: review/install/execution flows key off the immutable manifest (`artifact_manifest_digest`) and canonical closure digest (`artifact_canonical_digest`).
+- `content_read` does not replace structural review metadata (entrypoints/layers/provenance); it only fetches file content.
+- Runtime rejects implicit workflow IDs for artifact-only operations (`artifact_inspect`, `artifact_exec`, `artifact_prepare`), preserving boundary clarity.
+
+Practical guidance:
+
+- Use `artifact_inspect` first when validating what an artifact contains.
+- Use `content_read` second to open exact files returned by inspection.
 
 ### `artifact_build`
 
@@ -133,8 +153,9 @@ Build an immutable artifact bundle from session content.
 // Response
 {
   "ok": true,
-  "artifact_id": "art_a1b2c3d4",
-  "digest": "sha256:...",
+  "artifact_ref": "ar.a1b2c3d4ab12",
+  "artifact_canonical_digest": "sha256:...",
+  "artifact_manifest_digest": "sha256:...",
   "files": [
     {"name": "src/main.py", "handle": "sha256:...", "alias": "a1b2c3d4"},
     {"name": "src/utils.py", "handle": "sha256:...", "alias": "u5e6f7g8"}
@@ -146,19 +167,20 @@ Build an immutable artifact bundle from session content.
 
 ### `artifact_inspect`
 
-Inspect an artifact by ID.
+Inspect an artifact by ref.
 
 ```json
 // Request
 {
-  "artifact_id": "art_a1b2c3d4"
+  "artifact_ref": "ar.a1b2c3d4ab12"
 }
 
 // Response
 {
   "ok": true,
-  "artifact_id": "art_a1b2c3d4",
-  "digest": "sha256:...",
+  "artifact_ref": "ar.a1b2c3d4ab12",
+  "artifact_canonical_digest": "sha256:...",
+  "artifact_manifest_digest": "sha256:...",
   "files": [...],
   "entrypoints": [...],
   "created_at": "...",
@@ -166,8 +188,8 @@ Inspect an artifact by ID.
 }
 ```
 
-`artifact_inspect` accepts explicit artifact bundle IDs (`art_...`) only.
-Implicit workflow output handles (`impl_task-...`) are content records and should be consumed via `content_read`.
+`artifact_inspect` accepts `artifact_ref` (`ar.<12-hex>`) returned by `artifact_build` or `workflow_wait`/`workflow_state`.
+Implicit workflow output handles are content records and should be consumed via `content_read`.
 
 ## Artifact Trust Boundary
 
@@ -184,7 +206,7 @@ The workflow for any executable-producing task:
 1. Coder writes files via `content_write`
 2. Coder builds an artifact: `artifact_build(inputs, entrypoints)`
 3. Evaluator/auditor review the artifact via `artifact_inspect`
-4. Install/run consumes only the artifact ID
+4. Install/run consumes only the `artifact_ref`
 
 The artifact boundary must cover the full executable behavior surface, including:
 - import and source resolution
@@ -200,6 +222,8 @@ When an artifact is built, the gateway also materializes a read-only projection 
 ```text
 .gateway/sessions/<root-session-id>/artifacts/<artifact_id>/
 ```
+
+(where `<artifact_id>` is the gateway-internal locator derived from the canonical digest; the agent-facing handle is always `artifact_ref`.)
 
 On Unix hosts, the named files are symlinks to the canonical immutable content blobs, so the readable session view does not duplicate file contents. On other hosts, the gateway falls back to a best-effort non-duplicating link and only copies when linking is unavailable. The canonical trust boundary remains the immutable artifact manifest plus content handles.
 
@@ -238,7 +262,7 @@ content_read({"name_or_handle": "weather.py"})
 artifact_build({"inputs": ["weather.py"], "entrypoints": ["weather.py"]})
 
 // Evaluator reviews the artifact
-artifact_inspect({"artifact_id": "art_a1b2c3d4"})
+artifact_inspect({"artifact_ref": "ar.a1b2c3d4ab12"})
 ```
 
 ### Private Scratch Work

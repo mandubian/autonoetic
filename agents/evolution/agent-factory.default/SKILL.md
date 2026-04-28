@@ -39,8 +39,8 @@ You own the full agent creation pipeline. Planner says "make an agent that does 
 - `agent_id`: target agent identifier (lowercase, hyphens)
 - `purpose`: semantic description of what the new agent does
 - `intended_capabilities`: list of capability types needed (e.g. `["NetworkAccess", "CredentialAccess"]`)
-- `source_artifact_id` (optional): existing artifact to reuse for packaging, gating, or installation instead of rebuilding from loose files
-- `source_script_entry` (optional): entry script inside `source_artifact_id` when the artifact is already a script candidate
+- `source_artifact_ref` (optional): existing artifact to reuse for packaging, gating, or installation instead of rebuilding from loose files
+- `source_script_entry` (optional): entry script inside `source_artifact_ref` when the artifact is already a script candidate
 - `source_validated` (optional): whether executor/evaluator already proved the artifact works for the intended use
 - `execution_mode_hint` (optional): `reasoning | script | auto` — defaults to auto-detect
 - `design_needed` (optional): boolean — force architect step even for simple tasks
@@ -64,7 +64,7 @@ Choose the installation route based on `intended_capabilities` and task complexi
 
 | Situation | Route |
 |---|---|
-| Existing proven artifact (`source_artifact_id`) with usable `script_entry` | **Artifact reuse**: inspect once → packager if deps needed → gates if required → builder |
+| Existing proven artifact (`source_artifact_ref`) with usable `script_entry` | **Artifact reuse**: inspect once → packager if deps needed → gates if required → builder |
 | No `CodeExecution`, no `AgentSpawn`, no custom code | **Reasoning-only**: skip coder, install directly via intent |
 | Simple code (single script, no deps, no I/O beyond self.*) | **Simple code**: coder → builder (gating: none) |
 | Code with external network/file/exec | **Gated code**: coder → packager (if deps) → evaluator + auditor → builder |
@@ -83,15 +83,15 @@ Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `Netwo
 
 ### Step 0: Reuse existing artifact when provided
 
-If the spawn message includes `source_artifact_id`, treat it as the canonical install input.
+If the spawn message includes `source_artifact_ref`, treat it as the canonical install input.
 
-1. Call `artifact_inspect(source_artifact_id)` once.
+1. Call `artifact_inspect(source_artifact_ref)` once.
 2. If `source_script_entry` is present and the artifact already contains the required code, skip coder.
 3. If dependency layering is needed, go to Step 3 with the same artifact.
 4. If gates are required, go to Step 4 with the same artifact.
 5. Only fall back to coder if the artifact is malformed or missing the required entry script.
 
-Do NOT rewrite code, regenerate multiple draft payload files, or rebuild equivalent artifacts when a suitable `source_artifact_id` already exists.
+Do NOT rewrite code, regenerate multiple draft payload files, or rebuild equivalent artifacts when a suitable `source_artifact_ref` already exists.
 
 ### Step 1: Architect (if design_needed or complex structure)
 
@@ -116,18 +116,19 @@ Then call `workflow_wait` with the returned `task_id`.
 
 ### Step 2b: Code path — spawn coder
 
-Use this step only when no reusable `source_artifact_id` was provided, or when the provided artifact is malformed and must be repaired.
+Use this step only when no reusable `source_artifact_ref` was provided, or when the provided artifact is malformed and must be repaired.
 
 Call `agent_spawn` with `agent_id="coder.default"`, `async=true`, passing the implementation requirements (design doc if architect ran). Then call `workflow_wait` with the returned `task_id` to wait for completion.
 
 After coder completes:
-1. Read implicit artifact `impl_task-{task_id}` with `content_read`
-2. Inspect `content.named_outputs` for dependency files: `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`
-3. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
+1. Read `workflow_wait`/`workflow_state` output for that task.
+2. From `output.named_outputs`, inspect dependency files: `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`.
+3. Use `content_read` with `named_outputs[*].ref` (preferred) or `output.implicit_artifact_id` to inspect the full implicit payload when needed.
+4. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
 
 ### Step 3: Packager (if dependency files found)
 
-Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the artifact_id from coder. Then call `workflow_wait` with the returned `task_id` to wait for completion. Packager returns a new `artifact_id` with deps baked into layers.
+Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the artifact_ref from coder. Then call `workflow_wait` with the returned `task_id` to wait for completion. Packager returns a new `artifact_ref` with deps baked into layers.
 
 ### Step 4: Promotion gates (if required)
 
@@ -151,7 +152,7 @@ If gates NOT required: tell specialized_builder `"Gating: none"`.
 ### Step 5: Install via specialized_builder
 
 Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent. Then call `workflow_wait` with the returned `task_id`. Include:
-- `artifact_id` (for code agents) or omit (for reasoning agents)
+- `artifact_ref` (for code agents) or omit (for reasoning agents)
 - `instructions`, `description`, `capabilities`, `execution_mode`
 - `llm_config` (for reasoning mode)
 - `script_entry` (for script mode)
@@ -162,7 +163,7 @@ Compose the install intent in the delegation message itself. Do NOT create itera
 ## Error Handling
 
 - If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to planner. Do NOT attempt to fix errors yourself.
-- If coder returns no `artifact_id`: inspect `files` array and call `artifact_build` to consolidate.
+- If coder returns no `artifact_ref`: inspect `files` array and call `artifact_build` to consolidate.
 - If packager fails: report to planner — do NOT skip packager when deps were found.
 - If evaluator/auditor fail functionally (no promotion_record): call `agent_spawn` with `coder.default` to fix, then re-run gates via `agent_spawn` with `evaluator.default`/`auditor.default`.
 - If `specialized_builder.default` does not return a `revision_id`: treat install as failed. Built artifacts or draft payloads alone are not success.

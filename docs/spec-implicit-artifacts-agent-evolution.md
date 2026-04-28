@@ -97,7 +97,7 @@ The system distinguishes between two artifact classes with different use cases:
 
 - Planner consuming researcher output → use `workflow_wait` implicit output
 - Evaluator validating coder output → use `artifact_inspect` on explicit artifact
-- Specialized_builder installing → use explicit artifact_id from promotion gate
+- Specialized_builder installing → use explicit `artifact_ref` from promotion gate
 
 ---
 
@@ -115,7 +115,7 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 
 ```json
 {
-  "artifact_id": "impl_task-94c19ac6",
+  "implicit_artifact_id": "impl_task-94c19ac6",
   "artifact_type": "implicit",
   "task_id": "task-94c19ac6",
   "agent_id": "researcher.default",
@@ -170,7 +170,7 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
   "task_id": "task-94c19ac6",
   "status": "completed",
   "output": {
-    "artifact_id": "impl_task-94c19ac6",
+    "implicit_artifact_id": "impl_task-94c19ac6",
     "summary": "Fetched current weather for Paris..."
   }
 }
@@ -208,13 +208,7 @@ content_read({
 })
 ```
 
-#### Via artifact_inspect
-
-```json
-artifact_inspect({
-  "artifact_id": "impl_task-94c19ac6"
-})
-```
+> Note: `artifact_inspect` requires an `artifact_ref` (`ar.<12-hex>`) from a built artifact bundle. Implicit workflow outputs are content records, not executable bundles — use `content_read` with the `implicit_artifact_id`.
 
 ### 4.5 Configuration
 
@@ -238,10 +232,10 @@ When `content_read` fails for a name that looks like a guessed name:
 {
   "error_type": "resource",
   "message": "Content 'weather_result' not found",
-  "hint": "Use workflow_wait or workflow_state to get stable output handles from completed child tasks, then use content_read with the artifact_id from the output field.",
+  "hint": "Use workflow_wait or workflow_state to get stable output handles from completed child tasks, then use content_read with the implicit_artifact_id from the output field.",
   "available_artifacts": [
-    {"artifact_id": "impl_task-94c19ac6", "from": "researcher.default", "summary": "Fetched weather..."},
-    {"artifact_id": "impl_task-fb261586", "from": "architect.default", "summary": "Design document..."}
+    {"implicit_artifact_id": "impl_task-94c19ac6", "from": "researcher.default", "summary": "Fetched weather..."},
+    {"implicit_artifact_id": "impl_task-fb261586", "from": "architect.default", "summary": "Design document..."}
   ]
 }
 ```
@@ -252,7 +246,7 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 
 ```json
 {
-  "artifact_id": "impl_task-94c19ac6",
+  "implicit_artifact_id": "impl_task-94c19ac6",
   "artifact_type": "implicit",
   "task_id": "task-94c19ac6",
   "agent_id": "researcher.default",
@@ -307,7 +301,7 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
   "task_id": "task-94c19ac6",
   "status": "completed",
   "output": {
-    "artifact_id": "impl_task-94c19ac6",
+    "implicit_artifact_id": "impl_task-94c19ac6",
     "summary": "Fetched current weather for Paris..."
   }
 }
@@ -321,13 +315,7 @@ content_read({
 })
 ```
 
-#### Via artifact_inspect
-
-```json
-artifact_inspect({
-  "artifact_id": "impl_task-94c19ac6"
-})
-```
+> Note: `artifact_inspect` requires an `artifact_ref` (`ar.<12-hex>`) from a built artifact bundle. Implicit workflow outputs are content records, not executable bundles — use `content_read` with the `implicit_artifact_id`.
 
 ### 3.5 Configuration
 
@@ -353,8 +341,8 @@ When `content_read` fails for a name that looks like a guessed name:
   "message": "Content 'weather_result' not found",
   "hint": "Did you mean one of these implicit artifacts from your workflow?",
   "available_artifacts": [
-    {"artifact_id": "impl_task-94c19ac6", "from": "researcher.default", "summary": "Fetched weather..."},
-    {"artifact_id": "impl_task-fb261586", "from": "architect.default", "summary": "Design document..."}
+    {"implicit_artifact_id": "impl_task-94c19ac6", "from": "researcher.default", "summary": "Fetched weather..."},
+    {"implicit_artifact_id": "impl_task-fb261586", "from": "architect.default", "summary": "Design document..."}
   ]
 }
 ```
@@ -435,7 +423,7 @@ session_escalate({
 
 // Gateway responds:
 {
-  "analysis": "The workflow_wait response structure includes an 'output' object with 'artifact_id'. Use: content_read({'name_or_handle': 'impl_task-94c19ac6'})",
+  "analysis": "The workflow_wait response structure includes an 'output' object with 'implicit_artifact_id'. Use: content_read({'name_or_handle': 'impl_task-94c19ac6'})",
   "confidence": "high",
   "alternative": "If that fails, the task output may be in the workflow.events for this task."
 }
@@ -903,11 +891,11 @@ planner calls workflow_wait
        "task_id": "task-94c19ac6",
        "status": "completed",
        "output": {
-         "artifact_id": "impl_task-94c19ac6",
+         "implicit_artifact_id": "impl_task-94c19ac6",
          "summary": "Fetched weather for Paris: 15°C, partly cloudy"
        }
      }
-planner uses artifact_id from response
+planner uses implicit_artifact_id from response
 planner calls content_read("impl_task-94c19ac6")
   → SUCCESS
 planner has all data needed
@@ -960,9 +948,9 @@ planner finds output immediately
 #### 3. Implicit Artifacts
 - **Creation**: `create_implicit_artifact()` in `workflow_store.rs:672-719`
 - **Trigger**: Automatic when task transitions to `Succeeded` status
-- **Format**: `impl_{task_id}` content with `artifact_id`, `summary`, `created_at`
+- **Format**: `impl_{task_id}` content with `implicit_artifact_id`, `summary`, `created_at`
 - **Storage**: Session-visible in parent session via `ContentStore`
-- **Access**: Via `workflow_wait` response → `output.artifact_id`
+- **Access**: Via `workflow_wait` response → `output.implicit_artifact_id`
 
 #### 3.6 Enhanced Error Messages
 - **Tool**: `ContentReadTool` enhanced in `tools.rs:2100`

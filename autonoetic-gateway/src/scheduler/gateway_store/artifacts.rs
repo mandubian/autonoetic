@@ -16,8 +16,11 @@ impl GatewayStore {
         if record.artifact_id.is_empty() {
             return Err(anyhow::anyhow!("artifact_id must not be empty"));
         }
-        if record.artifact_digest.is_empty() {
-            return Err(anyhow::anyhow!("artifact_digest must not be empty"));
+        if record.artifact_manifest_digest.is_empty() {
+            return Err(anyhow::anyhow!("artifact_manifest_digest must not be empty"));
+        }
+        if record.artifact_canonical_digest.is_empty() {
+            return Err(anyhow::anyhow!("artifact_canonical_digest must not be empty"));
         }
         if record.created_by_agent_id.is_empty() {
             return Err(anyhow::anyhow!("created_by_agent_id must not be empty"));
@@ -34,15 +37,16 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO artifact_refs (
-                ref_id, scope_type, scope_id, artifact_id, artifact_digest, created_by_agent_id,
-                created_at, expires_at, revoked_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                ref_id, scope_type, scope_id, artifact_id, artifact_digest, artifact_canonical_digest,
+                created_by_agent_id, created_at, expires_at, revoked_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 record.ref_id,
                 record.scope_type.as_str(),
                 record.scope_id,
                 record.artifact_id,
-                record.artifact_digest,
+                record.artifact_manifest_digest,
+                record.artifact_canonical_digest,
                 record.created_by_agent_id,
                 record.created_at,
                 record.expires_at,
@@ -62,6 +66,72 @@ impl GatewayStore {
         Self::resolve_artifact_ref_with_conn(&conn, scope_type, scope_id, ref_id)
     }
 
+    /// Resolves an artifact ref by ref_id across all scopes accessible from the given session.
+    ///
+    /// Lookup priority: global → workflow (if any for this root session) → session.
+    /// Pass the current session_id; root session and workflow lookup are derived automatically.
+    pub fn resolve_artifact_ref_any_scope(
+        &self,
+        ref_id: &str,
+        session_id: &str,
+    ) -> Result<Option<ArtifactRefRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        // 1. Try global scope first
+        if let Some(r) = Self::resolve_artifact_ref_with_conn(
+            &conn,
+            ArtifactRefScopeType::Global,
+            "__global__",
+            ref_id,
+        )? {
+            return Ok(Some(r));
+        }
+
+        // 2. Try workflow scope for this root session only
+        let root_sid = crate::runtime::content_store::root_session_id(session_id);
+        let workflow_candidate: Option<String> = conn
+            .query_row(
+                "SELECT workflow_id FROM workflow_index WHERE root_session_id = ?1",
+                params![root_sid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(wf_id) = workflow_candidate {
+            if let Some(r) = Self::resolve_artifact_ref_with_conn(
+                &conn,
+                ArtifactRefScopeType::Workflow,
+                &wf_id,
+                ref_id,
+            )? {
+                return Ok(Some(r));
+            }
+        }
+
+        // 3. Try exact session scope
+        if let Some(r) = Self::resolve_artifact_ref_with_conn(
+            &conn,
+            ArtifactRefScopeType::Session,
+            session_id,
+            ref_id,
+        )? {
+            return Ok(Some(r));
+        }
+
+        // 4. Try root session scope
+        if root_sid != session_id {
+            if let Some(r) = Self::resolve_artifact_ref_with_conn(
+                &conn,
+                ArtifactRefScopeType::Session,
+                root_sid,
+                ref_id,
+            )? {
+                return Ok(Some(r));
+            }
+        }
+
+        Ok(None)
+    }
+
     pub fn list_artifact_refs_for_scope(
         &self,
         scope_type: ArtifactRefScopeType,
@@ -70,8 +140,8 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT
-                ref_id, scope_type, scope_id, artifact_id, artifact_digest, created_by_agent_id,
-                created_at, expires_at, revoked_at
+                ref_id, scope_type, scope_id, artifact_id, artifact_digest, artifact_canonical_digest,
+                created_by_agent_id, created_at, expires_at, revoked_at
              FROM artifact_refs
              WHERE scope_type = ?1 AND scope_id = ?2
              ORDER BY created_at ASC, ref_id ASC",
@@ -126,8 +196,8 @@ impl GatewayStore {
         let record = conn
             .query_row(
                 "SELECT
-                    ref_id, scope_type, scope_id, artifact_id, artifact_digest, created_by_agent_id,
-                    created_at, expires_at, revoked_at
+                    ref_id, scope_type, scope_id, artifact_id, artifact_digest, artifact_canonical_digest,
+                    created_by_agent_id, created_at, expires_at, revoked_at
                  FROM artifact_refs
                  WHERE scope_type = ?1 AND scope_id = ?2 AND ref_id = ?3",
                 params![scope_type.as_str(), scope_id, ref_id],
@@ -164,11 +234,12 @@ impl GatewayStore {
             scope_type,
             scope_id: row.get(2)?,
             artifact_id: row.get(3)?,
-            artifact_digest: row.get(4)?,
-            created_by_agent_id: row.get(5)?,
-            created_at: row.get(6)?,
-            expires_at: row.get(7)?,
-            revoked_at: row.get(8)?,
+            artifact_manifest_digest: row.get(4)?,
+            artifact_canonical_digest: row.get(5)?,
+            created_by_agent_id: row.get(6)?,
+            created_at: row.get(7)?,
+            expires_at: row.get(8)?,
+            revoked_at: row.get(9)?,
         })
     }
 

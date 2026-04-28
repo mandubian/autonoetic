@@ -287,8 +287,11 @@ mod tests {
             scope_type,
             scope_id: scope_id.to_string(),
             artifact_id: "art_abcd1234".to_string(),
-            artifact_digest:
+            artifact_manifest_digest:
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+            artifact_canonical_digest:
+                "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
                     .to_string(),
             created_by_agent_id: "planner.default".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),

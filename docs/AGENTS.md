@@ -281,7 +281,8 @@ For reviewable/installable file bundles:
 | Tool | Signature | Description |
 |------|-----------|-------------|
 | `artifact_build` | `(inputs: [string], entrypoints?: [string]) → artifact` | Build immutable artifact from session content |
-| `artifact_inspect` | `(artifact_id: string) → artifact` | Inspect artifact files, entrypoints, digest |
+| `artifact_inspect` | `(artifact_ref: string) → artifact` | Inspect artifact files, entrypoints, digest |
+| `artifact_resolve_ref` | `(artifact_ref: string) → resolved` | Resolve an artifact ref to canonical/manifest digests |
 
 ### Knowledge Tools (Durable Memory)
 
@@ -348,8 +349,8 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `agent_revision_create` | `(artifact_id: string, agent_id: string, ...) → revision` | Low-level strict artifact path (expects manifest/lock already present in artifact) |
-| `agent_revision_create_from_intent` | `(agent_id, artifact_id, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock` |
+| `agent_revision_create` | `(artifact_ref: string, agent_id: string, ...) → revision` | Low-level strict artifact path (expects manifest/lock already present in artifact) |
+| `agent_revision_create_from_intent` | `(agent_id, artifact_ref, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock` |
 | `agent_revision_schema` | `() → schema` | Return install contract ownership split, required fields, and canonical examples |
 | `agent_revision_list` | `(agent_id: string) → [revisions]` | List revisions for an agent |
 | `agent_revision_inspect` | `(agent_ref: string) → revision` | Inspect revision metadata and status |
@@ -370,7 +371,7 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `promotion_record` | `(artifact_id: string, ...) → record` | Record evaluator/auditor evidence for promotion. Canonical `content_digest` binding is gateway-owned and attached during revision create/promote. |
+| `promotion_record` | `(artifact_ref: string, ...) → record` | Record evaluator/auditor evidence for promotion. Canonical `content_digest` binding is gateway-owned and attached during revision create/promote. |
 | `promotion_query` | `(scope: string, ...) → [records]` | Query promotion records |
 
 ### Execution Tools (Same-Session Debugging)
@@ -387,7 +388,7 @@ For running built artifact entrypoints in a sandbox with artifact-aware analysis
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `artifact_exec` | `(artifact_id: string, entrypoint: string, args?: [string], env?: {string: string}, credential_env?: [{credential_id: string, env_var: string}], deployment_ticket?: string, approval_ref?: string) → result` | Execute an artifact entrypoint in a sandbox. Remote-access analysis runs against the artifact's source files. Approval reuse is bound to the artifact identity + concrete targets. Use for transient validation, smoke tests, and ad hoc runs. `credential_env` injects vault-stored secrets as environment variables — the gateway resolves them server-side, they never reach LLM context. `deployment_ticket` from `artifact_prepare` resolves both approval and credentials in one pass. |
+| `artifact_exec` | `(artifact_ref: string, entrypoint: string, args?: [string], env?: {string: string}, credential_env?: [{credential_id: string, env_var: string}], deployment_ticket?: string, approval_ref?: string) → result` | Execute an artifact entrypoint in a sandbox. Remote-access analysis runs against the artifact's source files. Approval reuse is bound to the artifact's canonical digest + concrete targets. Use for transient validation, smoke tests, and ad hoc runs. `credential_env` injects vault-stored secrets as environment variables — the gateway resolves them server-side, they never reach LLM context. `deployment_ticket` from `artifact_prepare` resolves both approval and credentials in one pass. |
 
 **When to use `artifact_exec` vs `sandbox_exec`:**
 
@@ -398,7 +399,7 @@ For running built artifact entrypoints in a sandbox with artifact-aware analysis
 | Smoke test before promotion | `artifact_exec` | Artifact-bound identity, no command-shape sensitivity |
 | Quick bash one-liner | `sandbox_exec` | No artifact involved |
 
-**Approval behavior:** `artifact_exec` uses the same dedup chain as `sandbox_exec` (exec cache → approved requests → session grants → create approval), but the fingerprint is based on `artifact_id` instead of the raw command string. This means the same artifact re-run with different arguments reuses the prior approval as long as the concrete network targets are covered.
+**Approval behavior:** `artifact_exec` uses the same dedup chain as `sandbox_exec` (exec cache → approved requests → session grants → create approval), but the fingerprint is based on the artifact's `artifact_canonical_digest` instead of the raw command string. This means the same artifact re-run with different arguments reuses the prior approval as long as the concrete network targets are covered.
 
 ### Artifact Preparation Tool (One-Pass Preflight)
 
@@ -406,11 +407,11 @@ For resolving credentials + approval in a single pass before execution. Eliminat
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `artifact_prepare` | `(artifact_id: string, entrypoint: string, args?: [string], required_credentials?: [{credential_id: string, env_var: string}]) → result` | One-pass preflight: analyzes artifact source for remote access, resolves credentials from the vault, creates a single approval covering all domains + credential injection. Returns a `deployment_ticket` for use with `artifact_exec`. |
+| `artifact_prepare` | `(artifact_ref: string, entrypoint: string, args?: [string], required_credentials?: [{credential_id: string, env_var: string}]) → result` | One-pass preflight: analyzes artifact source for remote access, resolves credentials from the vault, creates a single approval covering all domains + credential injection. Returns a `deployment_ticket` for use with `artifact_exec`. |
 
-Artifact ID constraints:
-- `artifact_prepare`, `artifact_exec`, and `artifact_inspect` require explicit bundle IDs (`art_...`).
-- Implicit workflow outputs (`impl_task-...`) are content records, not executable bundles. Use `content_read` on the implicit handle and then select `content.artifacts[*].artifact_id`.
+Artifact ref constraints:
+- `artifact_prepare`, `artifact_exec`, and `artifact_inspect` require an explicit `artifact_ref` (`ar.<12-hex>`) returned by `artifact_build` or `workflow_wait`/`workflow_state`.
+- Implicit workflow outputs contain `implicit_artifact_id` and a `named_outputs` map. Use `content_read` on the implicit handle and then select `content.artifacts[*].artifact_ref`.
 
 Credential reference constraints:
 - `credential_id` references used by artifact/sandbox credential injection must be canonical IDs from credential tools (`cred_...`).
@@ -418,14 +419,15 @@ Credential reference constraints:
 
 **Flow:**
 ```
-1. agent calls artifact_prepare({ artifact_id, entrypoint, required_credentials })
-2. gateway analyzes source → detects domains
-3. gateway resolves all credentials → verifies they exist in vault
-4. gateway checks exec cache / session grants → auto-approves if covered
-5. if new approval needed → creates ONE request (domains + credentials declared)
-6. returns deployment_ticket
-7. agent calls artifact_exec({ deployment_ticket, artifact_id, entrypoint, args })
-8. gateway injects credentials as env vars → executes with network access → done
+1. agent calls artifact_prepare({ artifact_ref, entrypoint, required_credentials })
+2. gateway resolves artifact_ref → internal artifact_id
+3. gateway analyzes source → detects domains
+4. gateway resolves all credentials → verifies they exist in vault
+5. gateway checks exec cache / session grants → auto-approves if covered
+6. if new approval needed → creates ONE request (domains + credentials declared)
+7. returns deployment_ticket
+8. agent calls artifact_exec({ deployment_ticket, artifact_ref, entrypoint, args })
+9. gateway injects credentials as env vars → executes with network access → done
 ```
 
 **When to use `artifact_prepare` vs calling `artifact_exec` directly:**
@@ -762,7 +764,7 @@ The only path to activate a new logical agent is: **artifact → revision → pr
 autonoetic agent bundle ./path/to/agent/ --out agent.bundle
 
 # 2. Create an immutable revision from the artifact
-autonoetic agent revision create --artifact <artifact_id> --agent-id myagent.default
+autonoetic agent revision create --artifact <artifact_ref> --agent-id myagent.default
 
 # 3. Promote the revision (moves the alias, making it the active version)
 autonoetic agent revision promote <rev-id> --alias myagent.default

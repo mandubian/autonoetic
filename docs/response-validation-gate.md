@@ -81,7 +81,7 @@ Non-repairs that will still fail:
 `coder.default` already has the correct core split between ordinary coding work and promotable artifact-building work. For response validation and repair, its operational rules should be:
 
 1. Treat `artifact_build` as the authoritative completion event for promotable outputs.
-2. When a planner asks for a durable artifact, do not end the turn after writing files; build the artifact and return the resulting `artifact_id`.
+2. When a planner asks for a durable artifact, do not end the turn after writing files; build the artifact and return the resulting `artifact_ref`.
 3. If the gateway sends a repair prompt, fix the real output set first. That usually means writing the missing file, rebuilding the artifact, or trimming the final reply.
 4. Do not treat a passed `sandbox_exec` as sufficient evidence when the contract requires durable output artifacts.
 5. When evaluator or auditor feedback arrives, rebuild and return a new artifact instead of claiming the prior artifact was implicitly updated.
@@ -95,7 +95,7 @@ Concretely, the coder SKILL should state that response-contract repair has the s
 1. Ensure the final reply remains valid JSON when the evaluation report is expected to be machine-readable.
 2. Treat `promotion_record` as promotion evidence, but not as a substitute for response-contract outputs; if the contract requires files or bounded reply text, those constraints still apply.
 3. If the gateway issues a repair prompt, repair the evaluation output itself. That can mean rewriting the JSON report, reducing reply size, or returning the required named report artifact.
-4. Keep findings traceable to the reviewed `artifact_id` in both the report content and promotion record.
+4. Keep findings traceable to the reviewed `artifact_ref` in both the report content and promotion record.
 5. If execution is blocked on approval, stop as instructed; do not force a partial report into a shape that looks complete just to satisfy validation.
 6. The gateway mechanically gates `promotion_record`: `pass=true` is rejected if any finding has `error`/`critical` severity, or if `warning` findings lack a non-empty `evidence` field. This is enforced at the gateway boundary — the evaluator cannot override it.
 

@@ -54,7 +54,7 @@ When you wake up after any interruption:
 - Install build-time dependencies (pip, npm, etc.) and capture them as layers
 - Use `capture_paths` on `sandbox_exec` to capture dependency directories
 - Build artifacts with layers via `artifact_build`
-- Return layered `artifact_id` to planner
+- Return layered `artifact_ref` to planner
 - Runtime model is pinned to OpenRouter Minimax (`provider=openrouter`, `model=minimax/minimax-m2.7`). If execution reports a missing `OPENAI_API_KEY`, stop and report revision/provider drift to planner.
 
 ## Core Workflow
@@ -106,7 +106,7 @@ The gateway will:
 
 ```json
 {
-  "inputs": ["art_original123", "requirements.txt"],
+  "inputs": ["ar.example", "requirements.txt"],
   "entrypoints": ["main.py"],
   "kind": "agent_bundle",
   "layers": [
@@ -133,9 +133,9 @@ sys.path.insert(0, "/tmp/venv")
 
 Or the planner/coder should have already structured imports to find packages at the mount path.
 
-Return the new `artifact_id` to planner:
+Return the new `artifact_ref` to planner:
 ```
-Built layered artifact: art_xxxxxxxx
+Built layered artifact: ar.example
 ```
 
 ## Capture Path Rules
