@@ -81,6 +81,7 @@ impl LlmDriver for FixedJsonDigestDriver {
             })
             .to_string(),
             tool_calls: vec![],
+            reasoning_content: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         })

@@ -32,6 +32,8 @@ fn make_request(ix: usize, root_session_id: &str) -> ApprovalRequest {
         decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
+        similar_to_request_id: None,
+        similarity_score: None,
     }
 }
 

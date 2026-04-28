@@ -3414,6 +3414,7 @@ mod tests {
             Ok(CompletionResponse {
                 text: "assistant reply".to_string(),
                 tool_calls: vec![],
+                reasoning_content: None,
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
             })
@@ -3436,6 +3437,7 @@ mod tests {
                 Ok(CompletionResponse {
                     text: String::new(),
                     tool_calls: vec![],
+                    reasoning_content: None,
                     stop_reason: StopReason::Other(String::new()),
                     usage: TokenUsage::default(),
                 })
@@ -3443,6 +3445,7 @@ mod tests {
                 Ok(CompletionResponse {
                     text: "recovered reply".to_string(),
                     tool_calls: vec![],
+                    reasoning_content: None,
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
                 })
@@ -3507,6 +3510,7 @@ mod tests {
         let retryable = CompletionResponse {
             text: String::new(),
             tool_calls: vec![],
+            reasoning_content: None,
             stop_reason: StopReason::Other(String::new()),
             usage: TokenUsage::default(),
         };
@@ -3515,6 +3519,7 @@ mod tests {
         let not_retryable = CompletionResponse {
             text: "has text".to_string(),
             tool_calls: vec![],
+            reasoning_content: None,
             stop_reason: StopReason::Other(String::new()),
             usage: TokenUsage::default(),
         };
@@ -3540,6 +3545,7 @@ mod tests {
             Ok(CompletionResponse {
                 text: "ok".to_string(),
                 tool_calls: vec![],
+                reasoning_content: None,
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
             })
@@ -3640,6 +3646,7 @@ mod tests {
                     name: "test.approval".to_string(),
                     arguments: "{}".to_string(),
                 }],
+                reasoning_content: None,
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage::default(),
             })
@@ -3941,6 +3948,7 @@ Hope this helps!"#;
                         name: "unknown.tool".to_string(),
                         arguments: "{}".to_string(),
                     }],
+                    reasoning_content: None,
                     stop_reason: StopReason::ToolUse,
                     usage: TokenUsage::default(),
                 })
@@ -3984,6 +3992,7 @@ Hope this helps!"#;
                 Ok(CompletionResponse {
                     text: "The answer is 42".to_string(),
                     tool_calls: vec![],
+                    reasoning_content: None,
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
                 })
@@ -4033,6 +4042,7 @@ Hope this helps!"#;
                 name: "any".to_string(),
                 arguments: "{}".to_string(),
             }],
+            reasoning_content: None,
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage::default(),
         };
@@ -4067,6 +4077,7 @@ Hope this helps!"#;
         let response = CompletionResponse {
             text: "plain text response".to_string(),
             tool_calls: vec![],
+            reasoning_content: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         };
@@ -4078,6 +4089,7 @@ Hope this helps!"#;
         let response2 = CompletionResponse {
             text: r#"{"result": "success"}"#.to_string(),
             tool_calls: vec![],
+            reasoning_content: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         };

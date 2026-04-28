@@ -38,6 +38,7 @@ fn make_test_continuation(request_id: &str) -> TurnContinuation {
             content: "test prompt".to_string(),
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning_content: None,
         }],
         assistant_message: Message {
             role: Role::Assistant,
@@ -48,6 +49,7 @@ fn make_test_continuation(request_id: &str) -> TurnContinuation {
                 arguments: "{}".to_string(),
             }],
             tool_call_id: None,
+            reasoning_content: None,
         },
         completed_tool_results: vec![],
         pending_tool_call: PendingApprovalToolCall {

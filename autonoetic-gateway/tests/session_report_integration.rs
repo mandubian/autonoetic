@@ -27,6 +27,7 @@ impl LlmDriver for AnnotateThenStopDriver {
                     arguments: r#"{"type":"observation","content":"Track structured session reporting."}"#
                         .to_string(),
                 }],
+                reasoning_content: None,
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage::default(),
             })
@@ -34,6 +35,7 @@ impl LlmDriver for AnnotateThenStopDriver {
             Ok(CompletionResponse {
                 text: "Structured reporting complete.".to_string(),
                 tool_calls: vec![],
+                reasoning_content: None,
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
             })
