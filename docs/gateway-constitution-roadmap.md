@@ -339,7 +339,7 @@ with valid IDs.
 
 ---
 
-### 1.10 `Ri-0.10` `constitution.read` tool — agents can read their law
+### 1.10 `Ri-0.10` `constitution_read` tool — agents can read their law
 
 **Threat.** An agent that cannot read the constitution it is operating
 under cannot meaningfully consent to it, reason about its obligations,
@@ -351,7 +351,7 @@ Do this **before** R+++1 (amendment channel), because an agent
 submitting an amendment proposal to a rule it cannot read is going
 through motions.
 
-**Sketch.** New native tool `constitution.read`:
+**Sketch.** New native tool `constitution_read`:
 
 - `args`: optional `section` (e.g. `"Ri-0.10"`, `"R-7.5"`, `"§0"`) —
   if omitted, returns the whole document.
@@ -363,7 +363,7 @@ the gateway's bundled constitution file plus the precomputed
 `constitution_digest` (which becomes live when R+++2 lands).
 
 Foundation prompts teach agents: "the constitution is your
-contract. Use `constitution.read` to consult it before proposing
+contract. Use `constitution_read` to consult it before proposing
 amendments, when a rule ID appears in an error, or any time you need
 to understand your obligations."
 
@@ -372,7 +372,7 @@ Files: new
 `runtime/tools/mod.rs` (register), foundation prompts.
 
 **Test.** `constitution_right_ri_0_10.rs` — agent without any
-special capability invokes `constitution.read()` and receives the
+special capability invokes `constitution_read` and receives the
 full text; invokes with a section selector and receives the scoped
 text; the returned `digest` matches the compile-time digest constant.
 
