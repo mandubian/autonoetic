@@ -1,4 +1,4 @@
-//! `constitution.read` — Ri-0.10 (issue #95).
+//! `constitution_read` — Ri-0.10 (issue #95).
 //!
 //! Every agent has the right to read the full text of the constitution it is
 //! operating under, addressed by digest. No capability gate: reading the law
@@ -173,11 +173,12 @@ fn extract_numbered_section(doc: &str, n: u32) -> Option<String> {
         }
     })?;
 
-    // Walk to the next `## ` heading (any number, not `### `).
+    // Walk to the next `## ` heading. `## ` does not match `### ` (the third
+    // char differs: space vs `#`), so subsections are correctly retained.
     let collected: Vec<&str> = doc.lines().collect();
     let mut end = collected.len();
     for (i, line) in collected.iter().enumerate().skip(start + 1) {
-        if line.starts_with("## ") && !line.starts_with("### ") {
+        if line.starts_with("## ") {
             end = i;
             break;
         }
@@ -190,7 +191,10 @@ fn extract_numbered_section(doc: &str, n: u32) -> Option<String> {
 fn extract_rule_row(doc: &str, rule_id: &str) -> Option<String> {
     let needle = format!("| {} |", rule_id);
     let lines: Vec<&str> = doc.lines().collect();
-    let row_idx = lines.iter().position(|line| line.starts_with(&needle))?;
+    // Tolerate harmless leading whitespace in the markdown table.
+    let row_idx = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with(&needle))?;
 
     // Walk backwards to the table header. Markdown tables: header line, then
     // a separator line of `|---|---|...`, then data rows.
