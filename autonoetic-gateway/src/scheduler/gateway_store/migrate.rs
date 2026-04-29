@@ -505,6 +505,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_approval_similarity_v19(conn)?;
     apply_artifact_canonical_digest_v20(conn)?;
     apply_causal_event_enforced_rules_v21(conn)?;
+    apply_constitutional_proposals_v22(conn)?;
 
     Ok(())
 }
@@ -1337,6 +1338,48 @@ fn apply_causal_event_enforced_rules_v21(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![21_i64, "causal_event_enforced_rules", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_constitutional_proposals_v22(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 22 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS constitutional_proposals (
+            proposal_id          TEXT PRIMARY KEY,
+            proposer_agent_id    TEXT NOT NULL,
+            proposer_session_id  TEXT,
+            kind                 TEXT NOT NULL,
+            target_id            TEXT,
+            proposed_text        TEXT,
+            justification        TEXT NOT NULL,
+            evidence_json        TEXT NOT NULL DEFAULT '[]',
+            status               TEXT NOT NULL DEFAULT 'pending',
+            operator_decision    TEXT,
+            decision_reason      TEXT,
+            decided_by           TEXT,
+            decided_at           TEXT,
+            published_in_release TEXT,
+            created_at           TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_constitutional_proposals_status      ON constitutional_proposals(status);
+        CREATE INDEX IF NOT EXISTS idx_constitutional_proposals_proposer    ON constitutional_proposals(proposer_agent_id);
+        CREATE INDEX IF NOT EXISTS idx_constitutional_proposals_release     ON constitutional_proposals(published_in_release);
+        CREATE INDEX IF NOT EXISTS idx_constitutional_proposals_created_at  ON constitutional_proposals(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![22_i64, "constitutional_proposals", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

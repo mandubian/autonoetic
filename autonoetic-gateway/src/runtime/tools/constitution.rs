@@ -1,22 +1,24 @@
-//! `constitution_read` — Ri-0.10 (issue #95).
+//! Constitution-facing tools.
 //!
-//! Every agent has the right to read the full text of the constitution it is
-//! operating under, addressed by digest. No capability gate: reading the law
-//! is a right, not a privilege.
-//!
-//! Section selector accepts:
-//!   - `Ri-X.Y` (rights), `R-X.Y` (numbered rules)
-//!   - `R+N`, `R++N`, `R+++N` (pending / structural / constitutional)
-//!   - `§N` or `section N` for whole numbered sections (`§0`..`§14`)
-//!   - omitted / empty → entire document.
+//! - `constitution_read` (Ri-0.10, issue #95): every agent's right to read
+//!   the full text of the constitution it operates under, addressed by
+//!   digest. No capability gate.
+//! - `constitution_propose_amendment` (Ri-0.8 / R+++1, issue #92): agents
+//!   holding the `ConstitutionalProposal` capability submit amendment
+//!   proposals through a declared, durable channel. Proposals receive a
+//!   durable ID, enter a review queue, and cannot be silently dropped.
 
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
+use crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::capability::Capability;
+use autonoetic_types::notification::{NotificationRecord, NotificationType};
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -40,6 +42,27 @@ fn constitution_digest() -> &'static str {
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(ConstitutionReadTool));
+    registry.register(Box::new(ConstitutionProposeAmendmentTool));
+}
+
+/// Proposal kinds accepted by `constitution_propose_amendment`. Mirrors the
+/// roadmap §1.11 sketch: rules and rights, with `add` / `modify` / `remove`.
+const PROPOSAL_KINDS: &[&str] = &[
+    "add_rule",
+    "modify_rule",
+    "remove_rule",
+    "add_right",
+    "modify_right",
+    "remove_right",
+];
+
+/// True when at least one declared `ConstitutionalProposal` capability admits
+/// the requested proposal kind via wildcard (`*`) or direct match.
+fn has_constitutional_proposal_capability(manifest: &AgentManifest, kind: &str) -> bool {
+    manifest.capabilities.iter().any(|c| {
+        matches!(c, Capability::ConstitutionalProposal { patterns }
+            if patterns.iter().any(|p| p == "*" || p == kind))
+    })
 }
 
 pub struct ConstitutionReadTool;
@@ -216,6 +239,225 @@ fn extract_rule_row(doc: &str, rule_id: &str) -> Option<String> {
     }
     out.push(lines[row_idx]);
     Some(out.join("\n"))
+}
+
+// ---------------------------------------------------------------------------
+// constitution_propose_amendment — Ri-0.8 / R+++1 (issue #92)
+// ---------------------------------------------------------------------------
+
+pub struct ConstitutionProposeAmendmentTool;
+
+impl NativeTool for ConstitutionProposeAmendmentTool {
+    fn name(&self) -> &'static str {
+        "constitution_propose_amendment"
+    }
+
+    /// Available iff the agent declares any `ConstitutionalProposal` capability.
+    /// Per-kind enforcement is re-checked at execute time so the structured
+    /// validation error names the rule.
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::ConstitutionalProposal { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Submit a constitutional amendment proposal. Requires the \
+                ConstitutionalProposal capability. Proposals are persisted with a \
+                durable ID and enter the operator review queue — they cannot be \
+                silently dropped (Ri-0.8). Use `constitution_read` first to confirm \
+                the current text of the rule or right you are proposing to change."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": PROPOSAL_KINDS,
+                        "description": "Nature of the proposal."
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "description": "Existing rule or right ID (Ri-X.Y, R-X.Y, R+N…). Required for modify_* and remove_* kinds."
+                    },
+                    "proposed_text": {
+                        "type": "string",
+                        "description": "Replacement text for modify_*; new rule/right text for add_*. Omitted for remove_*."
+                    },
+                    "justification": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Why this amendment is needed. Required."
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Causal-event IDs or execution-trace IDs that motivate the proposal. Strongly encouraged."
+                    }
+                },
+                "required": ["kind", "justification"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            kind: String,
+            #[serde(default)]
+            target_id: Option<String>,
+            #[serde(default)]
+            proposed_text: Option<String>,
+            justification: String,
+            #[serde(default)]
+            evidence: Vec<String>,
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON for '{}': {}", self.name(), e))?;
+
+        if !PROPOSAL_KINDS.contains(&args.kind.as_str()) {
+            return Ok(ToolError::validation(
+                format!("kind must be one of: {}", PROPOSAL_KINDS.join(", ")),
+                None::<String>,
+            )
+            .to_error_response());
+        }
+
+        // Per-kind capability check against declared `patterns`. The agent may
+        // be allowed to propose `modify_rule` but not `remove_right`, etc.
+        if !has_constitutional_proposal_capability(manifest, &args.kind) {
+            return Ok(ToolError::permission(format!(
+                "agent does not hold ConstitutionalProposal capability covering kind '{}' (Ri-0.8 / R+++1). \
+                 Declare a ConstitutionalProposal capability whose `patterns` include this kind, or use '*'.",
+                args.kind
+            ))
+            .to_error_response());
+        }
+
+        // Per-kind argument shape validation.
+        let needs_target = matches!(
+            args.kind.as_str(),
+            "modify_rule" | "remove_rule" | "modify_right" | "remove_right"
+        );
+        let needs_text = matches!(
+            args.kind.as_str(),
+            "add_rule" | "modify_rule" | "add_right" | "modify_right"
+        );
+        if needs_target
+            && args
+                .target_id
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return Ok(ToolError::validation(
+                format!("kind '{}' requires non-empty target_id", args.kind),
+                None::<String>,
+            )
+            .to_error_response());
+        }
+        if needs_text
+            && args
+                .proposed_text
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return Ok(ToolError::validation(
+                format!("kind '{}' requires non-empty proposed_text", args.kind),
+                None::<String>,
+            )
+            .to_error_response());
+        }
+        if args.justification.trim().is_empty() {
+            return Ok(ToolError::validation(
+                "justification must not be empty",
+                None::<String>,
+            )
+            .to_error_response());
+        }
+
+        let Some(store) = gateway_store else {
+            return Ok(ToolError::resource(
+                "GatewayStore not available — proposal cannot be persisted",
+                None::<String>,
+            )
+            .to_error_response());
+        };
+
+        let proposal_id = format!(
+            "cprop-{}",
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        let proposal = ConstitutionalProposal {
+            proposal_id: proposal_id.clone(),
+            proposer_agent_id: manifest.agent.id.clone(),
+            proposer_session_id: session_id.map(str::to_string),
+            kind: args.kind.clone(),
+            target_id: args.target_id,
+            proposed_text: args.proposed_text,
+            justification: args.justification,
+            evidence_json: serde_json::Value::Array(
+                args.evidence
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+            status: "pending".to_string(),
+            operator_decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            published_in_release: None,
+            created_at: now,
+        };
+
+        store.insert_constitutional_proposal(&proposal)?;
+
+        let notification = NotificationRecord::new(
+            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            NotificationType::ConstitutionalProposal,
+            "system".to_string(),
+            json!({
+                "proposal_id": &proposal_id,
+                "kind": &proposal.kind,
+                "target_id": &proposal.target_id,
+                "proposer_agent_id": &proposal.proposer_agent_id,
+            }),
+        );
+        if let Err(e) = store.create_notification_record(&notification) {
+            tracing::warn!(
+                "Failed to create constitutional proposal notification: {}",
+                e
+            );
+        }
+
+        Ok(json!({
+            "ok": true,
+            "proposal_id": proposal_id,
+            "status": "pending",
+            "constitution_digest": constitution_digest(),
+        })
+        .to_string())
+    }
 }
 
 #[cfg(test)]

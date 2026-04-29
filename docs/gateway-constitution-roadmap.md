@@ -393,7 +393,7 @@ speed, not at the speed the system itself learns.
 
 This is Ri-0.8's enforcement mechanism.
 
-**Sketch.** New tool `constitution.propose_amendment` with args:
+**Sketch.** New tool `constitution_propose_amendment` with args:
 
 - `kind`: `add_rule` | `modify_rule` | `remove_rule` | `add_right` | `modify_right` | `remove_right`
 - `target_id`: rule or right ID (for modify / remove)
