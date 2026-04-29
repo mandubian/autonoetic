@@ -67,6 +67,9 @@ pub struct ToolError {
     /// Optional original error details (for logging, not always exposed to agent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    /// Specific constitutional or policy rule IDs enforced for this error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enforced_rules: Vec<String>,
 }
 
 impl ToolError {
@@ -78,6 +81,7 @@ impl ToolError {
             message: message.into(),
             repair_hint: repair_hint.map(|h| h.into()),
             details: None,
+            enforced_rules: Vec::new(),
         }
     }
 
@@ -91,6 +95,7 @@ impl ToolError {
                 "Request additional authorization or adjust the scope of your request.".to_string(),
             ),
             details: None,
+            enforced_rules: Vec::new(),
         }
     }
 
@@ -102,6 +107,7 @@ impl ToolError {
             message: message.into(),
             repair_hint: repair_hint.map(|h| h.into()),
             details: None,
+            enforced_rules: Vec::new(),
         }
     }
 
@@ -113,6 +119,7 @@ impl ToolError {
             message: message.into(),
             repair_hint: repair_hint.map(|h| h.into()),
             details: None,
+            enforced_rules: Vec::new(),
         }
     }
 
@@ -124,6 +131,7 @@ impl ToolError {
             message: message.into(),
             repair_hint: None,
             details: details.map(|d| d.into()),
+            enforced_rules: Vec::new(),
         }
     }
 
@@ -135,7 +143,13 @@ impl ToolError {
             message: message.into(),
             repair_hint: repair_hint.map(|h| h.into()),
             details: None,
+            enforced_rules: Vec::new(),
         }
+    }
+
+    pub fn with_enforced_rules(mut self, enforced_rules: Vec<String>) -> Self {
+        self.enforced_rules = enforced_rules;
+        self
     }
 
     /// Creates a new quota exceeded error.
@@ -146,6 +160,7 @@ impl ToolError {
             message: message.into(),
             repair_hint: repair_hint.map(|h| h.into()),
             details: None,
+            enforced_rules: Vec::new(),
         }
     }
 
@@ -157,6 +172,7 @@ impl ToolError {
             message: format!("{} not found", resource.into()),
             repair_hint: repair_hint.map(|h| h.into()),
             details: None,
+            enforced_rules: Vec::new(),
         }
     }
 
@@ -168,6 +184,7 @@ impl ToolError {
             message: message.into(),
             repair_hint: repair_hint.map(|h| h.into()),
             details: None,
+            enforced_rules: Vec::new(),
         }
     }
 
@@ -283,6 +300,7 @@ pub mod tagged {
     pub struct Tagged {
         error_type: ToolErrorType,
         source: anyhow::Error,
+        enforced_rules: Vec<String>,
     }
 
     // SAFETY: Tagged is safe to send across thread boundaries because:
@@ -297,6 +315,7 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::Validation,
                 source: err.into(),
+                enforced_rules: Vec::new(),
             }
         }
 
@@ -304,6 +323,18 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::Permission,
                 source: err.into(),
+                enforced_rules: Vec::new(),
+            }
+        }
+
+        pub fn permission_with_rules(
+            err: impl Into<anyhow::Error>,
+            enforced_rules: Vec<String>,
+        ) -> Self {
+            Self {
+                error_type: ToolErrorType::Permission,
+                source: err.into(),
+                enforced_rules,
             }
         }
 
@@ -311,6 +342,7 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::Resource,
                 source: err.into(),
+                enforced_rules: Vec::new(),
             }
         }
 
@@ -318,6 +350,7 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::Execution,
                 source: err.into(),
+                enforced_rules: Vec::new(),
             }
         }
 
@@ -325,6 +358,7 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::Fatal,
                 source: err.into(),
+                enforced_rules: Vec::new(),
             }
         }
 
@@ -332,6 +366,7 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::Conflict,
                 source: err.into(),
+                enforced_rules: Vec::new(),
             }
         }
 
@@ -339,6 +374,7 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::QuotaExceeded,
                 source: err.into(),
+                enforced_rules: Vec::new(),
             }
         }
 
@@ -346,6 +382,7 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::NotFound,
                 source: err.into(),
+                enforced_rules: Vec::new(),
             }
         }
 
@@ -353,6 +390,7 @@ pub mod tagged {
             Self {
                 error_type: ToolErrorType::Timeout,
                 source: err.into(),
+                enforced_rules: Vec::new(),
             }
         }
     }
@@ -371,16 +409,20 @@ pub mod tagged {
 
     impl Tagged {
         /// Extracts the error type and message from this tagged error.
-        pub fn into_parts(self) -> (ToolErrorType, String) {
-            (self.error_type.clone(), self.source.to_string())
+        pub fn into_parts(self) -> (ToolErrorType, String, Vec<String>) {
+            (
+                self.error_type.clone(),
+                self.source.to_string(),
+                self.enforced_rules,
+            )
         }
     }
 }
 
 impl From<tagged::Tagged> for ToolError {
     fn from(tagged: tagged::Tagged) -> Self {
-        let (error_type, message) = tagged.into_parts();
-        match error_type {
+        let (error_type, message, enforced_rules) = tagged.into_parts();
+        let err = match error_type {
             ToolErrorType::Validation => Self::validation(message, None::<String>),
             ToolErrorType::Permission => Self::permission(message),
             ToolErrorType::Resource => Self::resource(message, None::<String>),
@@ -390,7 +432,8 @@ impl From<tagged::Tagged> for ToolError {
             ToolErrorType::QuotaExceeded => Self::quota_exceeded(message, None::<String>),
             ToolErrorType::NotFound => Self::not_found(message, None::<String>),
             ToolErrorType::Timeout => Self::timeout(message, None::<String>),
-        }
+        };
+        err.with_enforced_rules(enforced_rules)
     }
 }
 

@@ -2,6 +2,7 @@
 //!
 //! Helpers for persisting and loading agent reevaluation state.
 
+use autonoetic_types::tool_error::tagged;
 use crate::policy::PolicyEngine;
 use crate::runtime::tools::NativeToolRegistry;
 use autonoetic_types::agent::AgentManifest;
@@ -61,10 +62,15 @@ pub fn execute_scheduled_action(
                 !path.starts_with('/') && !path.split('/').any(|part| part == ".."),
                 "scheduled file path must stay within the agent directory"
             );
-            anyhow::ensure!(
-                policy.can_write_path(path),
-                "scheduled file write denied by WriteAccess policy"
-            );
+            let write_decision = policy.can_write_path(path);
+            if !write_decision.is_allowed() {
+                return Err(anyhow::Error::from(
+                    tagged::Tagged::permission_with_rules(
+                        anyhow::anyhow!("scheduled file write denied by WriteAccess policy"),
+                        write_decision.enforced_rules.iter().map(|s| s.to_string()).collect(),
+                    )
+                ));
+            }
             let target = agent_dir.join(path);
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;

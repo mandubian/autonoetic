@@ -393,6 +393,18 @@ impl SessionTracer {
                 .and_then(|v| v.get("target"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let enforced_rules = payload
+                .as_ref()
+                .and_then(|v| v.get("enforced_rules"))
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<String>>()
+                })
+                .filter(|items| !items.is_empty())
+                .unwrap_or_else(autonoetic_types::causal_chain::default_enforced_rules);
 
             if let Err(e) =
                 store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
@@ -405,6 +417,7 @@ impl SessionTracer {
                     category: category.to_string(),
                     action: action.to_string(),
                     status: status.to_string(),
+                    enforced_rules,
                     target,
                     payload: payload_str.clone(),
                     payload_ref,
@@ -683,12 +696,26 @@ impl SessionTracer {
         result: &str,
         approval_ref: Option<&str>,
     ) -> anyhow::Result<String> {
+        let parsed_result = serde_json::from_str::<serde_json::Value>(result).ok();
         let mut completed_payload = serde_json::json!({
             "tool_name": tool_name,
             "result_len": result.len(),
             "result_sha256": sha256_hex(result),
             "result_preview": redact_text_for_logs(&truncate_for_log(result, TOOL_RESULT_PREVIEW_MAX_CHARS))
         });
+        if let Some(enforced_rules) = parsed_result
+            .as_ref()
+            .and_then(|v| v.get("enforced_rules"))
+            .and_then(|v| v.as_array())
+        {
+            let rule_ids: Vec<String> = enforced_rules
+                .iter()
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect();
+            if !rule_ids.is_empty() {
+                completed_payload["enforced_rules"] = serde_json::json!(rule_ids);
+            }
+        }
         if let Some(approval_id) = find_approval_request_id_in_result(result) {
             completed_payload["approval_request_id"] = serde_json::json!(approval_id);
         }
@@ -725,7 +752,7 @@ impl SessionTracer {
             if let Some(w) = &self.live_digest {
                 let mut guard = w.lock().unwrap();
                 let formatted = format_tool_digest_result(tool_name, result);
-                let parsed = serde_json::from_str::<serde_json::Value>(result).ok();
+                let parsed = parsed_result.clone();
                 let ok = parsed
                     .as_ref()
                     .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))

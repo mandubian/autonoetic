@@ -408,7 +408,7 @@ fn execute_duckduckgo_search(
     timeout_secs: u64,
 ) -> anyhow::Result<WebSearchResponse> {
     let engine_host = extract_host(&engine_url)?;
-    if !policy.can_connect_net(&engine_host) {
+    if !policy.can_connect_net(&engine_host).is_allowed() {
         return Err(anyhow::Error::from(tagged::Tagged::permission(
             anyhow::anyhow!(
                 "Permission Denied: NetworkAccess does not allow host '{}'",
@@ -493,7 +493,7 @@ fn execute_google_search(
     timeout_secs: u64,
 ) -> anyhow::Result<WebSearchResponse> {
     let engine_host = extract_host(&engine_url)?;
-    if !policy.can_connect_net(&engine_host) {
+    if !policy.can_connect_net(&engine_host).is_allowed() {
         return Err(anyhow::Error::from(tagged::Tagged::permission(
             anyhow::anyhow!(
                 "Permission Denied: NetworkAccess does not allow host '{}'",
@@ -857,7 +857,7 @@ impl NativeTool for WebFetchTool {
 
         anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
         let host = extract_host(&args.url)?;
-        if !policy.can_connect_net(&host) {
+        if !policy.can_connect_net(&host).is_allowed() {
             return Err(anyhow::Error::from(tagged::Tagged::permission(
                 anyhow::anyhow!(
                     "Permission Denied: NetworkAccess does not allow host '{}'",
@@ -1025,7 +1025,7 @@ impl NativeTool for WebCallTool {
 
         anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
         let host = extract_host(&args.url)?;
-        if !policy.can_connect_net(&host) {
+        if !policy.can_connect_net(&host).is_allowed() {
             return Err(anyhow::Error::from(tagged::Tagged::permission(
                 anyhow::anyhow!(
                     "Permission Denied: NetworkAccess does not allow host '{}'",

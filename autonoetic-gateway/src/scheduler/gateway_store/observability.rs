@@ -80,8 +80,8 @@ impl GatewayStore {
         conn.execute(
             "INSERT INTO causal_events (
                 event_id, agent_id, session_id, turn_id, event_seq, timestamp,
-                category, action, status, target, payload, payload_ref, evidence_ref, reason
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                category, action, status, enforced_rules, target, payload, payload_ref, evidence_ref, reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 &event.event_id,
                 &event.agent_id,
@@ -92,6 +92,7 @@ impl GatewayStore {
                 &event.category,
                 &event.action,
                 &event.status,
+                serde_json::to_string(&event.enforced_rules)?,
                 event.target.as_deref(),
                 event.payload.as_deref(),
                 event.payload_ref.as_deref(),
@@ -134,7 +135,7 @@ impl GatewayStore {
         };
 
         let query = format!(
-            "SELECT * FROM causal_events WHERE {} ORDER BY timestamp DESC LIMIT ?{}",
+            "SELECT event_id, agent_id, session_id, turn_id, event_seq, timestamp, category, action, status, enforced_rules, target, payload, payload_ref, evidence_ref, reason FROM causal_events WHERE {} ORDER BY timestamp DESC LIMIT ?{}",
             where_clause, param_idx
         );
 
@@ -142,24 +143,32 @@ impl GatewayStore {
         let mut params_with_limit = params.clone();
         params_with_limit.push(rusqlite::types::Value::Integer(limit));
 
-        let rows = stmt.query_map(rusqlite::params_from_iter(params_with_limit), |row| {
-            Ok(autonoetic_types::causal_chain::CausalEventRecord {
-                event_id: row.get(0)?,
-                agent_id: row.get(1)?,
-                session_id: row.get(2)?,
-                turn_id: row.get(3)?,
-                event_seq: row.get::<_, i64>(4)? as u64,
-                timestamp: row.get(5)?,
-                category: row.get(6)?,
-                action: row.get(7)?,
-                status: row.get(8)?,
-                target: row.get(9)?,
-                payload: row.get(10)?,
-                payload_ref: row.get(11)?,
-                evidence_ref: row.get(12)?,
-                reason: row.get(13)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params_with_limit.iter()),
+            |row| {
+                let enforced_rules_json: String = row.get(9)?;
+                let enforced_rules = Some(enforced_rules_json.as_str())
+                    .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+                    .unwrap_or_else(autonoetic_types::causal_chain::default_enforced_rules);
+                Ok(autonoetic_types::causal_chain::CausalEventRecord {
+                    event_id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    session_id: row.get(2)?,
+                    turn_id: row.get(3)?,
+                    event_seq: row.get::<_, i64>(4)? as u64,
+                    timestamp: row.get(5)?,
+                    category: row.get(6)?,
+                    action: row.get(7)?,
+                    status: row.get(8)?,
+                    enforced_rules,
+                    target: row.get(10)?,
+                    payload: row.get(11)?,
+                    payload_ref: row.get(12)?,
+                    evidence_ref: row.get(13)?,
+                    reason: row.get(14)?,
+                })
+            },
+        )?;
 
         let mut results = Vec::new();
         for r in rows {

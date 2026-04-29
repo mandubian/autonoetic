@@ -1295,7 +1295,7 @@ impl AgentExecutor {
                 let mut t: Vec<ToolDefinition> = mcp_runtime
                     .tool_definitions()?
                     .into_iter()
-                    .filter(|def| policy.can_invoke_tool(&def.name))
+                    .filter(|def| policy.can_invoke_tool(&def.name).is_allowed())
                     .filter(|def| tier_filter.allows(&def.name))
                     .collect();
                 t.extend(

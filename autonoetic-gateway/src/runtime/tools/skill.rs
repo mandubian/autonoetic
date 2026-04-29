@@ -103,7 +103,7 @@ impl NativeTool for SkillInstallTool {
 
         // ── 2. Policy: SkillInstall capability must permit this URL host ──────
         let url_host = extract_host(&args.url)?;
-        if !policy.can_install_skill(&url_host) {
+        if !policy.can_install_skill(&url_host).is_allowed() {
             return Ok(serde_json::json!({
                 "ok": false,
                 "error": format!(

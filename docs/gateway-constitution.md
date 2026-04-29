@@ -95,7 +95,7 @@ form the social contract.
 |---|---|---|---|---|
 | Ri-0.1 | Every agent may inspect its own currently-active capabilities, budget state, pending approvals, spawn depth, and session lineage at any turn boundary. | An agent that cannot see its own state cannot reason safely about what it may do next. | R++1 signed state attestation (planned) | PARTIAL |
 | Ri-0.2 | Every agent may read its own causal chain and execution trace. The gateway does not hide actions taken on the agent's behalf. | Audit is not a privilege of operators; it is a right of the subject. | `observability.*` tools | ENFORCED |
-| Ri-0.3 | Every rejection names the rule ID that caused it. No agent is ever told "denied" without being told why. | Rejection without explanation is indistinguishable from arbitrary authority. The constitutional test: if you were denied, you can look up which rule you ran into. | R+++3 causal rule-ID references (planned); partially present via uniform error envelope | PARTIAL |
+| Ri-0.3 | Every rejection names the rule ID that caused it. No agent is ever told "denied" without being told why. | Rejection without explanation is indistinguishable from arbitrary authority. The constitutional test: if you were denied, you can look up which rule you ran into. | `causal_events.enforced_rules` persisted on every decision event (`session_tracer`, gateway-store migration v20); key denial paths carry rule IDs; remaining paths (scheduler, evaluation, write-path) still use untagged errors | PARTIAL |
 | Ri-0.4 | Every agent knows its budget balances truthfully and in real time. Consumption is never silent. | A budget is a guarantee of a finite resource. Silent consumption is theft. | `runtime/session_budget.rs`; surfaced via R++1 attestation | PARTIAL |
 | Ri-0.5 | An agent placed in degraded mode (R++6) is told it is degraded, with the rule ID and evidence that triggered the transition, before its next turn executes. | Degradation without notice leaves the agent reasoning as if still healthy — a direct violation of responsibility. | R++6 degraded mode (planned) | MISSING |
 | Ri-0.6 | Capabilities declared in an agent's manifest are not silently reduced mid-session. Any narrowing is either (a) a declared side effect of a rule in this document, or (b) explicit operator action recorded in the causal chain. | Capabilities are the grammar of agent freedom. Silent reduction invalidates any plan built on them. | manifest-as-source-of-truth; needs explicit pin | PARTIAL |
@@ -452,7 +452,7 @@ These are properties that span categories and must hold end-to-end.
   if present.
 - **I-6** Every enforcement decision is attributable to a rule ID in
   the causal chain. A decision without a rule reference is a gap by
-  construction. (R+++3)
+  construction. (R+++3, ENFORCED)
 - **I-7** Rights (§0) supersede rules (§1–§11) on conflict. A rule
   that cannot be enforced without violating a right must be amended,
   not the right weakened. The gateway escalates conflicts to the

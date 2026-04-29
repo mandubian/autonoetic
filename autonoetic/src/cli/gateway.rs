@@ -508,6 +508,7 @@ pub async fn handle_gateway_grants(
                 category: "grant_revocation".to_string(),
                 action: "revoke_grants".to_string(),
                 status: "completed".to_string(),
+                enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
                 target: host.clone(),
                 payload: Some(serde_json::json!({
                     "reason": reason_text,

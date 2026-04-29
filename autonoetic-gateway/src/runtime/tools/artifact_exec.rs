@@ -246,9 +246,9 @@ impl NativeTool for ArtifactExecTool {
         }
 
         let command = build_command(entrypoint, &args.args);
-        let (allowed, analysis) = policy.can_exec_shell_detailed(&command);
-        if !allowed {
-            let reason = match &analysis {
+        let decision = policy.can_exec_shell_detailed(&command);
+        if !decision.is_allowed() {
+            let reason = match decision.security_analysis.as_ref() {
                 Some(a) if !a.threats.is_empty() => {
                     format!(
                         "artifact exec denied by security policy: {}",

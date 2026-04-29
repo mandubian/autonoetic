@@ -9,6 +9,7 @@ use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
 use autonoetic_types::config::{GatewayConfig, SchemaEnforcementConfig, SchemaEnforcementMode};
 use autonoetic_types::schema_enforcement::{default_enforcer, EnforcementResult, SchemaEnforcer};
+use autonoetic_types::tool_error::tagged;
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowEventRecord};
 use chrono::Utc;
 use serde::{de, Deserialize, Serialize};
@@ -1035,15 +1036,23 @@ impl NativeTool for AgentMessageTool {
         // Fast capability check against policy using the provided agent ID if available,
         // else fallback to parsing bounded capability scope or checking patterns runtime.
         if let Some(ref tid) = args.target_agent_id {
-            if !policy.can_message_agent(tid) {
-                return Err(anyhow::anyhow!(
-                    "Permission denied: cannot message agent '{}'",
-                    tid
-                ));
+            let decision = policy.can_message_agent(tid);
+            if !decision.is_allowed() {
+                return Err(tagged::Tagged::permission_with_rules(
+                    anyhow::anyhow!("Permission denied: cannot message agent '{}'", tid),
+                    decision
+                        .enforced_rules
+                        .into_iter()
+                        .map(|rule| rule.to_string())
+                        .collect(),
+                )
+                .into());
             }
         } else {
             // For target_session_id, verify broadly if capability exists
-            if !policy.can_message_agent("*") && !policy.can_message_agent("any") {
+            if !policy.can_message_agent("*").is_allowed()
+                && !policy.can_message_agent("any").is_allowed()
+            {
                 // Technically we'd look up target_session_id's agent, but for now we require broad msg right or specific target_agent_id
             }
         }
@@ -1275,6 +1284,7 @@ fn log_io_contract_enforcement(
         category: "contract".to_string(),
         action: action.to_string(),
         status: status.to_string(),
+        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
         target: target.map(ToOwned::to_owned),
         payload: payload_str,
         payload_ref: None,
