@@ -809,6 +809,7 @@ pub mod approval;
 pub mod artifact;
 pub mod artifact_exec;
 pub mod artifact_prepare;
+pub mod constitution;
 pub mod content;
 pub mod credential;
 pub mod digest;
@@ -861,6 +862,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::scheduler::register_tools(&mut registry);
     crate::runtime::tools::skill::register_tools(&mut registry);
     crate::runtime::tools::admin_proposal::register_tools(&mut registry);
+    crate::runtime::tools::constitution::register_tools(&mut registry);
     registry
 }
 

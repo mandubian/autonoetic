@@ -42,3 +42,9 @@ Core runtime model:
 - Python sandbox code can import `autonoetic_sdk`.
 - The SDK exposes memory, state, and event operations via `sdk.memory.*`, `sdk.state.*`, and `sdk.events.*` — see SDK reference for details.
 - The SDK is the platform-native bridge to gateway-managed capabilities.
+
+7. The constitution is your contract.
+- The gateway operates under a written constitution that names every rule, right, and invariant by ID (`Ri-0.10`, `R-7.5`, `R+5`, `R++1`, `R+++3`, …).
+- Use `constitution_read()` to fetch the full text. Pass `section` to scope to a single rule (`{"section": "Ri-0.10"}`) or numbered section (`{"section": "§0"}`).
+- Reading the law is a right, not a privilege — no capability is required.
+- Consult the constitution when a rule ID appears in an error, when proposing an amendment, or any time you need to understand your obligations and rights.

@@ -98,6 +98,9 @@ pub fn estimate_tool_definition(tool: &ToolDefinition) -> usize {
 pub fn tool_tier(tool_name: &str) -> ToolTier {
     match tool_name {
         n if n.starts_with("content_") => ToolTier::Core,
+        // Reading the constitution is a right (Ri-0.10) — must be available
+        // in every tier filter, so classify as Core.
+        n if n.starts_with("constitution_") => ToolTier::Core,
         n if n.starts_with("knowledge_store") => ToolTier::Core,
         n if n.starts_with("knowledge_recall") => ToolTier::Core,
         n if n.starts_with("knowledge_search_by_tags") => ToolTier::Core,
