@@ -88,8 +88,11 @@ impl NativeTool for SchedulerCronCreateTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_create").is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.create").to_error_response());
+        let decision = policy.can_schedule("scheduler_cron_create");
+        if !decision.is_allowed() {
+            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.create")
+                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
+                .to_error_response());
         }
 
         let cron = cron_parser::parse_schedule(&args.schedule_expr)
@@ -307,8 +310,11 @@ impl NativeTool for SchedulerCronListTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_list").is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.list").to_error_response());
+        let decision = policy.can_schedule("scheduler_cron_list");
+        if !decision.is_allowed() {
+            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.list")
+                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
+                .to_error_response());
         }
 
         let jobs =
@@ -406,8 +412,11 @@ impl NativeTool for SchedulerCronPauseTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_pause").is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.pause").to_error_response());
+        let decision = policy.can_schedule("scheduler_cron_pause");
+        if !decision.is_allowed() {
+            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.pause")
+                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
+                .to_error_response());
         }
 
         let job = store.get_scheduled_job(&args.job_id)?;
@@ -490,8 +499,11 @@ impl NativeTool for SchedulerCronResumeTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_resume").is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.resume").to_error_response());
+        let decision = policy.can_schedule("scheduler_cron_resume");
+        if !decision.is_allowed() {
+            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.resume")
+                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
+                .to_error_response());
         }
 
         let job = store.get_scheduled_job(&args.job_id)?;
@@ -576,8 +588,11 @@ impl NativeTool for SchedulerCronCancelTool {
             return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
         };
 
-        if !policy.can_schedule("scheduler_cron_cancel").is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.cancel").to_error_response());
+        let decision = policy.can_schedule("scheduler_cron_cancel");
+        if !decision.is_allowed() {
+            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.cancel")
+                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
+                .to_error_response());
         }
 
         let job = store.get_scheduled_job(&args.job_id)?;
