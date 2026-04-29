@@ -854,7 +854,17 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                 }
                 _ => "sandbox command denied by CodeExecution policy".to_string(),
             };
-            anyhow::bail!(reason);
+            return Err(
+                tagged::Tagged::permission_with_rules(
+                    anyhow::anyhow!(reason),
+                    decision
+                        .enforced_rules
+                        .into_iter()
+                        .map(|rule| rule.to_string())
+                        .collect(),
+                )
+                .into(),
+            );
         }
 
         let mut artifact_analysis_override: Option<

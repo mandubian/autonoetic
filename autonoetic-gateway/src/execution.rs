@@ -19,6 +19,7 @@ use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
 use autonoetic_types::background::{ScheduledAction, UserInteraction, UserInteractionStatus};
 use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::tool_error::tagged;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -435,11 +436,18 @@ impl GatewayExecutionService {
             let loaded =
                 repo.get_sync_from_store(aid, &gateway_dir, self.gateway_store.as_deref())?;
             let policy = crate::policy::PolicyEngine::new(loaded.manifest);
-            anyhow::ensure!(
-                policy.can_request_emergency_stop().is_allowed(),
-                "Permission Denied: agent '{}' cannot request emergency stop",
-                aid
-            );
+            let decision = policy.can_request_emergency_stop();
+            if !decision.is_allowed() {
+                return Err(tagged::Tagged::permission_with_rules(
+                    anyhow::anyhow!("Permission Denied: agent '{}' cannot request emergency stop", aid),
+                    decision
+                        .enforced_rules
+                        .into_iter()
+                        .map(|rule| rule.to_string())
+                        .collect(),
+                )
+                .into());
+            }
         }
 
         let stop_id = format!("estop-{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -712,12 +720,22 @@ impl GatewayExecutionService {
                     let source_policy = crate::policy::PolicyEngine::new(source_loaded.manifest);
 
                     if is_message {
-                        anyhow::ensure!(
-                            source_policy.can_message_agent(agent_id).is_allowed(),
-                            "Permission Denied: Source agent '{}' lacks 'AgentMessage' capability to message '{}'",
-                            source_id,
-                            agent_id
-                        );
+                        let decision = source_policy.can_message_agent(agent_id);
+                        if !decision.is_allowed() {
+                            return Err(tagged::Tagged::permission_with_rules(
+                                anyhow::anyhow!(
+                                    "Permission Denied: Source agent '{}' lacks 'AgentMessage' capability to message '{}'",
+                                    source_id,
+                                    agent_id
+                                ),
+                                decision
+                                    .enforced_rules
+                                    .into_iter()
+                                    .map(|rule| rule.to_string())
+                                    .collect(),
+                            )
+                            .into());
+                        }
                     } else {
                         let spawn_limit = source_policy.spawn_agent_limit().ok_or_else(|| {
                             anyhow::anyhow!(

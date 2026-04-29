@@ -2069,10 +2069,10 @@ fn test_can_evaluate_suite_publish_matches_suite_name_prefix() {
     }]);
     let policy = PolicyEngine::new(manifest);
 
-    assert!(policy.can_evaluate_suite_publish("suite-basic-planner"));
-    assert!(policy.can_evaluate_suite_publish("suite-basic-"));
-    assert!(!policy.can_evaluate_suite_publish("suite-advanced"));
-    assert!(!policy.can_evaluate_suite_publish("other-suite"));
+    assert!(policy.can_evaluate_suite_publish("suite-basic-planner").is_allowed());
+    assert!(policy.can_evaluate_suite_publish("suite-basic-").is_allowed());
+    assert!(!policy.can_evaluate_suite_publish("suite-advanced").is_allowed());
+    assert!(!policy.can_evaluate_suite_publish("other-suite").is_allowed());
 }
 
 #[test]
@@ -2082,8 +2082,8 @@ fn test_can_evaluate_suite_publish_wildcard() {
     }]);
     let policy = PolicyEngine::new(manifest);
 
-    assert!(policy.can_evaluate_suite_publish("any-suite-name"));
-    assert!(policy.can_evaluate_suite_publish("suite-x"));
+    assert!(policy.can_evaluate_suite_publish("any-suite-name").is_allowed());
+    assert!(policy.can_evaluate_suite_publish("suite-x").is_allowed());
 }
 
 #[test]
@@ -2093,9 +2093,15 @@ fn test_can_evaluate_suite_matches_suite_or_agent() {
     }]);
     let policy = PolicyEngine::new(manifest);
 
-    assert!(policy.can_evaluate_suite("planner-suite", "other-agent"));
-    assert!(policy.can_evaluate_suite("other-suite", "planner-agent"));
-    assert!(!policy.can_evaluate_suite("other-suite", "other-agent"));
+    assert!(policy
+        .can_evaluate_suite("planner-suite", "other-agent")
+        .is_allowed());
+    assert!(policy
+        .can_evaluate_suite("other-suite", "planner-agent")
+        .is_allowed());
+    assert!(!policy
+        .can_evaluate_suite("other-suite", "other-agent")
+        .is_allowed());
 }
 
 #[test]
@@ -2105,8 +2111,8 @@ fn test_can_evaluate_suite_empty_subject_agent_still_matches_suite() {
     }]);
     let policy = PolicyEngine::new(manifest);
 
-    assert!(policy.can_evaluate_suite("suite-abc", ""));
-    assert!(!policy.can_evaluate_suite("other-abc", ""));
+    assert!(policy.can_evaluate_suite("suite-abc", "").is_allowed());
+    assert!(!policy.can_evaluate_suite("other-abc", "").is_allowed());
 }
 
 // ─────────────────────────────────────────────────────────────────────

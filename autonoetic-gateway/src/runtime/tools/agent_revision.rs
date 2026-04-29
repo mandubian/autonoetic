@@ -11,6 +11,7 @@ use autonoetic_types::config::{CapabilityDeltaGateMode, GatewayConfig};
 use autonoetic_types::runtime_lock::{
     LockedArtifact, LockedDependencySet, LockedLayerMount, RuntimeLock,
 };
+use autonoetic_types::tool_error::tagged;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -703,12 +704,22 @@ impl NativeTool for AgentRevisionCreateTool {
             !args.artifact_id.trim().is_empty(),
             "artifact_id must not be empty"
         );
-        anyhow::ensure!(
-            policy.can_agent_revision(&args.agent_id).is_allowed(),
-            "Permission Denied: agent '{}' lacks AgentRevision capability for '{}'",
-            manifest.agent.id,
-            args.agent_id
-        );
+        let decision = policy.can_agent_revision(&args.agent_id);
+        if !decision.is_allowed() {
+            return Err(tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(
+                    "Permission Denied: agent '{}' lacks AgentRevision capability for '{}'",
+                    manifest.agent.id,
+                    args.agent_id
+                ),
+                decision
+                    .enforced_rules
+                    .into_iter()
+                    .map(|rule| rule.to_string())
+                    .collect(),
+            )
+            .into());
+        }
         let Some(gateway_store) = gateway_store else {
             return Err(anyhow::anyhow!(
                 "GatewayStore is required for revision creation"
@@ -933,12 +944,22 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             !args.description.trim().is_empty(),
             "description must not be empty"
         );
-        anyhow::ensure!(
-            policy.can_agent_revision(&args.agent_id).is_allowed(),
-            "Permission Denied: agent '{}' lacks AgentRevision capability for '{}'",
-            manifest.agent.id,
-            args.agent_id
-        );
+        let decision = policy.can_agent_revision(&args.agent_id);
+        if !decision.is_allowed() {
+            return Err(tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(
+                    "Permission Denied: agent '{}' lacks AgentRevision capability for '{}'",
+                    manifest.agent.id,
+                    args.agent_id
+                ),
+                decision
+                    .enforced_rules
+                    .into_iter()
+                    .map(|rule| rule.to_string())
+                    .collect(),
+            )
+            .into());
+        }
         // Explicit reasoning mode must always declare llm_config, regardless of artifact shape.
         if matches!(args.execution_mode, Some(ExecutionMode::Reasoning))
             && args.llm_config.is_none()
@@ -1319,11 +1340,21 @@ impl NativeTool for AgentRevisionListTool {
 
         if let Some(agent_id) = &args.agent_id {
             crate::runtime::tools::validate_agent_id(agent_id)?;
-            anyhow::ensure!(
-                policy.can_agent_revision(agent_id).is_allowed(),
-                "Permission Denied: missing AgentRevision capability for '{}'",
-                agent_id
-            );
+            let decision = policy.can_agent_revision(agent_id);
+            if !decision.is_allowed() {
+                return Err(tagged::Tagged::permission_with_rules(
+                    anyhow::anyhow!(
+                        "Permission Denied: missing AgentRevision capability for '{}'",
+                        agent_id
+                    ),
+                    decision
+                        .enforced_rules
+                        .into_iter()
+                        .map(|rule| rule.to_string())
+                        .collect(),
+                )
+                .into());
+            }
         }
 
         let revisions = if let Some(agent_id) = &args.agent_id {
@@ -1434,11 +1465,21 @@ impl NativeTool for AgentRevisionInspectTool {
         let rev = gateway_store
             .get_agent_revision(&revision_id)?
             .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", revision_id))?;
-        anyhow::ensure!(
-            policy.can_agent_revision(&rev.agent_id).is_allowed(),
-            "Permission Denied: missing AgentRevision capability for '{}'",
-            rev.agent_id
-        );
+        let decision = policy.can_agent_revision(&rev.agent_id);
+        if !decision.is_allowed() {
+            return Err(tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(
+                    "Permission Denied: missing AgentRevision capability for '{}'",
+                    rev.agent_id
+                ),
+                decision
+                    .enforced_rules
+                    .into_iter()
+                    .map(|rule| rule.to_string())
+                    .collect(),
+            )
+            .into());
+        }
 
         let short_ref = format!("{}@rev_{}", rev.agent_id, rev.short_id);
         Ok(serde_json::json!({
@@ -1524,11 +1565,21 @@ impl NativeTool for AgentRevisionPromoteTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
 
         crate::runtime::tools::validate_agent_id(&args.agent_id)?;
-        anyhow::ensure!(
-            policy.can_agent_revision(&args.agent_id).is_allowed(),
-            "Permission Denied: missing AgentRevision capability for '{}'",
-            args.agent_id
-        );
+        let decision = policy.can_agent_revision(&args.agent_id);
+        if !decision.is_allowed() {
+            return Err(tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(
+                    "Permission Denied: missing AgentRevision capability for '{}'",
+                    args.agent_id
+                ),
+                decision
+                    .enforced_rules
+                    .into_iter()
+                    .map(|rule| rule.to_string())
+                    .collect(),
+            )
+            .into());
+        }
 
         let Some(gateway_store) = gateway_store else {
             return Err(anyhow::anyhow!("GatewayStore is required"));
@@ -1815,11 +1866,21 @@ impl NativeTool for AgentRevisionRollbackTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
 
         crate::runtime::tools::validate_agent_id(&args.agent_id)?;
-        anyhow::ensure!(
-            policy.can_agent_revision(&args.agent_id).is_allowed(),
-            "Permission Denied: missing AgentRevision capability for '{}'",
-            args.agent_id
-        );
+        let decision = policy.can_agent_revision(&args.agent_id);
+        if !decision.is_allowed() {
+            return Err(tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(
+                    "Permission Denied: missing AgentRevision capability for '{}'",
+                    args.agent_id
+                ),
+                decision
+                    .enforced_rules
+                    .into_iter()
+                    .map(|rule| rule.to_string())
+                    .collect(),
+            )
+            .into());
+        }
 
         let Some(gateway_store) = gateway_store else {
             return Err(anyhow::anyhow!("GatewayStore is required"));
@@ -1976,12 +2037,32 @@ impl NativeTool for AgentRevisionDiffTool {
             &args.to_ref,
             gateway_store.as_ref(),
         )?;
-        anyhow::ensure!(
-            policy.can_agent_revision(&from_ref.agent_id).is_allowed()
-                && policy.can_agent_revision(&to_ref.agent_id).is_allowed(),
-            "Permission Denied: agent '{}' lacks AgentRevision capability for requested targets",
-            manifest.agent.id
-        );
+        let from_decision = policy.can_agent_revision(&from_ref.agent_id);
+        let to_decision = policy.can_agent_revision(&to_ref.agent_id);
+        if !from_decision.is_allowed() || !to_decision.is_allowed() {
+            let mut enforced_rules: Vec<String> = from_decision
+                .enforced_rules
+                .into_iter()
+                .map(|rule| rule.to_string())
+                .collect();
+            for rule in to_decision
+                .enforced_rules
+                .into_iter()
+                .map(|rule| rule.to_string())
+            {
+                if !enforced_rules.contains(&rule) {
+                    enforced_rules.push(rule);
+                }
+            }
+            return Err(tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(
+                    "Permission Denied: agent '{}' lacks AgentRevision capability for requested targets",
+                    manifest.agent.id
+                ),
+                enforced_rules,
+            )
+            .into());
+        }
 
         let from_dir = gateway_dir
             .join("revisions")
