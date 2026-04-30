@@ -619,6 +619,38 @@ where
     }
 }
 
+pub fn deserialize_string_map_values_lenient<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(std::collections::HashMap::new()),
+        serde_json::Value::Object(map) => {
+            let mut out = std::collections::HashMap::with_capacity(map.len());
+            for (key, value) in map {
+                let value = match value {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Null => {
+                        return Err(Error::custom(format!(
+                            "expected string, got null for key '{}'",
+                            key
+                        )));
+                    }
+                    other => other.to_string(),
+                };
+                out.insert(key, value);
+            }
+            Ok(out)
+        }
+        other => Err(Error::custom(format!("expected object, got {}", other))),
+    }
+}
+
 /// Accept a boolean, integer, or common string representations of truthiness.
 pub fn deserialize_bool_lenient<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
@@ -1206,6 +1238,47 @@ mod tests {
         }
         let args: Args = serde_json::from_str(r#"{"message": 42}"#).unwrap();
         assert_eq!(args.message, "42");
+    }
+
+    #[test]
+    fn test_deserialize_string_map_values_lenient_stringifies_nested_values() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(deserialize_with = "deserialize_string_map_values_lenient")]
+            env: std::collections::HashMap<String, String>,
+        }
+
+        let args: Args = serde_json::from_str(
+            r#"{"env":{"AUTONOETIC_INPUT":{"location":"Paris","date":"tomorrow"},"FLAG":true,"COUNT":3}}"#,
+        )
+        .unwrap();
+
+        let nested = args.env.get("AUTONOETIC_INPUT").expect("env var should exist");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(nested).unwrap(),
+            serde_json::json!({"location": "Paris", "date": "tomorrow"})
+        );
+        assert_eq!(args.env.get("FLAG").map(String::as_str), Some("true"));
+        assert_eq!(args.env.get("COUNT").map(String::as_str), Some("3"));
+    }
+
+    #[test]
+    fn test_deserialize_string_map_values_lenient_preserves_plain_strings() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(deserialize_with = "deserialize_string_map_values_lenient")]
+            env: std::collections::HashMap<String, String>,
+        }
+
+        let args: Args = serde_json::from_str(
+            r#"{"env":{"AUTONOETIC_INPUT":"{\"location\":\"Paris\",\"date\":\"tomorrow\"}"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            args.env.get("AUTONOETIC_INPUT").map(String::as_str),
+            Some(r#"{"location":"Paris","date":"tomorrow"}"#)
+        );
     }
 
     #[test]

@@ -46,41 +46,6 @@ fn strip_gemma_token_artifacts(s: &str) -> String {
     .to_string()
 }
 
-fn fix_stringified_json_values(raw: &str) -> String {
-    let Ok(mut val) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return raw.to_string();
-    };
-    fix_stringified_values_recursive(&mut val);
-    serde_json::to_string(&val).unwrap_or_else(|_| raw.to_string())
-}
-
-fn fix_stringified_values_recursive(val: &mut serde_json::Value) {
-    match val {
-        serde_json::Value::Object(map) => {
-            for v in map.values_mut() {
-                if let serde_json::Value::String(s) = v {
-                    let trimmed = s.trim();
-                    if (trimmed.starts_with('[') && trimmed.ends_with(']'))
-                        || (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                    {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            *v = parsed;
-                            continue;
-                        }
-                    }
-                }
-                fix_stringified_values_recursive(v);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                fix_stringified_values_recursive(v);
-            }
-        }
-        _ => {}
-    }
-}
-
 impl<'a> ToolCallProcessor<'a> {
     fn canonical_tool_name(name: &str) -> &str {
         match name {
@@ -305,7 +270,6 @@ impl<'a> ToolCallProcessor<'a> {
         let policy = crate::policy::PolicyEngine::new(self.manifest.clone());
 
         let sanitized_args = strip_gemma_token_artifacts(&tc.arguments);
-        let sanitized_args = fix_stringified_json_values(&sanitized_args);
 
         let mut result = if self.mcp_runtime.has_tool(tool_name) {
             let tool_policy = policy.can_invoke_tool(tool_name);
@@ -426,7 +390,6 @@ fn tool_result_requires_approval(result: &str) -> bool {
 
 fn validate_tool_intent(tool_name: &str, arguments_json: &str) -> Result<Option<String>, ToolError> {
     let sanitized_args = strip_gemma_token_artifacts(arguments_json);
-    let sanitized_args = fix_stringified_json_values(&sanitized_args);
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&sanitized_args) else {
         return Ok(None);
     };

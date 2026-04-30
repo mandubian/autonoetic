@@ -73,6 +73,7 @@ impl NativeTool for ContentWriteTool {
         #[derive(Deserialize)]
         struct Args {
             name: String,
+            #[serde(deserialize_with = "crate::runtime::tools::deserialize_string_lenient")]
             content: String,
             #[serde(default)]
             visibility: Option<String>,

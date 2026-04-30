@@ -32,7 +32,7 @@ struct ArtifactExecArgs {
     entrypoint: String,
     #[serde(default)]
     args: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::runtime::tools::deserialize_string_map_values_lenient")]
     env: std::collections::HashMap<String, String>,
     #[serde(default)]
     approval_ref: Option<String>,

@@ -1219,6 +1219,13 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
+    let content_width = area.width.saturating_sub(1).max(1) as usize;
+    let effective_scroll = app.effective_scroll_offset();
+    // ratatui Paragraph::scroll uses u16. Keep a moving visual window so
+    // very long transcripts still follow live output instead of wrapping.
+    let visual_window_start = effective_scroll.saturating_sub(u16::MAX as usize);
+    let mut render_base_visual_row: Option<usize> = None;
+    let mut visual_row: usize = 0;
     // `row` is the absolute content-line index (0 = very first line of all messages).
     let mut row: usize = 0;
 
@@ -1247,12 +1254,15 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 
         for (i, text_line) in msg.content.lines().enumerate() {
             let prefix = if i == 0 { icon } else { "  " };
+            let visual_line_count = wrapped_visual_line_count(prefix, text_line, content_width);
+            let visual_line_end = visual_row.saturating_add(visual_line_count);
+            let include_line = visual_line_end > visual_window_start;
 
             // Compare content row against selection bounds.
             let is_selected =
                 row >= content_sel_top && row <= content_sel_bot && content_sel_top != usize::MAX;
 
-            if is_selected {
+            if include_line && is_selected {
                 // For selected lines, render with highlight.
                 // Column bounds only apply at the first and last selected lines.
                 let sel_col_start = if row == content_sel_top {
@@ -1309,37 +1319,61 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                 }
 
                 lines.push(Line::from(spans));
-            } else {
+            } else if include_line {
                 lines.push(Line::from(vec![
                     Span::raw(prefix),
                     Span::styled(text_line.to_string(), style),
                 ]));
             }
 
+            if include_line && render_base_visual_row.is_none() {
+                render_base_visual_row = Some(visual_row);
+            }
+
+            visual_row = visual_line_end;
             row = row.saturating_add(1);
         }
-        lines.push(Line::raw(""));
+        let include_blank = visual_row.saturating_add(1) > visual_window_start;
+        if include_blank {
+            if render_base_visual_row.is_none() {
+                render_base_visual_row = Some(visual_row);
+            }
+            lines.push(Line::raw(""));
+        }
+        visual_row = visual_row.saturating_add(1);
         row = row.saturating_add(1);
     }
 
     // Pending indicator
     if !app.pending.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            format!(
-                "{} Working... ({} pending, {}s)",
-                app.spinner(),
-                app.pending.len(),
-                app.oldest_secs()
-            ),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::ITALIC),
-        )]));
+        let pending_text = format!(
+            "{} Working... ({} pending, {}s)",
+            app.spinner(),
+            app.pending.len(),
+            app.oldest_secs()
+        );
+        let include_pending = visual_row
+            .saturating_add(wrapped_visual_line_count("", &pending_text, content_width))
+            > visual_window_start;
+        if include_pending {
+            if render_base_visual_row.is_none() {
+                render_base_visual_row = Some(visual_row);
+            }
+            lines.push(Line::from(vec![Span::styled(
+                pending_text,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC),
+            )]));
+        }
     }
+
+    let render_base = render_base_visual_row.unwrap_or(0);
+    let relative_scroll = effective_scroll.saturating_sub(render_base).min(u16::MAX as usize);
 
     let p = Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: false })
-        .scroll((app.effective_scroll_offset() as u16, 0))
+        .scroll((relative_scroll as u16, 0))
         .block(
             Block::default()
                 .borders(Borders::LEFT)
