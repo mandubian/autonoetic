@@ -223,6 +223,22 @@ pub async fn handle_gateway_approvals(
                         };
                         format!("escalation ({}): {}", urgency, truncated)
                     }
+                    autonoetic_types::background::ScheduledAction::RevisionPromote {
+                        agent_id,
+                        revision_id,
+                        added_capabilities,
+                        broadened_capabilities,
+                        ..
+                    } => {
+                        let mut all = added_capabilities.clone();
+                        all.extend(broadened_capabilities.iter().cloned());
+                        format!(
+                            "promote {}@{}: +[{}]",
+                            agent_id,
+                            revision_id,
+                            all.join(", ")
+                        )
+                    }
                     other => format!("{}", other.kind()),
                 };
                 println!(
@@ -250,6 +266,7 @@ pub async fn handle_gateway_approvals(
             targets,
             ttl,
             until,
+            acknowledge_capabilities,
         } => {
             let approval_level = approval_level.to_runtime();
             let grant_scope = scope.to_runtime();
@@ -291,6 +308,7 @@ pub async fn handle_gateway_approvals(
                     grant_scope: Some(grant_scope),
                     grant_targets: parsed_targets,
                     grant_expires_at: expires_at,
+                    acknowledged_capabilities: acknowledge_capabilities.clone(),
                 },
             )?;
             println!(
@@ -362,6 +380,34 @@ pub async fn handle_gateway_approvals(
                                     println!("  Packages: {}", deps.packages.join(", "));
                                 }
                             }
+                        }
+                        autonoetic_types::background::ScheduledAction::RevisionPromote {
+                            agent_id,
+                            revision_id,
+                            outgoing_revision_id,
+                            added_capabilities,
+                            broadened_capabilities,
+                            ..
+                        } => {
+                            println!("\nAction: revision_promote (R++2 capability accretion)");
+                            println!("  Agent:           {}", agent_id);
+                            println!("  Outgoing:        {}", outgoing_revision_id);
+                            println!("  Incoming:        {}", revision_id);
+                            if !added_capabilities.is_empty() {
+                                println!("  Added caps:      {}", added_capabilities.join(", "));
+                            }
+                            if !broadened_capabilities.is_empty() {
+                                println!("  Broadened caps:  {}", broadened_capabilities.join(", "));
+                            }
+                            println!(
+                                "  Approve with:    --acknowledge-capability {}",
+                                added_capabilities
+                                    .iter()
+                                    .chain(broadened_capabilities.iter())
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(" --acknowledge-capability ")
+                            );
                         }
                         other => println!("\nAction: {}", other.kind()),
                     }
@@ -618,6 +664,20 @@ async fn run_interactive_approvals(
                             };
                             ("escalation", format!("[{}] {}", urgency, truncated))
                         }
+                        autonoetic_types::background::ScheduledAction::RevisionPromote {
+                            agent_id,
+                            revision_id,
+                            added_capabilities,
+                            broadened_capabilities,
+                            ..
+                        } => {
+                            let mut all = added_capabilities.clone();
+                            all.extend(broadened_capabilities.iter().cloned());
+                            (
+                                "promote",
+                                format!("{}@{}: +[{}]", agent_id, revision_id, all.join(", ")),
+                            )
+                        }
                         other => ("other", other.kind().to_string()),
                     };
                     let reason_str = req.reason.as_deref().unwrap_or("");
@@ -747,6 +807,51 @@ async fn run_interactive_approvals(
                             ]));
                         }
                     }
+                    autonoetic_types::background::ScheduledAction::RevisionPromote {
+                        agent_id,
+                        revision_id,
+                        outgoing_revision_id,
+                        added_capabilities,
+                        broadened_capabilities,
+                        ..
+                    } => {
+                        lines.push(Line::from(vec![
+                            Span::styled("Promote: ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                format!("{} → {}", outgoing_revision_id, revision_id),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("Agent:   ", Style::default().fg(Color::Gray)),
+                            Span::styled(agent_id.clone(), Style::default().fg(Color::Green)),
+                        ]));
+                        if !added_capabilities.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled("Added:   ", Style::default().fg(Color::Gray)),
+                                Span::styled(
+                                    added_capabilities.join(", "),
+                                    Style::default().fg(Color::Red),
+                                ),
+                            ]));
+                        }
+                        if !broadened_capabilities.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled("Broaden: ", Style::default().fg(Color::Gray)),
+                                Span::styled(
+                                    broadened_capabilities.join(", "),
+                                    Style::default().fg(Color::Red),
+                                ),
+                            ]));
+                        }
+                        lines.push(Line::from(vec![
+                            Span::styled("Note:    ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                "approve from CLI with --acknowledge-capability for each (R++2)",
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]));
+                    }
                     other => {
                         lines.push(Line::from(vec![
                             Span::styled("Action:  ", Style::default().fg(Color::Gray)),
@@ -806,6 +911,23 @@ async fn run_interactive_approvals(
                     KeyCode::Char('a') => {
                         if let Some(idx) = state.selected() {
                             let req = &items[idx];
+
+                            // RevisionPromote (R++2) requires per-capability
+                            // acknowledgement that the TUI cannot collect
+                            // safely. Direct the operator to the CLI form
+                            // rather than letting `approve_request` always
+                            // fail with a structured error.
+                            if matches!(
+                                req.action,
+                                autonoetic_types::background::ScheduledAction::RevisionPromote { .. }
+                            ) {
+                                status_msg = format!(
+                                    "{} approve from CLI: `gateway approvals approve {} --acknowledge-capability <TYPE>` for each added/broadened cap (R++2)",
+                                    "\u{26a0}",
+                                    req.request_id,
+                                );
+                                continue;
+                            }
 
                             // For CredentialPrompt, prompt for secrets interactively
                             let secrets =
