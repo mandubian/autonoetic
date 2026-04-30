@@ -912,6 +912,23 @@ async fn run_interactive_approvals(
                         if let Some(idx) = state.selected() {
                             let req = &items[idx];
 
+                            // RevisionPromote (R++2) requires per-capability
+                            // acknowledgement that the TUI cannot collect
+                            // safely. Direct the operator to the CLI form
+                            // rather than letting `approve_request` always
+                            // fail with a structured error.
+                            if matches!(
+                                req.action,
+                                autonoetic_types::background::ScheduledAction::RevisionPromote { .. }
+                            ) {
+                                status_msg = format!(
+                                    "{} approve from CLI: `gateway approvals approve {} --acknowledge-capability <TYPE>` for each added/broadened cap (R++2)",
+                                    "\u{26a0}",
+                                    req.request_id,
+                                );
+                                continue;
+                            }
+
                             // For CredentialPrompt, prompt for secrets interactively
                             let secrets =
                                 if let autonoetic_types::background::ScheduledAction::CredentialPrompt {

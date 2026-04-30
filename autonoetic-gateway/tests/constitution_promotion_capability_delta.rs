@@ -415,6 +415,19 @@ fn adds_network_access_creates_named_approval() {
     assert_eq!(resp["error"], "capability_delta_requires_approval");
     assert_eq!(resp["approval_required"], true);
     let approval_ref = resp["approval_ref"].as_str().expect("approval_ref present");
+    // Both `request_id` and `approval_ref` are exposed to keep parity with
+    // the rest of the gateway's tool-response shape — `request_id` is what
+    // SessionTracer indexes against; `approval_ref` is the retry handle.
+    assert_eq!(
+        resp["request_id"].as_str(),
+        Some(approval_ref),
+        "request_id must mirror approval_ref"
+    );
+    assert!(
+        approval_ref.starts_with("apr-"),
+        "approval IDs use the `apr-` prefix to match the rest of the gateway: {}",
+        approval_ref
+    );
     let added: Vec<&str> = resp["added_capabilities"]
         .as_array()
         .expect("added_capabilities array")
@@ -445,6 +458,90 @@ fn adds_network_access_creates_named_approval() {
         assert!(broadened_capabilities.is_empty());
     } else {
         panic!("expected RevisionPromote action, got {:?}", row.action);
+    }
+}
+
+#[test]
+fn approval_ref_bypass_is_invalidated_when_alias_moves() {
+    // R++2 hardening: an approval acknowledges a delta against a *specific*
+    // outgoing baseline. If the alias has moved between approval-mint and
+    // retry, the bypass must NOT engage — the operator never acknowledged
+    // the (potentially different) delta against the new baseline.
+    let outgoing_caps = "capabilities: []";
+    let incoming_caps = "capabilities:\n  - type: NetworkAccess\n    hosts: [\"api.github.com\"]";
+    let h = setup_promote_harness(outgoing_caps, incoming_caps);
+
+    let first = invoke_promote(
+        &h,
+        &format!(
+            r#"{{"agent_id":"{}","revision_id":"{}"}}"#,
+            AGENT_ID, INCOMING_REVISION
+        ),
+    );
+    let approval_ref = first["approval_ref"].as_str().unwrap().to_string();
+
+    let cfg = GatewayConfig::default();
+    approve_request_with_options(
+        &cfg,
+        Some(&h.store),
+        &approval_ref,
+        "operator",
+        None,
+        None,
+        Some(&ApprovalLevel::Operator),
+        None,
+        ApproveOptions {
+            acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+            ..Default::default()
+        },
+    )
+    .expect("operator approval should succeed");
+
+    // Operator (or another flow) moves the alias to a *third* revision while
+    // the agent's approval is still outstanding. The acknowledgement was
+    // against `OUTGOING_REVISION`; the baseline is now different.
+    let third_revision = "rev_third";
+    write_revision_skill(&h.gateway_dir, third_revision, "capabilities: []");
+    h.store
+        .insert_agent_revision(&make_revision_record(third_revision))
+        .unwrap();
+    h.store
+        .upsert_agent_alias(&AgentAliasRecord {
+            alias_id: AGENT_ID.to_string(),
+            agent_id: AGENT_ID.to_string(),
+            revision_id: third_revision.to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            updated_by_type: "user".to_string(),
+            updated_by_id: "test".to_string(),
+            reason: None,
+        })
+        .unwrap();
+
+    let retry = invoke_promote(
+        &h,
+        &format!(
+            r#"{{"agent_id":"{}","revision_id":"{}","approval_ref":"{}"}}"#,
+            AGENT_ID, INCOMING_REVISION, approval_ref
+        ),
+    );
+    assert_eq!(
+        retry["error"].as_str(),
+        Some("capability_delta_requires_approval"),
+        "stale approval_ref must not bypass the gate after the baseline moved: {:?}",
+        retry
+    );
+    // A *fresh* approval row must be minted against the new outgoing.
+    let new_ref = retry["approval_ref"].as_str().expect("new approval_ref");
+    assert_ne!(new_ref, approval_ref, "fresh approval, not a reuse");
+    let new_row = h.store.get_approval(new_ref).unwrap().unwrap();
+    if let ScheduledAction::RevisionPromote {
+        outgoing_revision_id,
+        ..
+    } = &new_row.action
+    {
+        assert_eq!(outgoing_revision_id, third_revision);
+    } else {
+        panic!("expected RevisionPromote on retry");
     }
 }
 

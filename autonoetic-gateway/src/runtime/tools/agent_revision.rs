@@ -1685,7 +1685,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                 });
 
                 let request_id =
-                    format!("ar-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]);
+                    format!("apr-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]);
                 let action = autonoetic_types::background::ScheduledAction::RevisionPromote {
                     agent_id: args.agent_id.clone(),
                     revision_id: args.revision_id.clone(),
@@ -1732,6 +1732,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                         outgoing_revision_id
                     ),
                     "approval_required": true,
+                    "request_id": request_id,
                     "approval_ref": request_id,
                     "added_capabilities": added_capabilities,
                     "broadened_capabilities": broadened_capabilities,
@@ -2224,9 +2225,15 @@ impl NativeTool for AgentRevisionDiffTool {
     }
 }
 
-/// Look up an existing approval by ID and check whether it (a) targets exactly
-/// this `(agent_id, revision_id)` pair, (b) is a `RevisionPromote` action, and
-/// (c) has been approved. Returns `true` when the gate may be bypassed.
+/// Look up an existing approval by ID and decide whether the R++2 gate may be
+/// bypassed for this retry. All four conditions must hold:
+///   (a) the action is `RevisionPromote` for exactly this `(agent_id, revision_id)`,
+///   (b) the approval status is `Approved`,
+///   (c) the recorded `outgoing_revision_id` still matches the current alias —
+///       i.e. the baseline the operator acknowledged against has not moved;
+///       if it has, a fresh promote attempt must produce a new approval
+///       against the new baseline (otherwise an unrelated revision flip
+///       between approval-mint and retry could let unacknowledged caps through).
 fn check_revision_promote_approval(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     approval_ref: &str,
@@ -2239,6 +2246,7 @@ fn check_revision_promote_approval(
     let autonoetic_types::background::ScheduledAction::RevisionPromote {
         agent_id: a_id,
         revision_id: r_id,
+        outgoing_revision_id: approved_outgoing,
         ..
     } = &req.action
     else {
@@ -2247,10 +2255,20 @@ fn check_revision_promote_approval(
     if a_id != agent_id || r_id != revision_id {
         return Ok(false);
     }
-    Ok(matches!(
+    if !matches!(
         req.status,
         Some(autonoetic_types::background::ApprovalStatus::Approved)
-    ))
+    ) {
+        return Ok(false);
+    }
+    // Baseline consistency: the alias must still point to the revision the
+    // operator was acknowledging against when they approved.
+    let current_alias = gateway_store.resolve_alias(agent_id)?;
+    let current_outgoing = current_alias
+        .as_ref()
+        .map(|a| a.revision_id.as_str())
+        .unwrap_or("");
+    Ok(current_outgoing == approved_outgoing.as_str())
 }
 
 fn check_capability_delta(
