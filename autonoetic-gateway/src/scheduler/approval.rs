@@ -148,6 +148,11 @@ pub struct ApproveOptions {
     pub grant_scope: Option<autonoetic_types::background::GrantScope>,
     pub grant_targets: Vec<autonoetic_types::background::GrantTarget>,
     pub grant_expires_at: Option<String>,
+    /// Capability type names the operator explicitly acknowledges as part of
+    /// approving a `RevisionPromote` request (R++2). Must match the union of
+    /// `added_capabilities + broadened_capabilities` exactly. Empty for any
+    /// other action type.
+    pub acknowledged_capabilities: Vec<String>,
 }
 
 pub fn approve_request(
@@ -191,6 +196,46 @@ pub fn approve_request_with_options(
             req.approval_level,
             provided_level
         );
+    }
+
+    // R++2: a `RevisionPromote` approval can only be approved when the
+    // operator names every added/broadened capability via
+    // `--acknowledge-capability`. The set must match exactly — silent
+    // accretion is the threat we are defending against.
+    if let ScheduledAction::RevisionPromote {
+        added_capabilities,
+        broadened_capabilities,
+        agent_id: target_agent_id,
+        revision_id: target_revision_id,
+        ..
+    } = &req.action
+    {
+        use std::collections::BTreeSet;
+        let required: BTreeSet<&str> = added_capabilities
+            .iter()
+            .chain(broadened_capabilities.iter())
+            .map(String::as_str)
+            .collect();
+        let acknowledged: BTreeSet<&str> = options
+            .acknowledged_capabilities
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if acknowledged != required {
+            let missing: Vec<&str> = required.difference(&acknowledged).copied().collect();
+            let extra: Vec<&str> = acknowledged.difference(&required).copied().collect();
+            anyhow::bail!(
+                "Capability-accretion approval (R++2) for agent '{}' revision '{}' \
+                 requires the operator to acknowledge each added/broadened capability \
+                 by name via --acknowledge-capability. Required: [{}]. Missing: [{}]. \
+                 Unexpected: [{}].",
+                target_agent_id,
+                target_revision_id,
+                required.iter().copied().collect::<Vec<_>>().join(", "),
+                missing.join(", "),
+                extra.join(", "),
+            );
+        }
     }
 
     // If secrets are provided, store them in the vault before approving

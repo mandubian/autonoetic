@@ -141,6 +141,9 @@ pub fn execute_scheduled_action(
         ScheduledAction::LayerMount { .. } => anyhow::bail!(
             "LayerMount is not directly executable; it only gates layer mounting by operator approval"
         ),
+        ScheduledAction::RevisionPromote { .. } => anyhow::bail!(
+            "RevisionPromote is not directly executable; it only gates agent_revision_promote by operator approval (R++2)"
+        ),
     }
 }
 

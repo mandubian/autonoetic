@@ -1514,6 +1514,11 @@ struct RevisionPromoteArgs {
     revision_id: String,
     reason: Option<String>,
     required_eval_run_id: Option<String>,
+    /// Approval reference returned by an earlier promote call that hit the
+    /// capability-delta gate (R++2). When supplied and approved, the gate is
+    /// bypassed for this exact (agent_id, revision_id) pair.
+    #[serde(default)]
+    approval_ref: Option<String>,
 }
 
 pub struct AgentRevisionPromoteTool;
@@ -1540,7 +1545,8 @@ impl NativeTool for AgentRevisionPromoteTool {
                     "agent_id": { "type": "string", "description": "Logical agent ID whose alias should be updated" },
                     "revision_id": { "type": "string", "description": "Revision ID to promote (must be in candidate or ready status)" },
                     "reason": { "type": "string", "description": "Optional: human-readable reason for promotion" },
-                    "required_eval_run_id": { "type": "string", "description": "Optional: if provided, promotion requires this eval run to have passed for the target revision" }
+                    "required_eval_run_id": { "type": "string", "description": "Optional: if provided, promotion requires this eval run to have passed for the target revision" },
+                    "approval_ref": { "type": "string", "description": "Optional: approval ID returned by an earlier promote call that hit the capability-delta gate (R++2). Pass it on retry to bypass the gate." }
                 },
                 "required": ["agent_id", "revision_id"],
                 "additionalProperties": false
@@ -1555,7 +1561,7 @@ impl NativeTool for AgentRevisionPromoteTool {
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         config: Option<&GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -1638,24 +1644,102 @@ impl NativeTool for AgentRevisionPromoteTool {
             .map(|c| c.capability_delta_gate_mode)
             .unwrap_or(CapabilityDeltaGateMode::Strict);
 
-        if let Some(delta) = check_capability_delta(
-            &gateway_store,
-            gateway_dir,
-            &args.agent_id,
-            &args.revision_id,
-            &current_capabilities,
-            delta_mode,
-        )? {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": "capability_delta_requires_approval",
-                "delta": {
+        // R++2: capability-delta gating. The gate fires on broadening relative
+        // to the outgoing revision and is only bypassed by an approved
+        // `RevisionPromote` approval whose acknowledgement matches the delta
+        // exactly. The `approval_ref` argument is how a retry call reuses an
+        // earlier approval.
+        let gate_bypassed_by_approval = if let Some(ref approval_ref) = args.approval_ref {
+            check_revision_promote_approval(
+                &gateway_store,
+                approval_ref,
+                &args.agent_id,
+                &args.revision_id,
+            )?
+        } else {
+            false
+        };
+
+        if !gate_bypassed_by_approval {
+            if let Some(delta) = check_capability_delta(
+                &gateway_store,
+                gateway_dir,
+                &args.agent_id,
+                &args.revision_id,
+                &current_capabilities,
+                delta_mode,
+            )? {
+                let outgoing_revision_id = gateway_store
+                    .resolve_alias(&args.agent_id)?
+                    .map(|alias| alias.revision_id)
+                    .unwrap_or_default();
+                let added_capabilities: Vec<String> = delta.added.clone();
+                let broadened_capabilities: Vec<String> = delta
+                    .broadened
+                    .iter()
+                    .map(|b| b.capability_type.clone())
+                    .collect();
+                let payload = serde_json::json!({
                     "added": delta.added,
                     "broadened": delta.broadened,
-                },
-                "hint": "Capability set broadened relative to outgoing revision. Explicit operator approval is required before promotion.",
-            })
-            .to_string());
+                });
+
+                let request_id =
+                    format!("ar-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]);
+                let action = autonoetic_types::background::ScheduledAction::RevisionPromote {
+                    agent_id: args.agent_id.clone(),
+                    revision_id: args.revision_id.clone(),
+                    outgoing_revision_id: outgoing_revision_id.clone(),
+                    added_capabilities: added_capabilities.clone(),
+                    broadened_capabilities: broadened_capabilities.clone(),
+                    payload: Some(payload.clone()),
+                };
+                let approval_level = config
+                    .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
+                    .unwrap_or(autonoetic_types::background::ApprovalLevel::Operator);
+                let req = autonoetic_types::background::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    agent_id: manifest.agent.id.clone(),
+                    session_id: session_id.unwrap_or("").to_string(),
+                    root_session_id: None,
+                    workflow_id: None,
+                    task_id: None,
+                    action,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    status: None,
+                    decided_at: None,
+                    decided_by: None,
+                    reason: args.reason.clone().or_else(|| {
+                        Some(format!(
+                            "Promote revision '{}' would broaden capabilities relative to '{}'",
+                            args.revision_id, outgoing_revision_id
+                        ))
+                    }),
+                    evidence_ref: None,
+                    decision_reason: None,
+                    approval_level,
+                    similar_to_request_id: None,
+                    similarity_score: None,
+                };
+                gateway_store.create_approval(&req)?;
+
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "permission",
+                    "error": "capability_delta_requires_approval",
+                    "message": format!(
+                        "Capability set broadened relative to outgoing revision '{}'. Operator approval is required (R++2).",
+                        outgoing_revision_id
+                    ),
+                    "approval_required": true,
+                    "approval_ref": request_id,
+                    "added_capabilities": added_capabilities,
+                    "broadened_capabilities": broadened_capabilities,
+                    "delta": payload,
+                    "repair_hint": "Operator must approve the request and acknowledge each added/broadened capability by name. Then retry agent_revision_promote with `approval_ref`.",
+                })
+                .to_string());
+            }
         }
 
         // Deserialize capabilities from the frontmatter using the same lenient pipeline
@@ -2138,6 +2222,35 @@ impl NativeTool for AgentRevisionDiffTool {
         })
         .to_string())
     }
+}
+
+/// Look up an existing approval by ID and check whether it (a) targets exactly
+/// this `(agent_id, revision_id)` pair, (b) is a `RevisionPromote` action, and
+/// (c) has been approved. Returns `true` when the gate may be bypassed.
+fn check_revision_promote_approval(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    approval_ref: &str,
+    agent_id: &str,
+    revision_id: &str,
+) -> anyhow::Result<bool> {
+    let Some(req) = gateway_store.get_approval(approval_ref)? else {
+        return Ok(false);
+    };
+    let autonoetic_types::background::ScheduledAction::RevisionPromote {
+        agent_id: a_id,
+        revision_id: r_id,
+        ..
+    } = &req.action
+    else {
+        return Ok(false);
+    };
+    if a_id != agent_id || r_id != revision_id {
+        return Ok(false);
+    }
+    Ok(matches!(
+        req.status,
+        Some(autonoetic_types::background::ApprovalStatus::Approved)
+    ))
 }
 
 fn check_capability_delta(

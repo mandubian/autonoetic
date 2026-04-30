@@ -186,6 +186,31 @@ pub enum ScheduledAction {
         /// The sandbox command this mount is for (context only).
         command: String,
     },
+    /// Approval subject only: an `agent_revision_promote` would broaden the agent's
+    /// capability set relative to the currently-active revision (R++2). The operator
+    /// must explicitly acknowledge each added or broadened capability by name when
+    /// approving. Not executed by the scheduler; once approved with the matching
+    /// acknowledgement, the caller retries `agent_revision_promote` with
+    /// `approval_ref` and the gate is bypassed.
+    RevisionPromote {
+        /// Agent whose alias is being promoted.
+        agent_id: String,
+        /// Incoming revision ID (the one that would become active).
+        revision_id: String,
+        /// Currently-active revision (the one being replaced).
+        outgoing_revision_id: String,
+        /// Capability type names that are present on the new revision but absent
+        /// from the outgoing one (e.g. `["NetworkAccess"]`).
+        added_capabilities: Vec<String>,
+        /// Capability type names whose scope was broadened (wider hosts, scopes,
+        /// patterns, larger spawn budget, etc.). Names only — full structured
+        /// detail lives in `payload.broadened`.
+        broadened_capabilities: Vec<String>,
+        /// Full structured delta (for renderers / audit) — `{ added: [...],
+        /// broadened: [{ capability_type, previous_scope, new_scope }, ...] }`.
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
 }
 
 impl ScheduledAction {
@@ -200,6 +225,7 @@ impl ScheduledAction {
                 | Self::ProfileShare { .. }
                 | Self::SessionEscalate { .. }
                 | Self::LayerMount { .. }
+                | Self::RevisionPromote { .. }
         )
     }
 
@@ -217,7 +243,8 @@ impl ScheduledAction {
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }
-            | Self::LayerMount { .. } => true,
+            | Self::LayerMount { .. }
+            | Self::RevisionPromote { .. } => true,
         }
     }
 
@@ -232,6 +259,7 @@ impl ScheduledAction {
             Self::ProfileShare { .. } => "profile_share",
             Self::SessionEscalate { .. } => "session_escalate",
             Self::LayerMount { .. } => "layer_mount",
+            Self::RevisionPromote { .. } => "revision_promote",
         }
     }
 
@@ -245,7 +273,8 @@ impl ScheduledAction {
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }
-            | Self::LayerMount { .. } => None,
+            | Self::LayerMount { .. }
+            | Self::RevisionPromote { .. } => None,
         }
     }
 
@@ -263,7 +292,8 @@ impl ScheduledAction {
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }
-            | Self::LayerMount { .. } => {}
+            | Self::LayerMount { .. }
+            | Self::RevisionPromote { .. } => {}
         }
         self
     }

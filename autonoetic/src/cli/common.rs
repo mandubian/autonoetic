@@ -325,6 +325,11 @@ pub enum GatewayApprovalCommands {
         /// Absolute expiry timestamp (RFC3339).
         #[arg(long)]
         until: Option<String>,
+        /// Acknowledge a capability that this approval grants (R++2).
+        /// Required for `RevisionPromote` approvals — must name every
+        /// added/broadened capability type. Repeatable.
+        #[arg(long = "acknowledge-capability", value_name = "TYPE")]
+        acknowledge_capabilities: Vec<String>,
     },
     /// Reject one pending request.
     Reject {

@@ -2550,6 +2550,31 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
             }
             v
         }
+        ScheduledAction::RevisionPromote {
+            agent_id,
+            revision_id,
+            outgoing_revision_id,
+            added_capabilities,
+            broadened_capabilities,
+            ..
+        } => {
+            let mut v = vec![
+                "type: revision_promote (R++2 capability accretion)".to_string(),
+                format!("  agent: {}", clamp_chat_field(agent_id)),
+                format!("  outgoing: {}", clamp_chat_field(outgoing_revision_id)),
+                format!("  incoming: {}", clamp_chat_field(revision_id)),
+            ];
+            if !added_capabilities.is_empty() {
+                v.push(format!("  added caps: {}", added_capabilities.join(", ")));
+            }
+            if !broadened_capabilities.is_empty() {
+                v.push(format!(
+                    "  broadened caps: {}",
+                    broadened_capabilities.join(", ")
+                ));
+            }
+            v
+        }
     }
 }
 
