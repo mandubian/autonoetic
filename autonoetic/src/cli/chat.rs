@@ -1388,14 +1388,18 @@ fn wrapped_visual_line_count(prefix: &str, text: &str, content_width: usize) -> 
     }
 
     let prefix_width = UnicodeWidthStr::width(prefix).min(content_width.saturating_sub(1));
-    let available_width = content_width.saturating_sub(prefix_width).max(1);
     let text_width = UnicodeWidthStr::width(text);
 
     if text_width == 0 {
-        1
-    } else {
-        text_width.div_ceil(available_width)
+        return 1;
     }
+
+    let first_line_capacity = content_width.saturating_sub(prefix_width);
+    if text_width <= first_line_capacity {
+        return 1;
+    }
+
+    1 + (text_width - first_line_capacity).div_ceil(content_width)
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
