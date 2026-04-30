@@ -253,8 +253,8 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
     }
 
     /// Available iff the agent declares any `ConstitutionalProposal` capability.
-    /// Per-kind enforcement is re-checked at execute time so the structured
-    /// validation error names the rule.
+    /// Per-kind pattern matching is enforced at execute time and reported as a
+    /// `permission` error naming the rejected proposal kind.
     fn is_available(&self, manifest: &AgentManifest) -> bool {
         manifest
             .capabilities

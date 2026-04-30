@@ -137,8 +137,13 @@ impl GatewayStore {
         Ok(out)
     }
 
-    /// Apply an operator decision to a proposal. The new status must be one of
-    /// `under_review`, `approved`, `rejected`, `deferred`.
+    /// Apply a status transition to a proposal.
+    ///
+    /// Terminal decisions (`approved`, `rejected`, `deferred`) stamp
+    /// `operator_decision`, `decision_reason`, `decided_by`, and
+    /// `decided_at`. `under_review` is a non-terminal review-start
+    /// transition and only updates `status` — it does not record a
+    /// "decision" timestamp.
     pub fn decide_constitutional_proposal(
         &self,
         proposal_id: &str,
@@ -147,13 +152,22 @@ impl GatewayStore {
         reason: Option<&str>,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-        let rows = conn.execute(
-            "UPDATE constitutional_proposals \
-             SET status = ?1, operator_decision = ?1, decision_reason = ?2, decided_by = ?3, decided_at = ?4 \
-             WHERE proposal_id = ?5",
-            params![new_status, reason, decided_by, now, proposal_id],
-        )?;
+        let rows = if new_status == "under_review" {
+            conn.execute(
+                "UPDATE constitutional_proposals \
+                 SET status = ?1 \
+                 WHERE proposal_id = ?2",
+                params![new_status, proposal_id],
+            )?
+        } else {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE constitutional_proposals \
+                 SET status = ?1, operator_decision = ?1, decision_reason = ?2, decided_by = ?3, decided_at = ?4 \
+                 WHERE proposal_id = ?5",
+                params![new_status, reason, decided_by, now, proposal_id],
+            )?
+        };
         Ok(rows > 0)
     }
 
@@ -162,27 +176,20 @@ impl GatewayStore {
     /// release note). The constitution markdown is *not* mutated here — the
     /// operator edits the file by hand and the digest bumps naturally on
     /// rebuild via `include_str!`.
+    ///
+    /// Atomic via `UPDATE … RETURNING` so the returned list is exactly the
+    /// rows this call mutated, even under concurrent operators.
     pub fn publish_approved_proposals(&self, release_tag: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut select = conn.prepare(
-            "SELECT proposal_id FROM constitutional_proposals \
-             WHERE status = 'approved' AND published_in_release IS NULL",
-        )?;
-        let ids: Vec<String> = select
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(select);
-
-        if ids.is_empty() {
-            return Ok(ids);
-        }
-
-        conn.execute(
+        let mut update = conn.prepare(
             "UPDATE constitutional_proposals \
              SET published_in_release = ?1 \
-             WHERE status = 'approved' AND published_in_release IS NULL",
-            params![release_tag],
+             WHERE status = 'approved' AND published_in_release IS NULL \
+             RETURNING proposal_id",
         )?;
+        let ids: Vec<String> = update
+            .query_map(params![release_tag], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(ids)
     }
 }

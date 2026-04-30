@@ -315,6 +315,53 @@ fn operator_approve_reject_defer_transitions() {
 }
 
 #[test]
+fn under_review_transition_does_not_record_decision() {
+    // `under_review` is the non-terminal review-start status. It must not
+    // stamp `operator_decision` / `decided_at` — those fields are reserved
+    // for terminal decisions (approved / rejected / deferred).
+    let h = make_harness();
+    let manifest = manifest_with_capabilities(vec![Capability::ConstitutionalProposal {
+        patterns: vec!["*".to_string()],
+    }]);
+    let resp = invoke(
+        &h,
+        &manifest,
+        r#"{"kind":"modify_rule","target_id":"R-1.1","proposed_text":"x","justification":"j"}"#,
+    );
+    let id = resp["proposal_id"].as_str().unwrap().to_string();
+
+    assert!(h
+        .store
+        .decide_constitutional_proposal(&id, "under_review", "alice", Some("queueing"))
+        .unwrap());
+
+    let row = h.store.get_constitutional_proposal(&id).unwrap().unwrap();
+    assert_eq!(row.status, "under_review");
+    assert!(
+        row.operator_decision.is_none(),
+        "under_review must not stamp operator_decision"
+    );
+    assert!(
+        row.decided_at.is_none(),
+        "under_review must not stamp decided_at"
+    );
+    assert!(row.decided_by.is_none());
+    assert!(row.decision_reason.is_none());
+
+    // A subsequent terminal transition does stamp the decision fields.
+    assert!(h
+        .store
+        .decide_constitutional_proposal(&id, "approved", "alice", Some("LGTM"))
+        .unwrap());
+    let row2 = h.store.get_constitutional_proposal(&id).unwrap().unwrap();
+    assert_eq!(row2.status, "approved");
+    assert_eq!(row2.operator_decision.as_deref(), Some("approved"));
+    assert!(row2.decided_at.is_some());
+    assert_eq!(row2.decided_by.as_deref(), Some("alice"));
+    assert_eq!(row2.decision_reason.as_deref(), Some("LGTM"));
+}
+
+#[test]
 fn release_marks_only_approved_unpublished() {
     let h = make_harness();
     let manifest = manifest_with_capabilities(vec![Capability::ConstitutionalProposal {
