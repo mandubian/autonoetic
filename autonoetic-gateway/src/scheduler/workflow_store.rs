@@ -731,14 +731,20 @@ fn create_implicit_artifact(
 
     // Generate implicit artifact ID
     let artifact_id = format!("impl_{}", task.task_id);
+    let parent_session = &task.parent_session_id;
 
-    // Collect all named content written by the child agent during its session.
+    // Collect child outputs that the parent session can actually resolve.
     // Each entry gives the parent a `name` (e.g. "weather_api_research.md") and
     // a `ref` (e.g. "cnt_a1b2c3d4") that can be passed directly to content.read.
     let named_outputs: Vec<serde_json::Value> = content_store
         .list_names_with_handles(&task.session_id)
         .unwrap_or_default()
         .into_iter()
+        .filter(|(_, handle)| {
+            content_store
+                .is_handle_visible(parent_session, handle)
+                .unwrap_or(false)
+        })
         .map(|(name, handle)| {
             let short_ref = format!("cnt_{}", ContentStore::get_short_alias(&handle));
             serde_json::json!({
@@ -827,7 +833,6 @@ fn create_implicit_artifact(
     let handle = content_store.write(&json_bytes)?;
 
     // Register with session visibility for parent session access
-    let parent_session = &task.parent_session_id;
     content_store.register_name_with_visibility(
         parent_session,
         &artifact_id,
@@ -1933,6 +1938,83 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.status, TaskRunStatus::Succeeded);
         assert_eq!(loaded.result_summary.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn create_implicit_artifact_filters_outputs_not_visible_to_parent() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+
+        let gw_dir = crate::execution::gateway_root_dir(&cfg);
+        let store = crate::runtime::content_store::ContentStore::new(&gw_dir).unwrap();
+
+        let parent_session = "root-visible";
+        let child_session = "root-visible/researcher-abc";
+        store.set_root_session(child_session, parent_session).unwrap();
+
+        let exported_handle = store.write(b"weather summary").unwrap();
+        store
+            .register_name_with_visibility(
+                child_session,
+                "weather.md",
+                &exported_handle,
+                crate::runtime::content_store::ContentVisibility::Session,
+            )
+            .unwrap();
+
+        let transcript_handle = store.write(b"internal transcript").unwrap();
+        store
+            .register_name(child_session, "session_history", &transcript_handle)
+            .unwrap();
+
+        let ts = now_rfc3339();
+        let task = TaskRun {
+            task_id: "task-visible-filter".to_string(),
+            workflow_id: "wf-visible-filter".to_string(),
+            agent_id: "researcher.default".to_string(),
+            session_id: child_session.to_string(),
+            parent_session_id: parent_session.to_string(),
+            status: TaskRunStatus::Succeeded,
+            created_at: ts.clone(),
+            updated_at: ts,
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+        };
+
+        create_implicit_artifact(&cfg, None, &task, Some("done")).unwrap();
+
+        let store = crate::runtime::content_store::ContentStore::new(&gw_dir).unwrap();
+        let artifact_name = format!("impl_{}", task.task_id);
+        let artifact_bytes = store.read_by_name(parent_session, &artifact_name).unwrap();
+        let artifact_json: serde_json::Value = serde_json::from_slice(&artifact_bytes).unwrap();
+        let named_outputs = artifact_json
+            .get("content")
+            .and_then(|content| content.get("named_outputs"))
+            .and_then(|outputs| outputs.as_array())
+            .unwrap();
+
+        assert_eq!(named_outputs.len(), 1);
+        assert_eq!(
+            named_outputs[0].get("name").and_then(|value| value.as_str()),
+            Some("weather.md")
+        );
+
+        let exported_ref = format!(
+            "cnt_{}",
+            crate::runtime::content_store::ContentStore::get_short_alias(&exported_handle)
+        );
+        assert_eq!(
+            named_outputs[0].get("ref").and_then(|value| value.as_str()),
+            Some(exported_ref.as_str())
+        );
+        assert!(named_outputs.iter().all(|entry| {
+            entry.get("name").and_then(|value| value.as_str()) != Some("session_history")
+        }));
     }
 
     #[test]

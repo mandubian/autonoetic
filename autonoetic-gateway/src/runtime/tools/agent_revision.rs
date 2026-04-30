@@ -347,6 +347,8 @@ struct RevisionCreateFromIntentArgs {
     agent_id: String,
     #[serde(default)]
     artifact_id: Option<String>,
+    #[serde(default)]
+    artifact_ref: Option<String>,
     instructions: String,
     description: String,
     #[serde(deserialize_with = "deserialize_capabilities_lenient")]
@@ -651,6 +653,89 @@ fn create_revision_from_files(
     })
 }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ResolvedRevisionArtifactInput {
+        artifact_id: String,
+        source_ref: String,
+    }
+
+    fn resolve_revision_artifact_input(
+        artifact_id: Option<&str>,
+        artifact_ref: Option<&str>,
+        session_id: Option<&str>,
+        gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    ) -> anyhow::Result<Option<ResolvedRevisionArtifactInput>> {
+        let artifact_id = artifact_id.map(str::trim);
+        let artifact_ref = artifact_ref.map(str::trim);
+
+        if matches!(artifact_id, Some("")) {
+            anyhow::bail!("artifact_id must not be empty");
+        }
+        if matches!(artifact_ref, Some("")) {
+            anyhow::bail!("artifact_ref must not be empty");
+        }
+
+        let Some(direct_artifact_id) = artifact_id.filter(|value| !value.is_empty()) else {
+            if let Some(ref_id) = artifact_ref.filter(|value| !value.is_empty()) {
+                let sid = session_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "artifact_ref '{}' requires session context for scope resolution",
+                            ref_id
+                        )
+                    })?;
+                let record = gateway_store
+                    .resolve_artifact_ref_any_scope(ref_id, sid)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "artifact_ref '{}' not found, expired, or revoked",
+                            ref_id
+                        )
+                    })?;
+                return Ok(Some(ResolvedRevisionArtifactInput {
+                    artifact_id: record.artifact_id,
+                    source_ref: ref_id.to_string(),
+                }));
+            }
+            return Ok(None);
+        };
+
+        if let Some(ref_id) = artifact_ref.filter(|value| !value.is_empty()) {
+            let sid = session_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "artifact_ref '{}' requires session context for scope resolution",
+                        ref_id
+                    )
+                })?;
+            let record = gateway_store
+                .resolve_artifact_ref_any_scope(ref_id, sid)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("artifact_ref '{}' not found, expired, or revoked", ref_id)
+                })?;
+            anyhow::ensure!(
+                record.artifact_id == direct_artifact_id,
+                "artifact_ref '{}' resolves to '{}' but artifact_id '{}' was also provided",
+                ref_id,
+                record.artifact_id,
+                direct_artifact_id,
+            );
+            return Ok(Some(ResolvedRevisionArtifactInput {
+                artifact_id: direct_artifact_id.to_string(),
+                source_ref: ref_id.to_string(),
+            }));
+        }
+
+        Ok(Some(ResolvedRevisionArtifactInput {
+            artifact_id: direct_artifact_id.to_string(),
+            source_ref: direct_artifact_id.to_string(),
+        }))
+    }
+
 pub struct AgentRevisionCreateTool;
 
 impl NativeTool for AgentRevisionCreateTool {
@@ -888,12 +973,13 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. For pure reasoning agents that only use existing gateway tools (no custom code), omit artifact_id — capability enforcement is the security gate. For script agents or agents with CodeExecution/AgentSpawn, artifact_id is required for code review and promotion gating.".to_string(),
+            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. For pure reasoning agents that only use existing gateway tools (no custom code), omit artifact_ref/artifact_id — capability enforcement is the security gate. For script agents or agents with CodeExecution/AgentSpawn, pass the artifact_ref returned by artifact_build. artifact_id is still accepted for backward compatibility.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string" },
-                    "artifact_id": { "type": "string", "description": "Artifact ID containing agent source files. Required for script agents and reasoning agents with CodeExecution/AgentSpawn. Omit for pure reasoning agents that only use existing gateway tools." },
+                    "artifact_ref": { "type": "string", "description": "Preferred public artifact handle from artifact_build (for example 'ar.aabb1234ef56'). Resolved against the caller's accessible scopes." },
+                    "artifact_id": { "type": "string", "description": "Deprecated internal artifact store locator retained for backward compatibility. Prefer artifact_ref." },
                     "instructions": { "type": "string", "description": "Markdown instruction body for SKILL.md" },
                     "description": { "type": "string", "description": "Agent description for metadata.agent.description" },
                     "execution_mode": { "type": "string", "enum": ["reasoning", "script"] },
@@ -926,7 +1012,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -973,6 +1059,12 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             ));
         };
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
+        let resolved_artifact = resolve_revision_artifact_input(
+            args.artifact_id.as_deref(),
+            args.artifact_ref.as_deref(),
+            session_id,
+            &gateway_store,
+        )?;
 
         // Two execution paths: with artifact (code agents) vs without (pure reasoning agents).
         let (
@@ -983,7 +1075,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             bundle_opt,
             source_kind,
             source_ref,
-        ) = if let Some(artifact_id) = &args.artifact_id {
+        ) = if let Some(resolved_artifact) = resolved_artifact.as_ref() {
+            let artifact_id = &resolved_artifact.artifact_id;
             anyhow::ensure!(
                 !artifact_id.trim().is_empty(),
                 "artifact_id must not be empty"
@@ -1089,22 +1182,22 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 Some(health_report),
                 Some(bundle),
                 "intent_artifact".to_string(),
-                Some(artifact_id.clone()),
+                Some(resolved_artifact.source_ref.clone()),
             )
         } else {
             // Pure reasoning agent — no artifact, no custom code.
             // Validate that this path is safe: no script mode, no CodeExecution/AgentSpawn.
             anyhow::ensure!(
                     !matches!(args.execution_mode, Some(ExecutionMode::Script)),
-                    "execution_mode 'script' requires an artifact_id — script agents must have source files"
+                    "execution_mode 'script' requires an artifact_ref or artifact_id — script agents must have source files"
                 );
             anyhow::ensure!(
                 args.script_entry.is_none(),
-                "script_entry requires an artifact_id — pure reasoning agents have no scripts"
+                "script_entry requires an artifact_ref or artifact_id — pure reasoning agents have no scripts"
             );
             anyhow::ensure!(
                 args.llm_config.is_some(),
-                "llm_config is required for pure reasoning agents (no artifact_id)"
+                "llm_config is required for pure reasoning agents (no artifact_ref/artifact_id)"
             );
             let forbidden_cap = args
                 .capabilities
@@ -1112,7 +1205,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 .find(|cap| crate::runtime::install_contract::requires_artifact_review(cap));
             if let Some(cap) = forbidden_cap {
                 anyhow::bail!(
-                        "Capability '{:?}' requires an artifact_id for code review and promotion gating. \
+                        "Capability '{:?}' requires an artifact_ref or artifact_id for code review and promotion gating. \
                          Pure reasoning agents (no artifact_id) may not use CodeExecution or AgentSpawn.",
                         cap
                     );
@@ -1182,7 +1275,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
 
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
-            artifact_id: args.artifact_id.clone(),
+            artifact_id: resolved_artifact.as_ref().map(|artifact| artifact.artifact_id.clone()),
             base_revision_id: args.base_revision_id.clone(),
             summary: args.summary.clone(),
             metadata: args.metadata.clone(),
@@ -2549,5 +2642,123 @@ mod capability_lenient_deser_tests {
         let previous = vec!["*.example.com".to_string()];
         let current = vec!["*.example.com".to_string(), "api.evil.org".to_string()];
         assert!(!scope_change_within_existing_envelope(&previous, &current));
+    }
+
+    fn test_manifest() -> AgentManifest {
+        AgentManifest {
+            version: "1.0".to_string(),
+            runtime: crate::runtime::install_contract::default_runtime_declaration(),
+            agent: AgentIdentity {
+                id: "specialized-builder.test".to_string(),
+                name: "specialized-builder.test".to_string(),
+                description: "test manifest".to_string(),
+            },
+            capabilities: vec![Capability::AgentRevision {
+                patterns: vec!["*".to_string()],
+            }],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            response_contract: None,
+            execution_mode: ExecutionMode::Reasoning,
+            script_entry: None,
+            script_input_mode: ScriptInputMode::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+        }
+    }
+
+    #[test]
+    fn create_from_intent_accepts_artifact_ref() {
+        use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        let session_id = "sess-install";
+
+        let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
+        let handle = content_store
+            .write(b"#!/usr/bin/env python3\nprint('hello')\n")
+            .unwrap();
+        content_store
+            .register_name(session_id, "main.py", &handle)
+            .unwrap();
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+        let inputs = vec!["main.py".to_string()];
+        let entrypoints = vec!["main.py".to_string()];
+        let bundle = artifact_store
+            .build(&inputs, Some(&entrypoints), None, session_id)
+            .unwrap();
+
+        let gateway_store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+        let artifact_ref = "ar.testinstall01".to_string();
+        gateway_store
+            .create_artifact_ref(&ArtifactRefRecord {
+                ref_id: artifact_ref.clone(),
+                scope_type: ArtifactRefScopeType::Session,
+                scope_id: session_id.to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "specialized-builder.test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let manifest = test_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = AgentRevisionCreateFromIntentTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                dir.path(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "agent_id": "weather-fetcher",
+                    "artifact_ref": artifact_ref,
+                    "description": "Fetch weather data",
+                    "instructions": "# Weather Agent",
+                    "capabilities": [
+                        {"type": "ReadAccess", "scopes": ["*"]}
+                    ]
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                None,
+                Some(gateway_store.clone()),
+                None,
+            )
+            .unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response_json.get("ok").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(
+            response_json
+                .get("artifact_id")
+                .and_then(|value| value.as_str()),
+            Some(bundle.artifact_id.as_str())
+        );
+
+        let revision_id = response_json
+            .get("revision_id")
+            .and_then(|value| value.as_str())
+            .unwrap();
+        let revision = gateway_store.get_agent_revision(revision_id).unwrap().unwrap();
+        assert_eq!(revision.artifact_id.as_deref(), Some(bundle.artifact_id.as_str()));
+        assert_eq!(revision.source_ref.as_deref(), Some("ar.testinstall01"));
     }
 }
