@@ -123,6 +123,16 @@ pub enum Capability {
         #[serde(default = "default_sources_all")]
         allowed_sources: Vec<String>,
     },
+
+    /// Submit constitutional amendment proposals via `constitution_propose_amendment`.
+    /// Enforcement of Ri-0.8 (right to propose amendments) — a high-risk capability
+    /// that must be explicitly granted; not a default. The `patterns` field selects
+    /// which proposal kinds the agent may submit (e.g. `add_rule`, `modify_rule`,
+    /// `remove_rule`, `add_right`, `modify_right`, `remove_right`, or `*` for all).
+    ConstitutionalProposal {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -221,6 +231,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::UserProfileAccess { .. } => "UserProfileAccess".to_string(),
         Capability::SchedulerAccess { .. } => "SchedulerAccess".to_string(),
         Capability::SkillInstall { .. } => "SkillInstall".to_string(),
+        Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal".to_string(),
     }
 }
 
@@ -269,6 +280,10 @@ fn capability_broadening(
         (Capability::SkillInstall { allowed_sources: a }, Capability::SkillInstall { allowed_sources: b }) => {
             scope_broadening(capability_type, a, b)
         }
+        (
+            Capability::ConstitutionalProposal { patterns: a },
+            Capability::ConstitutionalProposal { patterns: b },
+        ) => scope_broadening(capability_type, a, b),
         (
             Capability::CodeExecution {
                 patterns: ap,

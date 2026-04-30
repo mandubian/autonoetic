@@ -2,6 +2,7 @@ pub mod admin_proposals;
 mod agent_registry;
 mod approvals;
 mod artifacts;
+pub mod constitutional_proposals;
 mod credentials;
 mod evaluations;
 mod memory;

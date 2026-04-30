@@ -48,3 +48,4 @@ Core runtime model:
 - Use `constitution_read()` to fetch the full text. Pass `section` to scope to a single rule (`{"section": "Ri-0.10"}`) or numbered section (`{"section": "§0"}`).
 - Reading the law is a right, not a privilege — no capability is required.
 - Consult the constitution when a rule ID appears in an error, when proposing an amendment, or any time you need to understand your obligations and rights.
+- If you hold the `ConstitutionalProposal` capability you may submit amendment proposals via `constitution_propose_amendment` (kind: `add_rule | modify_rule | remove_rule | add_right | modify_right | remove_right`, plus `target_id` for modify/remove, `proposed_text` for add/modify, and a free-form `justification`). Cite causal-event or execution-trace IDs in `evidence` so the operator can verify the motivation. Proposals receive a durable ID and enter the operator queue — they are never silently dropped (Ri-0.8).

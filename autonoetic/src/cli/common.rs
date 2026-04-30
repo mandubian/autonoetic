@@ -211,6 +211,82 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: SystemAgentCommands,
     },
+    /// Manage agent-submitted constitutional amendment proposals (R+++1).
+    Constitution {
+        #[command(subcommand)]
+        command: GatewayConstitutionCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayConstitutionCommands {
+    /// List amendment proposals.
+    Proposals {
+        #[command(subcommand)]
+        command: GatewayConstitutionProposalCommands,
+    },
+    /// Apply a release tag to all approved-but-unpublished proposals.
+    /// The constitution markdown is *not* edited automatically — the
+    /// operator updates `docs/gateway-constitution.md` by hand and the
+    /// digest bumps on rebuild.
+    Release {
+        /// Release tag to record (e.g. `2026-Q2`).
+        tag: String,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayConstitutionProposalCommands {
+    /// List submitted proposals (most recent first).
+    List {
+        /// Filter by status (`pending`, `under_review`, `approved`, `rejected`, `deferred`).
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by proposing agent ID.
+        #[arg(long)]
+        proposer: Option<String>,
+        /// Maximum number of results to return.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one proposal in full.
+    Show {
+        /// Proposal identifier.
+        proposal_id: String,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve a proposal — queues it for the next release.
+    Approve {
+        /// Proposal identifier.
+        proposal_id: String,
+        /// Optional approval note.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Reject a proposal.
+    Reject {
+        /// Proposal identifier.
+        proposal_id: String,
+        /// Optional rejection note.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Defer a proposal — keeps it in the queue without a final decision.
+    Defer {
+        /// Proposal identifier.
+        proposal_id: String,
+        /// Optional reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

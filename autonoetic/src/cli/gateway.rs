@@ -1217,3 +1217,170 @@ pub async fn handle_gateway_system_agents(
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Constitution amendment proposals — R+++1 (issue #92)
+// ---------------------------------------------------------------------------
+
+const PROPOSAL_DECISION_STATES: &[&str] = &["approved", "rejected", "deferred"];
+
+pub async fn handle_gateway_constitution(
+    config_path: &Path,
+    command: &super::common::GatewayConstitutionCommands,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = std::path::PathBuf::from(&config.agents_dir).join(".gateway");
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    match command {
+        super::common::GatewayConstitutionCommands::Proposals { command } => {
+            handle_constitution_proposals(&store, command)
+        }
+        super::common::GatewayConstitutionCommands::Release { tag, json } => {
+            let ids = store.publish_approved_proposals(tag)?;
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "release_tag": tag,
+                        "published_proposal_ids": ids,
+                        "count": ids.len(),
+                    }))?
+                );
+            } else if ids.is_empty() {
+                println!("No approved proposals to publish.");
+            } else {
+                println!("Marked {} proposal(s) with release tag '{}':", ids.len(), tag);
+                for id in &ids {
+                    println!("  {}", id);
+                }
+                println!(
+                    "\nNote: edit docs/gateway-constitution.md to apply the proposal text. \
+                     The constitution digest will bump on the next gateway rebuild."
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn handle_constitution_proposals(
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    command: &super::common::GatewayConstitutionProposalCommands,
+) -> anyhow::Result<()> {
+    use super::common::GatewayConstitutionProposalCommands;
+
+    match command {
+        GatewayConstitutionProposalCommands::List {
+            status,
+            proposer,
+            limit,
+            json,
+        } => {
+            let rows = store.list_constitutional_proposals(
+                status.as_deref(),
+                proposer.as_deref(),
+                *limit,
+            )?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(());
+            }
+            if rows.is_empty() {
+                println!("No constitutional proposals found.");
+                return Ok(());
+            }
+            println!(
+                "{:<24} {:<14} {:<14} {:<24} {}",
+                "PROPOSAL_ID", "STATUS", "KIND", "PROPOSER", "TARGET"
+            );
+            for p in &rows {
+                println!(
+                    "{:<24} {:<14} {:<14} {:<24} {}",
+                    p.proposal_id,
+                    p.status,
+                    p.kind,
+                    p.proposer_agent_id,
+                    p.target_id.as_deref().unwrap_or("-"),
+                );
+            }
+            Ok(())
+        }
+        GatewayConstitutionProposalCommands::Show { proposal_id, json } => {
+            let proposal = store.get_constitutional_proposal(proposal_id)?;
+            match proposal {
+                None => {
+                    anyhow::bail!("No proposal with id '{}'", proposal_id);
+                }
+                Some(p) => {
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&p)?);
+                    } else {
+                        println!("Proposal: {}", p.proposal_id);
+                        println!("  Status:        {}", p.status);
+                        println!("  Kind:          {}", p.kind);
+                        println!("  Target ID:     {}", p.target_id.as_deref().unwrap_or("-"));
+                        println!("  Proposer:      {}", p.proposer_agent_id);
+                        if let Some(s) = &p.proposer_session_id {
+                            println!("  From session:  {}", s);
+                        }
+                        println!("  Created at:    {}", p.created_at);
+                        if let Some(d) = &p.decided_at {
+                            println!("  Decided at:    {}", d);
+                        }
+                        if let Some(b) = &p.decided_by {
+                            println!("  Decided by:    {}", b);
+                        }
+                        if let Some(reason) = &p.decision_reason {
+                            println!("  Reason:        {}", reason);
+                        }
+                        if let Some(rel) = &p.published_in_release {
+                            println!("  Released in:   {}", rel);
+                        }
+                        println!("  Justification: {}", p.justification);
+                        if let Some(t) = &p.proposed_text {
+                            println!("\n--- proposed text ---\n{}", t);
+                        }
+                        if !matches!(p.evidence_json, serde_json::Value::Null) {
+                            println!(
+                                "\n--- evidence ---\n{}",
+                                serde_json::to_string_pretty(&p.evidence_json)?
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        }
+        GatewayConstitutionProposalCommands::Approve {
+            proposal_id,
+            reason,
+        } => decide_proposal(store, proposal_id, "approved", reason.as_deref()),
+        GatewayConstitutionProposalCommands::Reject {
+            proposal_id,
+            reason,
+        } => decide_proposal(store, proposal_id, "rejected", reason.as_deref()),
+        GatewayConstitutionProposalCommands::Defer {
+            proposal_id,
+            reason,
+        } => decide_proposal(store, proposal_id, "deferred", reason.as_deref()),
+    }
+}
+
+fn decide_proposal(
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    proposal_id: &str,
+    new_status: &str,
+    reason: Option<&str>,
+) -> anyhow::Result<()> {
+    debug_assert!(PROPOSAL_DECISION_STATES.contains(&new_status));
+    let updated = store.decide_constitutional_proposal(proposal_id, new_status, "operator", reason)?;
+    if !updated {
+        anyhow::bail!("No proposal with id '{}'", proposal_id);
+    }
+    println!("Proposal {} → {}", proposal_id, new_status);
+    if let Some(r) = reason {
+        println!("  Reason: {}", r);
+    }
+    Ok(())
+}

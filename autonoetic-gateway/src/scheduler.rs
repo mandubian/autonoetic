@@ -1349,6 +1349,7 @@ async fn process_pending_notifications(
                 serde_json::from_value::<crate::scheduler::signal::Signal>(n.payload.clone()).ok()
             }
             autonoetic_types::notification::NotificationType::AdminProposal => None,
+            autonoetic_types::notification::NotificationType::ConstitutionalProposal => None,
         };
 
         if let Some(signal) = signal {
