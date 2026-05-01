@@ -35,6 +35,8 @@ pub enum YieldReason {
     Error(String),
     /// Agent escalated to human operator for guidance.
     HumanEscalation { escalation_request_id: String },
+    /// Parent session terminated (crash, emergency stop, exit); child is orphaned.
+    ParentTerminated { parent_session_id: String, reason: String },
 }
 
 /// Snapshot of LLM configuration needed for reproducible execution.
@@ -607,6 +609,13 @@ mod tests {
             YieldReason::MaxTurnsReached,
             YieldReason::ManualStop,
             YieldReason::Error("something went wrong".to_string()),
+            YieldReason::HumanEscalation {
+                escalation_request_id: "esc-001".to_string(),
+            },
+            YieldReason::ParentTerminated {
+                parent_session_id: "root/parent-abc".to_string(),
+                reason: "emergency_stop".to_string(),
+            },
         ];
 
         for reason in reasons {

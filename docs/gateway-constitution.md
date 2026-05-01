@@ -287,7 +287,7 @@ Loop guard in `runtime/guard.rs`, emergency stop in
 | R-7.13 | Unresolved dependencies block promotion for high-risk agents. | spec-install-pipeline-hardening.md §3.2 | `install_contract.rs` + `promote` | ENFORCED |
 | R-7.14 | `force_complete` refuses `Succeeded` without real child-session evidence. | spec-install-pipeline-hardening.md §A.1 | `workflow.rs::force_complete` | ENFORCED |
 | R-7.15 | Spawn-chain depth is bounded system-wide; child `max_depth` ≤ parent's. | (R+3) | `execution.rs::spawn_agent_once` depth cap + `policy.rs::spawn_depth_limit` + `GatewayConfig.max_spawn_depth` | ENFORCED |
-| R-7.16 | Orphan children are reaped when the parent session terminates. | (R+12) | not pinned | MISSING |
+| R-7.16 | Orphan children are reaped when the parent session terminates. | (R+12) | `scheduler.rs::reap_orphaned_sessions`, `gateway_store/observability.rs::find_orphaned_sessions` | ENFORCED |
 | R-7.17 | Approval flood cap — pending approvals per root session bounded. | (R+5) | `gateway_store/approvals.rs::create_approval` + `GatewayConfig.max_pending_approvals_per_root` | ENFORCED |
 
 ## 8. Audit & Traceability
@@ -387,7 +387,7 @@ before it moves into its category.
 | R+9 | Redaction-before-write ordering invariant. | P1 |
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | P1 |
 | R+11 | Bundle signature verification at `agent_revision_create`. | P1 |
-| R+12 | Orphan-child reaper on parent session termination. | P1 |
+| R+12 | Orphan-child reaper on parent session termination. | ENFORCED (R-7.16) |
 | R+13 | Approval grant TTL. | P2 |
 | R+14 | `can_invoke_tool` denies unknown tool names explicitly. | P2 |
 | R+15 | Constant-time comparison for JSON-RPC shared-secret auth. | ENFORCED (R-10.8) |

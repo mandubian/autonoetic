@@ -794,6 +794,55 @@ impl GatewayStore {
         }
         Ok(results)
     }
+
+    /// Find active sessions whose parent session has ended (orphan detection for R+12).
+    ///
+    /// Returns (child_session_id, parent_session_id, root_session_id, agent_id) tuples
+    /// for each orphaned child. A child is "active" if its transcript status is 'active'
+    /// and its parent (derived from session_id path) has a non-'active' transcript.
+    pub fn find_orphaned_sessions(
+        &self,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, root_session_id, agent_id
+             FROM session_transcripts
+             WHERE status = 'active'
+               AND session_id LIKE '%/%'",
+        )?;
+        let active_children: Vec<(String, String, String, String)> = stmt
+            .query_map([], |row| {
+                let sid: String = row.get(0)?;
+                let root: String = row.get(1)?;
+                let agent: String = row.get(2)?;
+                let parent = sid
+                    .rsplit_once('/')
+                    .map(|(p, _)| p.to_string())
+                    .unwrap_or_default();
+                Ok((sid, parent, root, agent))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        let mut orphans = Vec::new();
+        for (child_session_id, parent_session_id, root_session_id, agent_id) in active_children {
+            let parent_status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM session_transcripts WHERE session_id = ?1",
+                    params![parent_session_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            match parent_status.as_deref() {
+                Some("active") | None => {}
+                _ => {
+                    orphans.push((child_session_id, parent_session_id, root_session_id, agent_id));
+                }
+            }
+        }
+        Ok(orphans)
+    }
 }
 
 #[cfg(test)]

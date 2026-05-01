@@ -196,9 +196,14 @@ async fn run_scheduler_tick_at(
         tracing::warn!(error = %e, "Failed to process queued workflow tasks");
     }
 
+    // Orphan-child reaper: cancel children of terminated parent sessions (R+12)
+    if let Err(e) = reap_orphaned_sessions(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to reap orphaned sessions");
+    }
+
     // Resume standalone sessions whose user interaction has been answered
     if let Err(e) = resume_answered_standalone_interactions(execution).await {
-        tracing::warn!(error = %e, "Failed to resume answered standalone interactions");
+        tracing::warn!(error = %e, "Failed to reap orphaned sessions");
     }
 
     Ok(())
@@ -489,6 +494,134 @@ async fn check_stuck_running_tasks(
                 occurred_at: chrono::Utc::now().to_rfc3339(),
             };
             let _ = workflow_store::append_workflow_event(&config, store, &event);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn reap_orphaned_sessions(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let store = match execution.gateway_store() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let orphans = store.find_orphaned_sessions()?;
+    if orphans.is_empty() {
+        return Ok(());
+    }
+
+    let config = execution.config();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    for (child_session_id, parent_session_id, root_session_id, agent_id) in orphans {
+        tracing::info!(
+            child_session_id = %child_session_id,
+            parent_session_id = %parent_session_id,
+            root_session_id = %root_session_id,
+            agent_id = %agent_id,
+            "Reaping orphaned session (R+12)"
+        );
+
+        let _ = store.finalize_session_transcript(
+            &child_session_id,
+            &now,
+            "failed",
+        );
+
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: agent_id.clone(),
+            session_id: child_session_id.clone(),
+            turn_id: None,
+            event_seq: 0,
+            timestamp: now.clone(),
+            category: "session".to_string(),
+            action: "parent_terminated".to_string(),
+            status: "error".to_string(),
+            enforced_rules: vec!["R+12".to_string()],
+            target: Some(parent_session_id.clone()),
+            payload: Some(serde_json::json!({
+                "parent_session_id": parent_session_id,
+                "root_session_id": root_session_id,
+                "reason": "parent_session_ended",
+            }).to_string()),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("Orphan-child reaper: parent session terminated".to_string()),
+        };
+        let _ = store.create_causal_event(&event);
+
+        let workflows_root =
+            crate::scheduler::workflow_store::workflows_root(&config).join("runs");
+        if workflows_root.is_dir() {
+            for entry in std::fs::read_dir(&workflows_root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let wf_dir = entry.path();
+                let tasks_dir = wf_dir.join("tasks");
+                if !tasks_dir.is_dir() {
+                    continue;
+                }
+                for task_entry in std::fs::read_dir(&tasks_dir)? {
+                    let task_entry = task_entry?;
+                    let task_path = task_entry.path();
+                    let task_json_path = if task_path.extension().map_or(false, |e| e == "json") {
+                        task_path.clone()
+                    } else {
+                        task_path.join("task.json")
+                    };
+                    if !task_json_path.exists() {
+                        continue;
+                    }
+                    let task_data = match std::fs::read_to_string(&task_json_path) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    let mut task: autonoetic_types::workflow::TaskRun =
+                        match serde_json::from_str(&task_data) {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
+                    if task.session_id != child_session_id {
+                        continue;
+                    }
+                    let is_terminal = matches!(
+                        task.status,
+                        autonoetic_types::workflow::TaskRunStatus::Succeeded
+                            | autonoetic_types::workflow::TaskRunStatus::Failed
+                            | autonoetic_types::workflow::TaskRunStatus::Cancelled
+                            | autonoetic_types::workflow::TaskRunStatus::Aborted
+                    );
+                    if is_terminal {
+                        continue;
+                    }
+                    task.status = autonoetic_types::workflow::TaskRunStatus::Cancelled;
+                    task.updated_at = now.clone();
+                    task.result_summary = Some("Cancelled by orphan-child reaper (R+12): parent session terminated".to_string());
+                    let updated = serde_json::to_string_pretty(&task)
+                        .unwrap_or_else(|_| task_data.clone());
+                    let _ = std::fs::write(&task_json_path, updated);
+
+                    crate::scheduler::workflow_store::dequeue_task(
+                        &config,
+                        Some(store.as_ref()),
+                        &task.workflow_id,
+                        &task.task_id,
+                    ).ok();
+                }
+            }
+        }
+
+        let checkpoint_dir = crate::execution::gateway_root_dir(&config)
+            .join("checkpoints")
+            .join(&child_session_id);
+        if checkpoint_dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&checkpoint_dir);
         }
     }
 

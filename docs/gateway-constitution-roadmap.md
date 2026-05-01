@@ -554,21 +554,22 @@ oversized payloads return `payload_too_large`.
 
 ---
 
-### 2.6 `R+12` Orphan-child reaper
+### 2.6 `R+12` Orphan-child reaper — **ENFORCED**
 
 **Threat.** Parent session crashes or is emergency-stopped; children
 run on, consuming budget and eventually reporting to a dead parent.
 
-**Sketch.** Scheduler tick scans `sessions` for parents in terminal
-states with live children. Cancel each child with yield reason
-`parent_terminated`, record in causal chain.
+**Sketch.** Scheduler tick scans `session_transcripts` for active child
+sessions whose parent (derived from session_id path) is in a terminal
+state. Cancels each orphan: finalizes transcript as `failed`, cancels
+workflow task, emits `parent_terminated` causal event with rule R+12.
 
-Files: `autonoetic-gateway/src/scheduler.rs`,
-`autonoetic-gateway/src/runtime/lifecycle.rs`.
+Files: `scheduler.rs::reap_orphaned_sessions`,
+`gateway_store/observability.rs::find_orphaned_sessions`,
+`runtime/checkpoint.rs` (YieldReason::ParentTerminated).
 
-**Test.** `constitution_lifecycle_orphan_reaper.rs` — start parent +
-child, kill parent mid-turn, advance scheduler, assert child reaches
-`Cancelled(parent_terminated)` within one tick.
+**Test.** `constitution_lifecycle_orphan_reaper.rs` — 4 tests: orphan
+cancelled, active parent not reaped, no store noop, multiple orphans.
 
 **Size.** M.
 
