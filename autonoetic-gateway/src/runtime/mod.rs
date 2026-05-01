@@ -36,6 +36,7 @@ pub mod session_budget;
 pub mod session_context;
 pub mod session_report;
 pub mod session_tracer;
+pub mod state_attestation;
 pub mod store;
 pub mod tool_call_processor;
 pub mod tools;
