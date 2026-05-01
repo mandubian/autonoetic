@@ -308,6 +308,7 @@ separate. Runtime-lock in `runtime_lock.rs`.
 | R-8.9 | Promotion records persist `artifact_id`, `evaluator_pass`, `auditor_pass`, `evidence`, and `content_digest`. | spec-install-pipeline-hardening.md §3.8 | `promotion_store.rs` | ENFORCED |
 | R-8.10 | Capability accretion across revisions is detectable via `promotion_history`. | security-sentinel.md | `promotion_history` table | ENFORCED |
 | R-8.11 | `runtime.lock` includes compile-time source fingerprint and runtime binary SHA. | spec-install-pipeline-hardening.md §3.7 | `build.rs`, `runtime_lock.rs` | ENFORCED |
+| R-8.11b | Sessions refuse to start when `runtime.lock` gateway section disagrees with the running gateway binary. Emit `runtime_lock_drift` causal event. Operator override via `allow_runtime_lock_drift` config. | (R+7 / R+18) | `runtime_lock.rs::check_runtime_lock_drift`, `lifecycle.rs:1260` | ENFORCED |
 | R-8.12 | Schema enforcement decisions are logged with target, result, transformations, and enforcer identity. | schema-enforcement-hook.md | causal event emission | ENFORCED |
 | R-8.13 | Knowledge records carry `owner_agent_id`, `writer_agent_id`, `source_ref`; visibility is enforced on recall. | ARCHITECTURE.md | `runtime/memory/*` | ENFORCED |
 | R-8.14 | Session approval grants are tracked by `(root_session_id, host)` and included in cleanup audits. | approved-resources-caching.md | `session_approval_grants` table | ENFORCED |
@@ -351,7 +352,7 @@ HTTP in `server/http.rs`, JSON-RPC in `server/jsonrpc.rs`, OFP in
 | R-10.5 | Layer mounts in remote execution are fetched and cached before sandbox use. | spec-build-layers-dependency-resolution.md §2.6 | HTTP layer download | ENFORCED |
 | R-10.6 | OFP messages preserve session context across gateways. | — | future federation layer | DESIGN DEBT |
 | R-10.7 | Remote agents cannot self-approve network access. | separation-of-powers.md | policy engine + remote validation | PARTIAL |
-| R-10.8 | Shared-secret comparison is constant-time. | (R+15) | needs audit | PARTIAL |
+| R-10.8 | Shared-secret comparison is constant-time. | (R+15) | `server/jsonrpc.rs:37`, `server/http.rs:76` | ENFORCED |
 
 ## 11. Inter-Agent Messaging
 
@@ -381,7 +382,7 @@ before it moves into its category.
 | R+4 | Root-session tree budget — tokens / time / cost aggregated across all descendants. | P0 |
 | R+5 | Approval flood cap per root session; further requests reject `approval_flood`. | P0 |
 | R+6 | Causal-chain fsync ordering invariant — state transitions gated on event durability. | P0 |
-| R+7 | Runtime-lock drift check at session start. | P1 |
+| R+7 | Runtime-lock drift check at session start. | ENFORCED (R-8.11b) |
 | R+8 | Vault master-key presence probe at gateway startup. | P2 |
 | R+9 | Redaction-before-write ordering invariant. | P1 |
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | P1 |
@@ -389,7 +390,7 @@ before it moves into its category.
 | R+12 | Orphan-child reaper on parent session termination. | P1 |
 | R+13 | Approval grant TTL. | P2 |
 | R+14 | `can_invoke_tool` denies unknown tool names explicitly. | P2 |
-| R+15 | Constant-time comparison for JSON-RPC shared-secret auth. | P1 |
+| R+15 | Constant-time comparison for JSON-RPC shared-secret auth. | ENFORCED (R-10.8) |
 | R+16 | Promotion-gate execution is denied network access. | P1 |
 | R+17 | Retention pruning emits `retention.pruned` causal event. | P2 |
 | R+18 | Gateway refuses to start if a session's runtime-lock disagrees with the current binary SHA. | merged with R+7 |

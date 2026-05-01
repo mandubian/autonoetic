@@ -443,7 +443,7 @@ foundational to the vision.
 
 ## Phase 2 — P1 hardening (close next quarter)
 
-### 2.1 `R+7` + `R+18` Runtime-lock drift check
+### 2.1 `R+7` + `R+18` Runtime-lock drift check — **ENFORCED**
 
 **Threat.** A session pinned to a specific `runtime.lock` resumes
 after the gateway binary has been upgraded. The reproducibility
@@ -457,8 +457,8 @@ operator flag allows override per session with explicit audit.
 Files: `autonoetic-gateway/src/runtime_lock.rs`,
 `autonoetic-gateway/src/runtime/lifecycle.rs`.
 
-**Test.** `constitution_audit_runtime_lock_drift.rs` — checkpoint with
-one SHA, mutate build-time SHA constant, resume, assert refusal.
+**Test.** `constitution_audit_runtime_lock_drift.rs` — 5 tests covering
+build SHA drift, matching SHA, absent lock, malformed lock, payload fields.
 
 **Size.** S.
 
@@ -515,21 +515,20 @@ signature, assert pass; tamper one byte, assert reject.
 
 ---
 
-### 2.4 `R+15` Constant-time shared-secret comparison
+### 2.4 `R+15` Constant-time shared-secret comparison — **ENFORCED**
 
-**Threat.** Timing attacks against JSON-RPC auth. Low-risk against an
+**Threat.** Timing attacks against JSON-RPC and HTTP auth. Low-risk against an
 unprivileged adversary with no local access, but the cost to fix is
 trivial.
 
 **Sketch.** Replace `==` on the shared secret in
-`server/jsonrpc.rs` with `subtle::ConstantTimeEq`.
+`server/jsonrpc.rs` and `server/http.rs` with `subtle::ConstantTimeEq`.
 
-Files: `autonoetic-gateway/src/server/jsonrpc.rs`.
+Files: `autonoetic-gateway/src/server/jsonrpc.rs:37`,
+`autonoetic-gateway/src/server/http.rs:76`.
 
-**Test.** `constitution_federation_constant_time.rs` — a read-only
-test verifying the comparison site uses `subtle::ct_eq`. Static
-analysis via grep assertion is fine; property-level timing tests are
-out of scope.
+**Test.** `constitution_constant_time_auth.rs` — verifies wrong token
+rejected with 403, correct token accepted.
 
 **Size.** S.
 

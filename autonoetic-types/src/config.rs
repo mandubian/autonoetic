@@ -662,6 +662,12 @@ pub struct GatewayConfig {
     /// persist answers and orchestrate workflow task or session resume (gateway-owned path).
     #[serde(default = "default_interaction_answer_orchestration")]
     pub interaction_answer_orchestration: bool,
+
+    /// Allow sessions to start even when runtime.lock drift is detected (R+7 / R+18).
+    /// When true, drift is logged as a causal event but does not block session start.
+    /// Default: false (drift is fatal).
+    #[serde(default)]
+    pub allow_runtime_lock_drift: bool,
 }
 
 fn default_interaction_answer_orchestration() -> bool {
@@ -1259,6 +1265,7 @@ impl Default for GatewayConfig {
             scheduled_jobs: ScheduledJobsConfig::default(),
             system_agents: Vec::new(),
             interaction_answer_orchestration: default_interaction_answer_orchestration(),
+            allow_runtime_lock_drift: false,
         }
     }
 }
