@@ -167,7 +167,7 @@ fn checkpoint_path(config: &GatewayConfig, session_id: &str, turn_id: &str) -> P
         ))
 }
 
-fn sanitize_path_component(s: &str) -> String {
+pub fn sanitize_path_component(s: &str) -> String {
     s.chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {

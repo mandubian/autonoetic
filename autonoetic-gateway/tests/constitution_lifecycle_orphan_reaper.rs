@@ -190,3 +190,44 @@ async fn orphan_reaper_handles_multiple_orphans() {
         );
     }
 }
+
+#[tokio::test]
+async fn orphan_reaper_does_not_reap_suspended_parent() {
+    let ws = TestWorkspace::new().unwrap();
+    let gateway_dir = ws.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let root_id = "root-session-004";
+    let parent_id = "root-session-004/planner.default-ffff6666";
+    let child_id = "root-session-004/planner.default-ffff6666/coder.default-gggg7777";
+
+    store
+        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "active"))
+        .unwrap();
+    store
+        .upsert_session_transcript(&make_transcript(parent_id, root_id, "planner.default", "suspended"))
+        .unwrap();
+    store
+        .upsert_session_transcript(&make_transcript(child_id, root_id, "coder.default", "active"))
+        .unwrap();
+
+    let config = ws.gateway_config();
+    let execution = std::sync::Arc::new(
+        GatewayExecutionService::new(config, Some(store.clone())),
+    );
+
+    reap_orphaned_sessions(execution)
+        .await
+        .expect("reaper should succeed");
+
+    let child = store
+        .find_transcript_by_session_id(child_id)
+        .unwrap()
+        .expect("child should exist");
+    assert_eq!(
+        child.status, "active",
+        "child with suspended parent should NOT be reaped"
+    );
+}

@@ -799,7 +799,8 @@ impl GatewayStore {
     ///
     /// Returns (child_session_id, parent_session_id, root_session_id, agent_id) tuples
     /// for each orphaned child. A child is "active" if its transcript status is 'active'
-    /// and its parent (derived from session_id path) has a non-'active' transcript.
+    /// and its parent (derived from session_id path) has a terminal transcript
+    /// (`completed` or `failed`). `suspended` parents are NOT terminal (resumable).
     pub fn find_orphaned_sessions(
         &self,
     ) -> Result<Vec<(String, String, String, String)>> {
@@ -821,8 +822,7 @@ impl GatewayStore {
                     .unwrap_or_default();
                 Ok((sid, parent, root, agent))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
 
         let mut orphans = Vec::new();
@@ -835,10 +835,10 @@ impl GatewayStore {
                 )
                 .ok();
             match parent_status.as_deref() {
-                Some("active") | None => {}
-                _ => {
+                Some("completed") | Some("failed") => {
                     orphans.push((child_session_id, parent_session_id, root_session_id, agent_id));
                 }
+                _ => {}
             }
         }
         Ok(orphans)
