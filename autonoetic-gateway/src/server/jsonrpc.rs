@@ -34,9 +34,16 @@ pub(crate) async fn serve_jsonrpc_listener(
     }
 }
 
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    subtle::ConstantTimeEq::ct_eq(a.as_bytes(), b.as_bytes()).into()
+}
+
 fn is_authorized_request(req: &JsonRpcRequest, required_auth_token: Option<&str>) -> bool {
     match required_auth_token {
-        Some(expected) => req.auth_token.as_deref() == Some(expected),
+        Some(expected) => req
+            .auth_token
+            .as_deref()
+            .map_or(false, |provided| constant_time_str_eq(provided, expected)),
         None => true,
     }
 }

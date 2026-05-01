@@ -74,7 +74,8 @@ fn validate_auth(headers: &HeaderMap, expected_secret: &str) -> Result<(), Error
     }
 
     let token = &auth_header[7..]; // Skip "Bearer "
-    if token != expected_secret {
+    let token_valid: bool = subtle::ConstantTimeEq::ct_eq(token.as_bytes(), expected_secret.as_bytes()).into();
+    if !token_valid {
         return Err(ErrorResponse {
             error: "Invalid token".to_string(),
             code: 403,

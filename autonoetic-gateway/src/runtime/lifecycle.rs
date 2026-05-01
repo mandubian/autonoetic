@@ -511,6 +511,8 @@ pub struct AgentExecutor {
     pub task_id: Option<String>,
     /// SHA-256 of runtime.lock content, captured at session start for reproducibility.
     pub runtime_lock_hash: Option<String>,
+    /// Whether runtime-lock drift has already been checked this session.
+    pub drift_checked: bool,
     /// Emergency-stop hooks (sandbox PIDs, etc.); same registry as [`crate::execution::GatewayExecutionService`].
     pub active_executions:
         Option<Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>>,
@@ -586,6 +588,7 @@ impl AgentExecutor {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            drift_checked: false,
             active_executions: None,
             live_digest: None,
             live_report: None,
@@ -1253,6 +1256,41 @@ impl AgentExecutor {
         };
 
         let active_agent_dir = self.agent_dir.clone();
+
+        if !self.drift_checked {
+            if let Err(drift) = crate::runtime_lock::check_runtime_lock_drift(&self.agent_dir) {
+                let allow = self
+                    .config
+                    .as_ref()
+                    .map_or(false, |c| c.allow_runtime_lock_drift);
+                let status = if allow {
+                    autonoetic_types::causal_chain::EntryStatus::Success
+                } else {
+                    autonoetic_types::causal_chain::EntryStatus::Error
+                };
+                let _ = tracer.log_event(
+                    "runtime_lock_drift",
+                    if allow { "override" } else { "rejected" },
+                    status,
+                    Some(serde_json::json!({
+                        "locked_build_sha256": drift.locked_build_sha256,
+                        "current_build_sha256": drift.current_build_sha256,
+                        "locked_binary_sha256": drift.locked_binary_sha256,
+                        "current_binary_sha256": drift.current_binary_sha256,
+                        "override": allow,
+                    })),
+                );
+                if !allow {
+                    anyhow::bail!(
+                        "runtime lock drift detected: build SHA locked={}, current={}. \
+                         Set allow_runtime_lock_drift=true in config to override.",
+                        drift.locked_build_sha256,
+                        drift.current_build_sha256,
+                    );
+                }
+            }
+            self.drift_checked = true;
+        }
 
         if !self.session_started {
             let trigger = history
