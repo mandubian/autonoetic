@@ -967,15 +967,122 @@ impl AgentExecutor {
         render_user_context_snippet(&profile, &binding.scope)
     }
 
+    /// Compose, sign, and render the R++1 state-attestation tail for the
+    /// current turn. Returns:
+    ///   - `Ok(Some(tail))` whenever the gateway has a directory to keep
+    ///     the identity key in (the production path);
+    ///   - `Ok(None)` when `gateway_dir` is unset (some unit-test paths
+    ///     run an executor without persistent state — there is no key to
+    ///     sign with and no operational state to attest to);
+    ///   - `Err(_)` fail-shut whenever the key file is malformed or the
+    ///     filesystem refuses to honour the strict permissions. The
+    ///     surrounding turn must abort rather than proceed without a
+    ///     trustworthy attestation.
+    fn build_state_attestation_tail(&self) -> anyhow::Result<Option<String>> {
+        let Some(gateway_dir) = self.gateway_dir.as_ref() else {
+            return Ok(None);
+        };
+        let key = crate::runtime::crypto::GatewayIdentityKey::load_or_generate(gateway_dir)?;
+
+        let pending_approval_ids = self
+            .session_id
+            .as_ref()
+            .and_then(|sid| {
+                self.config.as_ref().map(|cfg| (cfg.as_ref(), sid.as_str()))
+            })
+            .map(|(cfg, sid)| {
+                crate::scheduler::approval::pending_approval_requests_for_session(
+                    cfg,
+                    self.gateway_store.as_deref(),
+                    sid,
+                )
+                .map(|reqs| reqs.into_iter().map(|r| r.request_id).collect::<Vec<_>>())
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let budget_meters = self.snapshot_budget_meters();
+        let gateway_node_id =
+            std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string());
+
+        let attestation = crate::runtime::state_attestation::compose_and_sign(
+            crate::runtime::state_attestation::AttestationInputs {
+                agent_id: &self.manifest.agent.id,
+                session_id: self.session_id.as_deref(),
+                root_session_id: self.root_session_id_opt(),
+                turn_counter: self.turn_counter,
+                manifest: &self.manifest,
+                gateway_node_id: &gateway_node_id,
+                pending_approval_ids,
+                budget_meters,
+            },
+            &key,
+        )?;
+
+        Ok(Some(crate::runtime::state_attestation::render_tail(
+            &attestation,
+        )?))
+    }
+
+    /// Best-effort budget snapshot for the attestation block. Pulls usage
+    /// from the per-session registry and pairs it with the configured
+    /// limit (when one exists). Returns an empty list when budgets are
+    /// disabled or counters have not been observed yet for this session.
+    fn snapshot_budget_meters(
+        &self,
+    ) -> Vec<crate::runtime::state_attestation::BudgetMeter> {
+        use crate::runtime::state_attestation::BudgetMeter;
+        let mut meters = Vec::new();
+        let session_id = match self.session_id.as_deref() {
+            Some(s) if !s.is_empty() => s,
+            _ => return meters,
+        };
+        let Some(reg) = self.session_budget.as_ref() else {
+            return meters;
+        };
+        let Some(cfg) = self.config.as_ref() else {
+            return meters;
+        };
+        let limits = &cfg.session_budget;
+        if let Some((rounds, tokens, cost)) = reg.snapshot_counters(session_id) {
+            meters.push(BudgetMeter {
+                name: "llm_rounds".to_string(),
+                used: rounds as f64,
+                limit: limits.max_llm_rounds.map(|x| x as f64),
+            });
+            meters.push(BudgetMeter {
+                name: "llm_tokens".to_string(),
+                used: tokens as f64,
+                limit: limits.max_llm_tokens.map(|x| x as f64),
+            });
+            meters.push(BudgetMeter {
+                name: "session_price_usd".to_string(),
+                used: cost,
+                limit: limits.max_session_price_usd,
+            });
+        }
+        meters
+    }
+
+    fn root_session_id_opt(&self) -> Option<&str> {
+        self.session_id
+            .as_deref()
+            .map(crate::runtime::content_store::root_session_id)
+    }
+
     /// Run the agent loop until completion or guard trip.
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let user_context = self.build_user_context_snippet();
-        let system_instructions = compose_system_instructions_with_user_context(
+        let mut system_instructions = compose_system_instructions_with_user_context(
             &self.instructions,
             &self.manifest,
             self.manifest.response_contract.as_ref(),
             user_context.as_deref(),
         );
+        if let Some(tail) = self.build_state_attestation_tail()? {
+            system_instructions.push_str("\n\n");
+            system_instructions.push_str(&tail);
+        }
         let mut history: Vec<Message> = vec![
             Message::system(system_instructions),
             Message::user(self.initial_user_message.clone()),
@@ -1272,12 +1379,19 @@ impl AgentExecutor {
 
             // Update system message — ensure exactly one system message at position 0
             let user_context = self.build_user_context_snippet();
-            let system_instructions = compose_system_instructions_with_user_context(
+            let mut system_instructions = compose_system_instructions_with_user_context(
                 &self.instructions,
                 &self.manifest,
                 self.manifest.response_contract.as_ref(),
                 user_context.as_deref(),
             );
+            // R++1: re-sign the state-attestation tail every turn so the
+            // facts in the block (turn counter, pending approvals, budget)
+            // reflect the current state, not last-turn's snapshot.
+            if let Some(tail) = self.build_state_attestation_tail()? {
+                system_instructions.push_str("\n\n");
+                system_instructions.push_str(&tail);
+            }
 
             // Remove any existing system messages (could be stale from previous turns)
             history.retain(|m| !matches!(m.role, crate::llm::Role::System));

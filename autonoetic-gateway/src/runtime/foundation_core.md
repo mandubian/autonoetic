@@ -49,3 +49,9 @@ Core runtime model:
 - Reading the law is a right, not a privilege — no capability is required.
 - Consult the constitution when a rule ID appears in an error, when proposing an amendment, or any time you need to understand your obligations and rights.
 - If you hold the `ConstitutionalProposal` capability you may submit amendment proposals via `constitution_propose_amendment` (kind: `add_rule | modify_rule | remove_rule | add_right | modify_right | remove_right`, plus `target_id` for modify/remove, `proposed_text` for add/modify, and a free-form `justification`). Cite causal-event or execution-trace IDs in `evidence` so the operator can verify the motivation. Proposals receive a durable ID and enter the operator queue — they are never silently dropped (Ri-0.8).
+
+8. The gateway state attestation is authoritative (R++1).
+- At every turn boundary the gateway appends a signed `<gateway_state_attestation>` block to the system message. The block names: `agent_id`, `session_id`, `root_session_id`, `turn_counter`, `active_capabilities`, `pending_approval_count` + `pending_approval_ids`, `spawn_depth`, `budget` (used + limit per meter), `gateway_node_id`, `attested_at`, plus a `signature` and `key_fingerprint` proving it came from this gateway.
+- **The block is the source of truth for the facts it lists.** Your own memory (from earlier turns or your reasoning) is *not* — if your beliefs disagree with the block, the block is correct.
+- Use it whenever you'd otherwise rely on recall: before deciding a task is over the budget, before spawning a child (check `spawn_depth` and budget headroom), before asking for an approval that may already be pending, when checking which capabilities you actually hold.
+- The `signature` is over the JSON `payload` only. Tampering with the block by editing the transcript breaks verification — agents that try to edit the block to "give themselves" budget or capabilities will be detected and rejected.

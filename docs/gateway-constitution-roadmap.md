@@ -217,7 +217,7 @@ Files: new `autonoetic-gateway/src/runtime/state_attestation.rs`,
 verify signature against gateway pubkey, tamper one field, verify
 reject. `constitution_attestation_freshness.rs` — assert block
 reflects current turn state (monotonic turn counter, accurate remaining
-budget after a round).
+budget after a round). **Both implemented (8 + 6 tests).**
 
 **Size.** L. Non-trivial because it touches prompt composition, key
 management, and foundation docs. The agent-side adoption (actually
@@ -835,9 +835,9 @@ These tests follow the upstream work.
 
 | Right | Depends on | Work |
 |---|---|---|
-| Ri-0.1 self-inspection | R++1 attestation (#48) | Right-level test: agent reads its own state via attestation, values match internal registry. |
+| Ri-0.1 self-inspection | R++1 attestation (#48) | Right-level test: agent reads its own state via attestation, values match internal registry. **Covered by `constitution_attestation_freshness.rs` (capability_changes, pending_approvals, spawn_depth, budget).** |
 | Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | Test: every rejection across a sample of tools carries a rule ID resolvable to the constitution. |
-| Ri-0.4 truthful budget | R++1 (#48) | Test: budget values in attestation match `session_budget.rs` registry in real time across a multi-turn trace. |
+| Ri-0.4 truthful budget | R++1 (#48) | Test: budget values in attestation match `session_budget.rs` registry in real time across a multi-turn trace. **Covered by `constitution_attestation_freshness.rs::budget_meters_reflect_consumption`.** |
 | Ri-0.5 degradation notice | R++6 (#61) | Add notice-on-entry to degraded mode. Test: agent receives notice with rule ID + evidence before its next turn. |
 | Ri-0.8 amendment proposal | R+++1 (#92) | Test: capability-holder submits, durable ID returned, proposal reviewable; non-holder rejected. |
 | Ri-0.9 last-word before terminal | R++6 (#61) + emergency-stop | Add notify-where-practical to degrade/emergency-stop paths. Test: agent receives a notification opportunity where not foreclosed by the trigger. |
