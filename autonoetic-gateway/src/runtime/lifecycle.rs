@@ -1258,34 +1258,70 @@ impl AgentExecutor {
         let active_agent_dir = self.agent_dir.clone();
 
         if !self.drift_checked {
-            if let Err(drift) = crate::runtime_lock::check_runtime_lock_drift(&self.agent_dir) {
-                let allow = self
-                    .config
-                    .as_ref()
-                    .map_or(false, |c| c.allow_runtime_lock_drift);
-                let status = if allow {
-                    autonoetic_types::causal_chain::EntryStatus::Success
-                } else {
-                    autonoetic_types::causal_chain::EntryStatus::Error
-                };
-                let _ = tracer.log_event(
-                    "runtime_lock_drift",
-                    if allow { "override" } else { "rejected" },
-                    status,
-                    Some(serde_json::json!({
-                        "locked_build_sha256": drift.locked_build_sha256,
-                        "current_build_sha256": drift.current_build_sha256,
-                        "locked_binary_sha256": drift.locked_binary_sha256,
-                        "current_binary_sha256": drift.current_binary_sha256,
-                        "override": allow,
-                    })),
-                );
-                if !allow {
-                    anyhow::bail!(
-                        "runtime lock drift detected: build SHA locked={}, current={}. \
-                         Set allow_runtime_lock_drift=true in config to override.",
-                        drift.locked_build_sha256,
-                        drift.current_build_sha256,
+            match crate::runtime_lock::check_runtime_lock_drift(&self.agent_dir) {
+                crate::runtime_lock::DriftCheckResult::Clean => {}
+                crate::runtime_lock::DriftCheckResult::Drift(drift) => {
+                    let allow = self
+                        .config
+                        .as_ref()
+                        .map_or(false, |c| c.allow_runtime_lock_drift);
+                    let status = if allow {
+                        autonoetic_types::causal_chain::EntryStatus::Success
+                    } else {
+                        autonoetic_types::causal_chain::EntryStatus::Error
+                    };
+                    let drift_field = if drift.locked_binary_sha256.is_some() {
+                        "binary_sha256"
+                    } else {
+                        "build_sha256"
+                    };
+                    let _ = tracer.log_event(
+                        "runtime_lock_drift",
+                        if allow { "override" } else { "rejected" },
+                        status,
+                        Some(serde_json::json!({
+                            "drift_field": drift_field,
+                            "locked_build_sha256": drift.locked_build_sha256,
+                            "current_build_sha256": drift.current_build_sha256,
+                            "locked_binary_sha256": drift.locked_binary_sha256,
+                            "current_binary_sha256": drift.current_binary_sha256,
+                            "override": allow,
+                        })),
+                    );
+                    if !allow {
+                        let mut msg = format!(
+                            "runtime lock drift detected ({drift_field}): "
+                        );
+                        if drift.locked_binary_sha256.is_some() {
+                            msg.push_str(&format!(
+                                "binary SHA locked={:?}, current={:?}. ",
+                                drift.locked_binary_sha256, drift.current_binary_sha256,
+                            ));
+                        }
+                        msg.push_str(&format!(
+                            "build SHA locked={}, current={}. \
+                             Set allow_runtime_lock_drift=true in config to override.",
+                            drift.locked_build_sha256, drift.current_build_sha256,
+                        ));
+                        anyhow::bail!("{}", msg);
+                    }
+                }
+                crate::runtime_lock::DriftCheckResult::Skipped(reason) => {
+                    let (action, detail): (&str, &str) = match &reason {
+                        crate::runtime_lock::DriftSkippedReason::LockAbsent => {
+                            ("lock_absent", "runtime.lock not found in agent dir")
+                        }
+                        crate::runtime_lock::DriftSkippedReason::LockMalformed(e) => {
+                            ("lock_malformed", e.as_str())
+                        }
+                    };
+                    let _ = tracer.log_event(
+                        "runtime_lock_drift",
+                        action,
+                        autonoetic_types::causal_chain::EntryStatus::Success,
+                        Some(serde_json::json!({
+                            "detail": detail,
+                        })),
                     );
                 }
             }

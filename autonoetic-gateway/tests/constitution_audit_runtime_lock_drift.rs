@@ -3,7 +3,9 @@
 mod support;
 
 use autonoetic_gateway::runtime::install_contract::GATEWAY_BUILD_SHA256;
-use autonoetic_gateway::runtime_lock::check_runtime_lock_drift;
+use autonoetic_gateway::runtime_lock::{
+    check_runtime_lock_drift, DriftCheckResult, DriftSkippedReason,
+};
 use autonoetic_types::runtime_lock::{LockedGateway, LockedSandbox, LockedSdk, RuntimeLock};
 use support::TestWorkspace;
 
@@ -34,6 +36,28 @@ fn lock_with_build_sha(sha: &str) -> RuntimeLock {
     }
 }
 
+fn lock_with_binary_sha(build_sha: &str, binary_sha: &str) -> RuntimeLock {
+    RuntimeLock {
+        gateway: LockedGateway {
+            artifact: "marketplace://gateway/autonoetic-gateway".into(),
+            version: "0.1.0".into(),
+            sha256: build_sha.into(),
+            binary_sha256: Some(binary_sha.into()),
+            build_tag: None,
+            signature: None,
+        },
+        sdk: LockedSdk {
+            version: "0.1.0".into(),
+        },
+        sandbox: LockedSandbox {
+            backend: "bubblewrap".into(),
+        },
+        dependencies: vec![],
+        artifacts: vec![],
+        layers: vec![],
+    }
+}
+
 #[test]
 fn drift_rejected_when_build_sha_mismatches() {
     let ws = TestWorkspace::new().unwrap();
@@ -43,13 +67,41 @@ fn drift_rejected_when_build_sha_mismatches() {
     write_runtime_lock(&agent_dir, &lock_with_build_sha("sha256:deadbeef"));
 
     let result = check_runtime_lock_drift(&agent_dir);
-    assert!(result.is_err(), "should detect drift when build SHA differs");
-    let drift = result.unwrap_err();
-    assert_eq!(drift.locked_build_sha256, "sha256:deadbeef");
-    assert_ne!(
-        drift.current_build_sha256, "sha256:deadbeef",
-        "current SHA should differ from the fake one"
+    match result {
+        DriftCheckResult::Drift(drift) => {
+            assert_eq!(drift.locked_build_sha256, "sha256:deadbeef");
+            assert_ne!(
+                drift.current_build_sha256, "sha256:deadbeef",
+                "current SHA should differ from the fake one"
+            );
+        }
+        other => panic!("expected Drift, got {:?}", other),
+    }
+}
+
+#[test]
+fn drift_rejected_when_binary_sha_mismatches() {
+    let ws = TestWorkspace::new().unwrap();
+    let agent_dir = ws.agents_dir.join("test.agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    write_runtime_lock(
+        &agent_dir,
+        &lock_with_binary_sha(GATEWAY_BUILD_SHA256, "sha256:bada55"),
     );
+
+    let result = check_runtime_lock_drift(&agent_dir);
+    match result {
+        DriftCheckResult::Drift(drift) => {
+            assert_eq!(drift.locked_binary_sha256.as_deref(), Some("sha256:bada55"));
+            assert_ne!(
+                drift.current_binary_sha256.as_deref(),
+                Some("sha256:bada55"),
+                "current binary SHA should differ from the fake one"
+            );
+        }
+        other => panic!("expected Drift, got {:?}", other),
+    }
 }
 
 #[test]
@@ -62,26 +114,28 @@ fn no_drift_when_build_sha_matches_current_gateway() {
 
     let result = check_runtime_lock_drift(&agent_dir);
     assert!(
-        result.is_ok(),
-        "no drift expected when lock matches current gateway build SHA"
+        matches!(result, DriftCheckResult::Clean),
+        "no drift expected when lock matches current gateway build SHA, got {:?}",
+        result
     );
 }
 
 #[test]
-fn no_drift_when_runtime_lock_absent() {
+fn skipped_when_runtime_lock_absent() {
     let ws = TestWorkspace::new().unwrap();
     let agent_dir = ws.agents_dir.join("test.agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     let result = check_runtime_lock_drift(&agent_dir);
     assert!(
-        result.is_ok(),
-        "no drift when runtime.lock does not exist"
+        matches!(result, DriftCheckResult::Skipped(DriftSkippedReason::LockAbsent)),
+        "absent lock should be Skipped(LockAbsent), got {:?}",
+        result
     );
 }
 
 #[test]
-fn no_drift_when_runtime_lock_malformed() {
+fn skipped_when_runtime_lock_malformed() {
     let ws = TestWorkspace::new().unwrap();
     let agent_dir = ws.agents_dir.join("test.agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -90,8 +144,9 @@ fn no_drift_when_runtime_lock_malformed() {
 
     let result = check_runtime_lock_drift(&agent_dir);
     assert!(
-        result.is_ok(),
-        "malformed lock should not block (graceful degradation)"
+        matches!(result, DriftCheckResult::Skipped(DriftSkippedReason::LockMalformed(_))),
+        "malformed lock should be Skipped(LockMalformed), got {:?}",
+        result
     );
 }
 
@@ -103,8 +158,12 @@ fn drift_payload_contains_both_shas() {
 
     write_runtime_lock(&agent_dir, &lock_with_build_sha("sha256:aabbccdd"));
 
-    let drift = check_runtime_lock_drift(&agent_dir).unwrap_err();
-    assert!(drift.locked_build_sha256.starts_with("sha256:"));
-    assert!(drift.current_build_sha256.starts_with("sha256:"));
-    assert_ne!(drift.locked_build_sha256, drift.current_build_sha256);
+    match check_runtime_lock_drift(&agent_dir) {
+        DriftCheckResult::Drift(drift) => {
+            assert!(drift.locked_build_sha256.starts_with("sha256:"));
+            assert!(drift.current_build_sha256.starts_with("sha256:"));
+            assert_ne!(drift.locked_build_sha256, drift.current_build_sha256);
+        }
+        other => panic!("expected Drift, got {:?}", other),
+    }
 }

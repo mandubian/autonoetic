@@ -308,7 +308,7 @@ separate. Runtime-lock in `runtime_lock.rs`.
 | R-8.9 | Promotion records persist `artifact_id`, `evaluator_pass`, `auditor_pass`, `evidence`, and `content_digest`. | spec-install-pipeline-hardening.md §3.8 | `promotion_store.rs` | ENFORCED |
 | R-8.10 | Capability accretion across revisions is detectable via `promotion_history`. | security-sentinel.md | `promotion_history` table | ENFORCED |
 | R-8.11 | `runtime.lock` includes compile-time source fingerprint and runtime binary SHA. | spec-install-pipeline-hardening.md §3.7 | `build.rs`, `runtime_lock.rs` | ENFORCED |
-| R-8.11b | Sessions refuse to start when `runtime.lock` gateway section disagrees with the running gateway binary. Emit `runtime_lock_drift` causal event. Operator override via `allow_runtime_lock_drift` config. | (R+7 / R+18) | `runtime_lock.rs::check_runtime_lock_drift`, `lifecycle.rs:1258` | ENFORCED |
+| R-8.11b | Sessions refuse to start when `runtime.lock` gateway section disagrees with the running gateway binary. Emit `runtime_lock_drift` causal event. Operator override via `allow_runtime_lock_drift` config. | (R+7 / R+18) | `runtime_lock.rs::check_runtime_lock_drift`, `lifecycle.rs:1260` | ENFORCED |
 | R-8.12 | Schema enforcement decisions are logged with target, result, transformations, and enforcer identity. | schema-enforcement-hook.md | causal event emission | ENFORCED |
 | R-8.13 | Knowledge records carry `owner_agent_id`, `writer_agent_id`, `source_ref`; visibility is enforced on recall. | ARCHITECTURE.md | `runtime/memory/*` | ENFORCED |
 | R-8.14 | Session approval grants are tracked by `(root_session_id, host)` and included in cleanup audits. | approved-resources-caching.md | `session_approval_grants` table | ENFORCED |
