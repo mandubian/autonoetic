@@ -38,8 +38,10 @@ pub struct AttestationInputs<'a> {
     /// Bounded by the caller (we cap to 32 in the wrapper to keep the
     /// system-prompt tail small).
     pub pending_approval_ids: Vec<String>,
-    /// `(used, limit)` for each named budget meter that has a configured
-    /// limit. `remaining = limit - used`. Empty when budgets are disabled.
+    /// Named budget meters from the session registry. `limit` is `None`
+    /// when no cap is configured for that meter (e.g. price tracking
+    /// without a ceiling). Empty when budgets are disabled or the
+    /// session has not yet recorded any usage.
     pub budget_meters: Vec<BudgetMeter>,
 }
 
@@ -144,9 +146,11 @@ pub fn compose_and_sign(
 /// readable: agents (and human reviewers) can parse the JSON body between
 /// the markers. Markers also bracket the block so accidental
 /// concatenation with surrounding text can't be confused for inclusion.
-pub fn render_tail(att: &StateAttestation) -> String {
-    let body = serde_json::to_string_pretty(att).unwrap_or_default();
-    format!(
+pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
+    let body = serde_json::to_string_pretty(att).map_err(|e| {
+        anyhow::anyhow!("Cannot serialise state attestation for prompt injection: {}", e)
+    })?;
+    Ok(format!(
         "---\n\nGateway State Attestation (R++1)\n\n\
          The block below is signed by the gateway's identity key. It is the \
          **authoritative** statement of your remaining budget, active \
@@ -154,7 +158,7 @@ pub fn render_tail(att: &StateAttestation) -> String {
          counter. If your own memory of these facts disagrees with the block, \
          the block is correct.\n\n\
          <gateway_state_attestation>\n{body}\n</gateway_state_attestation>\n",
-    )
+    ))
 }
 
 /// Verify a wrapper against a known public key. Returns the parsed payload
@@ -164,6 +168,13 @@ pub fn verify(
     public_key_bytes: &[u8; 32],
     attestation: &StateAttestation,
 ) -> anyhow::Result<StateAttestationPayload> {
+    let expected_fp = hex::encode(&public_key_bytes[..8]);
+    anyhow::ensure!(
+        attestation.key_fingerprint == expected_fp,
+        "State attestation key fingerprint mismatch: block claims {}, verifier expected {}",
+        attestation.key_fingerprint,
+        expected_fp
+    );
     let canonical = canonical_payload_bytes(&attestation.payload)?;
     let ok = verify_attestation_signature(public_key_bytes, &canonical, &attestation.signature)?;
     if !ok {
@@ -388,11 +399,40 @@ mod tests {
             &key,
         )
         .unwrap();
-        let tail = render_tail(&att);
+        let tail = render_tail(&att).unwrap();
         assert!(tail.contains("Gateway State Attestation"));
         assert!(tail.contains("authoritative"));
         assert!(tail.contains("<gateway_state_attestation>"));
         assert!(tail.contains("</gateway_state_attestation>"));
         assert!(tail.contains(&att.signature));
+    }
+
+    #[test]
+    fn tampered_fingerprint_breaks_verification() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let mut att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "a",
+                session_id: Some("s"),
+                root_session_id: Some("s"),
+                turn_counter: 0,
+                manifest: &manifest,
+                gateway_node_id: "node",
+                pending_approval_ids: vec![],
+                budget_meters: vec![],
+            },
+            &key,
+        )
+        .unwrap();
+        att.key_fingerprint = "0000000000000000".to_string();
+        let pub_bytes = key.public_key_bytes();
+        let err = verify(&pub_bytes, &att).expect_err("tampered fingerprint must reject");
+        assert!(
+            err.to_string().contains("fingerprint mismatch"),
+            "{}",
+            err
+        );
     }
 }

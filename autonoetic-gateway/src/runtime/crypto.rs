@@ -88,55 +88,47 @@ impl GatewayIdentityKey {
         let public_path = gateway_dir.join(Self::PUBLIC_FILENAME);
 
         if private_path.exists() {
-            check_private_permissions(&private_path)?;
-            let bytes = std::fs::read(&private_path).map_err(|e| {
-                anyhow::anyhow!(
-                    "Cannot read gateway identity key at {}: {}",
-                    private_path.display(),
-                    e
-                )
-            })?;
-            anyhow::ensure!(
-                bytes.len() == 32,
-                "Gateway identity key at {} has wrong length ({} bytes, expected 32). \
-                 Refusing to operate on a malformed signing key.",
-                private_path.display(),
-                bytes.len()
-            );
-            let mut secret = [0u8; 32];
-            secret.copy_from_slice(&bytes);
-            let signing_key = SigningKey::from_bytes(&secret);
-            // Repair the public sidecar if the private file existed but the
-            // public file is missing (e.g. operator-created install).
-            if !public_path.exists() {
+            return load_existing_key(&private_path, &public_path);
+        }
+
+        std::fs::create_dir_all(gateway_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot create gateway directory {}: {}",
+                gateway_dir.display(),
+                e
+            )
+        })?;
+
+        let mut secret = [0u8; 32];
+        OsRng.fill_bytes(&mut secret);
+        let signing_key = SigningKey::from_bytes(&secret);
+
+        match atomic_create_private_key(&private_path, &signing_key) {
+            Ok(()) => {
                 write_public_key_file(&public_path, &signing_key.verifying_key())?;
+                tracing::info!(
+                    target: "crypto",
+                    path = %private_path.display(),
+                    "Generated new gateway identity key (Ed25519, R++1 attestation)"
+                );
+                Ok(Self {
+                    signing_key,
+                    private_path,
+                })
             }
-            Ok(Self {
-                signing_key,
-                private_path,
-            })
-        } else {
-            std::fs::create_dir_all(gateway_dir).map_err(|e| {
-                anyhow::anyhow!(
-                    "Cannot create gateway directory {}: {}",
-                    gateway_dir.display(),
-                    e
-                )
-            })?;
-            let mut secret = [0u8; 32];
-            OsRng.fill_bytes(&mut secret);
-            let signing_key = SigningKey::from_bytes(&secret);
-            write_private_key_file(&private_path, &signing_key)?;
-            write_public_key_file(&public_path, &signing_key.verifying_key())?;
-            tracing::info!(
-                target: "crypto",
-                path = %private_path.display(),
-                "Generated new gateway identity key (Ed25519, R++1 attestation)"
-            );
-            Ok(Self {
-                signing_key,
-                private_path,
-            })
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                tracing::info!(
+                    target: "crypto",
+                    path = %private_path.display(),
+                    "Gateway identity key created by peer; loading existing"
+                );
+                load_existing_key(&private_path, &public_path)
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "Cannot create gateway identity key {}: {}",
+                private_path.display(),
+                e
+            )),
         }
     }
 
@@ -166,42 +158,57 @@ impl GatewayIdentityKey {
     }
 }
 
-fn write_private_key_file(path: &Path, key: &SigningKey) -> anyhow::Result<()> {
+fn load_existing_key(private_path: &Path, public_path: &Path) -> anyhow::Result<GatewayIdentityKey> {
+    check_private_permissions(private_path)?;
+    let bytes = std::fs::read(private_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot read gateway identity key at {}: {}",
+            private_path.display(),
+            e
+        )
+    })?;
+    anyhow::ensure!(
+        bytes.len() == 32,
+        "Gateway identity key at {} has wrong length ({} bytes, expected 32). \
+         Refusing to operate on a malformed signing key.",
+        private_path.display(),
+        bytes.len()
+    );
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&bytes);
+    let signing_key = SigningKey::from_bytes(&secret);
+    if !public_path.exists() {
+        write_public_key_file(public_path, &signing_key.verifying_key())?;
+    }
+    Ok(GatewayIdentityKey {
+        signing_key,
+        private_path: private_path.to_path_buf(),
+    })
+}
+
+fn atomic_create_private_key(
+    path: &Path,
+    key: &SigningKey,
+) -> std::io::Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         let mut f = OpenOptions::new()
-            .create(true)
             .write(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(path)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Cannot create gateway identity key {}: {}",
-                    path.display(),
-                    e
-                )
-            })?;
+            .open(path)?;
         f.write_all(&key.to_bytes())?;
         f.sync_all().ok();
     }
     #[cfg(not(unix))]
     {
         let mut f = OpenOptions::new()
-            .create(true)
             .write(true)
-            .truncate(true)
-            .open(path)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Cannot create gateway identity key {}: {}",
-                    path.display(),
-                    e
-                )
-            })?;
+            .create_new(true)
+            .open(path)?;
         f.write_all(&key.to_bytes())?;
         f.sync_all().ok();
     }
@@ -258,7 +265,10 @@ pub fn verify_attestation_signature(
     let vk = VerifyingKey::from_bytes(public_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid public key: {}", e))?;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let sig_bytes = STANDARD.decode(signature_b64)?;
+    let sig_bytes = match STANDARD.decode(signature_b64) {
+        Ok(b) => b,
+        Err(_) => return Ok(false),
+    };
     if sig_bytes.len() != 64 {
         return Ok(false);
     }
@@ -346,10 +356,33 @@ mod tests {
         let sig = key.sign(payload);
         let pub_bytes = key.public_key_bytes();
         assert!(verify_attestation_signature(&pub_bytes, payload, &sig).unwrap());
-        // Mutated payload — signature must reject.
         assert!(
             !verify_attestation_signature(&pub_bytes, b"{\"agent_id\":\"b\",\"turn\":3}", &sig)
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_base64_signature_returns_not_ok() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let pub_bytes = key.public_key_bytes();
+        assert!(
+            !verify_attestation_signature(&pub_bytes, b"payload", "!!!not-base64!!!")
+                .unwrap()
+        );
+        assert!(!verify_attestation_signature(&pub_bytes, b"payload", "").unwrap());
+    }
+
+    #[test]
+    fn wrong_length_signature_returns_not_ok() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let pub_bytes = key.public_key_bytes();
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let short_sig = STANDARD.encode(b"tooshort");
+        assert!(
+            !verify_attestation_signature(&pub_bytes, b"payload", &short_sig).unwrap()
         );
     }
 }

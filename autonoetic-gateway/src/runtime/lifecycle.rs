@@ -1021,7 +1021,7 @@ impl AgentExecutor {
 
         Ok(Some(crate::runtime::state_attestation::render_tail(
             &attestation,
-        )))
+        )?))
     }
 
     /// Best-effort budget snapshot for the attestation block. Pulls usage

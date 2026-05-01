@@ -165,7 +165,11 @@ fn different_gateway_key_rejects_attestation() {
     let manifest = manifest_with_caps(vec![]);
     let att = compose_and_sign(default_inputs(&manifest), &key_a).expect("compose");
     let err = verify(&key_b.public_key_bytes(), &att).expect_err("wrong key");
-    assert!(err.to_string().contains("did not verify"), "{}", err);
+    assert!(
+        err.to_string().contains("fingerprint mismatch") || err.to_string().contains("did not verify"),
+        "{}",
+        err
+    );
 }
 
 #[test]
@@ -176,7 +180,7 @@ fn rendered_tail_contains_verifiable_block() {
         scopes: vec!["*".to_string()],
     }]);
     let att = compose_and_sign(default_inputs(&manifest), &key).expect("compose");
-    let tail = render_tail(&att);
+    let tail = render_tail(&att).unwrap();
 
     assert!(tail.contains("<gateway_state_attestation>"));
     assert!(tail.contains("</gateway_state_attestation>"));
