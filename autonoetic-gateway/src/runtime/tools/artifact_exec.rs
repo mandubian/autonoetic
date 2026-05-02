@@ -667,6 +667,7 @@ impl NativeTool for ArtifactExecTool {
                 &stdout_str,
                 &stderr_str,
                 has_network_cap,
+                false,
             );
         }
 
@@ -872,6 +873,7 @@ fn execute_with_ticket(
             &stdout,
             &stderr,
             has_network_cap,
+            false,
         );
     }
 

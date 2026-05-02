@@ -391,7 +391,7 @@ before it moves into its category.
 | R+13 | Approval grant TTL. | P2 |
 | R+14 | `can_invoke_tool` denies unknown tool names explicitly. | P2 |
 | R+15 | Constant-time comparison for JSON-RPC shared-secret auth. | ENFORCED (R-10.8) |
-| R+16 | Promotion-gate execution is denied network access. | P1 |
+| R+16 | Promotion-gate execution is denied network access. `autonoetic-gateway/src/sandbox.rs` (`BwrapIsolationOverrides::force_network_off`), `autonoetic-gateway/src/runtime/tools/sandbox.rs` (Evaluation-cap override), `autonoetic-gateway/src/execution.rs` (`execute_script_in_sandbox` override), `agents/specialists/evaluator.default/SKILL.md` + `agents/specialists/auditor.default/SKILL.md` (`Evaluation` capability). | ENFORCED |
 | R+17 | Retention pruning emits `retention.pruned` causal event. | P2 |
 | R+18 | Gateway refuses to start if a session's runtime-lock disagrees with the current binary SHA. | merged with R+7 |
 

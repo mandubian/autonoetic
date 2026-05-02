@@ -348,6 +348,7 @@ pub fn apply_network_isolation_failure_to_result(
     stdout: &str,
     stderr: &str,
     has_network_cap: bool,
+    evaluation_blocked: bool,
 ) -> Option<Vec<String>> {
     let combined_output = format!("{stdout}\n{stderr}");
     let network_errors = detect_network_errors_in_output(&combined_output);
@@ -355,17 +356,23 @@ pub fn apply_network_isolation_failure_to_result(
         return None;
     }
 
+    let reason = if evaluation_blocked {
+        "Promotion evaluation sessions have no network access (gateway constitution rule R+16). \
+         Use constitution.read to inspect the rule. Mock all external services in tests so they \
+         run offline."
+    } else if has_network_cap {
+        "This agent declares NetworkAccess but this run did not enable the network \
+         namespace (e.g. missing operator approval or misconfiguration)."
+    } else {
+        "This agent does not declare NetworkAccess: outbound calls are blocked. \
+         Add scoped NetworkAccess, or use packager.default layers so tests run offline."
+    };
+
     let summary = format!(
         "Sandbox ran without outbound network and output indicates a network failure \
          ({}). {}",
         network_errors.join(", "),
-        if has_network_cap {
-            "This agent declares NetworkAccess but this run did not enable the network \
-             namespace (e.g. missing operator approval or misconfiguration)."
-        } else {
-            "This agent does not declare NetworkAccess: outbound calls are blocked. \
-             Add scoped NetworkAccess, or use packager.default layers so tests run offline."
-        }
+        reason
     );
     if let Some(obj) = body.as_object_mut() {
         obj.insert("ok".to_string(), serde_json::json!(false));
@@ -1788,6 +1795,14 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
             overrides.share_net = true;
         }
 
+        let has_evaluation_cap = manifest.capabilities.iter().any(|c| {
+            matches!(c, autonoetic_types::capability::Capability::Evaluation { .. })
+        });
+        if has_evaluation_cap {
+            overrides.force_network_off = true;
+            overrides.share_net = false;
+        }
+
         let layer_python_path_str = layer_python_paths.join(":");
         let mut extra_env: Vec<(String, String)> = if !layer_python_path_str.is_empty() {
             vec![("PYTHONPATH".to_string(), layer_python_path_str)]
@@ -1908,6 +1923,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                 &stdout,
                 &stderr,
                 has_network_cap,
+                has_evaluation_cap,
             ) {
                 tracing::warn!(
                     target: "sandbox_exec",
@@ -2150,6 +2166,7 @@ mod network_error_detection_tests {
             "requests.exceptions.ConnectionError: boom",
             "",
             false,
+            false,
         );
         assert!(
             detected.is_some(),
@@ -2169,11 +2186,43 @@ mod network_error_detection_tests {
             "stderr": ""
         });
         let detected =
-            apply_network_isolation_failure_to_result(&mut body, "normal output", "", false);
+            apply_network_isolation_failure_to_result(&mut body, "normal output", "", false, false);
         assert!(detected.is_none(), "should not detect network patterns");
         assert_eq!(body["ok"], json!(true));
         assert!(body.get("error_type").is_none());
         assert!(body.get("network_blocked").is_none());
+    }
+
+    #[test]
+    fn evaluation_blocked_message_mentions_r16_and_constitution() {
+        let mut body = json!({
+            "ok": true,
+            "exit_code": 0,
+            "stdout": "done",
+            "stderr": ""
+        });
+        let detected = apply_network_isolation_failure_to_result(
+            &mut body,
+            "requests.exceptions.ConnectionError: boom",
+            "",
+            true,
+            true,
+        );
+        assert!(detected.is_some());
+        assert_eq!(body["ok"], json!(false));
+        let msg = body["network_warning"].as_str().unwrap();
+        assert!(
+            msg.contains("R+16"),
+            "evaluation-blocked message should reference R+16: {msg}"
+        );
+        assert!(
+            msg.contains("constitution"),
+            "evaluation-blocked message should mention constitution: {msg}"
+        );
+        assert!(
+            msg.contains("Mock all external services"),
+            "evaluation-blocked message should advise mocking: {msg}"
+        );
     }
 }
 

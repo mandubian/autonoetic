@@ -32,18 +32,20 @@ static SANDBOX_CONFIG: OnceLock<SandboxConfig> = OnceLock::new();
 /// Derived from the executing agent's capabilities.
 #[derive(Debug, Clone, Default)]
 pub struct BwrapIsolationOverrides {
-    /// Share host network namespace (adds --share-net to bwrap).
     pub share_net: bool,
+    pub force_network_off: bool,
 }
 
 impl BwrapIsolationOverrides {
-    /// Derive overrides from agent capabilities.
-    /// Returns `share_net: true` if any `NetworkAccess` capability is present.
     pub fn from_capabilities(caps: &[Capability]) -> Self {
         let share_net = caps
             .iter()
             .any(|cap| matches!(cap, Capability::NetworkAccess { hosts } if !hosts.is_empty()));
-        Self { share_net }
+        Self { share_net, force_network_off: false }
+    }
+
+    pub fn promotion_gate_overrides() -> Self {
+        Self { share_net: false, force_network_off: true }
     }
 }
 
@@ -917,9 +919,14 @@ pub fn append_bwrap_isolation_flags(
 ) {
     argv.push("--unshare-all".to_string());
 
-    let share_net = overrides
-        .map(|o| o.share_net)
-        .unwrap_or_else(bwrap_share_net_enabled);
+    let force_off = overrides.map(|o| o.force_network_off).unwrap_or(false);
+    let share_net = if force_off {
+        false
+    } else {
+        overrides
+            .map(|o| o.share_net)
+            .unwrap_or_else(bwrap_share_net_enabled)
+    };
 
     if share_net {
         argv.push("--share-net".to_string());

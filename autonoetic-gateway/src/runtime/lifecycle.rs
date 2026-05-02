@@ -3120,6 +3120,7 @@ fn input_tokens_as_context_pct(input_tokens: u64, context_window: Option<u32>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use autonoetic_types::agent::SessionState;
     use crate::llm::{
         CompletionRequest, CompletionResponse, LlmDriver, StopReason, TokenUsage, ToolCall,
         ToolDefinition,
@@ -3182,6 +3183,7 @@ mod tests {
             &manifest,
             Some("root/agent-factory.default-12345678"),
             false,
+            SessionState::Normal,
         );
 
         assert!(filter.allows("content_write"));
@@ -3199,6 +3201,7 @@ mod tests {
             &manifest,
             Some("root/specialized_builder.default-12345678"),
             false,
+            SessionState::Normal,
         );
 
         assert!(filter.allows("content_read"));

@@ -597,7 +597,7 @@ is what makes this S vs. L.
 
 ---
 
-### 2.8 `R+16` Promotion-gate execution denied network
+### 2.8 `R+16` Promotion-gate execution denied network — **ENFORCED**
 
 **Threat.** An auditor or evaluator that hits the network during a
 verdict is not reproducible from recorded evidence. A malicious
