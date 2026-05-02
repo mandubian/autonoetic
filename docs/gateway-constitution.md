@@ -376,7 +376,7 @@ before it moves into its category.
 
 | ID | Rule | Priority |
 |---|---|---|
-| R+1 | Structured capability scopes mandatory for all capabilities (not only the three high-risk ones). | P1 |
+| R+1 | Structured capability scopes mandatory for all capabilities (not only the three high-risk ones). | ENFORCED |
 | R+2 | Child → parent tool results validate against `io.returns` on egress. | P0 |
 | R+3 | Spawn-chain depth cap — child `max_children` and `max_depth` ≤ parent's; global ceiling applies. | P0 |
 | R+4 | Root-session tree budget — tokens / time / cost aggregated across all descendants. | P0 |
