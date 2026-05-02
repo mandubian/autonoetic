@@ -71,6 +71,88 @@ pub fn classify_network_coverage(
     }
 }
 
+/// Max pattern text length included in [`approval_remote_operator_suffix`].
+const APPROVAL_REMOTE_PATTERN_SNIPPET_CHARS: usize = 96;
+
+/// Max distinct `category:snippet` hints appended when hosts are unknown.
+const APPROVAL_REMOTE_HINT_CAP: usize = 8;
+
+fn collapse_detected_pattern_text(raw: &str) -> String {
+    raw.lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
+fn truncate_unicode_hint(s: &str, max_chars: usize) -> String {
+    let n = s.chars().count();
+    if n <= max_chars {
+        s.to_string()
+    } else {
+        let keep = max_chars.saturating_sub(3);
+        format!("{}...", s.chars().take(keep).collect::<String>())
+    }
+}
+
+/// Extra text appended to operator-facing sandbox approval strings.
+///
+/// When [`crate::runtime::approved_exec_cache::normalize_targets`] finds URL/IP literals, returns
+/// ` → hosts: host1, host2`. Otherwise lists short `category:snippet` entries from detected patterns so
+/// approvers see what triggered the gate when no literal URL could be extracted.
+pub fn approval_remote_operator_suffix(
+    concrete_hosts: &[String],
+    patterns: &[DetectedPattern],
+) -> String {
+    if !concrete_hosts.is_empty() {
+        return format!(" → hosts: {}", concrete_hosts.join(", "));
+    }
+    if patterns.is_empty() {
+        return String::new();
+    }
+
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut parts = Vec::new();
+
+    for p in patterns {
+        let snippet = truncate_unicode_hint(
+            &collapse_detected_pattern_text(&p.pattern),
+            APPROVAL_REMOTE_PATTERN_SNIPPET_CHARS,
+        );
+        if snippet.is_empty() {
+            continue;
+        }
+        let label = format!("{}:{}", p.category, snippet);
+        if seen.insert(label.clone()) {
+            parts.push(label);
+        }
+        if parts.len() >= APPROVAL_REMOTE_HINT_CAP {
+            break;
+        }
+    }
+
+    if parts.is_empty() {
+        seen.clear();
+        for p in patterns {
+            let label = format!("{}:*", p.category);
+            if seen.insert(label.clone()) {
+                parts.push(label);
+            }
+            if parts.len() >= APPROVAL_REMOTE_HINT_CAP {
+                break;
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" → signals: {}", parts.join("; "))
+    }
+}
+
 /// Static analyzer for detecting remote access patterns in code.
 pub struct RemoteAccessAnalyzer;
 
@@ -977,6 +1059,59 @@ mymod.do_thing()
         ];
         let coverage = classify_network_coverage(&patterns, vec![]);
         assert_eq!(coverage, NetworkCoverage::Unresolved);
+    }
+
+    #[test]
+    fn test_approval_remote_suffix_prefers_hosts() {
+        let patterns = vec![DetectedPattern {
+            category: "function_call".to_string(),
+            pattern: "urlopen(".to_string(),
+            line_number: Some(1),
+            reason: "open URL".to_string(),
+        }];
+        let s = approval_remote_operator_suffix(&["example.com".to_string()], &patterns);
+        assert_eq!(s, " → hosts: example.com");
+    }
+
+    #[test]
+    fn test_approval_remote_suffix_signals_when_no_hosts() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "function_call".to_string(),
+                pattern: "urlopen(".to_string(),
+                line_number: Some(1),
+                reason: "open URL".to_string(),
+            },
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: "from urllib.request import urlopen".to_string(),
+                line_number: Some(1),
+                reason: "import".to_string(),
+            },
+        ];
+        let s = approval_remote_operator_suffix(&[], &patterns);
+        assert!(s.starts_with(" → signals: "));
+        assert!(s.contains("function_call:urlopen("));
+        assert!(s.contains("import:from urllib.request import urlopen"));
+    }
+
+    #[test]
+    fn test_approval_remote_suffix_empty_without_patterns_or_hosts() {
+        assert!(approval_remote_operator_suffix(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn test_approval_remote_suffix_category_fallback_when_pattern_empty() {
+        let patterns = vec![DetectedPattern {
+            category: "import".to_string(),
+            pattern: "\n\t".to_string(),
+            line_number: Some(1),
+            reason: "x".to_string(),
+        }];
+        assert_eq!(
+            approval_remote_operator_suffix(&[], &patterns),
+            " → signals: import:*"
+        );
     }
 }
 
