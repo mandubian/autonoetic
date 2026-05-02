@@ -751,6 +751,49 @@ impl JsonRpcRouter {
                 }
             }
 
+            "session.degrade" => {
+                #[derive(Deserialize)]
+                struct DegradeParams {
+                    session_id: String,
+                    reason: String,
+                }
+                let params: DegradeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.degrade: {}", e),
+                        );
+                    }
+                };
+                match self.execution.degrade_session(&params.session_id, &params.reason).await {
+                    Ok(v) => JsonRpcResponse::success(req.id, v),
+                    Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+                }
+            }
+
+            "session.clear_degradation" => {
+                #[derive(Deserialize)]
+                struct ClearDegradeParams {
+                    session_id: String,
+                }
+                let params: ClearDegradeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.clear_degradation: {}", e),
+                        );
+                    }
+                };
+                match self.execution.clear_session_degradation(&params.session_id).await {
+                    Ok(v) => JsonRpcResponse::success(req.id, v),
+                    Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+                }
+            }
+
             // Session fork - fork a session from a snapshot
             "session.fork" => {
                 #[derive(Deserialize)]

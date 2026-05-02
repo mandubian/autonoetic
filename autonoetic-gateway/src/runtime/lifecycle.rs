@@ -490,6 +490,8 @@ pub struct AgentExecutor {
     pub registry: crate::runtime::tools::NativeToolRegistry,
     pub initial_user_message: String,
     pub guard: LoopGuard,
+    pub session_state: autonoetic_types::agent::SessionState,
+    pub degraded_sessions: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
     pub session_id: Option<String>,
     pub session_started: bool,
     pub turn_counter: u64,
@@ -575,6 +577,8 @@ impl AgentExecutor {
             gateway_dir: None,
             initial_user_message: String::new(),
             guard: LoopGuard::new(5),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            degraded_sessions: None,
             session_id: None,
             session_started: false,
             turn_counter: 0,
@@ -685,6 +689,11 @@ impl AgentExecutor {
 
     pub fn with_artifact_id(mut self, artifact_id: Option<String>) -> Self {
         self.artifact_id = artifact_id;
+        self
+    }
+
+    pub fn with_degraded_sessions(mut self, set: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>) -> Self {
+        self.degraded_sessions = set;
         self
     }
 
@@ -919,6 +928,7 @@ impl AgentExecutor {
             history: history.to_vec(),
             turn_counter: self.turn_counter,
             loop_guard_state: self.guard.snapshot(),
+            session_state: self.session_state,
             agent_id: self.manifest.agent.id.clone(),
             session_id: self.session_id.clone().unwrap_or_default(),
             turn_id: turn_id.to_string(),
@@ -1418,6 +1428,45 @@ impl AgentExecutor {
                 return Err(e);
             }
 
+            if self.session_state == autonoetic_types::agent::SessionState::Normal
+                && self.guard.is_sub_trip_warning()
+            {
+                self.session_state = autonoetic_types::agent::SessionState::Degraded;
+                if let Some(store) = self.gateway_store.as_ref() {
+                    let session_id_for_event = self.session_id.clone().unwrap_or_default();
+                    let event = autonoetic_types::causal_chain::CausalEventRecord {
+                        event_id: format!("subtrip-{}", uuid::Uuid::new_v4()),
+                        agent_id: self.manifest.agent.id.clone(),
+                        session_id: session_id_for_event,
+                        turn_id: None,
+                        event_seq: 0,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        category: "session".to_string(),
+                        action: "session.degraded".to_string(),
+                        status: "active".to_string(),
+                        enforced_rules: vec!["R++6".to_string()],
+                        target: None,
+                        payload: Some(serde_json::json!({"reason": "loop_guard_sub_trip_warning"}).to_string()),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: Some("loop_guard_sub_trip_warning".to_string()),
+                    };
+                    let _ = store.create_causal_event(&event);
+                }
+                if let Some(ds) = self.degraded_sessions.as_ref() {
+                    ds.lock().await.insert(session_id.clone());
+                }
+            }
+
+            if let Some(ds) = self.degraded_sessions.as_ref() {
+                let in_set = ds.lock().await.contains(&session_id);
+                if in_set && self.session_state == autonoetic_types::agent::SessionState::Normal {
+                    self.session_state = autonoetic_types::agent::SessionState::Degraded;
+                } else if !in_set && self.session_state == autonoetic_types::agent::SessionState::Degraded {
+                    self.session_state = autonoetic_types::agent::SessionState::Normal;
+                }
+            }
+
             // Budget check — save checkpoint before propagating budget-exhausted error
             if let Some(budget) = self.session_budget.as_ref() {
                 if let Err(e) = budget.check_pre_llm(&session_id) {
@@ -1479,6 +1528,7 @@ impl AgentExecutor {
                     &self.manifest,
                     self.session_id.as_deref(),
                     pending_approvals,
+                    self.session_state,
                 );
                 let mut t: Vec<ToolDefinition> = mcp_runtime
                     .tool_definitions()?
@@ -2218,7 +2268,8 @@ impl AgentExecutor {
                         self.gateway_store.clone(),
                         tool_run_ctx,
                     )
-                    .with_session_context(self.session_id.clone(), Some(turn_id.clone()));
+                    .with_session_context(self.session_id.clone(), Some(turn_id.clone()))
+                    .with_session_state(self.session_state);
 
                     let (_had_any_success, results) = processor
                         .process_tool_calls(
@@ -2298,6 +2349,7 @@ impl AgentExecutor {
                             turn_id: turn_id.clone(),
                             suspended_at: chrono::Utc::now().to_rfc3339(),
                             loop_guard_state: self.guard.snapshot(),
+                            session_state: self.session_state,
                         };
 
                         // Persist continuation to disk when we have a task_id and config.
@@ -2940,7 +2992,12 @@ fn determine_tool_tier_filter(
     manifest: &AgentManifest,
     session_id: Option<&str>,
     has_pending_approvals: bool,
+    session_state: autonoetic_types::agent::SessionState,
 ) -> crate::runtime::tools::ToolTierFilter {
+    if session_state == autonoetic_types::agent::SessionState::Degraded {
+        return crate::runtime::tools::ToolTierFilter::core_only();
+    }
+
     if !manifest.allowed_tool_tiers.is_empty() {
         return crate::runtime::tools::ToolTierFilter {
             allowed_tiers: manifest.allowed_tool_tiers.clone(),
@@ -4752,7 +4809,7 @@ mod loop_guard_tests {
 #[cfg(test)]
 mod tier_filter_tests {
     use super::determine_tool_tier_filter;
-    use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration, ToolTier};
+    use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration, SessionState, ToolTier};
 
     fn test_manifest() -> AgentManifest {
         AgentManifest {
@@ -4792,7 +4849,7 @@ mod tier_filter_tests {
     #[test]
     fn test_root_session_no_pending_approvals_allows_all() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false);
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Normal);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("web_search"));
         assert!(filter.allows("agent_spawn"));
@@ -4802,7 +4859,7 @@ mod tier_filter_tests {
     #[test]
     fn test_child_session_core_only_by_default() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, Some("root/child-session"), false);
+        let filter = determine_tool_tier_filter(&manifest, Some("root/child-session"), false, SessionState::Normal);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("sandbox_exec"));
         assert!(!filter.allows("web_search"));
@@ -4813,7 +4870,7 @@ mod tier_filter_tests {
     #[test]
     fn test_pending_approvals_restricts_to_core_and_workflow() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), true);
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), true, SessionState::Normal);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("sandbox_exec"));
         assert!(filter.allows("agent_spawn"));
@@ -4828,7 +4885,7 @@ mod tier_filter_tests {
     fn test_manifest_declared_tiers_override_runtime_inference() {
         let mut manifest = test_manifest();
         manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
-        let filter = determine_tool_tier_filter(&manifest, Some("root/child"), true);
+        let filter = determine_tool_tier_filter(&manifest, Some("root/child"), true, SessionState::Normal);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("web_search"));
         assert!(!filter.allows("agent_spawn"));
@@ -4838,7 +4895,29 @@ mod tier_filter_tests {
     #[test]
     fn test_no_session_id_allows_all() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, None, false);
+        let filter = determine_tool_tier_filter(&manifest, None, false, SessionState::Normal);
         assert!(filter.allows("web_search"));
+    }
+
+    #[test]
+    fn test_degraded_session_clamps_to_core_only() {
+        let manifest = test_manifest();
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded);
+        assert!(filter.allows("content_write"), "core content tools allowed in degraded");
+        assert!(filter.allows("sandbox_exec"), "sandbox_exec is core tier, allowed by tier filter");
+        assert!(!filter.allows("web_search"), "web_search is specialized, blocked in degraded");
+        assert!(!filter.allows("agent_spawn"), "agent_spawn is workflow, blocked in degraded");
+        assert!(!filter.allows("promotion_record"), "promotion is specialized, blocked in degraded");
+        assert!(!filter.allows("agent_revision_create"), "agent_revision is specialized, blocked in degraded");
+    }
+
+    #[test]
+    fn test_degraded_overrides_manifest_declared_tiers() {
+        let mut manifest = test_manifest();
+        manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded);
+        assert!(filter.allows("content_write"), "core allowed");
+        assert!(!filter.allows("web_search"), "specialized blocked despite manifest");
+        assert!(!filter.allows("agent_spawn"), "workflow blocked");
     }
 }

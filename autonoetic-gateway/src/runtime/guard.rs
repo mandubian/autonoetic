@@ -94,6 +94,27 @@ impl LoopGuard {
         Ok(())
     }
 
+    /// Returns `true` when the guard is approaching a trip condition but has
+    /// not yet tripped. Specifically, when `current_loops >= 80%` of
+    /// `max_loops_without_progress`, or any single tool failure count has
+    /// reached 80% of `max_tool_failures`.
+    ///
+    /// This is the trigger for R++6 degraded-mode entry via loop-guard
+    /// sub-trip warnings.
+    pub fn is_sub_trip_warning(&self) -> bool {
+        let loop_threshold = ((self.max_loops_without_progress as u64 * 4 + 4) / 5) as u32;
+        if self.current_loops >= loop_threshold && self.current_loops < self.max_loops_without_progress {
+            return true;
+        }
+        let failure_threshold = ((self.max_tool_failures as u64 * 4 + 4) / 5) as u32;
+        for count in self.tool_failure_counts.values() {
+            if *count >= failure_threshold && *count < self.max_tool_failures {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Track a tool failure — failures accumulate per tool name regardless of arguments.
     ///
     /// Permission errors are excluded from the budget: the agent cannot fix

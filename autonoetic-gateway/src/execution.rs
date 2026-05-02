@@ -361,6 +361,7 @@ pub struct GatewayExecutionService {
     gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     active_executions: Arc<ActiveExecutionRegistry>,
     hook_executor: Arc<crate::scheduler::hooks::HookExecutor>,
+    degraded_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl GatewayExecutionService {
@@ -389,6 +390,7 @@ impl GatewayExecutionService {
             gateway_store,
             active_executions: ActiveExecutionRegistry::new(),
             hook_executor,
+            degraded_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -402,6 +404,81 @@ impl GatewayExecutionService {
 
     pub fn active_executions(&self) -> Arc<ActiveExecutionRegistry> {
         self.active_executions.clone()
+    }
+
+    pub async fn degrade_session(&self, session_id: &str, reason: &str) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        let reason = reason.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        anyhow::ensure!(!reason.is_empty(), "reason must not be empty");
+        {
+            let mut set = self.degraded_sessions.lock().await;
+            set.insert(session_id.to_string());
+        }
+        if let Some(store) = self.gateway_store.as_ref() {
+            let event = autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("degrade-{}", uuid::Uuid::new_v4()),
+                agent_id: String::new(),
+                session_id: session_id.to_string(),
+                turn_id: None,
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "session".to_string(),
+                action: "session.degraded".to_string(),
+                status: "active".to_string(),
+                enforced_rules: vec!["R++6".to_string()],
+                target: None,
+                payload: Some(serde_json::json!({"reason": reason, "source": "operator"}).to_string()),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: Some(reason.to_string()),
+            };
+            let _ = store.create_causal_event(&event);
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "state": "degraded",
+            "reason": reason
+        }))
+    }
+
+    pub async fn clear_session_degradation(&self, session_id: &str) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        {
+            let mut set = self.degraded_sessions.lock().await;
+            set.remove(session_id);
+        }
+        if let Some(store) = self.gateway_store.as_ref() {
+            let event = autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("clear-degrade-{}", uuid::Uuid::new_v4()),
+                agent_id: String::new(),
+                session_id: session_id.to_string(),
+                turn_id: None,
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "session".to_string(),
+                action: "session.degradation_cleared".to_string(),
+                status: "active".to_string(),
+                enforced_rules: vec!["R++6".to_string()],
+                target: None,
+                payload: None,
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            };
+            let _ = store.create_causal_event(&event);
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "state": "normal"
+        }))
+    }
+
+    pub async fn is_session_degraded(&self, session_id: &str) -> bool {
+        self.degraded_sessions.lock().await.contains(session_id)
     }
 
     /// Operator / gateway / privileged-agent root-session circuit breaker (see Phase 2C).
@@ -617,6 +694,7 @@ impl GatewayExecutionService {
                     consecutive_progress_count: 0,
                     child_failure_count: 0,
                 },
+                session_state: autonoetic_types::agent::SessionState::Normal,
                 agent_id: lead.to_string(),
                 session_id: root_session_id.to_string(),
                 turn_id: format!("emergency-{stop_id}"),
@@ -1036,7 +1114,8 @@ impl GatewayExecutionService {
             )
             .with_active_executions(Some(self.active_executions.clone()))
             .with_http_client(self.http_client.clone())
-            .with_artifact_id(artifact_id.map(String::from));
+            .with_artifact_id(artifact_id.map(String::from))
+            .with_degraded_sessions(Some(self.degraded_sessions.clone()));
 
             use crate::runtime::lifecycle::TurnOutcome;
 
@@ -1218,6 +1297,9 @@ impl GatewayExecutionService {
                         }
                     };
 
+                    // Restore session state before executing remaining tool calls.
+                    runtime.session_state = cont.session_state;
+
                     // Execute remaining tool calls from the original batch.
                     let remaining_results = if !cont.remaining_tool_calls.is_empty() {
                         let mut mcp_rt = crate::runtime::mcp::McpToolRuntime::from_env().await?;
@@ -1235,7 +1317,7 @@ impl GatewayExecutionService {
                         ).with_session_context(
                             Some(cont.session_id.clone()),
                             Some(cont.turn_id.clone()),
-                        );
+                        ).with_session_state(runtime.session_state);
                         let mut tracer = crate::runtime::session_tracer::SessionTracer::new_with_evidence_mode(
                             &runtime.agent_dir,
                             &runtime.manifest.agent.id,
@@ -1445,6 +1527,7 @@ impl GatewayExecutionService {
                                     runtime.guard = crate::runtime::guard::LoopGuard::restore(
                                         checkpoint.loop_guard_state.clone(),
                                     );
+                                    runtime.session_state = checkpoint.session_state;
                                     runtime.session_started = true;
                                     runtime.turn_counter = checkpoint.turn_counter;
                                     runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
@@ -1483,10 +1566,11 @@ impl GatewayExecutionService {
                                 yield_reason = ?checkpoint.yield_reason,
                                 "Resuming session from latest checkpoint"
                             );
-                            runtime.guard = crate::runtime::guard::LoopGuard::restore(
-                                checkpoint.loop_guard_state.clone(),
-                            );
-                            runtime.session_started = true;
+                                    runtime.guard = crate::runtime::guard::LoopGuard::restore(
+                                        checkpoint.loop_guard_state.clone(),
+                                    );
+                                    runtime.session_state = checkpoint.session_state;
+                                    runtime.session_started = true;
                             runtime.turn_counter = checkpoint.turn_counter;
                             runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
                             if let Some(ref cm) = checkpoint.compression_metadata {
@@ -1591,6 +1675,7 @@ impl GatewayExecutionService {
                                 runtime.guard = crate::runtime::guard::LoopGuard::restore(
                                     checkpoint.loop_guard_state.clone(),
                                 );
+                                runtime.session_state = checkpoint.session_state;
                                 runtime.session_started = true;
                                 runtime.turn_counter = checkpoint.turn_counter;
                                 runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
@@ -1693,6 +1778,7 @@ impl GatewayExecutionService {
                                 runtime.guard = crate::runtime::guard::LoopGuard::restore(
                                     checkpoint.loop_guard_state.clone(),
                                 );
+                                runtime.session_state = checkpoint.session_state;
                                 runtime.session_started = true;
                                 runtime.turn_counter = checkpoint.turn_counter;
                                 runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
@@ -1733,6 +1819,7 @@ impl GatewayExecutionService {
                         runtime.guard = crate::runtime::guard::LoopGuard::restore(
                             checkpoint.loop_guard_state.clone(),
                         );
+                        runtime.session_state = checkpoint.session_state;
                         runtime.session_started = true;
                         runtime.turn_counter = checkpoint.turn_counter;
                         runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
@@ -2592,11 +2679,13 @@ impl GatewayExecutionService {
         .with_session_id(session_id.to_string())
         .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from))
         .with_active_executions(Some(self.active_executions.clone()))
-        .with_http_client(self.http_client.clone());
+        .with_http_client(self.http_client.clone())
+        .with_degraded_sessions(Some(self.degraded_sessions.clone()));
 
         // Restore executor state from checkpoint
         runtime.guard =
             crate::runtime::guard::LoopGuard::restore(checkpoint.loop_guard_state.clone());
+        runtime.session_state = checkpoint.session_state;
         runtime.session_started = true;
         runtime.turn_counter = checkpoint.turn_counter;
         runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
@@ -3330,6 +3419,7 @@ async fn resume_answered_user_interaction_from_loaded_checkpoint(
     );
 
     runtime.guard = crate::runtime::guard::LoopGuard::restore(checkpoint.loop_guard_state.clone());
+    runtime.session_state = checkpoint.session_state;
     runtime.session_started = true;
     runtime.turn_counter = checkpoint.turn_counter;
     runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
@@ -3835,6 +3925,7 @@ fn resolve_pending_prefers_checkpoint_pending_tool_state() {
             consecutive_progress_count: 0,
             child_failure_count: 0,
         },
+        session_state: autonoetic_types::agent::SessionState::Normal,
         agent_id: "a".into(),
         session_id: "s".into(),
         turn_id: "turn-1".into(),
