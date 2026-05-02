@@ -11,6 +11,7 @@ import json
 import os
 import socket
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import errors
@@ -18,6 +19,88 @@ from . import errors
 CCOS_SOCKET_ENV = "CCOS_SOCKET_PATH"
 CCOS_HTTP_ENV = "AUTONOETIC_HTTP_URL"
 CCOS_TOKEN_ENV = "AUTONOETIC_SHARED_SECRET"
+AUTONOETIC_INPUT_ENV = "AUTONOETIC_INPUT"
+AUTONOETIC_META_ENV = "AUTONOETIC_META"
+AUTONOETIC_INPUT_PATH_ENV = "AUTONOETIC_INPUT_PATH"
+AUTONOETIC_INPUT_FILE_ENV = "AUTONOETIC_INPUT_FILE"
+AUTONOETIC_META_PATH_ENV = "AUTONOETIC_META_PATH"
+AUTONOETIC_META_FILE_ENV = "AUTONOETIC_META_FILE"
+
+
+def _read_text_from_env_path(*env_names: str) -> str | None:
+    for env_name in env_names:
+        value = os.getenv(env_name)
+        if value and value.strip():
+            return Path(value).read_text(encoding="utf-8")
+    return None
+
+
+def _strip_legacy_metadata_wrappers(input_raw: str, metadata_raw: str | None) -> str:
+    if not metadata_raw:
+        return input_raw
+
+    suffix = f"\n\nDelegation metadata: {metadata_raw}"
+    if input_raw.endswith(suffix):
+        return input_raw[: -len(suffix)]
+
+    task_marker = "\n\n[Task]\n"
+    metadata_marker = "\n\n[Metadata]\n"
+    if input_raw.startswith("[Context]\n") and input_raw.endswith(metadata_raw):
+        task_start = input_raw.find(task_marker)
+        metadata_start = input_raw.rfind(metadata_marker)
+        if task_start != -1 and metadata_start != -1 and task_start < metadata_start:
+            return input_raw[task_start + len(task_marker) : metadata_start]
+
+    return input_raw
+
+
+def _parse_json_or_text(raw: str | None) -> Any:
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+@dataclass
+class Invocation:
+    input_raw: str | None
+    input: Any
+    metadata_raw: str | None
+    metadata: Any
+
+    @property
+    def has_runtime_input(self) -> bool:
+        return self.input_raw is not None
+
+
+def load_invocation() -> Invocation:
+    metadata_raw = _read_text_from_env_path(AUTONOETIC_META_PATH_ENV, AUTONOETIC_META_FILE_ENV)
+    if metadata_raw is None:
+        metadata_raw = os.getenv(AUTONOETIC_META_ENV)
+
+    input_raw = _read_text_from_env_path(AUTONOETIC_INPUT_PATH_ENV, AUTONOETIC_INPUT_FILE_ENV)
+    if input_raw is None:
+        input_raw = os.getenv(AUTONOETIC_INPUT_ENV)
+
+    normalized_input_raw = _strip_legacy_metadata_wrappers(input_raw, metadata_raw) if input_raw else None
+    return Invocation(
+        input_raw=normalized_input_raw,
+        input=_parse_json_or_text(normalized_input_raw),
+        metadata_raw=metadata_raw,
+        metadata=_parse_json_or_text(metadata_raw),
+    )
+
+
+def load_input(default: Any = None) -> Any:
+    invocation = load_invocation()
+    return default if invocation.input is None else invocation.input
+
+
+def load_metadata(default: Any = None) -> Any:
+    invocation = load_invocation()
+    return default if invocation.metadata is None else invocation.metadata
 
 
 def _require_socket_path(path: str | None) -> str:

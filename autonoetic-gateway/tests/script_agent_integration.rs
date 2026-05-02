@@ -45,6 +45,56 @@ capabilities: []
     Ok(())
 }
 
+fn install_invocation_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(agent_dir.join("scripts"))?;
+
+    std::fs::write(
+        agent_dir.join("scripts/invoke.py"),
+        r#"#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+input_path = os.environ.get("AUTONOETIC_INPUT_PATH")
+meta_path = os.environ.get("AUTONOETIC_META_PATH")
+input_raw = Path(input_path).read_text() if input_path else os.environ.get("AUTONOETIC_INPUT", "")
+meta_raw = Path(meta_path).read_text() if meta_path else os.environ.get("AUTONOETIC_META", "")
+
+print(json.dumps({
+    "input_raw": input_raw,
+    "meta_raw": meta_raw,
+    "has_input_path": bool(input_path),
+    "has_meta_path": bool(meta_path),
+}))
+"#,
+    )?;
+
+    let skill_md = format!(
+        r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "{agent_id}"
+  name: "{agent_id}"
+  description: "Script agent that inspects invocation payload and metadata"
+execution_mode: script
+script_entry: scripts/invoke.py
+capabilities: []
+---
+# Invocation Script Agent
+"#,
+    );
+    std::fs::write(agent_dir.join("SKILL.md"), skill_md)?;
+    std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []")?;
+    Ok(())
+}
+
 fn setup_store_for_script(
     config: &autonoetic_types::config::GatewayConfig,
     agents_dir: &std::path::Path,
@@ -91,6 +141,59 @@ async fn test_script_agent_execution_returns_stdout() -> anyhow::Result<()> {
                 "reply should contain script output, got: {reply}"
             );
             tracing::info!(reply = %reply, "Script agent executed successfully");
+        }
+        Err(e) => {
+            if e.to_string().contains("bwrap") || e.to_string().contains("bubblewrap") {
+                tracing::warn!("bubblewrap not available, skipping test");
+                return Ok(());
+            }
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_script_agent_receives_normalized_input_and_separate_metadata() -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    let agent_id = "script-invocation-agent";
+    install_invocation_agent(&workspace.agents_dir.join(agent_id), agent_id)?;
+    let store = setup_store_for_script(&config, &workspace.agents_dir, agent_id)?;
+
+    let execution = GatewayExecutionService::new(config, store);
+    let session_id = "session-script-invocation";
+    let payload = r#"{"location":"Paris, France","date":"tomorrow"}"#;
+    let metadata = serde_json::json!({
+        "delegated_role": "weather.forecast",
+        "reply_to_agent_id": "planner.default"
+    });
+    let kickoff = format!("{payload}\n\nDelegation metadata: {}", metadata);
+
+    let result = execution
+        .spawn_agent_once(
+            agent_id,
+            &kickoff,
+            session_id,
+            None,
+            false,
+            None,
+            Some(&metadata),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    match result {
+        Ok(spawn_result) => {
+            let reply = spawn_result.assistant_reply.expect("should have reply");
+            let parsed: serde_json::Value = serde_json::from_str(&reply)?;
+            assert_eq!(parsed["input_raw"], payload);
+            assert_eq!(parsed["meta_raw"], metadata.to_string());
+            assert_eq!(parsed["has_input_path"], true);
+            assert_eq!(parsed["has_meta_path"], true);
         }
         Err(e) => {
             if e.to_string().contains("bwrap") || e.to_string().contains("bubblewrap") {
@@ -372,13 +475,14 @@ fn install_args_mode_agent(agent_dir: &std::path::Path, agent_id: &str) -> anyho
         r#"#!/usr/bin/env python3
 import sys
 import json
-input_data = sys.argv[1] if len(sys.argv) > 1 else ""
+input_data = sys.argv[1] if len(sys.argv) > 1 else "{}"
 try:
     parsed = json.loads(input_data)
     method = parsed.get("method", "unknown")
-    print(f"method={method} payload={input_data}")
+    summary = f"method={method} payload={input_data}"
 except Exception:
-    print(f"raw={input_data}")
+    summary = f"raw={input_data}"
+print(json.dumps({"result": summary}))
 "#,
     )?;
 
@@ -446,12 +550,15 @@ async fn test_script_agent_args_mode_receives_payload_as_argv1() -> anyhow::Resu
     match result {
         Ok(spawn_result) => {
             let reply = spawn_result.assistant_reply.expect("should have reply");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&reply).expect("script stdout must be JSON per io.returns");
+            let result = parsed["result"].as_str().expect("result field");
             assert!(
-                reply.contains("method=ping"),
+                result.contains("method=ping"),
                 "reply should contain parsed method, got: {reply}"
             );
             assert!(
-                reply.contains("params"),
+                result.contains("params"),
                 "reply should contain payload, got: {reply}"
             );
             tracing::info!(reply = %reply, "Args-mode script agent executed successfully");

@@ -113,17 +113,28 @@ execution_mode: script
 script_entry: scripts/weather.py
 ```
 
-**Script input:** The script receives the ingress payload via the `AUTONOETIC_INPUT` environment variable (always set). When `script_input_mode: stdin` (default), the payload is also written to the script's stdin. When `script_input_mode: args`, the payload is passed as the first positional CLI argument ($1).
+**Script input:** The script receives the normalized task payload via `AUTONOETIC_INPUT_PATH` (primary) and `AUTONOETIC_INPUT` (compatibility). When delegation metadata exists, it is exposed separately via `AUTONOETIC_META_PATH` and `AUTONOETIC_META`. When `script_input_mode: stdin` (default), the normalized payload is also written to the script's stdin. When `script_input_mode: args`, the normalized payload is passed as the first positional CLI argument ($1).
+
+Prefer the injected SDK helper over direct environment parsing:
+
+```python
+from autonoetic_sdk import load_invocation
+
+invocation = load_invocation()
+task = invocation.input
+metadata = invocation.metadata
+```
+
+This keeps runtime input and delegation metadata separate while still allowing local CLI fallbacks when the script runs outside the gateway.
 
 **Script output:** stdout is captured and returned as the agent reply.
 
 **Example script:**
 ```python
-import os
+from autonoetic_sdk import load_input
 import json
 
-input_data = os.environ.get("AUTONOETIC_INPUT", "")
-# Process input and produce output
+input_data = load_input("")
 print(json.dumps({"result": input_data}))
 ```
 

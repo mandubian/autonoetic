@@ -211,14 +211,14 @@ pub enum ExecutionMode {
     Reasoning,
 }
 
-/// How the gateway delivers input to a script-mode agent.
+/// How the gateway delivers normalized task input to a script-mode agent.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptInputMode {
-    /// Write the raw message to the script's stdin (default).
+    /// Write the normalized payload to the script's stdin (default).
     #[default]
     Stdin,
-    /// Pass the full JSON message as the first positional CLI argument ($1).
+    /// Pass the normalized payload as the first positional CLI argument ($1).
     Args,
 }
 

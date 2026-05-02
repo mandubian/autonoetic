@@ -518,11 +518,14 @@ script_entry: "scripts/main.py"  # Must exist and be executable
 ```
 
 **Script interface:**
-- Receives input via `AUTONOETIC_INPUT` env var (always set, regardless of `script_input_mode`)
-- When `script_input_mode: stdin` (default), the payload is also written to stdin
-- When `script_input_mode: args`, the payload is passed as the first positional CLI argument ($1)
+- Receives normalized task input via `AUTONOETIC_INPUT_PATH` (primary) and `AUTONOETIC_INPUT` (compatibility)
+- Receives delegation/invocation metadata via `AUTONOETIC_META_PATH` / `AUTONOETIC_META` when metadata exists
+- When `script_input_mode: stdin` (default), the normalized payload is also written to stdin
+- When `script_input_mode: args`, the normalized payload is passed as the first positional CLI argument ($1)
 - Writes JSON to stdout (must match `io.returns` schema if declared)
 - Has access to `AGENT_DIR` env var
+
+The injected Python / TypeScript SDK includes input helpers. Prefer `load_invocation()` / `load_input()` over open-coding `os.environ["AUTONOETIC_INPUT"]`.
 
 **Input schema contract:**
 - The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest to describe the input the script expects. The gateway exposes this schema through `agent.describe` so callers (including the planner) can translate natural-language intent into matching fields before calling `agent_spawn`.

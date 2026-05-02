@@ -1010,7 +1010,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "description": { "type": "string", "description": "Agent description for metadata.agent.description" },
                     "execution_mode": { "type": "string", "enum": ["reasoning", "script"] },
                     "script_entry": { "type": "string" },
-                    "script_input_mode": { "type": "string", "enum": ["stdin", "args"], "description": "How input is delivered to script agents: 'stdin' (default) writes payload to stdin; 'args' passes the full JSON payload as the first positional CLI argument ($1)." },
+                    "script_input_mode": { "type": "string", "enum": ["stdin", "args"], "description": "How normalized task input is delivered to script agents: 'stdin' (default) writes the payload to stdin; 'args' passes the same payload as the first positional CLI argument ($1)." },
                     "llm_config": { "type": "object" },
                     "capabilities": {
                         "type": "array",

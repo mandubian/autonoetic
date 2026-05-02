@@ -1,6 +1,13 @@
 import net from "node:net";
+import fs from "node:fs";
 
 const CCOS_SOCKET_ENV = "CCOS_SOCKET_PATH";
+const AUTONOETIC_INPUT_ENV = "AUTONOETIC_INPUT";
+const AUTONOETIC_META_ENV = "AUTONOETIC_META";
+const AUTONOETIC_INPUT_PATH_ENV = "AUTONOETIC_INPUT_PATH";
+const AUTONOETIC_INPUT_FILE_ENV = "AUTONOETIC_INPUT_FILE";
+const AUTONOETIC_META_PATH_ENV = "AUTONOETIC_META_PATH";
+const AUTONOETIC_META_FILE_ENV = "AUTONOETIC_META_FILE";
 
 export class AutonoeticSdkError extends Error {}
 export class PolicyViolation extends AutonoeticSdkError {}
@@ -15,6 +22,91 @@ export class ApprovalRequiredError extends AutonoeticSdkError {
 }
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export type Invocation = {
+  inputRaw: string | null;
+  input: JsonValue | string | null;
+  metadataRaw: string | null;
+  metadata: JsonValue | string | null;
+  hasRuntimeInput: boolean;
+};
+
+function readTextFromEnvPath(...envNames: string[]): string | null {
+  for (const envName of envNames) {
+    const value = process.env[envName];
+    if (value && value.trim().length > 0) {
+      return fs.readFileSync(value, "utf8");
+    }
+  }
+  return null;
+}
+
+function stripLegacyMetadataWrappers(inputRaw: string, metadataRaw: string | null): string {
+  if (!metadataRaw) {
+    return inputRaw;
+  }
+
+  const suffix = `\n\nDelegation metadata: ${metadataRaw}`;
+  if (inputRaw.endsWith(suffix)) {
+    return inputRaw.slice(0, -suffix.length);
+  }
+
+  const taskMarker = "\n\n[Task]\n";
+  const metadataMarker = "\n\n[Metadata]\n";
+  if (inputRaw.startsWith("[Context]\n") && inputRaw.endsWith(metadataRaw)) {
+    const taskStart = inputRaw.indexOf(taskMarker);
+    const metadataStart = inputRaw.lastIndexOf(metadataMarker);
+    if (taskStart !== -1 && metadataStart !== -1 && taskStart < metadataStart) {
+      return inputRaw.slice(taskStart + taskMarker.length, metadataStart);
+    }
+  }
+
+  return inputRaw;
+}
+
+function parseJsonOrText(raw: string | null): JsonValue | string | null {
+  if (raw === null) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw) as JsonValue;
+  } catch {
+    return raw;
+  }
+}
+
+export function loadInvocation(): Invocation {
+  const metadataRaw =
+    readTextFromEnvPath(AUTONOETIC_META_PATH_ENV, AUTONOETIC_META_FILE_ENV) ??
+    process.env[AUTONOETIC_META_ENV] ??
+    null;
+  const inputRaw =
+    readTextFromEnvPath(AUTONOETIC_INPUT_PATH_ENV, AUTONOETIC_INPUT_FILE_ENV) ??
+    process.env[AUTONOETIC_INPUT_ENV] ??
+    null;
+  const normalizedInput = inputRaw === null ? null : stripLegacyMetadataWrappers(inputRaw, metadataRaw);
+  return {
+    inputRaw: normalizedInput,
+    input: parseJsonOrText(normalizedInput),
+    metadataRaw,
+    metadata: parseJsonOrText(metadataRaw),
+    hasRuntimeInput: normalizedInput !== null,
+  };
+}
+
+export function loadInput<T extends JsonValue | string | null = JsonValue | string | null>(
+  defaultValue: T | null = null,
+): T | JsonValue | string | null {
+  const invocation = loadInvocation();
+  return invocation.input === null ? defaultValue : invocation.input;
+}
+
+export function loadMetadata<T extends JsonValue | string | null = JsonValue | string | null>(
+  defaultValue: T | null = null,
+): T | JsonValue | string | null {
+  const invocation = loadInvocation();
+  return invocation.metadata === null ? defaultValue : invocation.metadata;
+}
 
 type JsonRpcResponse = {
   jsonrpc: string;
