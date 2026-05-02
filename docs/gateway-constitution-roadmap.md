@@ -226,7 +226,7 @@ but begins once the block is authoritatively present.
 
 ---
 
-### 1.7 `R++2` Capability-delta gating at promotion
+### 1.7 `R++2` Capability-delta gating at promotion — **ENFORCED** (now R-2.16)
 
 **Threat.** Capability accretion by stealth. R-8.10 detects drift in
 `promotion_history` after the fact; nothing *prevents* the canonical
@@ -261,7 +261,7 @@ rejection.
 
 ---
 
-### 1.8 `R++5` Tool-call intent capture
+### 1.8 `R++5` Tool-call intent capture — **ENFORCED** (now R-8.18)
 
 **Threat.** Post-hoc audit of what-happened is much harder than it
 needs to be. Today we see "spawned coder with message X"; we don't
@@ -674,7 +674,7 @@ Files: `autonoetic-gateway/src/gateway_store/approvals.rs` (schema),
 
 ---
 
-### 2.11 `R++6` Degraded session mode — **ENFORCED**
+### 2.11 `R++6` Degraded session mode — **ENFORCED** (now R-7.18)
 
 **Threat.** The response to agent misbehaviour today is binary:
 healthy or emergency-stopped. A session showing loop-guard warnings
@@ -819,7 +819,7 @@ For rights that need one small piece of new code plus a test.
 
 | Right | Work |
 |---|---|
-| Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via R++6 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
+| Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via R-7.18 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
 | Ri-0.12 continuity — closed list of termination reasons | Audit every `lifecycle.rs` termination path, enumerate, document, refactor so every exit calls a single `terminate(reason, rule_id, evidence)` helper. Test: fuzz inputs, no termination occurs outside the declared set. |
 
 **Size.** M. Ri-0.12 is the larger piece — requires refactoring
@@ -838,9 +838,9 @@ These tests follow the upstream work.
 | Ri-0.1 self-inspection | R++1 attestation (#48) | Right-level test: agent reads its own state via attestation, values match internal registry. **Covered by `constitution_attestation_freshness.rs` (capability_changes, pending_approvals, spawn_depth, budget).** |
 | Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | Test: every rejection across a sample of tools carries a rule ID resolvable to the constitution. |
 | Ri-0.4 truthful budget | R++1 (#48) | Test: budget values in attestation match `session_budget.rs` registry in real time across a multi-turn trace. **Covered by `constitution_attestation_freshness.rs::budget_meters_reflect_consumption`.** |
-| Ri-0.5 degradation notice | R++6 (#61) | Add notice-on-entry to degraded mode. Test: agent receives notice with rule ID + evidence before its next turn. |
+| Ri-0.5 degradation notice | R-7.18 (#61) | Add notice-on-entry to degraded mode. Test: agent receives notice with rule ID + evidence before its next turn. |
 | Ri-0.8 amendment proposal | R+++1 (#92) | Test: capability-holder submits, durable ID returned, proposal reviewable; non-holder rejected. |
-| Ri-0.9 last-word before terminal | R++6 (#61) + emergency-stop | Add notify-where-practical to degrade/emergency-stop paths. Test: agent receives a notification opportunity where not foreclosed by the trigger. |
+| Ri-0.9 last-word before terminal | R-7.18 (#61) + emergency-stop | Add notify-where-practical to degrade/emergency-stop paths. Test: agent receives a notification opportunity where not foreclosed by the trigger. |
 
 **Size.** M.
 
@@ -928,7 +928,7 @@ identical from the outside to a healthy agent.
 (or `SCMP_ACT_ERRNO` + audit subsystem) for high-value syscalls:
 mount, ptrace, kexec, unshare reuse, `/proc/self/exe` writes. Parse
 audit log per session, maintain a counter. Crossing a threshold
-(default N=5) triggers R++6 degraded mode; a second threshold
+(default N=5) triggers R-7.18 degraded mode; a second threshold
 (default N=20) triggers emergency stop. Docker/microvm paths parse the
 equivalent runtime-level security events.
 
