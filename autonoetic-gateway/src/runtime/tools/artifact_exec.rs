@@ -5,7 +5,8 @@ use crate::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,
 };
 use crate::runtime::remote_access::{
-    classify_network_coverage, is_safe_inspection_command, NetworkCoverage, RemoteAccessAnalyzer,
+    approval_remote_operator_suffix, classify_network_coverage, is_safe_inspection_command,
+    NetworkCoverage, RemoteAccessAnalyzer,
 };
 use crate::runtime::tools::{
     build_approval_details, load_session_content_mounts, CredentialEnvMapping, NativeTool,
@@ -423,6 +424,8 @@ impl NativeTool for ArtifactExecTool {
                     let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
                     let summary =
                         format!("Artifact {}: {}", artifact_id, remote_analysis.summary);
+                    let remote_hint_suffix =
+                        approval_remote_operator_suffix(&concrete_targets, &detected_patterns);
                     let action = ScheduledAction::SandboxExec {
                         command: command.clone(),
                         dependencies: None,
@@ -450,8 +453,8 @@ impl NativeTool for ArtifactExecTool {
                         decided_at: None,
                         decided_by: None,
                         reason: Some(format!(
-                            "Artifact exec: {} → {}",
-                            artifact_id, remote_analysis.summary
+                            "Artifact exec: {} → {}{}",
+                            artifact_id, remote_analysis.summary, remote_hint_suffix
                         )),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
@@ -493,7 +496,11 @@ impl NativeTool for ArtifactExecTool {
                         "ok": false,
                         "exit_code": null,
                         "stdout": "",
-                        "stderr": format!("Remote access detected in artifact {}. Operator approval required.", artifact_id),
+                        "stderr": format!(
+                            "Remote access detected in artifact {}. Operator approval required.{}",
+                            artifact_id,
+                            remote_hint_suffix
+                        ),
                         "approval_required": true,
                         "request_id": request_id,
                         "suspended": true,
@@ -507,7 +514,11 @@ impl NativeTool for ArtifactExecTool {
                     "ok": false,
                     "exit_code": null,
                     "stdout": "",
-                    "stderr": format!("Remote access detected in artifact {}. Operator approval required.", artifact_id),
+                    "stderr": format!(
+                        "Remote access detected in artifact {}. Operator approval required.{}",
+                        artifact_id,
+                        approval_remote_operator_suffix(&concrete_targets, &detected_patterns)
+                    ),
                     "approval_required": true,
                     "suspended": true,
                 })
