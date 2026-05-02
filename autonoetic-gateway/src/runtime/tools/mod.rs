@@ -861,9 +861,9 @@ pub mod web;
 pub mod workflow;
 
 pub use crate::runtime::tools::agent_revision::{
-    AgentRevisionCreateFromIntentTool, AgentRevisionCreateTool, AgentRevisionDiffTool,
-    AgentRevisionInspectTool, AgentRevisionListTool, AgentRevisionPromoteTool,
-    AgentRevisionRollbackTool,
+    normalize_capability_from_llm, AgentRevisionCreateFromIntentTool, AgentRevisionCreateTool,
+    AgentRevisionDiffTool, AgentRevisionInspectTool, AgentRevisionListTool,
+    AgentRevisionPromoteTool, AgentRevisionRollbackTool,
 };
 pub use crate::runtime::tools::evaluation::{
     validate_suite_spec, EvalCompareTool, EvalReportTool, EvalRunTool, EvalSuiteCaseSpec,

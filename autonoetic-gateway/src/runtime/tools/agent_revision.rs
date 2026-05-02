@@ -188,7 +188,7 @@ fn collect_revision_files(root: &Path) -> anyhow::Result<BTreeMap<String, Vec<u8
 
 /// LLMs often emit invalid shapes (bare strings, `scopes` instead of `hosts` on NetworkAccess).
 /// Try strict [`Capability`] first, then apply a small set of normalizations, then error.
-fn normalize_capability_from_llm(v: serde_json::Value) -> anyhow::Result<Capability> {
+pub fn normalize_capability_from_llm(v: serde_json::Value) -> anyhow::Result<Capability> {
     if let Ok(c) = serde_json::from_value::<Capability>(v.clone()) {
         return Ok(c);
     }
