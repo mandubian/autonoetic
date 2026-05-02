@@ -95,8 +95,8 @@ form the social contract.
 |---|---|---|---|---|
 | Ri-0.1 | Every agent may inspect its own currently-active capabilities, budget state, pending approvals, spawn depth, and session lineage at any turn boundary. | An agent that cannot see its own state cannot reason safely about what it may do next. | R++1 signed state attestation (#48) | ENFORCED |
 | Ri-0.2 | Every agent may read its own causal chain and execution trace. The gateway does not hide actions taken on the agent's behalf. | Audit is not a privilege of operators; it is a right of the subject. | `observability.*` tools | ENFORCED |
-| Ri-0.3 | Every rejection names the rule ID that caused it. No agent is ever told "denied" without being told why. | Rejection without explanation is indistinguishable from arbitrary authority. The constitutional test: if you were denied, you can look up which rule you ran into. | `causal_events.enforced_rules` persisted on every decision event (`session_tracer`, gateway-store migration v20); key denial paths carry rule IDs; remaining paths (scheduler, evaluation, write-path) still use untagged errors | PARTIAL |
-| Ri-0.4 | Every agent knows its budget balances truthfully and in real time. Consumption is never silent. | A budget is a guarantee of a finite resource. Silent consumption is theft. | `runtime/session_budget.rs`; surfaced via R++1 attestation | PARTIAL |
+| Ri-0.3 | Every rejection names the rule ID that caused it. No agent is ever told "denied" without being told why. | Rejection without explanation is indistinguishable from arbitrary authority. The constitutional test: if you were denied, you can look up which rule you ran into. | `causal_events.enforced_rules` persisted on every decision event (`session_tracer`, gateway-store migration v20); key denial paths carry rule IDs; remaining paths (scheduler, evaluation, write-path) still use untagged errors — see I-6 for the cross-cutting invariant which is ENFORCED | PARTIAL (core mechanism ENFORCED via R+++3; remaining gaps in scheduler/evaluation/write-path denial paths) |
+| Ri-0.4 | Every agent knows its budget balances truthfully and in real time. Consumption is never silent. | A budget is a guarantee of a finite resource. Silent consumption is theft. | `runtime/session_budget.rs`; surfaced via R++1 attestation; covered by `constitution_attestation_freshness.rs::budget_meters_reflect_consumption` | ENFORCED |
 | Ri-0.5 | An agent placed in degraded mode (R++6) is told it is degraded, with the rule ID and evidence that triggered the transition, before its next turn executes. | Degradation without notice leaves the agent reasoning as if still healthy — a direct violation of responsibility. | R++6 degraded mode (planned) | MISSING |
 | Ri-0.6 | Capabilities declared in an agent's manifest are not silently reduced mid-session. Any narrowing is either (a) a declared side effect of a rule in this document, or (b) explicit operator action recorded in the causal chain. | Capabilities are the grammar of agent freedom. Silent reduction invalidates any plan built on them. | manifest-as-source-of-truth; needs explicit pin | PARTIAL |
 | Ri-0.7 | An agent may explicitly request session termination. The gateway commits outstanding causal events, releases resources, and closes cleanly — it may not refuse. | The right to exit is foundational. Without it, an agent can be held in a state it does not consent to. | `session.end` tool | ENFORCED |
@@ -174,6 +174,7 @@ approve via `runtime/continuation.rs`.
 | R-2.13 | `user_ask` checkpoints the session as `YieldReason::UserInputRequired`. | architecture-interaction-mechanisms.md | `runtime/tools/user_interaction.rs` | ENFORCED |
 | R-2.14 | `user_ask` is refused if the workflow has active children or pending approvals. | architecture-interaction-mechanisms.md | runtime guard | PARTIAL |
 | R-2.15 | Spawn payload is preserved verbatim across approval resume. | approval-system.md | `continuation.rs:332` | ENFORCED |
+| R-2.16 | Promotion of revision N computes `cap_set(N) \ cap_set(N-1)`. A non-empty delta triggers a **separate, differently-shaped approval** (`ScheduledAction::RevisionPromote`) that names each added capability explicitly. The operator must acknowledge every added/broadened capability by name (`--acknowledge-capability`) — silent accretion across approvals is impossible. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs` (gate creation), `autonoetic-gateway/src/scheduler/approval.rs` (acknowledgement check) | ENFORCED |
 
 ## 3. Sandbox Isolation
 
@@ -221,13 +222,13 @@ Enforcement hook for ingress, response validation gate for egress.
 | ID | Rule | Source | Enforcement | Status |
 |---|---|---|---|---|
 | R-5.1 | Messages to child agents pass `io.accepts` enforcement at ingress. | schema-enforcement-hook.md | `runtime/tools/agent.rs` | ENFORCED |
-| R-5.2 | Deterministic coercion runs first; LLM-coercion fallback is an escape hatch (see §12). | schema-enforcement-hook.md | `DeterministicCoercionEnforcer` | ENFORCED |
+| R-5.2 | Deterministic coercion runs first; LLM-coercion fallback is an escape hatch (see §12). | schema-enforcement-hook.md | `DeterministicCoercionEnforcer` | ENFORCED — **DUMBNESS VIOLATION** (Phase 4.2: gateway invokes LLM to reshape agent input) |
 | R-5.3 | Failed coercion returns an actionable `hint`. | schema-enforcement-hook.md | tool response | ENFORCED |
 | R-5.4 | Every enforcement decision is logged (pass/coerce/reject). | schema-enforcement-hook.md | causal event emission | ENFORCED |
 | R-5.5 | Response contract checks `required_artifacts`, `max_artifacts`, `max_total_size_mb`, `max_reply_length_chars`. | response-validation-gate.md | `response_validation.rs:68` | ENFORCED |
 | R-5.6 | Contract verification uses authoritative runtime state (content-store byte sizes, successful `artifact_build` traces) — not LLM claims. | response-validation-gate.md | `response_validation.rs` | ENFORCED |
 | R-5.7 | `output_schema` validates JSON final replies. | response-validation-gate.md | `validate_json_against_schema:563` | ENFORCED |
-| R-5.8 | Validation failures trigger a bounded repair loop (`max_validation_loops`, `max_validation_duration_ms`); exhaustion returns error. | response-validation-gate.md | `execution.rs:1965 validate_and_maybe_repair` | ENFORCED |
+| R-5.8 | Validation failures trigger a bounded repair loop (`max_validation_loops`, `max_validation_duration_ms`); exhaustion returns error. | response-validation-gate.md | `execution.rs:1965 validate_and_maybe_repair` | ENFORCED — **DUMBNESS VIOLATION** (Phase 4.1: gateway repairs agent output on agent's behalf) |
 | R-5.9 | `min_artifact_builds` is verified via execution traces. | response-validation-gate.md | `response_validation.rs` | ENFORCED |
 | R-5.10 | `artifact_inspect` accepts explicit `art_*` IDs only; implicit `impl_task-*` handles are rejected. | content-store.md | `runtime/tools/artifact.rs` | ENFORCED |
 | R-5.11 | Native tool errors use a uniform `{error_type, message, repair_hint}` envelope. | ARCHITECTURE.md | per-tool response construction | PARTIAL |
@@ -289,6 +290,7 @@ Loop guard in `runtime/guard.rs`, emergency stop in
 | R-7.15 | Spawn-chain depth is bounded system-wide; child `max_depth` ≤ parent's. | (R+3) | `execution.rs::spawn_agent_once` depth cap + `policy.rs::spawn_depth_limit` + `GatewayConfig.max_spawn_depth` | ENFORCED |
 | R-7.16 | Orphan children are reaped when the parent session terminates. | (R+12) | `scheduler.rs::reap_orphaned_sessions`, `gateway_store/observability.rs::find_orphaned_sessions` | ENFORCED |
 | R-7.17 | Approval flood cap — pending approvals per root session bounded. | (R+5) | `gateway_store/approvals.rs::create_approval` + `GatewayConfig.max_pending_approvals_per_root` | ENFORCED |
+| R-7.18 | A **degraded** session state exists between healthy and emergency-stopped. In degraded mode a session loses non-Core tools, network access, and spawn capability but retains reasoning. Entry is triggered by loop-guard warnings short of trip, by R++8 escape-attempt counts, or by explicit operator command. Exit requires operator clearance. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/lifecycle.rs` (state machine + sub-trip trigger), `autonoetic-gateway/src/runtime/tool_call_processor.rs` (sandbox_exec block), `autonoetic-gateway/src/execution.rs` (`degrade_session`/`clear_session_degradation`), `autonoetic-gateway/src/runtime/guard.rs` (`is_sub_trip_warning`) | ENFORCED |
 
 ## 8. Audit & Traceability
 
@@ -308,13 +310,13 @@ separate. Runtime-lock in `runtime_lock.rs`.
 | R-8.9 | Promotion records persist `artifact_id`, `evaluator_pass`, `auditor_pass`, `evidence`, and `content_digest`. | spec-install-pipeline-hardening.md §3.8 | `promotion_store.rs` | ENFORCED |
 | R-8.10 | Capability accretion across revisions is detectable via `promotion_history`. | security-sentinel.md | `promotion_history` table | ENFORCED |
 | R-8.11 | `runtime.lock` includes compile-time source fingerprint and runtime binary SHA. | spec-install-pipeline-hardening.md §3.7 | `build.rs`, `runtime_lock.rs` | ENFORCED |
-| R-8.11b | Sessions refuse to start when `runtime.lock` gateway section disagrees with the running gateway binary. Emit `runtime_lock_drift` causal event. Operator override via `allow_runtime_lock_drift` config. | (R+7 / R+18) | `runtime_lock.rs::check_runtime_lock_drift`, `lifecycle.rs:1260` | ENFORCED |
-| R-8.12 | Schema enforcement decisions are logged with target, result, transformations, and enforcer identity. | schema-enforcement-hook.md | causal event emission | ENFORCED |
-| R-8.13 | Knowledge records carry `owner_agent_id`, `writer_agent_id`, `source_ref`; visibility is enforced on recall. | ARCHITECTURE.md | `runtime/memory/*` | ENFORCED |
-| R-8.14 | Session approval grants are tracked by `(root_session_id, host)` and included in cleanup audits. | approved-resources-caching.md | `session_approval_grants` table | ENFORCED |
-| R-8.15 | Causal-chain append is `fsync`-durable before any state transition that depends on it. | (R+6) | `causal_chain.rs:149` `runtime/tools/promotion.rs:189` `execution.rs:455` `gateway_store/mod.rs:112` | ENFORCED |
-| R-8.16 | Retention pruning emits a `retention.pruned` causal event. | (R+17) | not pinned | MISSING |
-| R++5 | Every tool call may carry a top-level `intent` field (free-text, 1-2 sentences, max 500 chars) describing the agent's reason for invoking the tool. For privileged tool classes, missing intent is a validation error. When present, the gateway persists the intent verbatim on the `tool_invoke.requested` causal event alongside args. | gateway-constitution-roadmap.md | `runtime/tools/mod.rs` `runtime/tool_call_processor.rs` `runtime/session_tracer.rs` | ENFORCED |
+| R-8.12 | Sessions refuse to start when `runtime.lock` gateway section disagrees with the running gateway binary. Emit `runtime_lock_drift` causal event. Operator override via `allow_runtime_lock_drift` config. | (R+7 / R+18) | `runtime_lock.rs::check_runtime_lock_drift`, `lifecycle.rs:1260` | ENFORCED |
+| R-8.13 | Schema enforcement decisions are logged with target, result, transformations, and enforcer identity. | schema-enforcement-hook.md | causal event emission | ENFORCED |
+| R-8.14 | Knowledge records carry `owner_agent_id`, `writer_agent_id`, `source_ref`; visibility is enforced on recall. | ARCHITECTURE.md | `runtime/memory/*` | ENFORCED |
+| R-8.15 | Session approval grants are tracked by `(root_session_id, host)` and included in cleanup audits. | approved-resources-caching.md | `session_approval_grants` table | ENFORCED |
+| R-8.16 | Causal-chain append is `fsync`-durable before any state transition that depends on it. | (R+6) | `causal_chain.rs:149` `runtime/tools/promotion.rs:189` `execution.rs:455` `gateway_store/mod.rs:112` | ENFORCED |
+| R-8.17 | Retention pruning emits a `retention.pruned` causal event. | (R+17) | not pinned | MISSING |
+| R-8.18 | Every tool call may carry a top-level `intent` field (free-text, 1-2 sentences, max 500 chars) describing the agent's reason for invoking the tool. For privileged tool classes, missing intent is a validation error. When present, the gateway persists the intent verbatim on the `tool_invoke.requested` causal event alongside args. | gateway-constitution-roadmap.md | `runtime/tools/mod.rs` `runtime/tool_call_processor.rs` `runtime/session_tracer.rs` | ENFORCED |
 
 ## 9. Agent Install & Provenance
 
@@ -376,13 +378,13 @@ before it moves into its category.
 
 | ID | Rule | Priority |
 |---|---|---|
-| R+1 | Structured capability scopes mandatory for all capabilities (not only the three high-risk ones). | ENFORCED |
-| R+2 | Child → parent tool results validate against `io.returns` on egress. | P0 |
-| R+3 | Spawn-chain depth cap — child `max_children` and `max_depth` ≤ parent's; global ceiling applies. | P0 |
-| R+4 | Root-session tree budget — tokens / time / cost aggregated across all descendants. | P0 |
-| R+5 | Approval flood cap per root session; further requests reject `approval_flood`. | P0 |
-| R+6 | Causal-chain fsync ordering invariant — state transitions gated on event durability. | P0 |
-| R+7 | Runtime-lock drift check at session start. | ENFORCED (R-8.11b) |
+| R+1 | Structured capability scopes mandatory for all capabilities (not only the three high-risk ones). | ENFORCED (R-1.2) |
+| R+2 | Child → parent tool results validate against `io.returns` on egress. | ENFORCED (R-5.13) |
+| R+3 | Spawn-chain depth cap — child `max_children` and `max_depth` ≤ parent's; global ceiling applies. | ENFORCED (R-7.15) |
+| R+4 | Root-session tree budget — tokens / time / cost aggregated across all descendants. | ENFORCED (R-6.21) |
+| R+5 | Approval flood cap per root session; further requests reject `approval_flood`. | ENFORCED (R-7.17) |
+| R+6 | Causal-chain fsync ordering invariant — state transitions gated on event durability. | ENFORCED (R-8.15) |
+| R+7 | Runtime-lock drift check at session start. | ENFORCED (R-8.12) |
 | R+8 | Vault master-key presence probe at gateway startup. | P2 |
 | R+9 | Redaction-before-write ordering invariant. | P1 |
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | P1 |
@@ -406,10 +408,8 @@ item will move into its numbered category once ENFORCED.
 
 | ID | Rule | Priority | Target category |
 |---|---|---|---|
-| R++2 | Promotion of revision N computes `cap_set(N) \ cap_set(N-1)`. A non-empty delta triggers a **separate, differently-shaped approval** (`ScheduledAction::RevisionPromote`) that names each added capability explicitly. The operator must acknowledge every added/broadened capability by name (`--acknowledge-capability`) — silent accretion across approvals is impossible. ENFORCED — `autonoetic-gateway/src/runtime/tools/agent_revision.rs` (gate creation), `autonoetic-gateway/src/scheduler/approval.rs` (acknowledgement check). | P0 | §2 Approval |
 | R++3 | The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). | P1 | §2 Approval |
 | R++4 | Operator approval hardening: (a) dwell time (minimum-visible seconds) on high-risk approvals before the confirm action enables; (b) typed confirmation string required for destructive approval classes (bundle promotion, credential register, first-ever host approval); (c) structural-similarity dedup to the operator, not just fingerprint dedup (prevents near-identical prompt floods from bypassing attention). | P1 | §2 Approval |
-| R++6 | A **degraded** session state exists between healthy and emergency-stopped. In degraded mode a session loses non-Core tools, network access, and spawn capability but retains reasoning. Entry is triggered by loop-guard warnings short of trip, by R++8 escape-attempt counts, or by explicit operator command. Exit requires operator clearance. **ENFORCED** — `autonoetic-gateway/src/runtime/lifecycle.rs` (state machine + sub-trip trigger), `autonoetic-gateway/src/runtime/tool_call_processor.rs` (sandbox_exec block), `autonoetic-gateway/src/execution.rs` (`degrade_session`/`clear_session_degradation`), `autonoetic-gateway/src/runtime/guard.rs` (`is_sub_trip_warning`). | P1 | §7 Abuse/Hard-Stop |
 | R++7 | Cross-gateway causal continuity: cross-gateway events carry a `peer_event_ref` pointing to the corresponding remote chain entry; gateways periodically exchange signed `chain_attestation` digests allowing end-to-end federated trace verification. | P1 | §10 Federation + §8 Audit |
 | R++8 | Sandbox-escape attempts are counted. Kernel-denied syscalls (seccomp), denied mount attempts, ptrace calls, and equivalents on docker/microvm drivers increment a per-session counter. Threshold crossings trigger R++6 degraded mode; further escalation triggers emergency stop. | P2 | §3 Sandbox + §7 Abuse |
 | R++9 | A property test pins gateway determinism: for random valid inputs, the gateway's decision for `(capability-set, tool-call, recorded-state) → verdict` is a pure function — no LLM call, no network fetch with undeclared fallback, no hidden branch. Any future change that adds nondeterminism fails the test. Prevents principle erosion. | P2 | §13 (cross-cutting) |
@@ -447,7 +447,10 @@ These are properties that span categories and must hold end-to-end.
 - **I-3** Redaction runs before persistence on every path that can
   contain secret-shaped content. (R+9)
 - **I-4** Gateway does not make recovery decisions on the agent's
-  behalf. (See §14 — the dumbness invariant.)
+  behalf. (See §14 — the dumbness invariant.) **Exception:**
+  R-4.11 `credential_refresh` 401 auto-retry is a recovery decision
+  made by the gateway. Tracked for Phase 4 review — the exception
+  may need to become opt-in per manifest.
 - **I-5** Rules live in manifests or declared configuration; hard-coded
   policy constants in Rust are discouraged and must be documented here
   if present.

@@ -226,7 +226,7 @@ but begins once the block is authoritatively present.
 
 ---
 
-### 1.7 `R++2` Capability-delta gating at promotion
+### 1.7 `R++2` Capability-delta gating at promotion — **ENFORCED** (now R-2.16)
 
 **Threat.** Capability accretion by stealth. R-8.10 detects drift in
 `promotion_history` after the fact; nothing *prevents* the canonical
@@ -261,7 +261,7 @@ rejection.
 
 ---
 
-### 1.8 `R++5` Tool-call intent capture
+### 1.8 `R++5` Tool-call intent capture — **ENFORCED** (now R-8.18)
 
 **Threat.** Post-hoc audit of what-happened is much harder than it
 needs to be. Today we see "spawned coder with message X"; we don't
@@ -674,7 +674,7 @@ Files: `autonoetic-gateway/src/gateway_store/approvals.rs` (schema),
 
 ---
 
-### 2.11 `R++6` Degraded session mode — **ENFORCED**
+### 2.11 `R++6` Degraded session mode — **ENFORCED** (now R-7.18)
 
 **Threat.** The response to agent misbehaviour today is binary:
 healthy or emergency-stopped. A session showing loop-guard warnings
