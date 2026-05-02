@@ -491,6 +491,7 @@ pub struct AgentExecutor {
     pub initial_user_message: String,
     pub guard: LoopGuard,
     pub session_state: autonoetic_types::agent::SessionState,
+    pub degraded_sessions: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
     pub session_id: Option<String>,
     pub session_started: bool,
     pub turn_counter: u64,
@@ -577,6 +578,7 @@ impl AgentExecutor {
             initial_user_message: String::new(),
             guard: LoopGuard::new(5),
             session_state: autonoetic_types::agent::SessionState::Normal,
+            degraded_sessions: None,
             session_id: None,
             session_started: false,
             turn_counter: 0,
@@ -687,6 +689,11 @@ impl AgentExecutor {
 
     pub fn with_artifact_id(mut self, artifact_id: Option<String>) -> Self {
         self.artifact_id = artifact_id;
+        self
+    }
+
+    pub fn with_degraded_sessions(mut self, set: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>) -> Self {
+        self.degraded_sessions = set;
         self
     }
 
@@ -1445,6 +1452,18 @@ impl AgentExecutor {
                         reason: Some("loop_guard_sub_trip_warning".to_string()),
                     };
                     let _ = store.create_causal_event(&event);
+                }
+                if let Some(ds) = self.degraded_sessions.as_ref() {
+                    ds.lock().await.insert(session_id.clone());
+                }
+            }
+
+            if let Some(ds) = self.degraded_sessions.as_ref() {
+                let in_set = ds.lock().await.contains(&session_id);
+                if in_set && self.session_state == autonoetic_types::agent::SessionState::Normal {
+                    self.session_state = autonoetic_types::agent::SessionState::Degraded;
+                } else if !in_set && self.session_state == autonoetic_types::agent::SessionState::Degraded {
+                    self.session_state = autonoetic_types::agent::SessionState::Normal;
                 }
             }
 

@@ -80,7 +80,7 @@ fn session_state_default_is_normal() {
 }
 
 #[test]
-fn degraded_checkpoint_roundtrip() {
+fn session_state_serde_roundtrip() {
     let state = autonoetic_types::agent::SessionState::Degraded;
     let json = serde_json::to_string(&state).unwrap();
     assert_eq!(json, "\"degraded\"");

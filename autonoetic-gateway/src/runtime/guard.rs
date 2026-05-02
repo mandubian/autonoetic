@@ -102,11 +102,11 @@ impl LoopGuard {
     /// This is the trigger for R++6 degraded-mode entry via loop-guard
     /// sub-trip warnings.
     pub fn is_sub_trip_warning(&self) -> bool {
-        let loop_threshold = ((self.max_loops_without_progress as f64) * 0.8).ceil() as u32;
+        let loop_threshold = ((self.max_loops_without_progress as u64 * 4 + 4) / 5) as u32;
         if self.current_loops >= loop_threshold && self.current_loops < self.max_loops_without_progress {
             return true;
         }
-        let failure_threshold = ((self.max_tool_failures as f64) * 0.8).ceil() as u32;
+        let failure_threshold = ((self.max_tool_failures as u64 * 4 + 4) / 5) as u32;
         for count in self.tool_failure_counts.values() {
             if *count >= failure_threshold && *count < self.max_tool_failures {
                 return true;

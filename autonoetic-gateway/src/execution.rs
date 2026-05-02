@@ -407,6 +407,10 @@ impl GatewayExecutionService {
     }
 
     pub async fn degrade_session(&self, session_id: &str, reason: &str) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        let reason = reason.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        anyhow::ensure!(!reason.is_empty(), "reason must not be empty");
         {
             let mut set = self.degraded_sessions.lock().await;
             set.insert(session_id.to_string());
@@ -440,6 +444,8 @@ impl GatewayExecutionService {
     }
 
     pub async fn clear_session_degradation(&self, session_id: &str) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
         {
             let mut set = self.degraded_sessions.lock().await;
             set.remove(session_id);
@@ -1108,7 +1114,8 @@ impl GatewayExecutionService {
             )
             .with_active_executions(Some(self.active_executions.clone()))
             .with_http_client(self.http_client.clone())
-            .with_artifact_id(artifact_id.map(String::from));
+            .with_artifact_id(artifact_id.map(String::from))
+            .with_degraded_sessions(Some(self.degraded_sessions.clone()));
 
             use crate::runtime::lifecycle::TurnOutcome;
 
@@ -1290,6 +1297,9 @@ impl GatewayExecutionService {
                         }
                     };
 
+                    // Restore session state before executing remaining tool calls.
+                    runtime.session_state = cont.session_state;
+
                     // Execute remaining tool calls from the original batch.
                     let remaining_results = if !cont.remaining_tool_calls.is_empty() {
                         let mut mcp_rt = crate::runtime::mcp::McpToolRuntime::from_env().await?;
@@ -1307,7 +1317,7 @@ impl GatewayExecutionService {
                         ).with_session_context(
                             Some(cont.session_id.clone()),
                             Some(cont.turn_id.clone()),
-                        );
+                        ).with_session_state(runtime.session_state);
                         let mut tracer = crate::runtime::session_tracer::SessionTracer::new_with_evidence_mode(
                             &runtime.agent_dir,
                             &runtime.manifest.agent.id,
@@ -1342,7 +1352,6 @@ impl GatewayExecutionService {
                         .unwrap_or_default();
 
                     runtime.guard = crate::runtime::guard::LoopGuard::restore(cont.loop_guard_state.clone());
-                    runtime.session_state = cont.session_state;
                     runtime.session_id = Some(cont.session_id.clone());
                     runtime.session_started = true;
                     runtime.turn_counter = cont.turn_id
@@ -2670,7 +2679,8 @@ impl GatewayExecutionService {
         .with_session_id(session_id.to_string())
         .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from))
         .with_active_executions(Some(self.active_executions.clone()))
-        .with_http_client(self.http_client.clone());
+        .with_http_client(self.http_client.clone())
+        .with_degraded_sessions(Some(self.degraded_sessions.clone()));
 
         // Restore executor state from checkpoint
         runtime.guard =

@@ -1283,6 +1283,47 @@ mod tests {
         assert_eq!(tool_error.error_type, ToolErrorType::Execution);
         assert!(tool_error.is_recoverable());
     }
+
+    fn make_degraded_test_processor() -> ToolCallProcessor<'static> {
+        let mut mcp_runtime = Box::leak(Box::new(crate::runtime::mcp::McpToolRuntime::empty()));
+        let manifest = Box::leak(Box::new(test_manifest()));
+        let registry = Box::leak(Box::new(default_registry()));
+        let ds = Box::leak(Box::new(crate::runtime::disclosure::DisclosureState::default()));
+        ToolCallProcessor::new(
+            mcp_runtime,
+            registry,
+            manifest,
+            ds,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn degraded_mode_blocks_sandbox_exec() {
+        let mut proc = make_degraded_test_processor();
+        proc.session_state = autonoetic_types::agent::SessionState::Degraded;
+        assert!(proc.is_degraded_blocked_tool("sandbox_exec"));
+        assert!(proc.is_degraded_blocked_tool("artifact_exec"));
+    }
+
+    #[test]
+    fn normal_mode_allows_sandbox_exec() {
+        let proc = make_degraded_test_processor();
+        assert!(!proc.is_degraded_blocked_tool("sandbox_exec"));
+        assert!(!proc.is_degraded_blocked_tool("artifact_exec"));
+    }
+
+    #[test]
+    fn degraded_mode_does_not_block_other_core_tools() {
+        let mut proc = make_degraded_test_processor();
+        proc.session_state = autonoetic_types::agent::SessionState::Degraded;
+        assert!(!proc.is_degraded_blocked_tool("content_write"));
+        assert!(!proc.is_degraded_blocked_tool("knowledge_store"));
+        assert!(!proc.is_degraded_blocked_tool("artifact_build"));
+    }
 }
 
 fn extract_approval_ref_from_args(arguments_json: &str) -> Option<String> {
