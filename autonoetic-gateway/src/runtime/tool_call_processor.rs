@@ -26,10 +26,10 @@ pub struct ToolCallProcessor<'a> {
     secret_store: Option<&'a mut SecretStoreRuntime>,
     session_id: Option<String>,
     turn_id: Option<String>,
-    /// When set, passed to native tools for config-dependent behavior.
     config: Option<&'a GatewayConfig>,
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     run_context: Option<crate::runtime::active_execution_registry::NativeToolRunContext>,
+    session_state: autonoetic_types::agent::SessionState,
 }
 
 fn strip_gemma_token_artifacts(s: &str) -> String {
@@ -78,6 +78,7 @@ impl<'a> ToolCallProcessor<'a> {
             config,
             gateway_store,
             run_context,
+            session_state: autonoetic_types::agent::SessionState::Normal,
         }
     }
 
@@ -89,6 +90,18 @@ impl<'a> ToolCallProcessor<'a> {
         self.session_id = session_id;
         self.turn_id = turn_id;
         self
+    }
+
+    pub fn with_session_state(mut self, state: autonoetic_types::agent::SessionState) -> Self {
+        self.session_state = state;
+        self
+    }
+
+    fn is_degraded_blocked_tool(&self, tool_name: &str) -> bool {
+        if self.session_state != autonoetic_types::agent::SessionState::Degraded {
+            return false;
+        }
+        matches!(tool_name, "sandbox_exec" | "artifact_exec")
     }
 
     /// Processes tool calls and returns `(had_any_success, results)`.
@@ -110,6 +123,26 @@ impl<'a> ToolCallProcessor<'a> {
             let started_at = Instant::now();
             let approval_ref = extract_approval_ref_from_args(&tc.arguments);
             let tool_name = Self::canonical_tool_name(&tc.name).to_string();
+
+            if self.is_degraded_blocked_tool(&tool_name) {
+                let tool_error = ToolError::permission(format!(
+                    "session_degraded: tool '{}' blocked in degraded mode (R++6). \
+                     CodeExecution is refused until operator clears degradation.",
+                    tool_name
+                ));
+                let error_json = tool_error.to_json_string();
+                let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
+                self.record_execution_trace(
+                    tc,
+                    &error_json,
+                    started_at.elapsed(),
+                    Some(&tool_error),
+                    Some(failure_event_id),
+                )?;
+                results.push((tc.id.clone(), tc.name.clone(), error_json));
+                continue;
+            }
+
             let intent = match validate_tool_intent(&tool_name, &tc.arguments) {
                 Ok(intent) => intent,
                 Err(tool_error) => {

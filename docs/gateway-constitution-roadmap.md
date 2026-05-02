@@ -674,7 +674,7 @@ Files: `autonoetic-gateway/src/gateway_store/approvals.rs` (schema),
 
 ---
 
-### 2.11 `R++6` Degraded session mode
+### 2.11 `R++6` Degraded session mode — **ENFORCED**
 
 **Threat.** The response to agent misbehaviour today is binary:
 healthy or emergency-stopped. A session showing loop-guard warnings

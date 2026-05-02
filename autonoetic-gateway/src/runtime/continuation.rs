@@ -113,6 +113,10 @@ pub struct TurnContinuation {
     /// Loop guard state at suspension so the guard can be restored on resume
     /// without counting suspension time as wasted iterations.
     pub loop_guard_state: LoopGuardState,
+
+    /// Session state at suspension so degraded mode persists across resume.
+    #[serde(default)]
+    pub session_state: autonoetic_types::agent::SessionState,
 }
 
 /// The specific tool call that triggered the approval gate.

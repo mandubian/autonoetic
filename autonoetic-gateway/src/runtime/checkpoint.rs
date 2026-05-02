@@ -97,6 +97,9 @@ pub struct SessionCheckpoint {
     pub turn_counter: u64,
     /// Loop guard state (failure counts, progress tracking).
     pub loop_guard_state: LoopGuardState,
+    /// Session runtime state (Normal or Degraded).
+    #[serde(default)]
+    pub session_state: autonoetic_types::agent::SessionState,
 
     // --- Session identity ---
     pub agent_id: String,
@@ -454,6 +457,7 @@ mod tests {
                 consecutive_progress_count: 0,
                 child_failure_count: 0,
             },
+            session_state: autonoetic_types::agent::SessionState::Normal,
             agent_id: "test-agent".to_string(),
             session_id: "session-123".to_string(),
             turn_id: "turn-001".to_string(),
@@ -504,6 +508,7 @@ mod tests {
                 consecutive_progress_count: 0,
                 child_failure_count: 0,
             },
+            session_state: autonoetic_types::agent::SessionState::Normal,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: "turn-001".to_string(),
@@ -562,6 +567,7 @@ mod tests {
                     consecutive_progress_count: 0,
                     child_failure_count: 0,
                 },
+                session_state: autonoetic_types::agent::SessionState::Normal,
                 agent_id: "test-agent".to_string(),
                 session_id: session_id.to_string(),
                 turn_id: format!("turn-{:03}", i),

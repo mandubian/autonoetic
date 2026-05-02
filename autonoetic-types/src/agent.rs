@@ -234,6 +234,15 @@ pub enum ToolTier {
     Specialized,
 }
 
+/// Session runtime state — tracks whether the session is healthy or degraded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionState {
+    #[default]
+    Normal,
+    Degraded,
+}
+
 /// A stored credential record for agent-to-service authentication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialRecord {
