@@ -66,7 +66,7 @@ impl Drop for ChatTerminalRestore {
 // App State
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum MessageRole {
     User,
     Assistant,
@@ -316,8 +316,8 @@ impl App {
         }
     }
 
-    fn content_line_count(&self, content_width: u16) -> usize {
-        let content_width = content_width.max(1) as usize;
+    fn content_line_count(&self, wrap_width: u16) -> usize {
+        let ww = wrap_width.max(1);
         let mut count = 0usize;
         for msg in &self.messages {
             let icon = match msg.role {
@@ -328,16 +328,19 @@ impl App {
                 MessageRole::SignalLow => "  ",
                 MessageRole::AgentOutput => "📝 ",
             };
+            let style = message_role_style(msg.role);
 
             for (i, text_line) in msg.content.lines().enumerate() {
                 let prefix = if i == 0 { icon } else { "  " };
-                count = count.saturating_add(wrapped_visual_line_count(
-                    prefix,
-                    text_line,
-                    content_width,
+                count = count.saturating_add(transcript_wrap_line_count(
+                    Line::from(vec![
+                        Span::raw(prefix),
+                        Span::styled(text_line.to_string(), style),
+                    ]),
+                    ww,
                 ));
             }
-            count = count.saturating_add(1);
+            count = count.saturating_add(transcript_wrap_line_count(Line::raw(""), ww));
         }
         if !self.pending.is_empty() {
             let pending_text = format!(
@@ -346,7 +349,15 @@ impl App {
                 self.pending.len(),
                 self.oldest_secs()
             );
-            count = count.saturating_add(wrapped_visual_line_count("", &pending_text, content_width));
+            count = count.saturating_add(transcript_wrap_line_count(
+                Line::from(vec![Span::styled(
+                    pending_text,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
+                )]),
+                ww,
+            ));
         }
         count
     }
@@ -1128,7 +1139,8 @@ fn draw(f: &mut Frame, app: &App) {
 
     draw_input(f, app, layout.input);
 
-    let before_cursor_display_width = app.input[..app.cursor_pos].chars().count() as u16;
+    let before_cursor_display_width =
+        UnicodeWidthStr::width(&app.input[..app.cursor_pos]).min(usize::from(u16::MAX)) as u16;
     let cursor_x = (layout.input.x + 2 + before_cursor_display_width)
         .min(layout.input.x + layout.input.width.saturating_sub(1));
     let cursor_y = layout.input.y + 1;
@@ -1217,9 +1229,29 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+fn message_role_style(role: MessageRole) -> Style {
+    match role {
+        MessageRole::User => Style::default().fg(Color::Green),
+        MessageRole::Assistant => Style::default().fg(Color::Blue),
+        MessageRole::System => Style::default().fg(Color::Yellow),
+        MessageRole::Signal => Style::default().fg(Color::Cyan),
+        MessageRole::SignalLow => Style::default().fg(Color::DarkGray),
+        MessageRole::AgentOutput => Style::default().fg(Color::Magenta),
+    }
+}
+
+/// Vertical line count for transcript lines as ratatui's `Paragraph::wrap(Wrap { trim: false })`
+/// will render them — must match [`draw_messages`] or follow-mode scroll drifts from the true end.
+fn transcript_wrap_line_count(paragraph_line: Line<'static>, wrap_width: u16) -> usize {
+    Paragraph::new(paragraph_line)
+        .wrap(Wrap { trim: false })
+        .line_count(wrap_width.max(1))
+        .max(1)
+}
+
 fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
-    let content_width = area.width.saturating_sub(1).max(1) as usize;
+    let wrap_width = area.width.saturating_sub(1).max(1);
     let effective_scroll = app.effective_scroll_offset();
     // ratatui Paragraph::scroll uses u16. Keep a moving visual window so
     // very long transcripts still follow live output instead of wrapping.
@@ -1243,18 +1275,25 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         };
 
     for msg in &app.messages {
-        let (icon, style) = match msg.role {
-            MessageRole::User => ("> ", Style::default().fg(Color::Green)),
-            MessageRole::Assistant => ("🤖 ", Style::default().fg(Color::Blue)),
-            MessageRole::System => ("ℹ ", Style::default().fg(Color::Yellow)),
-            MessageRole::Signal => ("🔔 ", Style::default().fg(Color::Cyan)),
-            MessageRole::SignalLow => ("  ", Style::default().fg(Color::DarkGray)),
-            MessageRole::AgentOutput => ("📝 ", Style::default().fg(Color::Magenta)),
+        let icon = match msg.role {
+            MessageRole::User => "> ",
+            MessageRole::Assistant => "🤖 ",
+            MessageRole::System => "ℹ ",
+            MessageRole::Signal => "🔔 ",
+            MessageRole::SignalLow => "  ",
+            MessageRole::AgentOutput => "📝 ",
         };
+        let style = message_role_style(msg.role);
 
         for (i, text_line) in msg.content.lines().enumerate() {
             let prefix = if i == 0 { icon } else { "  " };
-            let visual_line_count = wrapped_visual_line_count(prefix, text_line, content_width);
+            let visual_line_count = transcript_wrap_line_count(
+                Line::from(vec![
+                    Span::raw(prefix),
+                    Span::styled(text_line.to_string(), style),
+                ]),
+                wrap_width,
+            );
             let visual_line_end = visual_row.saturating_add(visual_line_count);
             let include_line = visual_line_end > visual_window_start;
 
@@ -1352,19 +1391,20 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
             app.pending.len(),
             app.oldest_secs()
         );
+        let pending_line = Line::from(vec![Span::styled(
+            pending_text,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::ITALIC),
+        )]);
         let include_pending = visual_row
-            .saturating_add(wrapped_visual_line_count("", &pending_text, content_width))
+            .saturating_add(transcript_wrap_line_count(pending_line.clone(), wrap_width))
             > visual_window_start;
         if include_pending {
             if render_base_visual_row.is_none() {
                 render_base_visual_row = Some(visual_row);
             }
-            lines.push(Line::from(vec![Span::styled(
-                pending_text,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            )]));
+            lines.push(pending_line);
         }
     }
 
@@ -1380,26 +1420,6 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
     f.render_widget(p, area);
-}
-
-fn wrapped_visual_line_count(prefix: &str, text: &str, content_width: usize) -> usize {
-    if content_width == 0 {
-        return 0;
-    }
-
-    let prefix_width = UnicodeWidthStr::width(prefix).min(content_width.saturating_sub(1));
-    let text_width = UnicodeWidthStr::width(text);
-
-    if text_width == 0 {
-        return 1;
-    }
-
-    let first_line_capacity = content_width.saturating_sub(prefix_width);
-    if text_width <= first_line_capacity {
-        return 1;
-    }
-
-    1 + (text_width - first_line_capacity).div_ceil(content_width)
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
