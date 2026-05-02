@@ -56,9 +56,7 @@ impl HookExecutor {
                     let ctx = ctx.clone();
                     let store = self.store.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            Self::publish_report_sync(&store, &ctx, &hook)
-                        {
+                        if let Err(e) = Self::publish_report_sync(&store, &ctx, &hook) {
                             tracing::warn!(
                                 target: "hooks",
                                 error = %e,
@@ -74,10 +72,8 @@ impl HookExecutor {
                     let port = self.port;
                     let timeout_secs = self.signal_timeout_secs;
                     tokio::spawn(async move {
-                        if let Err(e) = Self::deliver_signal_sync(
-                            &store, &ctx, &hook, port, timeout_secs,
-                        )
-                        .await
+                        if let Err(e) =
+                            Self::deliver_signal_sync(&store, &ctx, &hook, port, timeout_secs).await
                         {
                             tracing::warn!(
                                 target: "hooks",
@@ -89,10 +85,10 @@ impl HookExecutor {
                 }
                 HookAction::AgentSpawn | HookAction::HttpCallback => {
                     tracing::warn!(
-                        target: "hooks",
-                        action = ?hook.action,
-                        "hook action not yet implemented"
-                        );
+                    target: "hooks",
+                    action = ?hook.action,
+                    "hook action not yet implemented"
+                    );
                 }
             }
         }
@@ -140,9 +136,7 @@ impl HookExecutor {
             }
         };
 
-        let session_dir = gateway_dir
-            .join("sessions")
-            .join(session_id);
+        let session_dir = gateway_dir.join("sessions").join(session_id);
 
         let report_json_path = session_dir.join("session_report.json");
 
@@ -227,9 +221,8 @@ impl HookExecutor {
 
         let sanitized_body = sanitize_report_for_publishing(&report_body);
 
-        let report_handle = crate::runtime::content_store::ContentStore::compute_handle(
-            sanitized_body.as_bytes(),
-        );
+        let report_handle =
+            crate::runtime::content_store::ContentStore::compute_handle(sanitized_body.as_bytes());
 
         if let Ok(content_store) = crate::runtime::content_store::ContentStore::new(&gateway_dir) {
             if let Err(e) = content_store.write(sanitized_body.as_bytes()) {
@@ -244,30 +237,35 @@ impl HookExecutor {
         let mut html_handle: Option<String> = None;
         let html_path = session_dir.join("session_report_final.html");
         if let Ok(html_body) = std::fs::read_to_string(&html_path) {
-            let h = crate::runtime::content_store::ContentStore::compute_handle(html_body.as_bytes());
+            let h =
+                crate::runtime::content_store::ContentStore::compute_handle(html_body.as_bytes());
             html_handle = Some(h);
-            if let Ok(content_store) = crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+            if let Ok(content_store) =
+                crate::runtime::content_store::ContentStore::new(&gateway_dir)
+            {
                 let _ = content_store.write(html_body.as_bytes());
             }
         }
 
-        store.upsert_published_session_report(&autonoetic_types::causal_chain::PublishedSessionReportRecord {
-            root_session_id: ctx.root_session_id.clone(),
-            report_handle,
-            overview_handle: None,
-            html_handle,
-            narrative_handle: None,
-            title,
-            status: status.to_string(),
-            started_at,
-            ended_at,
-            agent_count,
-            error_count,
-            approval_count,
-            search_text,
-            generated_at: chrono::Utc::now().to_rfc3339(),
-            report_version: 1,
-        })?;
+        store.upsert_published_session_report(
+            &autonoetic_types::causal_chain::PublishedSessionReportRecord {
+                root_session_id: ctx.root_session_id.clone(),
+                report_handle,
+                overview_handle: None,
+                html_handle,
+                narrative_handle: None,
+                title,
+                status: status.to_string(),
+                started_at,
+                ended_at,
+                agent_count,
+                error_count,
+                approval_count,
+                search_text,
+                generated_at: chrono::Utc::now().to_rfc3339(),
+                report_version: 1,
+            },
+        )?;
 
         tracing::info!(
             target: "hooks",
@@ -313,19 +311,16 @@ impl HookExecutor {
         let Some(store) = store else {
             return Ok(());
         };
-        let target_session = ctx
-            .session_id
-            .as_deref()
-            .unwrap_or(&ctx.root_session_id);
-        let request_id = ctx
-            .fields
-            .get("request_id")
-            .cloned()
-            .unwrap_or_default();
+        let target_session = ctx.session_id.as_deref().unwrap_or(&ctx.root_session_id);
+        let request_id = ctx.fields.get("request_id").cloned().unwrap_or_default();
 
         let signal = match ctx.event {
             HookEvent::ApprovalResolved => {
-                let decision = ctx.fields.get("decision").map(String::as_str).unwrap_or("approved");
+                let decision = ctx
+                    .fields
+                    .get("decision")
+                    .map(String::as_str)
+                    .unwrap_or("approved");
                 crate::scheduler::signal::Signal::ApprovalResolved {
                     request_id: request_id.clone(),
                     agent_id: ctx.agent_id.clone().unwrap_or_default(),
@@ -335,11 +330,7 @@ impl HookExecutor {
                         "denied".to_string()
                     },
                     install_completed: false,
-                    message: format!(
-                        "Approval {} {}",
-                        request_id,
-                        decision
-                    ),
+                    message: format!("Approval {} {}", request_id, decision),
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 }
             }
@@ -349,11 +340,7 @@ impl HookExecutor {
                     .get("task_ids")
                     .map(|s| s.split(',').map(String::from).collect())
                     .unwrap_or_default();
-                let workflow_id = ctx
-                    .fields
-                    .get("workflow_id")
-                    .cloned()
-                    .unwrap_or_default();
+                let workflow_id = ctx.fields.get("workflow_id").cloned().unwrap_or_default();
                 crate::scheduler::signal::Signal::WorkflowJoinSatisfied {
                     workflow_id,
                     join_task_ids: task_ids,

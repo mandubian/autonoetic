@@ -3,9 +3,7 @@
 use autonoetic_gateway::interaction_answer::resolve_interaction_id;
 use autonoetic_gateway::interaction_answer::InteractionResolveAndAnswerParams;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::background::{
-    UserInteraction, UserInteractionKind, UserInteractionStatus,
-};
+use autonoetic_types::background::{UserInteraction, UserInteractionKind, UserInteractionStatus};
 use tempfile::tempdir;
 
 fn minimal_interaction(id: &str, root: &str, session: &str) -> UserInteraction {
@@ -64,11 +62,7 @@ fn resolve_single_pending_under_root() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gw)?;
     let store = GatewayStore::open(&gw)?;
 
-    store.create_user_interaction(&minimal_interaction(
-        "ui-only",
-        "root-1",
-        "root-1/sess",
-    ))?;
+    store.create_user_interaction(&minimal_interaction("ui-only", "root-1", "root-1/sess"))?;
 
     let p = InteractionResolveAndAnswerParams {
         interaction_id: None,
@@ -92,16 +86,8 @@ fn resolve_ambiguous_when_multiple_pending() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gw)?;
     let store = GatewayStore::open(&gw)?;
 
-    store.create_user_interaction(&minimal_interaction(
-        "ui-a",
-        "root-2",
-        "root-2/s1",
-    ))?;
-    store.create_user_interaction(&minimal_interaction(
-        "ui-b",
-        "root-2",
-        "root-2/s2",
-    ))?;
+    store.create_user_interaction(&minimal_interaction("ui-a", "root-2", "root-2/s1"))?;
+    store.create_user_interaction(&minimal_interaction("ui-b", "root-2", "root-2/s2"))?;
 
     let p = InteractionResolveAndAnswerParams {
         interaction_id: None,

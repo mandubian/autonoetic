@@ -53,9 +53,7 @@ pub fn check_runtime_lock_drift(agent_dir: &Path) -> DriftCheckResult {
     let lock = match resolve_runtime_lock(&lock_path) {
         Ok(l) => l,
         Err(e) => {
-            return DriftCheckResult::Skipped(DriftSkippedReason::LockMalformed(
-                e.to_string(),
-            ));
+            return DriftCheckResult::Skipped(DriftSkippedReason::LockMalformed(e.to_string()));
         }
     };
 

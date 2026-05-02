@@ -96,8 +96,12 @@ fn write_runtime_lock(agent_dir: &std::path::Path, layers: Vec<LockedLayerMount>
             build_tag: None,
             signature: None,
         },
-        sdk: LockedSdk { version: "0.1.0".to_string() },
-        sandbox: LockedSandbox { backend: "bubblewrap".to_string() },
+        sdk: LockedSdk {
+            version: "0.1.0".to_string(),
+        },
+        sandbox: LockedSandbox {
+            backend: "bubblewrap".to_string(),
+        },
         dependencies: vec![],
         artifacts: vec![],
         layers,
@@ -162,17 +166,30 @@ fn test_layer_with_unapproved_hosts_blocks_execution() {
         None,
     );
 
-    assert!(result.is_ok(), "should return Ok (approval response, not Err)");
+    assert!(
+        result.is_ok(),
+        "should return Ok (approval response, not Err)"
+    );
     let response: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
 
-    assert_eq!(response["ok"], false, "execution should be blocked by layer scope check");
+    assert_eq!(
+        response["ok"], false,
+        "execution should be blocked by layer scope check"
+    );
     assert_eq!(
         response["layer_mount_approval_required"], true,
         "response should indicate layer_mount_approval_required"
     );
-    assert!(response.get("request_id").is_some(), "approval request_id should be present");
+    assert!(
+        response.get("request_id").is_some(),
+        "approval request_id should be present"
+    );
     let stderr = response["stderr"].as_str().unwrap_or("");
-    assert!(stderr.contains("pypi.org"), "stderr should mention the unapproved host: {}", stderr);
+    assert!(
+        stderr.contains("pypi.org"),
+        "stderr should mention the unapproved host: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -218,7 +235,8 @@ fn test_layer_without_scope_does_not_block_execution() {
             assert_ne!(
                 response.get("layer_mount_approval_required"),
                 Some(&serde_json::Value::Bool(true)),
-                "network-free layer should not require approval: {:?}", response
+                "network-free layer should not require approval: {:?}",
+                response
             );
         }
     }
@@ -270,7 +288,8 @@ fn test_layer_with_scope_does_not_block_network_access_agent() {
             assert_ne!(
                 response.get("layer_mount_approval_required"),
                 Some(&serde_json::Value::Bool(true)),
-                "NetworkAccess agent should bypass layer scope check: {:?}", response
+                "NetworkAccess agent should bypass layer scope check: {:?}",
+                response
             );
         }
     }
@@ -300,23 +319,48 @@ fn test_layer_mount_approval_ref_clears_scope_gate() {
     // Step 1: First call — blocked, returns request_id
     let arguments = serde_json::json!({ "command": "echo 'go'" });
     let r1 = registry.execute(
-        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
-        &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+        "sandbox_exec",
+        &manifest,
+        &policy,
+        &agent_dir,
+        Some(&gw_dir),
+        &arguments.to_string(),
+        Some("sess_mount"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
     );
     let resp1: serde_json::Value = serde_json::from_str(&r1.unwrap()).unwrap();
     assert_eq!(resp1["layer_mount_approval_required"], true);
     let request_id = resp1["request_id"].as_str().unwrap().to_string();
 
     // Step 2: Operator approves
-    store.record_decision(
-        &request_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None,
-    ).unwrap();
+    store
+        .record_decision(
+            &request_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )
+        .unwrap();
 
     // Step 3: Retry with approval_ref — scope gate is cleared
-    let arguments_with_ref = serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
+    let arguments_with_ref =
+        serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
     let r2 = registry.execute(
-        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
-        &arguments_with_ref.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+        "sandbox_exec",
+        &manifest,
+        &policy,
+        &agent_dir,
+        Some(&gw_dir),
+        &arguments_with_ref.to_string(),
+        Some("sess_mount"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
     );
 
     // If bwrap is not available, r2 is an Err from execution — that means the scope gate
@@ -330,7 +374,8 @@ fn test_layer_mount_approval_ref_clears_scope_gate() {
             assert_ne!(
                 resp2.get("layer_mount_approval_required"),
                 Some(&serde_json::Value::Bool(true)),
-                "approval_ref for LayerMount should clear the scope gate: {:?}", resp2
+                "approval_ref for LayerMount should clear the scope gate: {:?}",
+                resp2
             );
         }
     }
@@ -359,20 +404,45 @@ fn test_layer_mount_approval_ref_rejected_for_different_root_session() {
 
     let arguments = serde_json::json!({ "command": "echo 'go'" });
     let r1 = registry.execute(
-        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
-        &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+        "sandbox_exec",
+        &manifest,
+        &policy,
+        &agent_dir,
+        Some(&gw_dir),
+        &arguments.to_string(),
+        Some("sess_mount"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
     );
     let resp1: serde_json::Value = serde_json::from_str(&r1.unwrap()).unwrap();
     let request_id = resp1["request_id"].as_str().unwrap().to_string();
 
-    store.record_decision(
-        &request_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None,
-    ).unwrap();
+    store
+        .record_decision(
+            &request_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )
+        .unwrap();
 
-    let arguments_with_ref = serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
+    let arguments_with_ref =
+        serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
     let r2 = registry.execute(
-        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
-        &arguments_with_ref.to_string(), Some("sess_other"), None, Some(&config), Some(store.clone()), None,
+        "sandbox_exec",
+        &manifest,
+        &policy,
+        &agent_dir,
+        Some(&gw_dir),
+        &arguments_with_ref.to_string(),
+        Some("sess_other"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
     );
 
     let err = r2.expect_err("approval_ref should be rejected in a different root session");
@@ -414,15 +484,30 @@ fn test_layer_mount_approval_ref_rejected_for_new_layer_scope() {
 
     let arguments = serde_json::json!({ "command": "echo 'go'" });
     let r1 = registry.execute(
-        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
-        &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+        "sandbox_exec",
+        &manifest,
+        &policy,
+        &agent_dir,
+        Some(&gw_dir),
+        &arguments.to_string(),
+        Some("sess_mount"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
     );
     let resp1: serde_json::Value = serde_json::from_str(&r1.unwrap()).unwrap();
     let request_id = resp1["request_id"].as_str().unwrap().to_string();
 
-    store.record_decision(
-        &request_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None,
-    ).unwrap();
+    store
+        .record_decision(
+            &request_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )
+        .unwrap();
 
     let second_scope = LayerApprovalScope {
         approved_hosts: vec!["crates.io".to_string()],
@@ -448,15 +533,26 @@ fn test_layer_mount_approval_ref_rejected_for_new_layer_scope() {
         ],
     );
 
-    let arguments_with_ref = serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
+    let arguments_with_ref =
+        serde_json::json!({ "command": "echo 'go'", "approval_ref": request_id });
     let r2 = registry.execute(
-        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
-        &arguments_with_ref.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+        "sandbox_exec",
+        &manifest,
+        &policy,
+        &agent_dir,
+        Some(&gw_dir),
+        &arguments_with_ref.to_string(),
+        Some("sess_mount"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
     );
 
     let err = r2.expect_err("approval_ref should not cover newly added layers or hosts");
     assert!(
-        err.to_string().contains("does not cover the currently requested layer scope"),
+        err.to_string()
+            .contains("does not cover the currently requested layer scope"),
         "error should mention uncovered layer scope: {err}"
     );
 }
@@ -489,8 +585,17 @@ fn test_corrupt_layer_manifest_blocks_execution() {
 
     let arguments = serde_json::json!({ "command": "echo 'go'" });
     let result = registry.execute(
-        "sandbox_exec", &manifest, &policy, &agent_dir, Some(&gw_dir),
-        &arguments.to_string(), Some("sess_mount"), None, Some(&config), Some(store.clone()), None,
+        "sandbox_exec",
+        &manifest,
+        &policy,
+        &agent_dir,
+        Some(&gw_dir),
+        &arguments.to_string(),
+        Some("sess_mount"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
     );
 
     let err = result.expect_err("corrupt manifest should fail closed");

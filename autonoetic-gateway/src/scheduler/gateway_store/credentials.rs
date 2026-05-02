@@ -57,7 +57,8 @@ impl GatewayStore {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            &format!("INSERT INTO credentials ({CREDENTIAL_COLUMNS}, created_at, updated_at)
+            &format!(
+                "INSERT INTO credentials ({CREDENTIAL_COLUMNS}, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(credential_id) DO UPDATE SET
                 service = excluded.service,
@@ -73,7 +74,8 @@ impl GatewayStore {
                 refresh_extract_access_token = excluded.refresh_extract_access_token,
                 refresh_extract_refresh_token = excluded.refresh_extract_refresh_token,
                 refresh_extract_expires_in = excluded.refresh_extract_expires_in,
-                updated_at = excluded.updated_at"),
+                updated_at = excluded.updated_at"
+            ),
             params![
                 cred.credential_id,
                 cred.service,
@@ -119,21 +121,19 @@ impl GatewayStore {
         service: &str,
     ) -> Result<Vec<autonoetic_types::agent::CredentialRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            &format!("SELECT {CREDENTIAL_COLUMNS} FROM credentials WHERE service = ?1"),
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CREDENTIAL_COLUMNS} FROM credentials WHERE service = ?1"
+        ))?;
         let rows = stmt.query_map(params![service], row_to_credential)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub fn list_all_credentials(
-        &self,
-    ) -> Result<Vec<autonoetic_types::agent::CredentialRecord>> {
+    pub fn list_all_credentials(&self) -> Result<Vec<autonoetic_types::agent::CredentialRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            &format!("SELECT {CREDENTIAL_COLUMNS} FROM credentials ORDER BY service, credential_id"),
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CREDENTIAL_COLUMNS} FROM credentials ORDER BY service, credential_id"
+        ))?;
         let rows = stmt.query_map([], row_to_credential)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!(e))

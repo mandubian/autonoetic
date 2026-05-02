@@ -98,15 +98,24 @@ fn empty_args_returns_full_constitution() {
     let text = resp["text"].as_str().expect("text is a string");
 
     // Full document covers from the title through the closing sections.
-    assert!(text.starts_with("# Gateway Constitution"), "starts with title");
+    assert!(
+        text.starts_with("# Gateway Constitution"),
+        "starts with title"
+    );
     assert!(text.contains("## 0. Rights"), "contains rights section");
-    assert!(text.contains("## 14."), "contains dumbness invariant section");
+    assert!(
+        text.contains("## 14."),
+        "contains dumbness invariant section"
+    );
     assert!(text.contains("Ri-0.10"), "contains Ri-0.10 row");
 
     assert!(resp["digest"].is_string(), "digest present");
     assert!(resp["version"].is_string(), "version present");
     assert!(resp["retrieved_at"].is_string(), "retrieved_at present");
-    assert!(resp["section"].is_null(), "section is null when no selector");
+    assert!(
+        resp["section"].is_null(),
+        "section is null when no selector"
+    );
 }
 
 #[test]

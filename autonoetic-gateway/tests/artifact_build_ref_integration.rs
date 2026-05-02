@@ -221,8 +221,11 @@ fn test_artifact_build_reuse_does_not_mint_second_ref() -> anyhow::Result<()> {
     )?;
     let v2: serde_json::Value = serde_json::from_str(&out2)?;
     assert_eq!(v2.get("reused"), Some(&serde_json::json!(true)));
-    assert!(v2.get("artifact_ref").is_none());
-    assert_eq!(v1["artifact_canonical_digest"], v2["artifact_canonical_digest"]);
+    assert_eq!(v1["artifact_ref"], v2["artifact_ref"]);
+    assert_eq!(
+        v1["artifact_canonical_digest"],
+        v2["artifact_canonical_digest"]
+    );
     Ok(())
 }
 

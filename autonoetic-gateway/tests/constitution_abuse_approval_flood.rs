@@ -74,7 +74,11 @@ fn flood_cap_rejects_at_limit_and_keeps_existing() -> anyhow::Result<()> {
 
     // The original cap approvals should still be pending.
     let pending = store.count_pending_for_root(root)?;
-    assert_eq!(pending, cap, "all {} original approvals should remain pending", cap);
+    assert_eq!(
+        pending, cap,
+        "all {} original approvals should remain pending",
+        cap
+    );
 
     // A different root session should not be affected.
     let other_root = "other-root-session";

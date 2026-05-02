@@ -215,13 +215,17 @@ fn test_layer_approval_scope_persisted_in_manifest() {
         .unwrap();
 
     // Approval scope is returned in the CapturedLayer
-    let returned_scope = captured.approval_scope.expect("approval_scope should be set");
+    let returned_scope = captured
+        .approval_scope
+        .expect("approval_scope should be set");
     assert_eq!(returned_scope.approved_hosts, scope.approved_hosts);
     assert_eq!(returned_scope.built_by_agent_id, scope.built_by_agent_id);
 
     // And persisted in the manifest on disk
     let manifest = store.inspect(&captured.layer_id).unwrap();
-    let manifest_scope = manifest.approval_scope.expect("manifest should have approval_scope");
+    let manifest_scope = manifest
+        .approval_scope
+        .expect("manifest should have approval_scope");
     assert_eq!(manifest_scope.approved_hosts, scope.approved_hosts);
     assert_eq!(manifest_scope.built_by_agent_id, scope.built_by_agent_id);
 }
@@ -245,8 +249,14 @@ fn test_layer_no_scope_when_built_without_network() {
         .create_from_dir(&source_dir, "local-deps", "/opt/local", None)
         .unwrap();
 
-    assert!(captured.approval_scope.is_none(), "network-free layer should have no approval scope");
+    assert!(
+        captured.approval_scope.is_none(),
+        "network-free layer should have no approval scope"
+    );
 
     let manifest = store.inspect(&captured.layer_id).unwrap();
-    assert!(manifest.approval_scope.is_none(), "manifest should not have approval_scope");
+    assert!(
+        manifest.approval_scope.is_none(),
+        "manifest should not have approval_scope"
+    );
 }

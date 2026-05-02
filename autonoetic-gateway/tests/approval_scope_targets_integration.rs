@@ -106,7 +106,11 @@ fn test_host_suffix_matches_subdomain() {
 
     assert!(store.grants_cover_targets("root-1", "root-1", &["api.github.com".to_string()]));
     assert!(store.grants_cover_targets("root-1", "root-1", &["v2.api.github.com".to_string()]));
-    assert!(!store.grants_cover_targets("root-1", "root-1", &["github.com.evil.example".to_string()]));
+    assert!(!store.grants_cover_targets(
+        "root-1",
+        "root-1",
+        &["github.com.evil.example".to_string()]
+    ));
 }
 
 #[test]
@@ -142,7 +146,9 @@ fn test_url_prefix_target() {
     let gw = make_gateway_dir(&tmp);
     let store = GatewayStore::open(&gw).unwrap();
 
-    let targets = vec![GrantTarget::UrlPrefix("https://api.example.com/public/".to_string())];
+    let targets = vec![GrantTarget::UrlPrefix(
+        "https://api.example.com/public/".to_string(),
+    )];
     seed_grant(
         &store,
         "root-1",
@@ -153,8 +159,16 @@ fn test_url_prefix_target() {
         None,
     );
 
-    assert!(store.grants_cover_targets("root-1", "root-1", &["https://api.example.com/public/x".to_string()]));
-    assert!(!store.grants_cover_targets("root-1", "root-1", &["https://api.example.com/admin".to_string()]));
+    assert!(store.grants_cover_targets(
+        "root-1",
+        "root-1",
+        &["https://api.example.com/public/x".to_string()]
+    ));
+    assert!(!store.grants_cover_targets(
+        "root-1",
+        "root-1",
+        &["https://api.example.com/admin".to_string()]
+    ));
 }
 
 #[test]
@@ -247,8 +261,24 @@ fn test_emergency_stop_cleans_up_all_scopes() {
     let store = GatewayStore::open(&gw).unwrap();
 
     let targets = vec![GrantTarget::ExactHost("api.example.com".to_string())];
-    seed_grant(&store, "root-1", "child-A", "agent-1", &GrantScope::Session, &targets, None);
-    seed_grant(&store, "root-1", "root-1", "agent-1", &GrantScope::RootSession, &targets, None);
+    seed_grant(
+        &store,
+        "root-1",
+        "child-A",
+        "agent-1",
+        &GrantScope::Session,
+        &targets,
+        None,
+    );
+    seed_grant(
+        &store,
+        "root-1",
+        "root-1",
+        "agent-1",
+        &GrantScope::RootSession,
+        &targets,
+        None,
+    );
 
     store.delete_session_grants("root-1").unwrap();
 
@@ -264,10 +294,26 @@ fn test_two_children_one_root_session_vs_root_scope() {
     let store = GatewayStore::open(&gw).unwrap();
 
     let targets_a = vec![GrantTarget::ExactHost("host-a.example.com".to_string())];
-    seed_grant(&store, "root-1", "child-A", "agent-1", &GrantScope::Session, &targets_a, None);
+    seed_grant(
+        &store,
+        "root-1",
+        "child-A",
+        "agent-1",
+        &GrantScope::Session,
+        &targets_a,
+        None,
+    );
 
     let targets_b = vec![GrantTarget::ExactHost("host-b.example.com".to_string())];
-    seed_grant(&store, "root-1", "child-B", "agent-1", &GrantScope::Session, &targets_b, None);
+    seed_grant(
+        &store,
+        "root-1",
+        "child-B",
+        "agent-1",
+        &GrantScope::Session,
+        &targets_b,
+        None,
+    );
 
     assert!(store.grants_cover_targets("child-A", "root-1", &["host-a.example.com".to_string()]));
     assert!(!store.grants_cover_targets("child-A", "root-1", &["host-b.example.com".to_string()]));
@@ -286,16 +332,29 @@ fn test_multi_target_grant() {
         GrantTarget::ExactHost("api.example.com".to_string()),
         GrantTarget::ExactHost("cdn.example.com".to_string()),
     ];
-    seed_grant(&store, "root-1", "root-1", "agent-1", &GrantScope::RootSession, &targets, None);
+    seed_grant(
+        &store,
+        "root-1",
+        "root-1",
+        "agent-1",
+        &GrantScope::RootSession,
+        &targets,
+        None,
+    );
 
-    assert!(store.grants_cover_targets("root-1", "root-1", &[
-        "api.example.com".to_string(),
-        "cdn.example.com".to_string(),
-    ]));
-    assert!(!store.grants_cover_targets("root-1", "root-1", &[
-        "api.example.com".to_string(),
-        "other.example.com".to_string(),
-    ]));
+    assert!(store.grants_cover_targets(
+        "root-1",
+        "root-1",
+        &["api.example.com".to_string(), "cdn.example.com".to_string(),]
+    ));
+    assert!(!store.grants_cover_targets(
+        "root-1",
+        "root-1",
+        &[
+            "api.example.com".to_string(),
+            "other.example.com".to_string(),
+        ]
+    ));
 }
 
 #[test]

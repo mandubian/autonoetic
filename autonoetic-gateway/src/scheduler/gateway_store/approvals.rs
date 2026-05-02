@@ -11,7 +11,9 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
 
         if let Some(ref root_session_id) = request.root_session_id {
-            let cap = self.approval_flood_cap.load(std::sync::atomic::Ordering::Relaxed);
+            let cap = self
+                .approval_flood_cap
+                .load(std::sync::atomic::Ordering::Relaxed);
             if cap > 0 {
                 let pending_count: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM approvals WHERE root_session_id = ?1 AND status = 'pending'",
@@ -58,7 +60,8 @@ impl GatewayStore {
     }
 
     pub fn set_approval_flood_cap(&self, cap: usize) {
-        self.approval_flood_cap.store(cap, std::sync::atomic::Ordering::Relaxed);
+        self.approval_flood_cap
+            .store(cap, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn count_pending_for_root(&self, root_session_id: &str) -> Result<usize> {
@@ -298,10 +301,13 @@ impl GatewayStore {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
 
-        let primary_host = targets.iter().find_map(|t| match t {
-            GrantTarget::ExactHost(h) => Some(h.clone()),
-            _ => None,
-        }).unwrap_or_else(|| "_multi_target_".to_string());
+        let primary_host = targets
+            .iter()
+            .find_map(|t| match t {
+                GrantTarget::ExactHost(h) => Some(h.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "_multi_target_".to_string());
 
         conn.execute(
             "INSERT INTO session_approval_grants
@@ -424,12 +430,32 @@ impl GatewayStore {
             let granted_at: String = row.get(6)?;
             let source_approval_id: Option<String> = row.get(7)?;
             let expires_at: Option<String> = row.get(8)?;
-            Ok((id, root_session_id, session_id, agent_id, scope_str, granted_by, granted_at, source_approval_id, expires_at))
+            Ok((
+                id,
+                root_session_id,
+                session_id,
+                agent_id,
+                scope_str,
+                granted_by,
+                granted_at,
+                source_approval_id,
+                expires_at,
+            ))
         })?;
 
         let mut results = Vec::new();
         for row_result in rows {
-            let (id, root_sid, sess_id, agent_id, scope_str, granted_by, granted_at, source_approval_id, expires_at) = row_result?;
+            let (
+                id,
+                root_sid,
+                sess_id,
+                agent_id,
+                scope_str,
+                granted_by,
+                granted_at,
+                source_approval_id,
+                expires_at,
+            ) = row_result?;
             let targets = self.get_grant_targets_with_conn(conn, id)?;
             results.push(SessionApprovalGrant {
                 id,
@@ -447,7 +473,11 @@ impl GatewayStore {
         Ok(results)
     }
 
-    fn get_grant_targets_with_conn(&self, conn: &Connection, grant_id: i64) -> Result<Vec<GrantTarget>> {
+    fn get_grant_targets_with_conn(
+        &self,
+        conn: &Connection,
+        grant_id: i64,
+    ) -> Result<Vec<GrantTarget>> {
         let mut stmt = conn.prepare(
             "SELECT kind, value FROM session_approval_grant_targets WHERE grant_id = ?1",
         )?;
@@ -485,7 +515,10 @@ impl GatewayStore {
             "host_and_port" => {
                 if let Some((h, p)) = value.rsplit_once(':') {
                     if let Ok(port) = p.parse::<u16>() {
-                        return Some(GrantTarget::HostAndPort { host: h.to_string(), port });
+                        return Some(GrantTarget::HostAndPort {
+                            host: h.to_string(),
+                            port,
+                        });
                     }
                 }
                 None
@@ -547,18 +580,17 @@ impl GatewayStore {
         }
 
         required_targets.iter().all(|req| {
-            active.iter().any(|grant| {
-                grant.targets.iter().any(|t| t.matches(req))
-            })
+            active
+                .iter()
+                .any(|grant| grant.targets.iter().any(|t| t.matches(req)))
         })
     }
 
     pub fn delete_session_grants(&self, root_session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let grant_ids: Vec<i64> = {
-            let mut stmt = conn.prepare(
-                "SELECT id FROM session_approval_grants WHERE root_session_id = ?1",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT id FROM session_approval_grants WHERE root_session_id = ?1")?;
             let rows = stmt.query_map(params![root_session_id], |row| row.get(0))?;
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -585,7 +617,8 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         let count = match host {
             Some(h) => {
-                let active_grants = self.get_session_grants_structured_with_conn(&*conn, root_session_id)?;
+                let active_grants =
+                    self.get_session_grants_structured_with_conn(&*conn, root_session_id)?;
                 let mut matching_ids = Vec::new();
                 for g in &active_grants {
                     if g.targets.iter().any(|t| t.matches(h)) {
@@ -595,19 +628,22 @@ impl GatewayStore {
                 if matching_ids.is_empty() {
                     return Ok(0);
                 }
-                let placeholders: Vec<String> = matching_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 3)).collect();
+                let placeholders: Vec<String> = matching_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("?{}", i + 3))
+                    .collect();
                 let sql = format!(
                     "UPDATE session_approval_grants SET revoked_at = ?1, revoked_reason = ?2 WHERE id IN ({}) AND revoked_at IS NULL",
                     placeholders.join(", ")
                 );
-                let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-                    Box::new(now.clone()),
-                    Box::new(reason.to_string()),
-                ];
+                let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    vec![Box::new(now.clone()), Box::new(reason.to_string())];
                 for id in &matching_ids {
                     params_vec.push(Box::new(*id));
                 }
-                let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    params_vec.iter().map(|p| p.as_ref()).collect();
                 conn.execute(&sql, params_refs.as_slice())?
             }
             None => conn.execute(
@@ -686,7 +722,8 @@ impl GatewayStore {
             format!("WHERE {}", where_clauses.join(" AND "))
         };
 
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
 
         let total: i64 = conn.query_row(
             &format!("SELECT COUNT(*) FROM approvals {}", where_sql),

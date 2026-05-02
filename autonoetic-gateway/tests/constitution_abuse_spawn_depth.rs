@@ -13,7 +13,12 @@ use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::config::GatewayConfig;
 use std::sync::Arc;
 
-fn install_spawn_agent(agents_dir: &std::path::Path, name: &str, max_children: u32, max_spawn_depth: u32) -> anyhow::Result<()> {
+fn install_spawn_agent(
+    agents_dir: &std::path::Path,
+    name: &str,
+    max_children: u32,
+    max_spawn_depth: u32,
+) -> anyhow::Result<()> {
     let agent_dir = agents_dir.join(name);
     std::fs::create_dir_all(&agent_dir)?;
     std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []")?;
@@ -111,14 +116,12 @@ async fn spawn_refused_at_system_ceiling() -> anyhow::Result<()> {
     install_spawn_agent(&workspace.agents_dir, "spawner", 10, 0)?;
     install_target_agent(&workspace.agents_dir, "leaf")?;
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
     seed_revision(&store, &config, "spawner", &workspace.agents_dir)?;
     seed_revision(&store, &config, "leaf", &workspace.agents_dir)?;
 
-    let exec = Arc::new(GatewayExecutionService::new(
-        config.clone(),
-        Some(store),
-    ));
+    let exec = Arc::new(GatewayExecutionService::new(config.clone(), Some(store)));
 
     // Session "root" → depth 0: should be allowed (depth 0 < ceiling 2)
     let result: Result<autonoetic_gateway::SpawnResult, anyhow::Error> = exec
@@ -218,14 +221,12 @@ async fn spawn_refused_at_agent_ceiling_when_tighter() -> anyhow::Result<()> {
     install_spawn_agent(&workspace.agents_dir, "shallow-spawner", 10, 1)?;
     install_target_agent(&workspace.agents_dir, "leaf")?;
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
     seed_revision(&store, &config, "shallow-spawner", &workspace.agents_dir)?;
     seed_revision(&store, &config, "leaf", &workspace.agents_dir)?;
 
-    let exec = Arc::new(GatewayExecutionService::new(
-        config.clone(),
-        Some(store),
-    ));
+    let exec = Arc::new(GatewayExecutionService::new(config.clone(), Some(store)));
 
     // Session "root" → depth 0: should be allowed (depth 0 < effective ceiling 1)
     let result: Result<autonoetic_gateway::SpawnResult, anyhow::Error> = exec
@@ -269,7 +270,10 @@ async fn spawn_refused_at_agent_ceiling_when_tighter() -> anyhow::Result<()> {
             None,
         )
         .await;
-    assert!(result.is_err(), "spawn at depth 1 should be rejected with agent ceiling 1");
+    assert!(
+        result.is_err(),
+        "spawn at depth 1 should be rejected with agent ceiling 1"
+    );
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("max_spawn_depth exceeded"),
@@ -292,14 +296,12 @@ async fn spawn_refused_at_depth_zero_no_capability() -> anyhow::Result<()> {
     install_target_agent(&workspace.agents_dir, "no-spawn")?;
     install_target_agent(&workspace.agents_dir, "leaf")?;
 
-    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
     seed_revision(&store, &config, "no-spawn", &workspace.agents_dir)?;
     seed_revision(&store, &config, "leaf", &workspace.agents_dir)?;
 
-    let exec = Arc::new(GatewayExecutionService::new(
-        config.clone(),
-        Some(store),
-    ));
+    let exec = Arc::new(GatewayExecutionService::new(config.clone(), Some(store)));
 
     let result: Result<autonoetic_gateway::SpawnResult, anyhow::Error> = exec
         .spawn_agent_once(
@@ -315,7 +317,10 @@ async fn spawn_refused_at_depth_zero_no_capability() -> anyhow::Result<()> {
             None,
         )
         .await;
-    assert!(result.is_err(), "agent without AgentSpawn should be rejected");
+    assert!(
+        result.is_err(),
+        "agent without AgentSpawn should be rejected"
+    );
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("lacks 'AgentSpawn' capability"),

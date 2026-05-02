@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use autonoetic_types::memory::MemoryObject;
 use std::sync::Arc;
 
-use crate::scheduler::gateway_store::GatewayStore;
 use crate::runtime::memory::MemoryStore;
+use crate::scheduler::gateway_store::GatewayStore;
 
 /// SQLite-backed memory store that delegates to the existing `GatewayStore` methods.
 ///
@@ -49,15 +49,14 @@ impl MemoryStore for SqliteMemoryStore {
         content_substr: Option<&str>,
         limit: i64,
     ) -> Result<Vec<String>> {
-        self.store
-            .memory_list_ids_matching_tags(
-                scope,
-                agent_id,
-                reader_session_id,
-                tags,
-                content_substr,
-                limit,
-            )
+        self.store.memory_list_ids_matching_tags(
+            scope,
+            agent_id,
+            reader_session_id,
+            tags,
+            content_substr,
+            limit,
+        )
     }
 
     async fn list_ids_owned_by(&self, owner_agent_id: &str) -> Result<Vec<String>> {

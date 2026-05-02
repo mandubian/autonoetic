@@ -12,7 +12,9 @@ mod support;
 use autonoetic_gateway::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,
 };
-use autonoetic_gateway::runtime::remote_access::{classify_network_coverage, NetworkCoverage, RemoteAccessAnalyzer};
+use autonoetic_gateway::runtime::remote_access::{
+    classify_network_coverage, NetworkCoverage, RemoteAccessAnalyzer,
+};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
@@ -238,16 +240,18 @@ fn test_lifecycle_cache_reuse_simulated() {
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache create");
     let now = chrono::Utc::now().to_rfc3339();
     cache
-        .record(autonoetic_gateway::runtime::approved_exec_cache::ApprovedExecEntry {
-            fingerprint: fingerprint_first.clone(),
-            agent_id: manifest.agent.id.clone(),
-            remote_targets: targets.clone(),
-            code_content: WEATHER_ARTIFACT_CODE.to_string(),
-            approval_request_id: "apr-lifecycle-test".to_string(),
-            approved_at: now.clone(),
-            approved_by: "operator".to_string(),
-            last_used_at: now.clone(),
-        })
+        .record(
+            autonoetic_gateway::runtime::approved_exec_cache::ApprovedExecEntry {
+                fingerprint: fingerprint_first.clone(),
+                agent_id: manifest.agent.id.clone(),
+                remote_targets: targets.clone(),
+                code_content: WEATHER_ARTIFACT_CODE.to_string(),
+                approval_request_id: "apr-lifecycle-test".to_string(),
+                approved_at: now.clone(),
+                approved_by: "operator".to_string(),
+                last_used_at: now.clone(),
+            },
+        )
         .expect("record");
 
     // Step 2: Second run — different shell wrapper, same artifact

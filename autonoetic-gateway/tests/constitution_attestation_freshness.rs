@@ -12,10 +12,10 @@
 mod support;
 
 use autonoetic_gateway::runtime::crypto::GatewayIdentityKey;
+use autonoetic_gateway::runtime::session_budget::SessionBudgetRegistry;
 use autonoetic_gateway::runtime::state_attestation::{
     compose_and_sign, verify, AttestationInputs, BudgetMeter,
 };
-use autonoetic_gateway::runtime::session_budget::SessionBudgetRegistry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::SessionBudgetConfig;
@@ -132,9 +132,7 @@ fn budget_meters_reflect_consumption() {
 
     for _ in 0..3 {
         registry.check_pre_llm(scope).unwrap();
-        registry
-            .record_llm_completion(scope, 50, 40, None)
-            .unwrap();
+        registry.record_llm_completion(scope, 50, 40, None).unwrap();
     }
     let (rounds, tokens, _cost) = registry.snapshot_counters(scope).expect("snapshot");
 
@@ -228,8 +226,12 @@ fn capability_changes_appear_immediately() {
     )
     .expect("compose read-write");
     let payload_rw = verify(&key.public_key_bytes(), &att_rw).expect("verify");
-    assert!(payload_rw.active_capabilities.contains(&"ReadAccess".to_string()));
-    assert!(payload_rw.active_capabilities.contains(&"WriteAccess".to_string()));
+    assert!(payload_rw
+        .active_capabilities
+        .contains(&"ReadAccess".to_string()));
+    assert!(payload_rw
+        .active_capabilities
+        .contains(&"WriteAccess".to_string()));
 }
 
 #[test]

@@ -2,8 +2,8 @@
 
 use autonoetic_gateway::execution::extract_artifacts_from_content_store;
 use autonoetic_gateway::runtime::content_store::ContentStore;
-use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
 use autonoetic_gateway::runtime::memory::Tier2Memory;
+use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
 use tempfile::tempdir;
 
 /// Helper to create a test gateway directory
@@ -197,8 +197,7 @@ fn test_content_store_deduplication() {
 async fn test_knowledge_store_and_recall() {
     let (_dir, gateway_dir) = create_test_gateway();
 
-    let mem =
-        Tier2Memory::open_sqlite(&gateway_dir, "test-agent").unwrap();
+    let mem = Tier2Memory::open_sqlite(&gateway_dir, "test-agent").unwrap();
 
     let memory = mem
         .remember(
@@ -224,8 +223,7 @@ async fn test_knowledge_store_and_recall() {
 async fn test_knowledge_search_by_scope() {
     let (_dir, gateway_dir) = create_test_gateway();
 
-    let mem =
-        Tier2Memory::open_sqlite(&gateway_dir, "test-agent").unwrap();
+    let mem = Tier2Memory::open_sqlite(&gateway_dir, "test-agent").unwrap();
 
     // Store multiple facts in same scope
     mem.remember("fact_a", "cities", "test-agent", "s1", "Paris is in France")
@@ -388,9 +386,7 @@ async fn test_collect_shared_knowledge_finds_shared_records() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     // Writer agent stores and shares a fact
-    let writer_mem =
-        Tier2Memory::open_sqlite(&gateway_dir, "writer-agent")
-            .unwrap();
+    let writer_mem = Tier2Memory::open_sqlite(&gateway_dir, "writer-agent").unwrap();
 
     let mut mem = MemoryObject::new(
         "shared_fact".into(),
@@ -423,9 +419,7 @@ async fn test_collect_shared_knowledge_excludes_private() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     // Writer agent stores a private fact
-    let writer_mem =
-        Tier2Memory::open_sqlite(&gateway_dir, "writer-agent")
-            .unwrap();
+    let writer_mem = Tier2Memory::open_sqlite(&gateway_dir, "writer-agent").unwrap();
 
     writer_mem
         .remember(
@@ -454,9 +448,7 @@ async fn test_collect_shared_knowledge_includes_global() {
     let (_dir, gateway_dir) = create_test_gateway();
 
     // Writer agent stores a global fact
-    let writer_mem =
-        Tier2Memory::open_sqlite(&gateway_dir, "writer-agent")
-            .unwrap();
+    let writer_mem = Tier2Memory::open_sqlite(&gateway_dir, "writer-agent").unwrap();
 
     let memory = writer_mem
         .remember(

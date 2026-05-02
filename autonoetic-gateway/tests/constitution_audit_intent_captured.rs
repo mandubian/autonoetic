@@ -51,7 +51,8 @@ fn test_manifest() -> AgentManifest {
 }
 
 #[tokio::test]
-async fn privileged_tool_without_intent_rejects_and_with_intent_is_captured() -> anyhow::Result<()> {
+async fn privileged_tool_without_intent_rejects_and_with_intent_is_captured() -> anyhow::Result<()>
+{
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
     let agent_dir = agents_dir.join("test-agent");
@@ -78,7 +79,10 @@ async fn privileged_tool_without_intent_rejects_and_with_intent_is_captured() ->
         Some(store.clone()),
         None,
     )
-    .with_session_context(Some("test-session".to_string()), Some("turn-000001".to_string()));
+    .with_session_context(
+        Some("test-session".to_string()),
+        Some("turn-000001".to_string()),
+    );
 
     let missing_intent = vec![ToolCall {
         id: "tc-no-intent".to_string(),
@@ -99,7 +103,8 @@ async fn privileged_tool_without_intent_rejects_and_with_intent_is_captured() ->
         .unwrap_or_default()
         .contains("intent_required"));
 
-    let intent_text = "Need to run a harmless shell probe to inspect the workspace state before editing.";
+    let intent_text =
+        "Need to run a harmless shell probe to inspect the workspace state before editing.";
     let with_intent = vec![ToolCall {
         id: "tc-with-intent".to_string(),
         name: "sandbox_exec".to_string(),

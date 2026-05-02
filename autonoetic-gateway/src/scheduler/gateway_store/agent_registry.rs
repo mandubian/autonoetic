@@ -377,14 +377,10 @@ impl GatewayStore {
         Ok(results.pop())
     }
 
-    pub fn list_sessions_for_agent(
-        &self,
-        agent_id: &str,
-    ) -> Result<Vec<String>> {
+    pub fn list_sessions_for_agent(&self, agent_id: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT session_id FROM session_agent_bindings WHERE agent_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT session_id FROM session_agent_bindings WHERE agent_id = ?1")?;
         let rows = stmt.query_map(params![agent_id], |row| row.get(0))?;
         let mut results = Vec::new();
         for r in rows {
@@ -576,10 +572,7 @@ impl GatewayStore {
                     params![curr],
                 )?;
 
-                let quarantine_reason = format!(
-                    "revision_rollback:{}",
-                    curr
-                );
+                let quarantine_reason = format!("revision_rollback:{}", curr);
                 tx.execute(
                     "UPDATE memories SET quarantine_reason = ?1 WHERE revision_id = ?2 AND quarantine_reason IS NULL",
                     params![&quarantine_reason, curr],

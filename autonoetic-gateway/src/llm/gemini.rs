@@ -273,15 +273,9 @@ mod tests {
 
         let sanitized = sanitize_schema_for_gemini(&schema);
         assert!(sanitized.get("additionalProperties").is_none());
-        assert!(
-            sanitized["properties"]["a"]
-                .get("additionalProperties")
-                .is_none()
-        );
-        assert!(
-            sanitized["anyOf"][0]
-                .get("additionalProperties")
-                .is_none()
-        );
+        assert!(sanitized["properties"]["a"]
+            .get("additionalProperties")
+            .is_none());
+        assert!(sanitized["anyOf"][0].get("additionalProperties").is_none());
     }
 }

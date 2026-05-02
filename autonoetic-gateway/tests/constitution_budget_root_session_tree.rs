@@ -29,7 +29,9 @@ fn tree_budget_denies_4th_child_when_aggregate_exceeds() {
         let scope = format!("{}/child-{}", root, child);
         for _ in 0..10 {
             session_reg.check_pre_llm(&scope).unwrap();
-            session_reg.record_llm_completion(&scope, 0, 0, None).unwrap();
+            session_reg
+                .record_llm_completion(&scope, 0, 0, None)
+                .unwrap();
             tree_reg.check_pre_llm(root).unwrap();
             tree_reg.reserve_llm_round(root).unwrap();
             tree_reg.record_llm_completion(root, 0, 0, None).unwrap();
@@ -41,9 +43,15 @@ fn tree_budget_denies_4th_child_when_aggregate_exceeds() {
     let child_4 = format!("{}/child-4", root);
     session_reg.check_pre_llm(&child_4).unwrap();
     let result = tree_reg.reserve_llm_round(root);
-    assert!(result.is_err(), "4th child should be denied — tree budget exceeded");
+    assert!(
+        result.is_err(),
+        "4th child should be denied — tree budget exceeded"
+    );
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("max_llm_rounds"), "error should mention max_llm_rounds: {msg}");
+    assert!(
+        msg.contains("max_llm_rounds"),
+        "error should mention max_llm_rounds: {msg}"
+    );
     assert!(msg.contains("root:"), "error should mention root: {msg}");
 }
 
@@ -68,9 +76,7 @@ fn per_session_allows_but_tree_denies() {
     session_reg
         .record_llm_completion(&child_1, 100, 90, None)
         .unwrap();
-    tree_reg
-        .record_llm_completion(root, 100, 90, None)
-        .unwrap();
+    tree_reg.record_llm_completion(root, 100, 90, None).unwrap();
 
     let child_2 = format!("{}/child-2", root);
     session_reg.check_pre_llm(&child_2).unwrap();
@@ -78,9 +84,7 @@ fn per_session_allows_but_tree_denies() {
     session_reg
         .record_llm_completion(&child_2, 5, 5, None)
         .unwrap();
-    tree_reg
-        .record_llm_completion(root, 5, 5, None)
-        .unwrap();
+    tree_reg.record_llm_completion(root, 5, 5, None).unwrap();
 
     let tree_result = tree_reg.record_llm_completion(root, 5, 5, None);
     assert!(
@@ -100,9 +104,7 @@ fn tree_tool_invocations_aggregate_across_children() {
     let root = "root-tools";
 
     for _child in 0..3 {
-        tree_reg
-            .reserve_tool_invocations(root, 3)
-            .unwrap();
+        tree_reg.reserve_tool_invocations(root, 3).unwrap();
     }
 
     assert!(tree_reg.reserve_tool_invocations(root, 2).is_err());

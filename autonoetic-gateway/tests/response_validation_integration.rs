@@ -390,8 +390,8 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
 
 #[serial_test::serial]
 #[tokio::test]
-async fn test_manifest_io_returns_passes_without_explicit_response_contract(
-) -> anyhow::Result<()> {
+async fn test_manifest_io_returns_passes_without_explicit_response_contract() -> anyhow::Result<()>
+{
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
 
@@ -424,11 +424,15 @@ async fn test_manifest_io_returns_passes_without_explicit_response_contract(
         )
         .await?;
 
-    assert_eq!(result.assistant_reply.as_deref(), Some("{\"status\":\"ok\"}"));
+    assert_eq!(
+        result.assistant_reply.as_deref(),
+        Some("{\"status\":\"ok\"}")
+    );
 
     let gateway_dir = workspace.agents_dir.join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
-    let events = store.search_causal_events(Some("sess-returns-pass-1"), Some("returns.pass.agent"), 100)?;
+    let events =
+        store.search_causal_events(Some("sess-returns-pass-1"), Some("returns.pass.agent"), 100)?;
     let event = events
         .iter()
         .find(|event| event.category == "contract" && event.action == "io.returns")
@@ -494,7 +498,8 @@ async fn test_manifest_io_returns_rejects_and_logs_without_explicit_response_con
         msg
     );
 
-    let events = store.search_causal_events(Some("sess-returns-fail-1"), Some("returns.fail.agent"), 100)?;
+    let events =
+        store.search_causal_events(Some("sess-returns-fail-1"), Some("returns.fail.agent"), 100)?;
     let event = events
         .iter()
         .find(|event| event.category == "contract" && event.action == "io.returns")

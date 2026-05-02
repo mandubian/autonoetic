@@ -118,7 +118,10 @@ pub fn resolve_interaction_id(
         })?;
     let pending = store.get_pending_interactions_for_root_session(root)?;
     match pending.len() {
-        0 => anyhow::bail!("No pending user interactions for root_session_id '{}'", root),
+        0 => anyhow::bail!(
+            "No pending user interactions for root_session_id '{}'",
+            root
+        ),
         1 => Ok(Ok(pending[0].interaction_id.clone())),
         _ => Ok(Err(pending
             .iter()
@@ -242,10 +245,7 @@ pub async fn answer_and_orchestrate_resume(
     // Standalone session: drive checkpoint resume immediately.
     let default_follow = "[operator] User answered the pending question via interaction.answer.";
     execution
-        .resume_from_user_interaction(
-            &params.interaction_id,
-            follow.or(Some(default_follow)),
-        )
+        .resume_from_user_interaction(&params.interaction_id, follow.or(Some(default_follow)))
         .await?;
 
     Ok(InteractionAnswerOutcome {

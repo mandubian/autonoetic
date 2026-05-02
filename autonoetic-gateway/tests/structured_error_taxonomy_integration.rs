@@ -8,9 +8,7 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::guard::{LoopGuard, LoopGuardState};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{
-    AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration,
-};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::tool_error::ToolError;
@@ -65,19 +63,28 @@ fn test_tool_error_serializes_correct_shape() {
 
     assert_eq!(parsed["ok"], false);
     assert_eq!(parsed["error_type"], "permission");
-    assert!(parsed["message"].as_str().unwrap().contains("access denied"));
+    assert!(parsed["message"]
+        .as_str()
+        .unwrap()
+        .contains("access denied"));
     assert!(parsed["repair_hint"].is_string());
 }
 
 #[test]
 fn test_tool_error_not_found_includes_repair_hint() {
-    let err = ToolError::not_found("credential 'abc'", Some("Use credential.check.".to_string()));
+    let err = ToolError::not_found(
+        "credential 'abc'",
+        Some("Use credential.check.".to_string()),
+    );
     let json_str = err.to_error_response();
     let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
     assert_eq!(parsed["ok"], false);
     assert_eq!(parsed["error_type"], "not_found");
-    assert!(parsed["message"].as_str().unwrap().contains("credential 'abc'"));
+    assert!(parsed["message"]
+        .as_str()
+        .unwrap()
+        .contains("credential 'abc'"));
     assert_eq!(
         parsed["repair_hint"].as_str().unwrap(),
         "Use credential.check."
@@ -312,6 +319,20 @@ fn test_loop_guard_snapshot_restore_preserves_failure_counts() {
     let state: LoopGuardState = guard.snapshot();
     let restored = LoopGuard::restore(state);
 
-    assert_eq!(*restored.snapshot().tool_failure_counts.get("web_fetch").unwrap(), 1);
-    assert_eq!(*restored.snapshot().tool_failure_counts.get("sandbox_exec").unwrap(), 1);
+    assert_eq!(
+        *restored
+            .snapshot()
+            .tool_failure_counts
+            .get("web_fetch")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        *restored
+            .snapshot()
+            .tool_failure_counts
+            .get("sandbox_exec")
+            .unwrap(),
+        1
+    );
 }

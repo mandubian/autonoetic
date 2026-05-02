@@ -71,7 +71,9 @@ fn egress_rejects_wrong_type() {
     let violations = validate_spawn_response(&result, &contract, None);
     assert!(!violations.is_empty(), "should violate type");
     assert!(
-        violations.iter().any(|v| v.message.contains("expected type")),
+        violations
+            .iter()
+            .any(|v| v.message.contains("expected type")),
         "{:?}",
         violations
     );
@@ -92,7 +94,9 @@ fn egress_rejects_invalid_json_when_schema_constrained() {
     let violations = validate_spawn_response(&result, &contract, None);
     assert!(!violations.is_empty(), "should violate invalid JSON");
     assert!(
-        violations.iter().any(|v| v.message.contains("not valid JSON")),
+        violations
+            .iter()
+            .any(|v| v.message.contains("not valid JSON")),
         "{:?}",
         violations
     );
@@ -112,7 +116,11 @@ fn egress_passes_valid_response() {
     let result = minimal_result(r#"{"status": "ok", "data": {"x": 1}}"#);
 
     let violations = validate_spawn_response(&result, &contract, None);
-    assert!(violations.is_empty(), "valid response should pass: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "valid response should pass: {:?}",
+        violations
+    );
 }
 
 #[test]
@@ -171,9 +179,14 @@ fn egress_rejects_no_reply_when_schema_constrained() {
     result.assistant_reply = None;
 
     let violations = validate_spawn_response(&result, &contract, None);
-    assert!(!violations.is_empty(), "no reply should violate constrained schema");
     assert!(
-        violations.iter().any(|v| v.message.contains("no reply produced")),
+        !violations.is_empty(),
+        "no reply should violate constrained schema"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.message.contains("no reply produced")),
         "{:?}",
         violations
     );

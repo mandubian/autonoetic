@@ -275,14 +275,17 @@ impl Tier2Memory {
             "limit must be between 1 and 100 inclusive"
         );
 
-        let ids = self.store.list_ids_matching_tags(
-            scope,
-            &self.current_agent_id,
-            self.reader_session_id.as_deref(),
-            tags,
-            text,
-            limit as i64,
-        ).await?;
+        let ids = self
+            .store
+            .list_ids_matching_tags(
+                scope,
+                &self.current_agent_id,
+                self.reader_session_id.as_deref(),
+                tags,
+                text,
+                limit as i64,
+            )
+            .await?;
 
         let mut results = Vec::new();
         for memory_id in ids {
@@ -324,10 +327,7 @@ impl Tier2Memory {
 
     /// Lists all memories owned by the current agent.
     pub async fn list_memories(&self) -> anyhow::Result<Vec<MemoryObject>> {
-        let ids = self
-            .store
-            .list_ids_owned_by(&self.current_agent_id)
-            .await?;
+        let ids = self.store.list_ids_owned_by(&self.current_agent_id).await?;
 
         let mut memories = Vec::new();
         for memory_id in ids {
@@ -411,16 +411,15 @@ mod tests {
         let mem1 = Tier2Memory::open_sqlite(temp.path(), "agent-1").unwrap();
         let mem2 = Tier2Memory::open_sqlite(temp.path(), "agent-2").unwrap();
 
-        mem1
-            .remember(
-                "fact_1",
-                "general",
-                "agent-1",
-                "session:test:turn:1",
-                "Private fact",
-            )
-            .await
-            .unwrap();
+        mem1.remember(
+            "fact_1",
+            "general",
+            "agent-1",
+            "session:test:turn:1",
+            "Private fact",
+        )
+        .await
+        .unwrap();
 
         // agent-1 can read its own memory
         assert!(mem1.recall("fact_1").await.is_ok());
@@ -464,16 +463,15 @@ mod tests {
         let mem1 = Tier2Memory::open_sqlite(temp.path(), "agent-1").unwrap();
         let mem2 = Tier2Memory::open_sqlite(temp.path(), "agent-2").unwrap();
 
-        mem1
-            .remember(
-                "fact_1",
-                "general",
-                "agent-1",
-                "session:test:turn:1",
-                "Global fact",
-            )
-            .await
-            .unwrap();
+        mem1.remember(
+            "fact_1",
+            "general",
+            "agent-1",
+            "session:test:turn:1",
+            "Global fact",
+        )
+        .await
+        .unwrap();
 
         // Make global
         mem1.make_global("fact_1").await.unwrap();

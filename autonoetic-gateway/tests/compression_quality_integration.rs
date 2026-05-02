@@ -13,8 +13,7 @@
 use autonoetic_gateway::llm::{build_driver, CompletionRequest, Message};
 use autonoetic_gateway::runtime::compression::{compress_context, CompressionMetadata};
 use autonoetic_gateway::runtime::compression_quality::{
-    GoldenSession, GoldenToolCall, GoldenTurn, StructuralValidation,
-    validate_compressed_history,
+    validate_compressed_history, GoldenSession, GoldenToolCall, GoldenTurn, StructuralValidation,
 };
 use autonoetic_types::agent::CompressionConfig;
 use autonoetic_types::config::{ContextCompressionConfig, LlmPreset};
@@ -135,7 +134,8 @@ async fn test_compression_structural_validation_with_real_llm() {
         &session.id,
         session.turns.len() as u64,
         None,
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(compression_result) => {
@@ -146,16 +146,35 @@ async fn test_compression_structural_validation_with_real_llm() {
 
             let validation = validate_compressed_history(&history, &compression_result.history);
 
-            assert!(validation.valid, "Structural validation failed: {:?}", validation.issues);
-            assert!(validation.summary_present, "Summary message not found in compressed history");
-            assert!(validation.messages_reduced, "Messages not reduced after compression");
-            assert!(validation.no_orphaned_tool_results, "Orphaned tool results found");
-            assert!(validation.tool_call_groups_intact, "Tool-call groups split across boundary");
+            assert!(
+                validation.valid,
+                "Structural validation failed: {:?}",
+                validation.issues
+            );
+            assert!(
+                validation.summary_present,
+                "Summary message not found in compressed history"
+            );
+            assert!(
+                validation.messages_reduced,
+                "Messages not reduced after compression"
+            );
+            assert!(
+                validation.no_orphaned_tool_results,
+                "Orphaned tool results found"
+            );
+            assert!(
+                validation.tool_call_groups_intact,
+                "Tool-call groups split across boundary"
+            );
 
             eprintln!("Compression quality validation passed: {:?}", validation);
         }
         Err(e) => {
-            eprintln!("Compression failed (expected if no valid LLM config): {}", e);
+            eprintln!(
+                "Compression failed (expected if no valid LLM config): {}",
+                e
+            );
         }
     }
 }
@@ -192,20 +211,26 @@ async fn test_compression_summary_quality_with_real_llm() {
         &session.id,
         session.turns.len() as u64,
         None,
-    ).await;
+    )
+    .await;
 
     if let Ok(compression_result) = result {
         if !compression_result.compressed {
             return;
         }
 
-        let summary_msg = compression_result.history.iter()
+        let summary_msg = compression_result
+            .history
+            .iter()
             .find(|m| m.content.starts_with("[COMPRESSED CONTEXT"));
 
         assert!(summary_msg.is_some(), "Summary message not found");
         let summary = summary_msg.unwrap();
         assert!(!summary.content.is_empty(), "Summary is empty");
-        assert!(summary.content.len() > 20, "Summary seems too short to be meaningful");
+        assert!(
+            summary.content.len() > 20,
+            "Summary seems too short to be meaningful"
+        );
 
         eprintln!("Summary generated ({} chars)", summary.content.len());
     }

@@ -156,7 +156,11 @@ fn test_admin_proposal_crud() -> anyhow::Result<()> {
     assert_eq!(f.status, "open");
     assert!(f.triaged_by.is_none());
 
-    let p2 = make_proposal("prop-test002", "Agents lack structured output parser", "capability");
+    let p2 = make_proposal(
+        "prop-test002",
+        "Agents lack structured output parser",
+        "capability",
+    );
     store.insert_admin_proposal(&p2)?;
 
     let all = store.list_admin_proposals(None, None, 100)?;
@@ -189,7 +193,10 @@ fn test_admin_proposal_status_update() -> anyhow::Result<()> {
     assert_eq!(fetched.status, "accepted");
     assert_eq!(fetched.triaged_by.unwrap(), "admin-operator");
     assert!(fetched.triaged_at.is_some());
-    assert_eq!(fetched.decision_reason.unwrap(), "Valid gap, scheduling implementation");
+    assert_eq!(
+        fetched.decision_reason.unwrap(),
+        "Valid gap, scheduling implementation"
+    );
 
     let missing = store.update_admin_proposal_status("nonexistent", "rejected", "admin", None)?;
     assert!(!missing);
@@ -205,11 +212,13 @@ fn test_admin_proposal_dedup() -> anyhow::Result<()> {
     let p = make_proposal("prop-dedup001", "Network timeout pattern", "protocol");
     store.insert_admin_proposal(&p)?;
 
-    let matches = store.find_open_proposals_by_title_category("Network timeout pattern", "protocol")?;
+    let matches =
+        store.find_open_proposals_by_title_category("Network timeout pattern", "protocol")?;
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].proposal_id, "prop-dedup001");
 
-    let no_match = store.find_open_proposals_by_title_category("Completely different", "protocol")?;
+    let no_match =
+        store.find_open_proposals_by_title_category("Completely different", "protocol")?;
     assert!(no_match.is_empty());
 
     Ok(())
@@ -264,7 +273,8 @@ fn test_admin_proposal_create_tool() -> anyhow::Result<()> {
             "remediation": "Add a structured response parser tool",
             "blast_radius": "medium",
             "priority": "high"
-        }).to_string(),
+        })
+        .to_string(),
         None,
         None,
         None,
@@ -299,23 +309,41 @@ fn test_admin_proposal_create_tool_dedup() -> anyhow::Result<()> {
     });
 
     let r1 = registry.execute(
-        "admin_proposal_create", &manifest, &policy,
-        temp_dir.path(), None, &args.to_string(), None, None, None, Some(store.clone()), None,
+        "admin_proposal_create",
+        &manifest,
+        &policy,
+        temp_dir.path(),
+        None,
+        &args.to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
     )?;
     let p1: serde_json::Value = serde_json::from_str(&r1)?;
     assert_eq!(p1["ok"], true);
 
     let r2 = registry.execute(
-        "admin_proposal_create", &manifest, &policy,
-        temp_dir.path(), None, &json!({
+        "admin_proposal_create",
+        &manifest,
+        &policy,
+        temp_dir.path(),
+        None,
+        &json!({
             "title": "Network timeout recurring pattern",
             "category": "protocol",
             "evidence": {"count": 8},
             "remediation": "Updated remediation: add exponential backoff",
             "blast_radius": "low",
             "priority": "critical"
-        }).to_string(),
-        None, None, None, Some(store.clone()), None,
+        })
+        .to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
     )?;
     let p2: serde_json::Value = serde_json::from_str(&r2)?;
     assert_eq!(p2["ok"], true);
@@ -345,7 +373,11 @@ fn test_admin_proposal_list_tool() -> anyhow::Result<()> {
     let store = Arc::new(GatewayStore::open(temp_dir.path())?);
 
     for i in 0..3 {
-        let p = make_proposal(&format!("prop-lt-{i:03}"), &format!("List test {i}"), "tool");
+        let p = make_proposal(
+            &format!("prop-lt-{i:03}"),
+            &format!("List test {i}"),
+            "tool",
+        );
         store.insert_admin_proposal(&p)?;
     }
 
@@ -354,16 +386,34 @@ fn test_admin_proposal_list_tool() -> anyhow::Result<()> {
     let policy = PolicyEngine::new(manifest.clone());
 
     let result = registry.execute(
-        "admin_proposal_list", &manifest, &policy,
-        temp_dir.path(), None, &json!({}).to_string(), None, None, None, Some(store.clone()), None,
+        "admin_proposal_list",
+        &manifest,
+        &policy,
+        temp_dir.path(),
+        None,
+        &json!({}).to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
     )?;
     let parsed: serde_json::Value = serde_json::from_str(&result)?;
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["count"], 3);
 
     let filtered = registry.execute(
-        "admin_proposal_list", &manifest, &policy,
-        temp_dir.path(), None, &json!({"status": "open"}).to_string(), None, None, None, Some(store.clone()), None,
+        "admin_proposal_list",
+        &manifest,
+        &policy,
+        temp_dir.path(),
+        None,
+        &json!({"status": "open"}).to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
     )?;
     let f: serde_json::Value = serde_json::from_str(&filtered)?;
     assert_eq!(f["count"], 3);
@@ -380,29 +430,47 @@ fn test_admin_proposal_create_validation() -> anyhow::Result<()> {
     let policy = PolicyEngine::new(manifest.clone());
 
     let bad_category = registry.execute(
-        "admin_proposal_create", &manifest, &policy,
-        temp_dir.path(), None, &json!({
+        "admin_proposal_create",
+        &manifest,
+        &policy,
+        temp_dir.path(),
+        None,
+        &json!({
             "title": "Test",
             "category": "invalid_category",
             "evidence": {},
             "remediation": "Fix",
             "blast_radius": "low"
-        }).to_string(),
-        None, None, None, Some(store.clone()), None,
+        })
+        .to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
     )?;
     let r: serde_json::Value = serde_json::from_str(&bad_category)?;
     assert_eq!(r["ok"], false);
 
     let bad_blast = registry.execute(
-        "admin_proposal_create", &manifest, &policy,
-        temp_dir.path(), None, &json!({
+        "admin_proposal_create",
+        &manifest,
+        &policy,
+        temp_dir.path(),
+        None,
+        &json!({
             "title": "Test",
             "category": "tool",
             "evidence": {},
             "remediation": "Fix",
             "blast_radius": "nuclear"
-        }).to_string(),
-        None, None, None, Some(store.clone()), None,
+        })
+        .to_string(),
+        None,
+        None,
+        None,
+        Some(store.clone()),
+        None,
     )?;
     let r: serde_json::Value = serde_json::from_str(&bad_blast)?;
     assert_eq!(r["ok"], false);

@@ -76,11 +76,7 @@ fn make_harness() -> Harness {
     }
 }
 
-fn invoke(
-    h: &Harness,
-    manifest: &AgentManifest,
-    args_json: &str,
-) -> serde_json::Value {
+fn invoke(h: &Harness, manifest: &AgentManifest, args_json: &str) -> serde_json::Value {
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
     let raw = registry
@@ -107,7 +103,9 @@ fn tool_unavailable_without_capability() {
     let manifest = manifest_with_capabilities(vec![]);
     let defs = registry.available_definitions(&manifest);
     assert!(
-        !defs.iter().any(|d| d.name == "constitution_propose_amendment"),
+        !defs
+            .iter()
+            .any(|d| d.name == "constitution_propose_amendment"),
         "tool must be hidden from agents without ConstitutionalProposal capability"
     );
 }
@@ -120,7 +118,8 @@ fn tool_available_with_capability() {
     }]);
     let defs = registry.available_definitions(&manifest);
     assert!(
-        defs.iter().any(|d| d.name == "constitution_propose_amendment"),
+        defs.iter()
+            .any(|d| d.name == "constitution_propose_amendment"),
         "tool must be available when ConstitutionalProposal is declared"
     );
 }
@@ -292,16 +291,28 @@ fn operator_approve_reject_defer_transitions() {
         .decide_constitutional_proposal(&p_defer, "deferred", "alice", None)
         .unwrap());
 
-    let approved = h.store.get_constitutional_proposal(&p_approve).unwrap().unwrap();
+    let approved = h
+        .store
+        .get_constitutional_proposal(&p_approve)
+        .unwrap()
+        .unwrap();
     assert_eq!(approved.status, "approved");
     assert_eq!(approved.operator_decision.as_deref(), Some("approved"));
     assert_eq!(approved.decision_reason.as_deref(), Some("LGTM"));
     assert!(approved.decided_at.is_some());
 
-    let rejected = h.store.get_constitutional_proposal(&p_reject).unwrap().unwrap();
+    let rejected = h
+        .store
+        .get_constitutional_proposal(&p_reject)
+        .unwrap()
+        .unwrap();
     assert_eq!(rejected.status, "rejected");
 
-    let deferred = h.store.get_constitutional_proposal(&p_defer).unwrap().unwrap();
+    let deferred = h
+        .store
+        .get_constitutional_proposal(&p_defer)
+        .unwrap()
+        .unwrap();
     assert_eq!(deferred.status, "deferred");
     assert!(deferred.decision_reason.is_none());
 
@@ -383,9 +394,15 @@ fn release_marks_only_approved_unpublished() {
     let p_b = make("modify_rule", "R-1.2");
     let p_c = make("modify_rule", "R-1.3");
 
-    h.store.decide_constitutional_proposal(&p_a, "approved", "op", None).unwrap();
-    h.store.decide_constitutional_proposal(&p_b, "approved", "op", None).unwrap();
-    h.store.decide_constitutional_proposal(&p_c, "rejected", "op", None).unwrap();
+    h.store
+        .decide_constitutional_proposal(&p_a, "approved", "op", None)
+        .unwrap();
+    h.store
+        .decide_constitutional_proposal(&p_b, "approved", "op", None)
+        .unwrap();
+    h.store
+        .decide_constitutional_proposal(&p_c, "rejected", "op", None)
+        .unwrap();
 
     let published = h.store.publish_approved_proposals("2026-Q2").unwrap();
     assert_eq!(published.len(), 2);
@@ -394,7 +411,10 @@ fn release_marks_only_approved_unpublished() {
 
     // Re-running should publish nothing — already tagged.
     let again = h.store.publish_approved_proposals("2026-Q3").unwrap();
-    assert!(again.is_empty(), "approved+published rows must not be re-tagged");
+    assert!(
+        again.is_empty(),
+        "approved+published rows must not be re-tagged"
+    );
 
     let rec_a = h.store.get_constitutional_proposal(&p_a).unwrap().unwrap();
     assert_eq!(rec_a.published_in_release.as_deref(), Some("2026-Q2"));

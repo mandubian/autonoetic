@@ -111,9 +111,7 @@ impl GatewayStore {
         limit: usize,
     ) -> Result<Vec<ConstitutionalProposal>> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = format!(
-            "SELECT {PROPOSAL_COLUMNS} FROM constitutional_proposals WHERE 1=1"
-        );
+        let mut sql = format!("SELECT {PROPOSAL_COLUMNS} FROM constitutional_proposals WHERE 1=1");
         let mut param_vals: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         if let Some(sf) = status_filter {
             sql.push_str(" AND status = ?");

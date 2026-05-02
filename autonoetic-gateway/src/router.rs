@@ -343,10 +343,7 @@ impl JsonRpcRouter {
                             return JsonRpcResponse::error(
                                 req.id,
                                 -32602,
-                                format!(
-                                    "Invalid params for interaction.resolve_and_answer: {}",
-                                    e
-                                ),
+                                format!("Invalid params for interaction.resolve_and_answer: {}", e),
                             );
                         }
                     };
@@ -540,7 +537,9 @@ impl JsonRpcRouter {
                     }
 
                     tokio::spawn(async move {
-                        let result = router.execute_agent_request(ingress, session_id_clone.clone()).await;
+                        let result = router
+                            .execute_agent_request(ingress, session_id_clone.clone())
+                            .await;
                         let mut map = async_results.lock().await;
                         let now = chrono::Utc::now().to_rfc3339();
                         if let Some(entry) = map.get_mut(&session_id_clone) {
@@ -569,8 +568,16 @@ impl JsonRpcRouter {
                                     };
                                     entry.status = status;
                                     entry.assistant_reply = spawn_result.assistant_reply;
-                                    entry.artifacts = spawn_result.artifacts.into_iter().map(|a| serde_json::to_value(&a).unwrap_or_default()).collect();
-                                    entry.shared_knowledge = spawn_result.shared_knowledge.into_iter().map(|k| serde_json::to_value(&k).unwrap_or_default()).collect();
+                                    entry.artifacts = spawn_result
+                                        .artifacts
+                                        .into_iter()
+                                        .map(|a| serde_json::to_value(&a).unwrap_or_default())
+                                        .collect();
+                                    entry.shared_knowledge = spawn_result
+                                        .shared_knowledge
+                                        .into_iter()
+                                        .map(|k| serde_json::to_value(&k).unwrap_or_default())
+                                        .collect();
                                     entry.completed_at = Some(now);
                                 }
                                 Err((e, _)) => {

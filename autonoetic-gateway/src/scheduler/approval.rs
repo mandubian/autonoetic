@@ -166,8 +166,15 @@ pub fn approve_request(
     hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<ApprovalDecision> {
     approve_request_with_options(
-        config, gateway_store, request_id, decided_by, reason, secrets,
-        approver_level, hook_executor, ApproveOptions::default(),
+        config,
+        gateway_store,
+        request_id,
+        decided_by,
+        reason,
+        secrets,
+        approver_level,
+        hook_executor,
+        ApproveOptions::default(),
     )
 }
 
@@ -663,14 +670,12 @@ fn resume_session_after_approval(
         }
         autonoetic_types::background::ScheduledAction::SessionContinue { .. } => {
             let msg = match decision.status {
-                ApprovalStatus::Approved => format!(
-                    "session_continue_approved:{}:approved",
-                    decision.request_id
-                ),
-                ApprovalStatus::Rejected => format!(
-                    "session_continue_rejected:{}:rejected",
-                    decision.request_id
-                ),
+                ApprovalStatus::Approved => {
+                    format!("session_continue_approved:{}:approved", decision.request_id)
+                }
+                ApprovalStatus::Rejected => {
+                    format!("session_continue_rejected:{}:rejected", decision.request_id)
+                }
                 ApprovalStatus::Cancelled => format!(
                     "session_continue_cancelled:{}:cancelled",
                     decision.request_id
@@ -945,7 +950,12 @@ fn decide_request(
     status: ApprovalStatus,
 ) -> anyhow::Result<ApprovalDecision> {
     decide_request_with_options(
-        config, gateway_store, request_id, decided_by, reason, status,
+        config,
+        gateway_store,
+        request_id,
+        decided_by,
+        reason,
+        status,
         ApproveOptions::default(),
     )
 }
@@ -1028,11 +1038,16 @@ fn decide_request_with_options(
             if !hosts.is_empty() {
                 if let Some(root_sid) = &decision.root_session_id {
                     if let Some(store) = gateway_store {
-                        let scope = options.grant_scope.clone()
+                        let scope = options
+                            .grant_scope
+                            .clone()
                             .unwrap_or(autonoetic_types::background::GrantScope::RootSession);
                         let targets = if options.grant_targets.is_empty() {
-                            hosts.iter()
-                                .map(|h| autonoetic_types::background::GrantTarget::ExactHost(h.clone()))
+                            hosts
+                                .iter()
+                                .map(|h| {
+                                    autonoetic_types::background::GrantTarget::ExactHost(h.clone())
+                                })
                                 .collect()
                         } else {
                             options.grant_targets.clone()

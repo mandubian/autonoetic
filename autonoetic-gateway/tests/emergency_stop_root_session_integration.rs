@@ -818,7 +818,9 @@ async fn emergency_stop_cancels_active_scheduled_jobs() -> anyhow::Result<()> {
         owner_agent_id: "planner.default".to_string(),
         root_session_id: root_session.to_string(),
         target_agent_id: "coder.default".to_string(),
-        target_revision_id: "rev_sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        target_revision_id:
+            "rev_sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
         message: "active job".to_string(),
         metadata_json: None,
         cron_expr: "*/5 * * * *".to_string(),
@@ -868,10 +870,18 @@ async fn emergency_stop_cancels_active_scheduled_jobs() -> anyhow::Result<()> {
     assert_eq!(j2.status, ScheduledJobStatus::Cancelled);
 
     let j3 = store.get_scheduled_job("sj-emstop-3")?.expect("job 3");
-    assert_eq!(j3.status, ScheduledJobStatus::Paused, "already-paused job should stay paused");
+    assert_eq!(
+        j3.status,
+        ScheduledJobStatus::Paused,
+        "already-paused job should stay paused"
+    );
 
     let j4 = store.get_scheduled_job("sj-emstop-4")?.expect("job 4");
-    assert_eq!(j4.status, ScheduledJobStatus::Active, "other-root job should be untouched");
+    assert_eq!(
+        j4.status,
+        ScheduledJobStatus::Active,
+        "other-root job should be untouched"
+    );
 
     Ok(())
 }

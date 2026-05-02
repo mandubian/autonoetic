@@ -5,7 +5,10 @@
 mod support;
 
 use autonoetic_gateway::router::JsonRpcRequest;
-use support::{seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub, TestWorkspace};
+use support::{
+    seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub,
+    TestWorkspace,
+};
 
 async fn send_tool(
     client: &mut JsonRpcClient,
@@ -13,13 +16,15 @@ async fn send_tool(
     method: &str,
     params: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    client.send(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: id.into(),
-        method: method.to_string(),
-        params,
-        auth_token: std::env::var("AUTONOETIC_SHARED_SECRET").ok(),
-    }).await?;
+    client
+        .send(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: id.into(),
+            method: method.to_string(),
+            params,
+            auth_token: std::env::var("AUTONOETIC_SHARED_SECRET").ok(),
+        })
+        .await?;
     let resp = client.recv().await?;
     if let Some(err) = resp.error {
         Ok(serde_json::json!({ "error": err }))
@@ -96,7 +101,8 @@ async fn test_agent_spawn_message_object_coerced_to_string() -> anyhow::Result<(
             }],
             "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
         })
-    }).await?;
+    })
+    .await?;
 
     let _env = EnvGuard::set(LLM_BASE_URL_OVERRIDE_ENV, stub.completion_url());
     let _key = EnvGuard::set(LLM_API_KEY_OVERRIDE_ENV, "test-key");
@@ -151,7 +157,8 @@ async fn test_agent_spawn_async_string_bool_coerced() -> anyhow::Result<()> {
             }],
             "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
         })
-    }).await?;
+    })
+    .await?;
 
     let _env = EnvGuard::set(LLM_BASE_URL_OVERRIDE_ENV, stub.completion_url());
     let _key = EnvGuard::set(LLM_API_KEY_OVERRIDE_ENV, "test-key");
@@ -175,7 +182,13 @@ async fn test_agent_spawn_async_string_bool_coerced() -> anyhow::Result<()> {
         "async": "true"
     });
 
-    let result = send_tool(&mut client, "test-spawn-string-bool", "agent_spawn", payload).await?;
+    let result = send_tool(
+        &mut client,
+        "test-spawn-string-bool",
+        "agent_spawn",
+        payload,
+    )
+    .await?;
 
     assert!(
         result.get("error").is_none(),
@@ -185,4 +198,3 @@ async fn test_agent_spawn_async_string_bool_coerced() -> anyhow::Result<()> {
 
     Ok(())
 }
-

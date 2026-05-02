@@ -1,11 +1,13 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
-use crate::runtime::approved_exec_cache::{compute_fingerprint, normalize_targets, ApprovedExecCache};
-use crate::runtime::remote_access::{
-    classify_network_coverage, RemoteAccessAnalyzer,
+use crate::runtime::approved_exec_cache::{
+    compute_fingerprint, normalize_targets, ApprovedExecCache,
 };
-use crate::runtime::tools::{build_approval_details, CredentialEnvMapping, NativeTool, NativeToolRegistry};
+use crate::runtime::remote_access::{classify_network_coverage, RemoteAccessAnalyzer};
+use crate::runtime::tools::{
+    build_approval_details, CredentialEnvMapping, NativeTool, NativeToolRegistry,
+};
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{
@@ -112,18 +114,14 @@ impl NativeTool for ArtifactPrepareTool {
         let args: ArtifactPrepareArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        let gw_dir = gateway_dir.ok_or_else(|| {
-            anyhow::anyhow!("artifact.prepare requires a gateway directory")
-        })?;
-        let store = gateway_store.ok_or_else(|| {
-            anyhow::anyhow!("artifact.prepare requires a GatewayStore")
-        })?;
-        let cfg = config.ok_or_else(|| {
-            anyhow::anyhow!("artifact.prepare requires a GatewayConfig")
-        })?;
-        let sid = session_id.ok_or_else(|| {
-            anyhow::anyhow!("artifact.prepare requires a session_id")
-        })?;
+        let gw_dir = gateway_dir
+            .ok_or_else(|| anyhow::anyhow!("artifact.prepare requires a gateway directory"))?;
+        let store = gateway_store
+            .ok_or_else(|| anyhow::anyhow!("artifact.prepare requires a GatewayStore"))?;
+        let cfg =
+            config.ok_or_else(|| anyhow::anyhow!("artifact.prepare requires a GatewayConfig"))?;
+        let sid =
+            session_id.ok_or_else(|| anyhow::anyhow!("artifact.prepare requires a session_id"))?;
 
         // Resolve artifact_ref → internal artifact_id
         let artifact_id = store
@@ -183,9 +181,7 @@ impl NativeTool for ArtifactPrepareTool {
             for rc in required {
                 crate::runtime::tools::ensure_safe_credential_id_reference(&rc.credential_id)?;
                 let cred = store.get_credential(&rc.credential_id)?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "required_credentials: credential reference not found in store"
-                    )
+                    anyhow::anyhow!("required_credentials: credential reference not found in store")
                 })?;
                 if vault.get_secret(&cred.secret_name).is_none() {
                     anyhow::bail!(
@@ -227,7 +223,8 @@ impl NativeTool for ArtifactPrepareTool {
                 },
                 "credentials_resolved": resolved_credential_env.len(),
                 "message": "Artifact is ready to execute. Use deployment_ticket with artifact.exec."
-            }).to_string());
+            })
+            .to_string());
         }
 
         let detected_patterns = remote_analysis.detected_patterns.clone();
@@ -287,20 +284,26 @@ impl NativeTool for ArtifactPrepareTool {
                     ) {
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                             if cache.find(&fingerprint).is_none() {
-                                let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
-                                    fingerprint: fingerprint.clone(),
-                                    agent_id: manifest.agent.id.clone(),
-                                    remote_targets: targets.clone(),
-                                    code_content: artifact_code.clone(),
-                                    approval_request_id: approved
-                                        .iter()
-                                        .find(|r| matches!(r.action, ScheduledAction::SandboxExec { .. }))
-                                        .map(|r| r.request_id.clone())
-                                        .unwrap_or_default(),
-                                    approved_at: chrono::Utc::now().to_rfc3339(),
-                                    approved_by: "operator".to_string(),
-                                    last_used_at: chrono::Utc::now().to_rfc3339(),
-                                };
+                                let entry =
+                                    crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                                        fingerprint: fingerprint.clone(),
+                                        agent_id: manifest.agent.id.clone(),
+                                        remote_targets: targets.clone(),
+                                        code_content: artifact_code.clone(),
+                                        approval_request_id: approved
+                                            .iter()
+                                            .find(|r| {
+                                                matches!(
+                                                    r.action,
+                                                    ScheduledAction::SandboxExec { .. }
+                                                )
+                                            })
+                                            .map(|r| r.request_id.clone())
+                                            .unwrap_or_default(),
+                                        approved_at: chrono::Utc::now().to_rfc3339(),
+                                        approved_by: "operator".to_string(),
+                                        last_used_at: chrono::Utc::now().to_rfc3339(),
+                                    };
                                 let _ = cache.record(entry);
                             }
                         }
@@ -370,10 +373,7 @@ impl NativeTool for ArtifactPrepareTool {
 
         let command = format!("{} {}", args.entrypoint, args.args.join(" "));
         let summary = if resolved_credential_env.is_empty() {
-            format!(
-                "Artifact {}: {}",
-                artifact_id, remote_analysis.summary
-            )
+            format!("Artifact {}: {}", artifact_id, remote_analysis.summary)
         } else {
             format!(
                 "Artifact {}: {} + {} credential(s) injected as env vars",

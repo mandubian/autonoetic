@@ -1606,7 +1606,8 @@ fn render_live_markdown(state: &SessionReportState) -> String {
             .timeline
             .iter()
             .filter(|e| {
-                e.session_id == agent.session_id && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR")
+                e.session_id == agent.session_id
+                    && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR")
             })
             .rev()
             .take(MAX_RECENT_EVENTS_PER_AGENT)
@@ -2022,7 +2023,10 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
         let tool_events: Vec<_> = state
             .timeline
             .iter()
-            .filter(|e| e.session_id == agent.session_id && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR"))
+            .filter(|e| {
+                e.session_id == agent.session_id
+                    && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR")
+            })
             .rev()
             .take(MAX_RECENT_EVENTS_PER_AGENT)
             .collect();
@@ -2034,7 +2038,8 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
             );
             out.push_str("<table><thead><tr><th style=\"width:13%\">Time</th><th style=\"width:10%\">Kind</th><th>Summary</th></tr></thead><tbody>\n");
             for event in tool_events.into_iter().rev() {
-                out.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                out.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
                     format_timestamp(Some(&event.created_at)),
                     escape_html(&event.kind),
                     truncate_html(&event.summary, 150),
@@ -2696,7 +2701,10 @@ pre { background: var(--surface); border: 1px solid var(--border); border-radius
         let tool_events: Vec<_> = state
             .timeline
             .iter()
-            .filter(|e| e.session_id == agent.session_id && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR"))
+            .filter(|e| {
+                e.session_id == agent.session_id
+                    && (e.kind == "ACTION" || e.kind == "RESULT" || e.kind == "ERROR")
+            })
             .rev()
             .take(MAX_RECENT_EVENTS_PER_AGENT)
             .collect();
@@ -2708,7 +2716,8 @@ pre { background: var(--surface); border: 1px solid var(--border); border-radius
             );
             out.push_str("<table><thead><tr><th style=\"width:13%\">Time</th><th style=\"width:10%\">Kind</th><th>Summary</th></tr></thead><tbody>\n");
             for event in tool_events.into_iter().rev() {
-                out.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                out.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
                     format_timestamp(Some(&event.created_at)),
                     escape_html(&event.kind),
                     truncate_html(&event.summary, 150),

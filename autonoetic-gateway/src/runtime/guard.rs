@@ -120,7 +120,12 @@ impl LoopGuard {
     /// Permission errors are excluded from the budget: the agent cannot fix
     /// them by retrying with different arguments, so counting them would
     /// unfairly exhaust the budget and abort the session prematurely.
-    pub fn register_failure(&mut self, tool_name: &str, _arguments: &str, error_type: Option<&ToolErrorType>) {
+    pub fn register_failure(
+        &mut self,
+        tool_name: &str,
+        _arguments: &str,
+        error_type: Option<&ToolErrorType>,
+    ) {
         if let Some(ToolErrorType::Permission) = error_type {
             return;
         }
@@ -337,12 +342,20 @@ mod tests {
         let mut guard = LoopGuard::new(100);
 
         for _ in 0..10 {
-            guard.register_failure("web_fetch", r#"{"url":"https://denied.com"}"#, Some(&ToolErrorType::Permission));
+            guard.register_failure(
+                "web_fetch",
+                r#"{"url":"https://denied.com"}"#,
+                Some(&ToolErrorType::Permission),
+            );
             guard.register_progress("web_fetch", r#"{"url":"https://denied.com"}"#);
             assert!(guard.check_loop().is_ok());
         }
 
-        guard.register_failure("web_fetch", r#"{"url":"https://denied.com"}"#, Some(&ToolErrorType::Permission));
+        guard.register_failure(
+            "web_fetch",
+            r#"{"url":"https://denied.com"}"#,
+            Some(&ToolErrorType::Permission),
+        );
         assert!(guard.check_loop().is_ok());
     }
 
@@ -352,11 +365,19 @@ mod tests {
         assert!(guard.check_loop().is_ok());
 
         for _ in 0..4 {
-            guard.register_failure("web_fetch", r#"{"url":"https://bad.com"}"#, Some(&ToolErrorType::Validation));
+            guard.register_failure(
+                "web_fetch",
+                r#"{"url":"https://bad.com"}"#,
+                Some(&ToolErrorType::Validation),
+            );
             guard.register_progress("web_fetch", r#"{"url":"https://bad.com"}"#);
             assert!(guard.check_loop().is_ok());
         }
-        guard.register_failure("web_fetch", r#"{"url":"https://bad.com"}"#, Some(&ToolErrorType::Validation));
+        guard.register_failure(
+            "web_fetch",
+            r#"{"url":"https://bad.com"}"#,
+            Some(&ToolErrorType::Validation),
+        );
         assert!(guard.check_loop().is_err());
     }
 

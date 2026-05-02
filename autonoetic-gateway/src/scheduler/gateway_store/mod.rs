@@ -24,8 +24,8 @@ use rusqlite::{params, Connection};
 use serde::Deserialize;
 use std::path::Path;
 
-pub(crate) use row_decode::memory_object_from_row;
 pub use messages::AgentMessageRecord;
+pub(crate) use row_decode::memory_object_from_row;
 pub(crate) use util::escape_sqlite_like_fragment;
 
 #[derive(Debug, Clone, Deserialize)]

@@ -58,7 +58,10 @@ fn test_revoke_all_grants_for_session() {
     assert_eq!(count, 2);
 
     assert!(store.get_session_grants("root-2").unwrap().is_empty());
-    assert_eq!(store.get_session_grants("other-root").unwrap(), vec!["host3.com"]);
+    assert_eq!(
+        store.get_session_grants("other-root").unwrap(),
+        vec!["host3.com"]
+    );
 }
 
 #[test]
@@ -92,15 +95,17 @@ fn test_grants_cover_targets_after_partial_revoke() {
     seed_grant(&store, "root-4", "agent-e", "b.com");
     seed_grant(&store, "root-4", "agent-e", "c.com");
 
-    assert!(store
-        .session_grants_cover_targets("root-4", &["a.com".to_string(), "b.com".to_string()]));
+    assert!(
+        store.session_grants_cover_targets("root-4", &["a.com".to_string(), "b.com".to_string()])
+    );
 
     store
         .revoke_session_grants("root-4", Some("b.com"), "revoked")
         .unwrap();
 
-    assert!(!store
-        .session_grants_cover_targets("root-4", &["a.com".to_string(), "b.com".to_string()]));
+    assert!(
+        !store.session_grants_cover_targets("root-4", &["a.com".to_string(), "b.com".to_string()])
+    );
     assert!(store.session_grants_cover_targets("root-4", &["a.com".to_string()]));
     assert!(store.session_grants_cover_targets("root-4", &["c.com".to_string()]));
 }
@@ -134,7 +139,10 @@ fn test_revoke_nonexistent_host_is_noop() {
         .unwrap();
     assert_eq!(count, 0);
 
-    assert_eq!(store.get_session_grants("root-6").unwrap(), vec!["exists.io"]);
+    assert_eq!(
+        store.get_session_grants("root-6").unwrap(),
+        vec!["exists.io"]
+    );
 }
 
 #[test]
@@ -145,20 +153,20 @@ fn test_revoke_then_reapprove_restores_coverage() {
 
     seed_grant(&store, "root-7", "agent-h", "regranted.io");
 
-    assert!(store
-        .session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+    assert!(store.session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
 
     store
         .revoke_session_grants("root-7", Some("regranted.io"), "temp revoke")
         .unwrap();
 
     assert!(store.get_session_grants("root-7").unwrap().is_empty());
-    assert!(!store
-        .session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+    assert!(!store.session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
 
     seed_grant(&store, "root-7", "agent-h", "regranted.io");
 
-    assert_eq!(store.get_session_grants("root-7").unwrap(), vec!["regranted.io"]);
-    assert!(store
-        .session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+    assert_eq!(
+        store.get_session_grants("root-7").unwrap(),
+        vec!["regranted.io"]
+    );
+    assert!(store.session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
 }

@@ -80,7 +80,10 @@ fn test_promotion_record_rejects_empty_finding_description() {
         .unwrap_err();
 
     let msg = err.to_string();
-    assert!(msg.contains("findings[0]"), "Expected findings index, got: {msg}");
+    assert!(
+        msg.contains("findings[0]"),
+        "Expected findings index, got: {msg}"
+    );
     assert!(
         msg.contains("description is empty"),
         "Expected 'description is empty', got: {msg}"

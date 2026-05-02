@@ -85,25 +85,31 @@ impl NativeTool for AdminProposalCreateTool {
             return Ok(ToolError::validation(
                 format!("category must be one of: {}", valid_categories.join(", ")),
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         }
         let valid_blast = ["low", "medium", "high"];
         if !valid_blast.contains(&args.blast_radius.as_str()) {
             return Ok(ToolError::validation(
                 format!("blast_radius must be one of: {}", valid_blast.join(", ")),
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         }
         let valid_priority = ["low", "medium", "high", "critical"];
         if !valid_priority.contains(&args.priority.as_str()) {
             return Ok(ToolError::validation(
                 format!("priority must be one of: {}", valid_priority.join(", ")),
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         }
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("GatewayStore not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("GatewayStore not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let existing = store.find_open_proposals_by_title_category(&args.title, &args.category)?;
@@ -137,10 +143,14 @@ impl NativeTool for AdminProposalCreateTool {
                 "proposal_id": dup.proposal_id,
                 "deduped": true,
                 "message": "Merged evidence into existing open proposal"
-            }).to_string());
+            })
+            .to_string());
         }
 
-        let proposal_id = format!("prop-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]);
+        let proposal_id = format!(
+            "prop-{}",
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
+        );
         let now = chrono::Utc::now().to_rfc3339();
         let proposal = AdminProposal {
             proposal_id: proposal_id.clone(),
@@ -179,7 +189,8 @@ impl NativeTool for AdminProposalCreateTool {
             "ok": true,
             "proposal_id": proposal_id,
             "deduped": false
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -241,15 +252,15 @@ impl NativeTool for AdminProposalListTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("GatewayStore not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("GatewayStore not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let limit = args.limit.min(200);
-        let proposals = store.list_admin_proposals(
-            args.status.as_deref(),
-            args.category.as_deref(),
-            limit,
-        )?;
+        let proposals =
+            store.list_admin_proposals(args.status.as_deref(), args.category.as_deref(), limit)?;
 
         let items: Vec<serde_json::Value> = proposals
             .iter()
@@ -271,6 +282,7 @@ impl NativeTool for AdminProposalListTool {
             "ok": true,
             "proposals": items,
             "count": items.len()
-        }).to_string())
+        })
+        .to_string())
     }
 }

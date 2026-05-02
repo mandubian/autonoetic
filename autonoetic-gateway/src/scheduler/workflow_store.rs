@@ -761,14 +761,29 @@ fn create_implicit_artifact(
     let artifact_store = crate::artifact_store::ArtifactStore::new(&gw_dir);
     let refs_by_artifact_id: std::collections::HashMap<String, String> = gateway_store
         .map(|gs| {
-            gs.list_artifact_refs_for_scope(
-                autonoetic_types::artifact::ArtifactRefScopeType::Session,
-                &task.session_id,
-            )
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| (r.artifact_id, r.ref_id))
-            .collect()
+            let mut refs = std::collections::HashMap::new();
+            for (scope_type, scope_id) in [
+                (
+                    autonoetic_types::artifact::ArtifactRefScopeType::Global,
+                    "__global__",
+                ),
+                (
+                    autonoetic_types::artifact::ArtifactRefScopeType::Workflow,
+                    task.workflow_id.as_str(),
+                ),
+                (
+                    autonoetic_types::artifact::ArtifactRefScopeType::Session,
+                    task.session_id.as_str(),
+                ),
+            ] {
+                for record in gs
+                    .list_artifact_refs_for_scope(scope_type, scope_id)
+                    .unwrap_or_default()
+                {
+                    refs.entry(record.artifact_id).or_insert(record.ref_id);
+                }
+            }
+            refs
         })
         .unwrap_or_default();
     let built_artifacts: Vec<serde_json::Value> = artifact_store
@@ -1952,7 +1967,9 @@ mod tests {
 
         let parent_session = "root-visible";
         let child_session = "root-visible/researcher-abc";
-        store.set_root_session(child_session, parent_session).unwrap();
+        store
+            .set_root_session(child_session, parent_session)
+            .unwrap();
 
         let exported_handle = store.write(b"weather summary").unwrap();
         store
@@ -2000,7 +2017,9 @@ mod tests {
 
         assert_eq!(named_outputs.len(), 1);
         assert_eq!(
-            named_outputs[0].get("name").and_then(|value| value.as_str()),
+            named_outputs[0]
+                .get("name")
+                .and_then(|value| value.as_str()),
             Some("weather.md")
         );
 
@@ -2015,6 +2034,99 @@ mod tests {
         assert!(named_outputs.iter().all(|entry| {
             entry.get("name").and_then(|value| value.as_str()) != Some("session_history")
         }));
+    }
+
+    #[test]
+    fn create_implicit_artifact_includes_workflow_scoped_artifact_ref() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+
+        let gw_dir = crate::execution::gateway_root_dir(&cfg);
+        let gateway_store = crate::scheduler::gateway_store::GatewayStore::open(&gw_dir).unwrap();
+        let content_store = crate::runtime::content_store::ContentStore::new(&gw_dir).unwrap();
+
+        let parent_session = "root-artifact-ref";
+        let child_session = "root-artifact-ref/coder-abc";
+        content_store
+            .set_root_session(child_session, parent_session)
+            .unwrap();
+
+        let source_handle = content_store.write(b"print('hello')").unwrap();
+        content_store
+            .register_name_with_visibility(
+                child_session,
+                "weather/main.py",
+                &source_handle,
+                crate::runtime::content_store::ContentVisibility::Session,
+            )
+            .unwrap();
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(&gw_dir).unwrap();
+        let bundle = artifact_store
+            .build(
+                &["weather/main.py".to_string()],
+                Some(&["weather/main.py".to_string()]),
+                None,
+                child_session,
+            )
+            .unwrap();
+
+        let workflow_id = "wf-artifact-ref";
+        gateway_store
+            .create_artifact_ref(&autonoetic_types::artifact::ArtifactRefRecord {
+                ref_id: "ar.test123456".to_string(),
+                scope_type: autonoetic_types::artifact::ArtifactRefScopeType::Workflow,
+                scope_id: workflow_id.to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "coder.default".to_string(),
+                created_at: now_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let ts = now_rfc3339();
+        let task = TaskRun {
+            task_id: "task-artifact-ref".to_string(),
+            workflow_id: workflow_id.to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: child_session.to_string(),
+            parent_session_id: parent_session.to_string(),
+            status: TaskRunStatus::Succeeded,
+            created_at: ts.clone(),
+            updated_at: ts,
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+        };
+
+        create_implicit_artifact(&cfg, Some(&gateway_store), &task, Some("done")).unwrap();
+
+        let content_store = crate::runtime::content_store::ContentStore::new(&gw_dir).unwrap();
+        let artifact_name = format!("impl_{}", task.task_id);
+        let artifact_bytes = content_store
+            .read_by_name(parent_session, &artifact_name)
+            .unwrap();
+        let artifact_json: serde_json::Value = serde_json::from_slice(&artifact_bytes).unwrap();
+        let artifacts = artifact_json
+            .get("content")
+            .and_then(|content| content.get("artifacts"))
+            .and_then(|outputs| outputs.as_array())
+            .unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(
+            artifacts[0]
+                .get("artifact_ref")
+                .and_then(|value| value.as_str()),
+            Some("ar.test123456")
+        );
     }
 
     #[test]

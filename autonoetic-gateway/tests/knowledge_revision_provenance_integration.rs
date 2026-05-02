@@ -110,9 +110,7 @@ fn test_quarantined_memories_excluded_from_search() {
     mem_quarantined.quarantine_reason = Some("revision_rollback:rev_bad".to_string());
     store.memory_upsert(&mem_quarantined).unwrap();
 
-    let ids = store
-        .memory_list_ids_for_scope("scope_a", None)
-        .unwrap();
+    let ids = store.memory_list_ids_for_scope("scope_a", None).unwrap();
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0], "fact_ok");
 
@@ -153,9 +151,7 @@ fn test_quarantined_memories_excluded_from_scopes_list() {
     mem_quarantined.quarantine_reason = Some("quarantined".to_string());
     store.memory_upsert(&mem_quarantined).unwrap();
 
-    let scopes = store
-        .memory_list_scopes_for_agent("agent-g", None)
-        .unwrap();
+    let scopes = store.memory_list_scopes_for_agent("agent-g", None).unwrap();
     assert!(scopes.contains(&"scope_g".to_string()));
     assert!(!scopes.contains(&"scope_gq".to_string()));
 }
@@ -166,25 +162,26 @@ fn test_memory_quarantine_by_revision() {
     let gw = make_gateway_dir(&tmp);
     let store = GatewayStore::open(&gw).unwrap();
 
-    store.memory_upsert(&make_memory("m1", "s", "a", Some("rev_A"))).unwrap();
-    store.memory_upsert(&make_memory("m2", "s", "a", Some("rev_A"))).unwrap();
-    store.memory_upsert(&make_memory("m3", "s", "a", Some("rev_B"))).unwrap();
+    store
+        .memory_upsert(&make_memory("m1", "s", "a", Some("rev_A")))
+        .unwrap();
+    store
+        .memory_upsert(&make_memory("m2", "s", "a", Some("rev_A")))
+        .unwrap();
+    store
+        .memory_upsert(&make_memory("m3", "s", "a", Some("rev_B")))
+        .unwrap();
 
     let count = store
         .memory_quarantine_by_revision("rev_A", "rollback:test")
         .unwrap();
     assert_eq!(count, 2);
 
-    let quarantined = store
-        .memory_list_quarantined_for_revision("rev_A")
-        .unwrap();
+    let quarantined = store.memory_list_quarantined_for_revision("rev_A").unwrap();
     assert_eq!(quarantined.len(), 2);
 
     let m1 = store.memory_get_unrestricted("m1").unwrap().unwrap();
-    assert_eq!(
-        m1.quarantine_reason.as_deref(),
-        Some("rollback:test")
-    );
+    assert_eq!(m1.quarantine_reason.as_deref(), Some("rollback:test"));
 
     let m3 = store.memory_get_unrestricted("m3").unwrap().unwrap();
     assert!(m3.quarantine_reason.is_none());
@@ -235,9 +232,7 @@ fn test_atomic_rollback_quarantines_knowledge() {
     let m_old = store.memory_get_unrestricted("old_fact").unwrap().unwrap();
     assert!(m_old.quarantine_reason.is_none());
 
-    let ids = store
-        .memory_list_ids_for_scope("scope1", None)
-        .unwrap();
+    let ids = store.memory_list_ids_for_scope("scope1", None).unwrap();
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0], "old_fact");
 
@@ -260,14 +255,7 @@ fn test_atomic_rollback_noop_when_same_revision() {
     store.memory_upsert(&mem).unwrap();
 
     let previous = store
-        .atomic_rollback(
-            agent_id,
-            "rev_only",
-            "promo_noop",
-            "test",
-            "test",
-            None,
-        )
+        .atomic_rollback(agent_id, "rev_only", "promo_noop", "test", "test", None)
         .unwrap();
     assert_eq!(previous.as_deref(), Some("rev_only"));
 
@@ -303,7 +291,10 @@ fn test_session_binding_tags_knowledge_store_write() {
         })
         .unwrap();
 
-    let binding = store.get_session_agent_binding(session_id).unwrap().unwrap();
+    let binding = store
+        .get_session_agent_binding(session_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(binding.revision_id, revision_id);
     assert_eq!(binding.alias_id.as_deref(), Some(alias_id));
 
@@ -316,7 +307,10 @@ fn test_session_binding_tags_knowledge_store_write() {
     mem.visibility = MemoryVisibility::Global;
     store.memory_upsert(&mem).unwrap();
 
-    let loaded = store.memory_get_unrestricted("bound_fact").unwrap().unwrap();
+    let loaded = store
+        .memory_get_unrestricted("bound_fact")
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded.revision_id.as_deref(), Some(revision_id));
     assert_eq!(loaded.binding_session_id.as_deref(), Some(session_id));
     assert_eq!(loaded.alias_ref.as_deref(), Some(alias_id));
@@ -337,7 +331,10 @@ fn test_quarantine_dedup_no_double_quarantine() {
         .unwrap();
     assert_eq!(count, 0);
 
-    let loaded = store.memory_get_unrestricted("dedup_fact").unwrap().unwrap();
+    let loaded = store
+        .memory_get_unrestricted("dedup_fact")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         loaded.quarantine_reason.as_deref(),
         Some("already_quarantined")

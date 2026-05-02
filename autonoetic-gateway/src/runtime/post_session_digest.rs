@@ -303,7 +303,15 @@ async fn run_post_session_digest_inner(
     let json_slice = extract_json_object_slice(&resp.text)?;
     let output: DigestLlmOutput = serde_json::from_str(json_slice)?;
     let sqlite_store = crate::runtime::memory::SqliteMemoryStore::new(store.clone());
-    apply_digest_output(gateway_dir, store, &sqlite_store, session_id, source_agent_id, &output).await?;
+    apply_digest_output(
+        gateway_dir,
+        store,
+        &sqlite_store,
+        session_id,
+        source_agent_id,
+        &output,
+    )
+    .await?;
     Ok(())
 }
 

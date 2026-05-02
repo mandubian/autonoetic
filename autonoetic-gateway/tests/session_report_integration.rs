@@ -24,8 +24,9 @@ impl LlmDriver for AnnotateThenStopDriver {
                 tool_calls: vec![ToolCall {
                     id: "tc-annotate".to_string(),
                     name: "digest_annotate".to_string(),
-                    arguments: r#"{"type":"observation","content":"Track structured session reporting."}"#
-                        .to_string(),
+                    arguments:
+                        r#"{"type":"observation","content":"Track structured session reporting."}"#
+                            .to_string(),
                 }],
                 reasoning_content: None,
                 stop_reason: StopReason::ToolUse,

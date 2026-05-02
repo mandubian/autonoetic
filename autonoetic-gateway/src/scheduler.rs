@@ -1193,7 +1193,9 @@ async fn spawn_task_execution(
             if spawn_result.suspended_for_user_input {
                 let pending_for_session =
                     crate::scheduler::approval::pending_approval_requests_for_session(
-                        &cfg, store, &session_id,
+                        &cfg,
+                        store,
+                        &session_id,
                     )
                     .unwrap_or_default();
 

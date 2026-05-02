@@ -1,8 +1,8 @@
 //! Integration tests for issue #87: continuation cleanup on reject/withdraw
 //! and startup reaper for orphaned continuation files.
 
-use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::runtime::continuation;
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::{
     ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
 };
@@ -132,7 +132,13 @@ fn test_reaper_removes_terminal_approval_orphan() {
     assert!(continuation_exists(&config, task_id));
 
     store
-        .record_decision(&request_id, "rejected", "test", &chrono::Utc::now().to_rfc3339(), None)
+        .record_decision(
+            &request_id,
+            "rejected",
+            "test",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )
         .unwrap();
 
     let reaped = continuation::reap_orphaned_continuations(&config, &store).unwrap();

@@ -169,7 +169,13 @@ impl<'a> ToolCallProcessor<'a> {
                         &res,
                         approval_ref.as_deref(),
                     )?;
-                    self.record_execution_trace(tc, &res, started_at.elapsed(), None, Some(event_id))?;
+                    self.record_execution_trace(
+                        tc,
+                        &res,
+                        started_at.elapsed(),
+                        None,
+                        Some(event_id),
+                    )?;
                     self.log_memory_tool_event(tracer, &tc.name, &res);
                     had_any_success = true;
                     res
@@ -421,7 +427,10 @@ fn tool_result_requires_approval(result: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn validate_tool_intent(tool_name: &str, arguments_json: &str) -> Result<Option<String>, ToolError> {
+fn validate_tool_intent(
+    tool_name: &str,
+    arguments_json: &str,
+) -> Result<Option<String>, ToolError> {
     let sanitized_args = strip_gemma_token_artifacts(arguments_json);
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&sanitized_args) else {
         return Ok(None);
@@ -440,7 +449,9 @@ fn validate_tool_intent(tool_name: &str, arguments_json: &str) -> Result<Option<
     let Some(intent) = intent_value.as_str() else {
         return Err(ToolError::validation(
             "intent must be a string no longer than 500 characters",
-            Some("Set the top-level 'intent' field to a short natural-language reason for the call."),
+            Some(
+                "Set the top-level 'intent' field to a short natural-language reason for the call.",
+            ),
         ));
     };
 
@@ -621,15 +632,15 @@ mod tests {
             io: None,
             middleware: None,
             execution_mode: Default::default(),
-                script_entry: None,
-                script_input_mode: Default::default(),
-                gateway_url: None,
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
             gateway_token: None,
 
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
-        compression: None,
+            compression: None,
         }
     }
 

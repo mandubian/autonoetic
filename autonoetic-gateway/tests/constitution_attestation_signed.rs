@@ -166,7 +166,8 @@ fn different_gateway_key_rejects_attestation() {
     let att = compose_and_sign(default_inputs(&manifest), &key_a).expect("compose");
     let err = verify(&key_b.public_key_bytes(), &att).expect_err("wrong key");
     assert!(
-        err.to_string().contains("fingerprint mismatch") || err.to_string().contains("did not verify"),
+        err.to_string().contains("fingerprint mismatch")
+            || err.to_string().contains("did not verify"),
         "{}",
         err
     );
@@ -186,9 +187,7 @@ fn rendered_tail_contains_verifiable_block() {
     assert!(tail.contains("</gateway_state_attestation>"));
     assert!(tail.contains("authoritative"));
 
-    let start = tail
-        .find("<gateway_state_attestation>")
-        .expect("open tag")
+    let start = tail.find("<gateway_state_attestation>").expect("open tag")
         + "<gateway_state_attestation>".len();
     let end = tail
         .find("</gateway_state_attestation>")

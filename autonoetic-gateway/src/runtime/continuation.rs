@@ -156,10 +156,8 @@ pub fn continuation_hmac_key(config: &GatewayConfig) -> String {
 /// Produce a deterministic JSON representation.  `serde_json` with sorted keys
 /// ensures the same struct always serialises to the same bytes.
 fn canonical_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
-    let mut buf = serde_json::Serializer::with_formatter(
-        Vec::new(),
-        serde_json::ser::CompactFormatter,
-    );
+    let mut buf =
+        serde_json::Serializer::with_formatter(Vec::new(), serde_json::ser::CompactFormatter);
     serde::Serialize::serialize(value, &mut buf)?;
     // Re-parse and re-serialize with sorted keys for determinism
     let v: serde_json::Value = serde_json::from_slice(&buf.into_inner())?;
@@ -238,7 +236,8 @@ pub fn load_continuation(
             return Err(ContinuationIntegrityError {
                 task_id: task_id.to_string(),
                 message: "HMAC mismatch".to_string(),
-            }.into());
+            }
+            .into());
         }
         let cont: TurnContinuation = serde_json::from_str(&envelope.payload_json)?;
         return Ok(Some(cont));

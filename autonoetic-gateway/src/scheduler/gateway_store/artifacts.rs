@@ -17,10 +17,14 @@ impl GatewayStore {
             return Err(anyhow::anyhow!("artifact_id must not be empty"));
         }
         if record.artifact_manifest_digest.is_empty() {
-            return Err(anyhow::anyhow!("artifact_manifest_digest must not be empty"));
+            return Err(anyhow::anyhow!(
+                "artifact_manifest_digest must not be empty"
+            ));
         }
         if record.artifact_canonical_digest.is_empty() {
-            return Err(anyhow::anyhow!("artifact_canonical_digest must not be empty"));
+            return Err(anyhow::anyhow!(
+                "artifact_canonical_digest must not be empty"
+            ));
         }
         if record.created_by_agent_id.is_empty() {
             return Err(anyhow::anyhow!("created_by_agent_id must not be empty"));

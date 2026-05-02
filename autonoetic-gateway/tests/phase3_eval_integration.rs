@@ -1172,7 +1172,8 @@ fn test_revision_create_from_intent_script_mode_without_io_leaves_io_none() {
     let content_store = ContentStore::new(&gateway_dir).unwrap();
     let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
     // A minimal script as the bundled entrypoint.
-    let script = b"#!/usr/bin/env python3\nimport os\nprint(os.environ.get('AUTONOETIC_INPUT',''))\n";
+    let script =
+        b"#!/usr/bin/env python3\nimport os\nprint(os.environ.get('AUTONOETIC_INPUT',''))\n";
     let handle = content_store.write(script).unwrap();
     content_store
         .register_name(session_id, "scripts/echo.py", &handle)
@@ -1218,7 +1219,10 @@ fn test_revision_create_from_intent_script_mode_without_io_leaves_io_none() {
         )
         .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(parsed["ok"], true, "create_from_intent should succeed: {parsed:?}");
+    assert_eq!(
+        parsed["ok"], true,
+        "create_from_intent should succeed: {parsed:?}"
+    );
     let revision_id = parsed["revision_id"].as_str().unwrap();
 
     let revision_dir = gateway_dir
@@ -1559,10 +1563,7 @@ layers: []
     // Intentionally build with default kind ("binary") and NO entrypoints.
     let bundle = artifact_store
         .build(
-            &[
-                "SKILL.md".to_string(),
-                "runtime.lock".to_string(),
-            ],
+            &["SKILL.md".to_string(), "runtime.lock".to_string()],
             None,
             None,
             session_id,
@@ -1591,8 +1592,13 @@ layers: []
             Some(store.clone()),
             None,
         )
-        .expect_err("revision creation must require artifact kind agent_bundle or binary with entrypoint");
-    assert!(err.to_string().contains("requires kind 'agent_bundle'") || err.to_string().contains("entrypoint"));
+        .expect_err(
+            "revision creation must require artifact kind agent_bundle or binary with entrypoint",
+        );
+    assert!(
+        err.to_string().contains("requires kind 'agent_bundle'")
+            || err.to_string().contains("entrypoint")
+    );
 }
 
 #[test]
@@ -2069,10 +2075,18 @@ fn test_can_evaluate_suite_publish_matches_suite_name_prefix() {
     }]);
     let policy = PolicyEngine::new(manifest);
 
-    assert!(policy.can_evaluate_suite_publish("suite-basic-planner").is_allowed());
-    assert!(policy.can_evaluate_suite_publish("suite-basic-").is_allowed());
-    assert!(!policy.can_evaluate_suite_publish("suite-advanced").is_allowed());
-    assert!(!policy.can_evaluate_suite_publish("other-suite").is_allowed());
+    assert!(policy
+        .can_evaluate_suite_publish("suite-basic-planner")
+        .is_allowed());
+    assert!(policy
+        .can_evaluate_suite_publish("suite-basic-")
+        .is_allowed());
+    assert!(!policy
+        .can_evaluate_suite_publish("suite-advanced")
+        .is_allowed());
+    assert!(!policy
+        .can_evaluate_suite_publish("other-suite")
+        .is_allowed());
 }
 
 #[test]
@@ -2082,7 +2096,9 @@ fn test_can_evaluate_suite_publish_wildcard() {
     }]);
     let policy = PolicyEngine::new(manifest);
 
-    assert!(policy.can_evaluate_suite_publish("any-suite-name").is_allowed());
+    assert!(policy
+        .can_evaluate_suite_publish("any-suite-name")
+        .is_allowed());
     assert!(policy.can_evaluate_suite_publish("suite-x").is_allowed());
 }
 

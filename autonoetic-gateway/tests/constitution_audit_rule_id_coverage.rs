@@ -10,9 +10,10 @@ fn causal_decision_events_include_enforced_rule_ids() -> anyhow::Result<()> {
     let agent_dir = tempdir.path().join("agents").join("tester.default");
     std::fs::create_dir_all(&agent_dir)?;
 
-    let mut tracer = SessionTracer::new_with_evidence_mode(&agent_dir, "tester.default", "sess-rule-1", "off")?
-        .with_gateway_store(Some(store.clone()))
-        .with_turn_id("turn-1");
+    let mut tracer =
+        SessionTracer::new_with_evidence_mode(&agent_dir, "tester.default", "sess-rule-1", "off")?
+            .with_gateway_store(Some(store.clone()))
+            .with_turn_id("turn-1");
 
     tracer.log_event(
         "policy",
@@ -40,7 +41,11 @@ fn causal_decision_events_include_enforced_rule_ids() -> anyhow::Result<()> {
     )?;
 
     let events = store.search_causal_events(Some("sess-rule-1"), Some("tester.default"), 50)?;
-    assert!(events.len() >= 3, "expected at least 3 events, got {}", events.len());
+    assert!(
+        events.len() >= 3,
+        "expected at least 3 events, got {}",
+        events.len()
+    );
 
     for event in &events {
         assert!(

@@ -5,13 +5,13 @@
 
 mod support;
 
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::{default_registry, NativeToolRegistry};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentManifest};
+use autonoetic_types::agent::AgentManifest;
 use support::EnvGuard;
 
 fn install_agent(agents_dir: &Path, name: &str, capabilities: &str) -> anyhow::Result<()> {
@@ -20,7 +20,8 @@ fn install_agent(agents_dir: &Path, name: &str, capabilities: &str) -> anyhow::R
     std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []")?;
     std::fs::write(
         agent_dir.join("SKILL.md"),
-        format!(r#"---
+        format!(
+            r#"---
 version: "1.0"
 runtime:
   engine: "autonoetic"
@@ -36,7 +37,9 @@ agent:
 {}
 ---
 # {}
-"#, name, name, capabilities, name),
+"#,
+            name, name, capabilities, name
+        ),
     )?;
     Ok(())
 }
@@ -54,21 +57,19 @@ async fn test_agent_message_delivery() -> anyhow::Result<()> {
         "sender-agent",
         r#"capabilities:
   - type: "AgentMessage"
-    patterns: ["*"]"#
+    patterns: ["*"]"#,
     )?;
 
-    install_agent(
-        &workspace.agents_dir,
-        "receiver-agent",
-        "capabilities: []"
-    )?;
+    install_agent(&workspace.agents_dir, "receiver-agent", "capabilities: []")?;
 
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
-    
+
     // We don't necessarily need to seed test agents, just execute the tool directly.
     let registry = default_registry();
-    let manifest_content = std::fs::read_to_string(workspace.agents_dir.join("sender-agent/SKILL.md"))?;
-    let manifest: AgentManifest = serde_yaml::from_str(manifest_content.split("---").nth(1).unwrap())?;
+    let manifest_content =
+        std::fs::read_to_string(workspace.agents_dir.join("sender-agent/SKILL.md"))?;
+    let manifest: AgentManifest =
+        serde_yaml::from_str(manifest_content.split("---").nth(1).unwrap())?;
     let policy = PolicyEngine::new(manifest.clone());
 
     let sender_session = "sender-session-1";
@@ -92,7 +93,7 @@ async fn test_agent_message_delivery() -> anyhow::Result<()> {
         Some("turn-1"),
         Some(&config),
         Some(store.clone()),
-        None
+        None,
     )?;
 
     let parsed: serde_json::Value = serde_json::from_str(&result)?;
@@ -104,10 +105,16 @@ async fn test_agent_message_delivery() -> anyhow::Result<()> {
     assert_eq!(undelivered.len(), 1);
     assert_eq!(undelivered[0].message, "Hello from sender");
     assert_eq!(undelivered[0].sender_agent_id, "sender-agent");
-    
-    let pending_notifications = store.list_notifications_for_session(receiver_session, autonoetic_types::notification::NotificationStatus::Pending)?;
+
+    let pending_notifications = store.list_notifications_for_session(
+        receiver_session,
+        autonoetic_types::notification::NotificationStatus::Pending,
+    )?;
     assert_eq!(pending_notifications.len(), 1);
-    assert_eq!(pending_notifications[0].notification_type, autonoetic_types::notification::NotificationType::AgentMessage);
+    assert_eq!(
+        pending_notifications[0].notification_type,
+        autonoetic_types::notification::NotificationType::AgentMessage
+    );
 
     Ok(())
 }
@@ -130,8 +137,10 @@ async fn test_agent_message_missing_target_agent_returns_structured_error() -> a
 
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let registry = default_registry();
-    let manifest_content = std::fs::read_to_string(workspace.agents_dir.join("sender-agent/SKILL.md"))?;
-    let manifest: AgentManifest = serde_yaml::from_str(manifest_content.split("---").nth(1).unwrap())?;
+    let manifest_content =
+        std::fs::read_to_string(workspace.agents_dir.join("sender-agent/SKILL.md"))?;
+    let manifest: AgentManifest =
+        serde_yaml::from_str(manifest_content.split("---").nth(1).unwrap())?;
     let policy = PolicyEngine::new(manifest.clone());
 
     let args = serde_json::json!({
@@ -155,8 +164,14 @@ async fn test_agent_message_missing_target_agent_returns_structured_error() -> a
 
     let parsed: serde_json::Value = serde_json::from_str(&result)?;
     assert!(!parsed.get("ok").unwrap().as_bool().unwrap());
-    assert_eq!(parsed.get("status").unwrap().as_str().unwrap(), "target_agent_not_found");
-    assert_eq!(parsed.get("target_agent_id").unwrap().as_str().unwrap(), "missing-agent");
+    assert_eq!(
+        parsed.get("status").unwrap().as_str().unwrap(),
+        "target_agent_not_found"
+    );
+    assert_eq!(
+        parsed.get("target_agent_id").unwrap().as_str().unwrap(),
+        "missing-agent"
+    );
     assert_eq!(parsed.get("recipients_count").unwrap().as_u64().unwrap(), 0);
     assert_eq!(parsed.get("exists").unwrap().as_bool().unwrap(), false);
 
@@ -165,7 +180,8 @@ async fn test_agent_message_missing_target_agent_returns_structured_error() -> a
 
 #[serial_test::serial]
 #[tokio::test]
-async fn test_agent_message_existing_agent_without_live_session_returns_structured_error() -> anyhow::Result<()> {
+async fn test_agent_message_existing_agent_without_live_session_returns_structured_error(
+) -> anyhow::Result<()> {
     let workspace = support::TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -183,8 +199,10 @@ async fn test_agent_message_existing_agent_without_live_session_returns_structur
 
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     let registry = default_registry();
-    let manifest_content = std::fs::read_to_string(workspace.agents_dir.join("sender-agent/SKILL.md"))?;
-    let manifest: AgentManifest = serde_yaml::from_str(manifest_content.split("---").nth(1).unwrap())?;
+    let manifest_content =
+        std::fs::read_to_string(workspace.agents_dir.join("sender-agent/SKILL.md"))?;
+    let manifest: AgentManifest =
+        serde_yaml::from_str(manifest_content.split("---").nth(1).unwrap())?;
     let policy = PolicyEngine::new(manifest.clone());
 
     let args = serde_json::json!({
@@ -208,8 +226,14 @@ async fn test_agent_message_existing_agent_without_live_session_returns_structur
 
     let parsed: serde_json::Value = serde_json::from_str(&result)?;
     assert!(!parsed.get("ok").unwrap().as_bool().unwrap());
-    assert_eq!(parsed.get("status").unwrap().as_str().unwrap(), "no_live_recipients");
-    assert_eq!(parsed.get("target_agent_id").unwrap().as_str().unwrap(), "receiver-agent");
+    assert_eq!(
+        parsed.get("status").unwrap().as_str().unwrap(),
+        "no_live_recipients"
+    );
+    assert_eq!(
+        parsed.get("target_agent_id").unwrap().as_str().unwrap(),
+        "receiver-agent"
+    );
     assert_eq!(parsed.get("recipients_count").unwrap().as_u64().unwrap(), 0);
     assert_eq!(parsed.get("exists").unwrap().as_bool().unwrap(), true);
 

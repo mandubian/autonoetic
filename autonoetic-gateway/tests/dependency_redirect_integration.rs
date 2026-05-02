@@ -1,17 +1,19 @@
 mod support;
 
-use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::policy::PolicyEngine;
+use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 
 fn make_manifest(has_network: bool) -> AgentManifest {
-    let mut caps = vec![
-        Capability::CodeExecution {
-            patterns: vec!["python3 ".to_string(), "pip ".to_string(), "bash -c ".to_string()],
-            commands: vec![],
-        },
-    ];
+    let mut caps = vec![Capability::CodeExecution {
+        patterns: vec![
+            "python3 ".to_string(),
+            "pip ".to_string(),
+            "bash -c ".to_string(),
+        ],
+        commands: vec![],
+    }];
     if has_network {
         caps.push(Capability::NetworkAccess {
             hosts: vec!["*".to_string()],
@@ -59,19 +61,21 @@ fn exec_sandbox(manifest: &AgentManifest, command: &str) -> serde_json::Value {
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     let args = serde_json::json!({ "command": command });
-    let result = registry.execute(
-        "sandbox_exec",
-        manifest,
-        &policy,
-        &agent_dir,
-        None::<&std::path::Path>,
-        &serde_json::to_string(&args).unwrap(),
-        Some("test-session"),
-        None,
-        None::<&autonoetic_types::config::GatewayConfig>,
-        None,
-        None,
-    ).unwrap();
+    let result = registry
+        .execute(
+            "sandbox_exec",
+            manifest,
+            &policy,
+            &agent_dir,
+            None::<&std::path::Path>,
+            &serde_json::to_string(&args).unwrap(),
+            Some("test-session"),
+            None,
+            None::<&autonoetic_types::config::GatewayConfig>,
+            None,
+            None,
+        )
+        .unwrap();
 
     serde_json::from_str(&result).unwrap()
 }
@@ -89,7 +93,10 @@ fn test_pip_install_from_non_network_agent_returns_redirect() {
 #[test]
 fn test_npm_install_from_non_network_agent_returns_redirect() {
     let manifest = make_manifest(false);
-    let parsed = exec_sandbox(&manifest, "bash -c \"cd /tmp/project && npm install express\"");
+    let parsed = exec_sandbox(
+        &manifest,
+        "bash -c \"cd /tmp/project && npm install express\"",
+    );
 
     assert_eq!(parsed["ok"], false);
     assert_eq!(parsed["dependency_layer_required"], true);
@@ -120,19 +127,21 @@ fn exec_sandbox_with_artifact(
         "command": command,
         "artifact_id": artifact_id,
     });
-    let result = registry.execute(
-        "sandbox_exec",
-        manifest,
-        &policy,
-        &agent_dir,
-        Some(tmpdir.path()),
-        &serde_json::to_string(&args).unwrap(),
-        Some("test-session"),
-        None,
-        None::<&autonoetic_types::config::GatewayConfig>,
-        None,
-        None,
-    ).unwrap();
+    let result = registry
+        .execute(
+            "sandbox_exec",
+            manifest,
+            &policy,
+            &agent_dir,
+            Some(tmpdir.path()),
+            &serde_json::to_string(&args).unwrap(),
+            Some("test-session"),
+            None,
+            None::<&autonoetic_types::config::GatewayConfig>,
+            None,
+            None,
+        )
+        .unwrap();
 
     serde_json::from_str(&result).unwrap()
 }

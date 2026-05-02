@@ -2,11 +2,11 @@
 //!
 //! Helpers for persisting and loading agent reevaluation state.
 
-use autonoetic_types::tool_error::tagged;
 use crate::policy::PolicyEngine;
 use crate::runtime::tools::NativeToolRegistry;
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{ReevaluationState, ScheduledAction};
+use autonoetic_types::tool_error::tagged;
 use std::path::Path;
 
 pub fn reevaluation_state_path(agent_dir: &Path) -> std::path::PathBuf {

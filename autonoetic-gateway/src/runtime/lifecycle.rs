@@ -67,7 +67,10 @@ fn compose_foundation(manifest: &AgentManifest) -> String {
         }
     });
     let has_code_execution = manifest.capabilities.iter().any(|c| {
-        matches!(c, autonoetic_types::capability::Capability::CodeExecution { .. })
+        matches!(
+            c,
+            autonoetic_types::capability::Capability::CodeExecution { .. }
+        )
     });
 
     if has_workflow_caps || !is_script_mode {
@@ -293,7 +296,9 @@ pub(crate) fn render_user_context_snippet(
                 parsed
             };
 
-            if filtered.is_null() || (filtered.is_object() && filtered.as_object().unwrap().is_empty()) {
+            if filtered.is_null()
+                || (filtered.is_object() && filtered.as_object().unwrap().is_empty())
+            {
                 return None;
             }
 
@@ -393,7 +398,7 @@ mod agentskills_bridging_tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
-        compression: None,
+            compression: None,
         }
     }
 }
@@ -544,8 +549,7 @@ fn tool_result_counts_as_progress(result: &str) -> bool {
         if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
             return ok;
         }
-        if let Some(approval_required) = parsed.get("approval_required").and_then(|v| v.as_bool())
-        {
+        if let Some(approval_required) = parsed.get("approval_required").and_then(|v| v.as_bool()) {
             return !approval_required;
         }
         if let Some(exit_code) = parsed.get("exit_code").and_then(|v| v.as_i64()) {
@@ -628,9 +632,7 @@ impl AgentExecutor {
 
     pub fn with_root_session_budget(
         mut self,
-        registry: Option<
-            Arc<crate::runtime::root_session_budget::RootSessionBudgetRegistry>,
-        >,
+        registry: Option<Arc<crate::runtime::root_session_budget::RootSessionBudgetRegistry>>,
     ) -> Self {
         self.root_session_budget = registry;
         self
@@ -1000,9 +1002,7 @@ impl AgentExecutor {
         let pending_approval_ids = self
             .session_id
             .as_ref()
-            .and_then(|sid| {
-                self.config.as_ref().map(|cfg| (cfg.as_ref(), sid.as_str()))
-            })
+            .and_then(|sid| self.config.as_ref().map(|cfg| (cfg.as_ref(), sid.as_str())))
             .map(|(cfg, sid)| {
                 crate::scheduler::approval::pending_approval_requests_for_session(
                     cfg,
@@ -1041,9 +1041,7 @@ impl AgentExecutor {
     /// from the per-session registry and pairs it with the configured
     /// limit (when one exists). Returns an empty list when budgets are
     /// disabled or counters have not been observed yet for this session.
-    fn snapshot_budget_meters(
-        &self,
-    ) -> Vec<crate::runtime::state_attestation::BudgetMeter> {
+    fn snapshot_budget_meters(&self) -> Vec<crate::runtime::state_attestation::BudgetMeter> {
         use crate::runtime::state_attestation::BudgetMeter;
         let mut meters = Vec::new();
         let session_id = match self.session_id.as_deref() {
@@ -1299,9 +1297,7 @@ impl AgentExecutor {
                         })),
                     );
                     if !allow {
-                        let mut msg = format!(
-                            "runtime lock drift detected ({drift_field}): "
-                        );
+                        let mut msg = format!("runtime lock drift detected ({drift_field}): ");
                         if drift.locked_binary_sha256.is_some() {
                             msg.push_str(&format!(
                                 "binary SHA locked={:?}, current={:?}. ",
@@ -1363,7 +1359,7 @@ impl AgentExecutor {
                         msg.sender_agent_id, msg.sender_session_id, msg.message
                     );
                     history.push(Message::user(text.clone()));
-                    
+
                     let _ = tracer.log_event(
                         "agent_message",
                         "received",
@@ -1374,7 +1370,7 @@ impl AgentExecutor {
                             "sender_session_id": msg.sender_session_id,
                         })),
                     );
-                    
+
                     let _ = store.mark_message_delivered(&msg.message_id, &session_id);
                 }
             }
@@ -2221,12 +2217,11 @@ impl AgentExecutor {
                     }
 
                     if let Some(root_budget) = self.root_session_budget.as_ref() {
-                        let root = crate::runtime::content_store::root_session_id(&session_id)
-                            .to_string();
-                        if let Err(e) = root_budget.reserve_tool_invocations(
-                            &root,
-                            response.tool_calls.len() as u64,
-                        ) {
+                        let root =
+                            crate::runtime::content_store::root_session_id(&session_id).to_string();
+                        if let Err(e) = root_budget
+                            .reserve_tool_invocations(&root, response.tool_calls.len() as u64)
+                        {
                             let cp = self.build_checkpoint(
                                 history,
                                 &turn_id,
@@ -2315,15 +2310,19 @@ impl AgentExecutor {
 
                         let pending_action = match self.gateway_store.as_ref() {
                             Some(store) => {
-                                let approval = store.get_approval(&request_id)
-                                    .map_err(|e| anyhow::anyhow!(
+                                let approval = store.get_approval(&request_id).map_err(|e| {
+                                    anyhow::anyhow!(
                                         "failed to fetch approval {} while saving continuation: {}",
-                                        request_id, e
-                                    ))?;
-                                let approval = approval.ok_or_else(|| anyhow::anyhow!(
-                                    "missing approval {} while saving continuation",
-                                    request_id
-                                ))?;
+                                        request_id,
+                                        e
+                                    )
+                                })?;
+                                let approval = approval.ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "missing approval {} while saving continuation",
+                                        request_id
+                                    )
+                                })?;
                                 Some(approval.action)
                             }
                             None => None,
@@ -2538,17 +2537,41 @@ impl AgentExecutor {
                                         "timeout" => Some(autonoetic_types::tool_error::ToolErrorType::Timeout),
                                         _ => None,
                                     });
-                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id) {
-                                    self.guard.register_failure(&tc.name, &tc.arguments, error_type.as_ref());
+                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id)
+                                {
+                                    self.guard.register_failure(
+                                        &tc.name,
+                                        &tc.arguments,
+                                        error_type.as_ref(),
+                                    );
                                 }
                             } else if tool_result_counts_as_progress(result) {
-                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id) {
+                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id)
+                                {
                                     self.guard.register_progress(&tc.name, &tc.arguments);
                                 }
                             }
                             if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {
                                 self.guard.register_child_failure();
                             }
+                        }
+                    }
+
+                    // Keep the transcript index current for live diagnostics such as
+                    // session_peek while a child agent is still tool-stepping.
+                    if let Some(gateway_dir) = self.gateway_dir.as_ref() {
+                        if let Err(e) = persist_history_to_content_store(
+                            &self.agent_dir,
+                            &session_id,
+                            history,
+                            gateway_dir,
+                            &mut tracer,
+                            &disclosure_state,
+                            self.gateway_store.as_deref(),
+                            Some(&self.manifest.agent.id),
+                            self.session_started_at.as_deref(),
+                        ) {
+                            tracing::warn!("Failed to persist history after tool batch: {}", e);
                         }
                     }
 
@@ -2983,8 +3006,8 @@ fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
 ///    from launching new specialized operations (web search, revision creation,
 ///    promotion) while waiting for human approval.
 /// 3. **Child session handoff**: child agent sessions (session_id contains `/`)
-///    get Core-only tools by default unless the parent explicitly requests more
-///    via manifest-declared tiers.
+///    get Core-only tools by default, plus the non-core tiers implied by their
+///    manifest capabilities.
 ///
 /// Manifest-declared tiers always take precedence over runtime inference — if an
 /// agent explicitly restricts itself, the restriction is honoured.
@@ -3009,14 +3032,56 @@ fn determine_tool_tier_filter(
         return crate::runtime::tools::ToolTierFilter::core_and_workflow_with_approvals();
     }
 
-    let is_child = session_id
-        .map(|sid| sid.contains('/'))
-        .unwrap_or(false);
+    let is_child = session_id.map(|sid| sid.contains('/')).unwrap_or(false);
     if is_child {
-        return crate::runtime::tools::ToolTierFilter::core_only();
+        return child_tool_tier_filter_for_manifest(manifest);
     }
 
     crate::runtime::tools::ToolTierFilter::all()
+}
+
+fn child_tool_tier_filter_for_manifest(
+    manifest: &AgentManifest,
+) -> crate::runtime::tools::ToolTierFilter {
+    use autonoetic_types::agent::ToolTier;
+    use autonoetic_types::capability::Capability;
+
+    let mut allowed_tiers = vec![ToolTier::Core];
+
+    let needs_workflow = manifest.capabilities.iter().any(|c| {
+        matches!(
+            c,
+            Capability::AgentSpawn { .. }
+                | Capability::AgentMessage { .. }
+                | Capability::SchedulerAccess { .. }
+                | Capability::BackgroundReevaluation { .. }
+                | Capability::ApprovalQueue { .. }
+                | Capability::SchedulerSignal { .. }
+                | Capability::Evaluation { .. }
+        )
+    });
+    if needs_workflow {
+        allowed_tiers.push(ToolTier::Workflow);
+    }
+
+    let needs_specialized = manifest.capabilities.iter().any(|c| {
+        matches!(
+            c,
+            Capability::AgentRevision { .. }
+                | Capability::ConstitutionalProposal { .. }
+                | Capability::SkillInstall { .. }
+                | Capability::CredentialAccess { .. }
+                | Capability::UserProfileAccess { .. }
+        )
+    });
+    if needs_specialized {
+        allowed_tiers.push(ToolTier::Specialized);
+    }
+
+    crate::runtime::tools::ToolTierFilter {
+        allowed_tiers,
+        always_include_approval_tools: true,
+    }
 }
 
 /// Manifest/env first; if still unknown and provider is OpenRouter, use the public models API cache.
@@ -3103,8 +3168,42 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
-        compression: None,
+            compression: None,
         }
+    }
+
+    #[test]
+    fn child_agent_spawn_capability_exposes_workflow_tools() {
+        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn {
+            max_children: 10,
+            max_spawn_depth: 0,
+        }]);
+        let filter = determine_tool_tier_filter(
+            &manifest,
+            Some("root/agent-factory.default-12345678"),
+            false,
+        );
+
+        assert!(filter.allows("content_write"));
+        assert!(filter.allows("agent_spawn"));
+        assert!(filter.allows("workflow_wait"));
+        assert!(!filter.allows("agent_revision_promote"));
+    }
+
+    #[test]
+    fn child_agent_revision_capability_exposes_revision_tools() {
+        let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+            patterns: vec!["*".to_string()],
+        }]);
+        let filter = determine_tool_tier_filter(
+            &manifest,
+            Some("root/specialized_builder.default-12345678"),
+            false,
+        );
+
+        assert!(filter.allows("content_read"));
+        assert!(filter.allows("agent_revision_create_from_intent"));
+        assert!(filter.allows("agent_revision_promote"));
     }
 
     #[test]
@@ -3605,7 +3704,10 @@ mod tests {
 
     #[test]
     fn test_compose_foundation_includes_workflow_for_agent_spawn() {
-        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn { max_children: 5, max_spawn_depth: 0 }]);
+        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 0,
+        }]);
         let foundation = compose_foundation(&manifest);
         assert!(foundation.contains("# Foundation Workflow"));
     }
@@ -4404,11 +4506,13 @@ fn workflow_status_user_message_for_chat(summary: &str, planner_text_empty: bool
 
 /// Normalizes a message the same way [`persist_history_to_content_store`] does before
 /// persisting, so we can compare fresh turns to already-stored (redacted) rows.
-fn normalize_message_for_persist_snapshot(msg: &Message, disclosure_state: &DisclosureState) -> Message {
+fn normalize_message_for_persist_snapshot(
+    msg: &Message,
+    disclosure_state: &DisclosureState,
+) -> Message {
     let mut m = msg.clone();
-    m.content = crate::log_redaction::redact_text_for_logs(
-        &disclosure_state.filter_reply(&m.content),
-    );
+    m.content =
+        crate::log_redaction::redact_text_for_logs(&disclosure_state.filter_reply(&m.content));
     for tc in &mut m.tool_calls {
         tc.arguments = crate::log_redaction::redact_text_for_logs(
             &disclosure_state.filter_reply(&tc.arguments),
@@ -4438,7 +4542,7 @@ fn longest_history_suffix_prefix_overlap(
     0
 }
 
-/// Persists conversation history to content store at hibernate points.
+/// Persists conversation history to content store at diagnostic checkpoints.
 fn persist_history_to_content_store(
     _agent_dir: &Path,
     session_id: &str,
@@ -4473,13 +4577,12 @@ fn persist_history_to_content_store(
             .cloned()
             .collect();
 
-        let overlap =
-            longest_history_suffix_prefix_overlap(&merged_history, &incoming_tail, disclosure_state);
-        merged_history.extend(
-            incoming_tail[overlap..]
-                .iter()
-                .cloned(),
+        let overlap = longest_history_suffix_prefix_overlap(
+            &merged_history,
+            &incoming_tail,
+            disclosure_state,
         );
+        merged_history.extend(incoming_tail[overlap..].iter().cloned());
     }
 
     // Bound persisted history size while preserving the first system message if present.
@@ -4710,7 +4813,11 @@ mod history_persistence_tests {
         let bytes = store.read_by_name("sess-merge", "session_history")?;
         let persisted: Vec<Message> = serde_json::from_slice(&bytes)?;
 
-        assert_eq!(persisted.len(), 5, "expected sys + 4 non-system, no duplicated hello turn");
+        assert_eq!(
+            persisted.len(),
+            5,
+            "expected sys + 4 non-system, no duplicated hello turn"
+        );
         assert_eq!(persisted[1].content, "hello");
         assert_eq!(persisted[2].content, "hi there");
         assert_eq!(persisted[3].content, "next");

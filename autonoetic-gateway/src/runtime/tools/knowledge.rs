@@ -1,7 +1,9 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
-use crate::runtime::tools::{block_on_memory, tier2_memory_for_native_tool, NativeTool, NativeToolRegistry};
+use crate::runtime::tools::{
+    block_on_memory, tier2_memory_for_native_tool, NativeTool, NativeToolRegistry,
+};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use serde::Deserialize;

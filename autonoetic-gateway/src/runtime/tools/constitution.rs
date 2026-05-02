@@ -387,11 +387,10 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
             .to_error_response());
         }
         if args.justification.trim().is_empty() {
-            return Ok(ToolError::validation(
-                "justification must not be empty",
-                None::<String>,
-            )
-            .to_error_response());
+            return Ok(
+                ToolError::validation("justification must not be empty", None::<String>)
+                    .to_error_response(),
+            );
         }
 
         let Some(store) = gateway_store else {
@@ -483,8 +482,8 @@ mod tests {
 
     #[test]
     fn extract_section_zero() {
-        let extract = extract_section(CONSTITUTION_TEXT, "§0")
-            .expect("section 0 (Rights) must exist");
+        let extract =
+            extract_section(CONSTITUTION_TEXT, "§0").expect("section 0 (Rights) must exist");
         assert!(extract.starts_with("## 0. "));
         // Should include the Ri-0.10 row but stop before the next `## ` section.
         assert!(extract.contains("Ri-0.10"));
@@ -500,8 +499,7 @@ mod tests {
     #[test]
     fn extract_pending_rule() {
         // R+++3 is in the constitution as a pending constitutional rule.
-        let extract = extract_section(CONSTITUTION_TEXT, "R+++3")
-            .expect("R+++3 must exist");
+        let extract = extract_section(CONSTITUTION_TEXT, "R+++3").expect("R+++3 must exist");
         assert!(extract.contains("R+++3"));
     }
 

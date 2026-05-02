@@ -378,9 +378,7 @@ pub fn next_occurrence(
 ) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Some(interval_secs) = cron.interval_seconds {
         let candidate = after + Duration::seconds(interval_secs as i64);
-        return candidate
-            .with_nanosecond(0)
-            .or(Some(candidate));
+        return candidate.with_nanosecond(0).or(Some(candidate));
     }
 
     let mut candidate = after + Duration::minutes(1);

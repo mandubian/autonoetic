@@ -111,7 +111,8 @@ impl GatewayStore {
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
         param_vals.push(Box::new(limit as i64));
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_vals.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_vals.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), |row| row_to_proposal(row))?;
 

@@ -308,7 +308,9 @@ fn try_read_artifact_ref_file(
 
     let ref_record = gs
         .resolve_artifact_ref_any_scope(ref_id, session_id)?
-        .ok_or_else(|| anyhow::anyhow!("artifact_ref '{}' not found, expired, or revoked", ref_id))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("artifact_ref '{}' not found, expired, or revoked", ref_id)
+        })?;
 
     let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
     let bundle = artifact_store

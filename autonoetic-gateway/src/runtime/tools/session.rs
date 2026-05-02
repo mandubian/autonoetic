@@ -454,7 +454,10 @@ impl NativeTool for SessionSummarizeTool {
         #[derive(Deserialize)]
         struct Args {
             transcript_handle: String,
-            #[serde(default = "default_max_length", deserialize_with = "crate::runtime::tools::deserialize_usize_lenient")]
+            #[serde(
+                default = "default_max_length",
+                deserialize_with = "crate::runtime::tools::deserialize_usize_lenient"
+            )]
             max_length: usize,
         }
 

@@ -67,7 +67,8 @@ impl NativeTool for ApprovalListTool {
             return Ok(autonoetic_types::tool_error::ToolError::fatal(
                 "Gateway store not available",
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         };
 
         if let Some(rid) = &args.request_id {
@@ -76,11 +77,16 @@ impl NativeTool for ApprovalListTool {
                 Some(r) => Ok(serde_json::json!({
                     "ok": true,
                     "approval": approval_summary(&r),
-                }).to_string()),
+                })
+                .to_string()),
                 None => Ok(autonoetic_types::tool_error::ToolError::not_found(
                     format!("approval '{}'", rid),
-                    Some("Use approval.list to see all pending approvals for this session.".to_string()),
-                ).to_error_response()),
+                    Some(
+                        "Use approval.list to see all pending approvals for this session."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response()),
             };
         }
 
@@ -108,7 +114,8 @@ impl NativeTool for ApprovalListTool {
             "ok": true,
             "pending": mine,
             "recent_decisions": decision_info,
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -174,15 +181,19 @@ impl NativeTool for ApprovalWithdrawTool {
             return Ok(autonoetic_types::tool_error::ToolError::fatal(
                 "Gateway store not available",
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         };
 
         let request = store.get_approval(&args.request_id)?;
         match request {
             None => Ok(autonoetic_types::tool_error::ToolError::not_found(
                 format!("approval '{}'", args.request_id),
-                Some("Use approval.list to see all pending approvals for this session.".to_string()),
-            ).to_error_response()),
+                Some(
+                    "Use approval.list to see all pending approvals for this session.".to_string(),
+                ),
+            )
+            .to_error_response()),
             Some(r) => {
                 if r.agent_id != manifest.agent.id {
                     return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
@@ -250,9 +261,7 @@ fn approval_summary(r: &autonoetic_types::background::ApprovalRequest) -> serde_
             "hosts": detected_hosts,
         }),
         autonoetic_types::background::ScheduledAction::AgentInstall {
-            agent_id,
-            summary,
-            ..
+            agent_id, summary, ..
         } => serde_json::json!({
             "kind": "agent_install",
             "agent_id": agent_id,

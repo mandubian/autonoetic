@@ -236,7 +236,9 @@ pub fn render_skill_document(
     let wrapper = SkillFrontmatter {
         name,
         description: &manifest.agent.description,
-        metadata: MetadataWrapper { autonoetic: manifest },
+        metadata: MetadataWrapper {
+            autonoetic: manifest,
+        },
     };
 
     let mut frontmatter = serde_yaml::to_string(&wrapper).map_err(|e| {
@@ -1245,9 +1247,18 @@ artifacts: "not_a_sequence"
         };
         let rendered = render_skill_document(&manifest, "# Instructions").unwrap();
         assert!(rendered.starts_with("---\n"));
-        assert!(rendered.contains("name: Roundtrip Agent\n"), "missing top-level name, got:\n{rendered}");
-        assert!(rendered.contains("metadata:\n  autonoetic:\n"), "missing metadata.autonoetic wrapper, got:\n{rendered}");
-        assert!(rendered.contains("id: roundtrip.agent"), "missing agent id, got:\n{rendered}");
+        assert!(
+            rendered.contains("name: Roundtrip Agent\n"),
+            "missing top-level name, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("metadata:\n  autonoetic:\n"),
+            "missing metadata.autonoetic wrapper, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("id: roundtrip.agent"),
+            "missing agent id, got:\n{rendered}"
+        );
         assert!(rendered.contains("# Instructions"));
     }
 

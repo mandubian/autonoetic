@@ -419,8 +419,12 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("file.txt"), b"same content").unwrap();
 
-        let captured1 = store.create_from_dir(&source, "deps1", "/tmp/d1", None).unwrap();
-        let captured2 = store.create_from_dir(&source, "deps2", "/tmp/d2", None).unwrap();
+        let captured1 = store
+            .create_from_dir(&source, "deps1", "/tmp/d1", None)
+            .unwrap();
+        let captured2 = store
+            .create_from_dir(&source, "deps2", "/tmp/d2", None)
+            .unwrap();
 
         // Same content → same layer_id
         assert_eq!(captured1.layer_id, captured2.layer_id);
@@ -441,7 +445,9 @@ mod tests {
         fs::write(source.join("a.txt"), b"hello").unwrap();
         fs::write(source.join("b.txt"), b"world").unwrap();
 
-        let captured = store.create_from_dir(&source, "test", "/tmp/deps", None).unwrap();
+        let captured = store
+            .create_from_dir(&source, "test", "/tmp/deps", None)
+            .unwrap();
 
         let extract_dir = temp.path().join("extract");
         fs::create_dir_all(&extract_dir).unwrap();
@@ -466,7 +472,9 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("file.txt"), b"content").unwrap();
 
-        let captured = store.create_from_dir(&source, "test", "/tmp/deps", None).unwrap();
+        let captured = store
+            .create_from_dir(&source, "test", "/tmp/deps", None)
+            .unwrap();
         let archive_path = store
             .layers_dir
             .join(&captured.layer_id)
@@ -491,7 +499,9 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("a.txt"), b"content").unwrap();
 
-        let captured = store.create_from_dir(&source, "deps", "/tmp/deps", None).unwrap();
+        let captured = store
+            .create_from_dir(&source, "deps", "/tmp/deps", None)
+            .unwrap();
 
         let artifact_layers = vec![ArtifactLayer {
             layer_id: captured.layer_id.clone(),

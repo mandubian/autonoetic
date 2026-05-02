@@ -13,10 +13,11 @@ mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::approved_exec_cache::{
-    compute_fingerprint, normalize_targets, ApprovedExecCache,
-    ApprovedExecEntry,
+    compute_fingerprint, normalize_targets, ApprovedExecCache, ApprovedExecEntry,
 };
-use autonoetic_gateway::runtime::remote_access::{classify_network_coverage, DetectedPattern, NetworkCoverage};
+use autonoetic_gateway::runtime::remote_access::{
+    classify_network_coverage, DetectedPattern, NetworkCoverage,
+};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
@@ -185,7 +186,12 @@ fn test_classify_coverage_url_only() {
         "https://api.example.com/data",
     )];
     let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
-    assert_eq!(coverage, NetworkCoverage::Concrete { targets: vec!["api.example.com".to_string()] });
+    assert_eq!(
+        coverage,
+        NetworkCoverage::Concrete {
+            targets: vec!["api.example.com".to_string()]
+        }
+    );
 }
 
 #[test]
@@ -208,7 +214,9 @@ fn test_classify_coverage_import_plus_url_is_concrete() {
     let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
     assert_eq!(
         coverage,
-        NetworkCoverage::Concrete { targets: vec!["api.example.com".to_string()] },
+        NetworkCoverage::Concrete {
+            targets: vec!["api.example.com".to_string()]
+        },
         "import + URL should classify as Concrete (imports are weak signals)"
     );
 }
@@ -222,7 +230,9 @@ fn test_classify_coverage_function_call_plus_url_is_concrete() {
     let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
     assert_eq!(
         coverage,
-        NetworkCoverage::Concrete { targets: vec!["api.example.com".to_string()] },
+        NetworkCoverage::Concrete {
+            targets: vec!["api.example.com".to_string()]
+        },
         "function_call + URL should classify as Concrete (function_call is a weak signal)"
     );
 }
@@ -547,7 +557,9 @@ requests.get("https://api.cache-test.dev")"#;
     let coverage = classify_network_coverage(&patterns, targets.clone());
     assert_eq!(
         coverage,
-        NetworkCoverage::Concrete { targets: targets.clone() },
+        NetworkCoverage::Concrete {
+            targets: targets.clone()
+        },
         "import + URL should classify as Concrete"
     );
 

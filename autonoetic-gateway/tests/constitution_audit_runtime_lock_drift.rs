@@ -128,7 +128,10 @@ fn skipped_when_runtime_lock_absent() {
 
     let result = check_runtime_lock_drift(&agent_dir);
     assert!(
-        matches!(result, DriftCheckResult::Skipped(DriftSkippedReason::LockAbsent)),
+        matches!(
+            result,
+            DriftCheckResult::Skipped(DriftSkippedReason::LockAbsent)
+        ),
         "absent lock should be Skipped(LockAbsent), got {:?}",
         result
     );
@@ -144,7 +147,10 @@ fn skipped_when_runtime_lock_malformed() {
 
     let result = check_runtime_lock_drift(&agent_dir);
     assert!(
-        matches!(result, DriftCheckResult::Skipped(DriftSkippedReason::LockMalformed(_))),
+        matches!(
+            result,
+            DriftCheckResult::Skipped(DriftSkippedReason::LockMalformed(_))
+        ),
         "malformed lock should be Skipped(LockMalformed), got {:?}",
         result
     );

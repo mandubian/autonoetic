@@ -159,9 +159,7 @@ impl SecurityAnalyzer {
             .next()
             .unwrap_or("")
             .to_lowercase();
-        first == "format"
-            || first.ends_with("/format.com")
-            || first.ends_with("\\format.com")
+        first == "format" || first.ends_with("/format.com") || first.ends_with("\\format.com")
     }
 
     /// Check for destructive commands that can destroy data.
@@ -603,7 +601,10 @@ impl PolicyEngine {
     /// A value of 0 means "use the system default ceiling".
     pub fn spawn_depth_limit(&self) -> Option<u32> {
         self.manifest.capabilities.iter().find_map(|cap| {
-            if let Capability::AgentSpawn { max_spawn_depth, .. } = cap {
+            if let Capability::AgentSpawn {
+                max_spawn_depth, ..
+            } = cap
+            {
                 Some(*max_spawn_depth)
             } else {
                 None

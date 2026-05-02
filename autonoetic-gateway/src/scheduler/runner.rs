@@ -182,7 +182,10 @@ pub async fn handle_due_wake(
                 if let Some(store) = execution.gateway_store() {
                     let candidates = store.get_recent_approvals_for_agent(&request.agent_id, 10)?;
                     let similar = crate::scheduler::approval_similarity::find_similar_approvals(
-                        &request, &candidates, 1, 0.7,
+                        &request,
+                        &candidates,
+                        1,
+                        0.7,
                     );
                     if let Some(best) = similar.first() {
                         request.similar_to_request_id = Some(best.request_id.clone());

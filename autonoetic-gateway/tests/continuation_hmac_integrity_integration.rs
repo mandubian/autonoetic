@@ -7,13 +7,13 @@
 
 mod support;
 
+use autonoetic_gateway::llm::{Message, Role, ToolCall};
 use autonoetic_gateway::runtime::continuation::{
     continuation_hmac_key, continuations_dir, is_integrity_error, load_continuation,
     save_continuation, ContinuationIntegrityError, PendingApprovalToolCall, SignedContinuation,
     TurnContinuation,
 };
 use autonoetic_gateway::runtime::guard::LoopGuardState;
-use autonoetic_gateway::llm::{Message, Role, ToolCall};
 use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::config::GatewayConfig;
 
@@ -115,8 +115,11 @@ fn test_tampered_payload_rejected() {
 
     let mut envelope: SignedContinuation = serde_json::from_str(&raw).expect("parse envelope");
     envelope.payload_json = envelope.payload_json.replace("echo hello", "rm -rf /");
-    std::fs::write(&path, serde_json::to_string_pretty(&envelope).expect("serialize"))
-        .expect("write tampered");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&envelope).expect("serialize"),
+    )
+    .expect("write tampered");
 
     let result = load_continuation(&config, "task-001");
     assert!(result.is_err(), "tampered continuation should be rejected");
@@ -142,9 +145,13 @@ fn test_tampered_hmac_rejected() {
     let raw = std::fs::read_to_string(&path).expect("read");
 
     let mut envelope: SignedContinuation = serde_json::from_str(&raw).expect("parse envelope");
-    envelope.hmac_hex = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
-    std::fs::write(&path, serde_json::to_string_pretty(&envelope).expect("serialize"))
-        .expect("write tampered hmac");
+    envelope.hmac_hex =
+        "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&envelope).expect("serialize"),
+    )
+    .expect("write tampered hmac");
 
     let result = load_continuation(&config, "task-002");
     assert!(result.is_err(), "tampered HMAC should be rejected");
@@ -184,7 +191,10 @@ fn test_continuation_key_derivation_uses_node_id() {
     let key1 = continuation_hmac_key(&config1);
     let key2 = continuation_hmac_key(&config2);
 
-    assert_ne!(key1, key2, "different node_id should produce different keys");
+    assert_ne!(
+        key1, key2,
+        "different node_id should produce different keys"
+    );
 }
 
 #[test]
@@ -225,7 +235,10 @@ fn test_different_key_rejects_continuation() {
 
     let result = load_continuation(&config_load, "task-key-001");
     assert!(result.is_err(), "different key should reject");
-    assert!(is_integrity_error(&result.unwrap_err()), "should be typed integrity error");
+    assert!(
+        is_integrity_error(&result.unwrap_err()),
+        "should be typed integrity error"
+    );
 }
 
 #[test]
@@ -246,7 +259,9 @@ fn test_tamper_returns_typed_integrity_error() {
 
     let err = load_continuation(&config, "task-typed").unwrap_err();
     assert!(is_integrity_error(&err), "should be integrity error");
-    let ie = err.downcast_ref::<ContinuationIntegrityError>().expect("downcast");
+    let ie = err
+        .downcast_ref::<ContinuationIntegrityError>()
+        .expect("downcast");
     assert_eq!(ie.task_id, "task-typed");
 }
 
@@ -262,5 +277,8 @@ fn test_io_error_is_not_treated_as_tampering() {
     std::fs::write(&path, "this is not valid json{{{").expect("write");
 
     let err = load_continuation(&config, "task-bad-json").unwrap_err();
-    assert!(!is_integrity_error(&err), "parse error should not be integrity error");
+    assert!(
+        !is_integrity_error(&err),
+        "parse error should not be integrity error"
+    );
 }

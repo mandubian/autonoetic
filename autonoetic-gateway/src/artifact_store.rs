@@ -119,7 +119,8 @@ impl ArtifactStore {
         layers: &[ArtifactLayer],
         kind: &ArtifactKind,
     ) -> String {
-        let canonical = Self::compute_canonical_artifact_digest(file_handles, entrypoints, layers, kind);
+        let canonical =
+            Self::compute_canonical_artifact_digest(file_handles, entrypoints, layers, kind);
         // Derive the short local locator from the first 4 bytes (8 hex chars) of the canonical digest
         let hex = &canonical["sha256:".len()..];
         format!("{}{:.8}", ARTIFACT_ID_PREFIX, hex)
@@ -443,7 +444,10 @@ impl ArtifactStore {
         let bundle_json = serde_json::to_string(&bundle)?;
         let artifact_manifest_digest = Self::compute_digest(&bundle_json);
 
-        let bundle = ArtifactBundle { artifact_manifest_digest, ..bundle };
+        let bundle = ArtifactBundle {
+            artifact_manifest_digest,
+            ..bundle
+        };
 
         // Persist to disk
         self.persist_bundle(&bundle)?;
@@ -687,7 +691,10 @@ mod tests {
         let inspected = store.inspect(&bundle.artifact_id).unwrap();
         assert_eq!(inspected.artifact_id, bundle.artifact_id);
         assert_eq!(inspected.files.len(), 2);
-        assert_eq!(inspected.artifact_manifest_digest, bundle.artifact_manifest_digest);
+        assert_eq!(
+            inspected.artifact_manifest_digest,
+            bundle.artifact_manifest_digest
+        );
 
         // Resolve files
         let resolved = store.resolve_files(&bundle.artifact_id).unwrap();

@@ -89,11 +89,7 @@ fn skill_md(capabilities_yaml: &str) -> String {
     )
 }
 
-fn write_revision_skill(
-    gateway_dir: &std::path::Path,
-    revision_id: &str,
-    capabilities_yaml: &str,
-) {
+fn write_revision_skill(gateway_dir: &std::path::Path, revision_id: &str, capabilities_yaml: &str) {
     let dir = gateway_dir
         .join("revisions/agents")
         .join(AGENT_ID)
@@ -124,10 +120,7 @@ fn make_revision_record(revision_id: &str) -> AgentRevisionRecord {
     }
 }
 
-fn setup_promote_harness(
-    outgoing_caps_yaml: &str,
-    incoming_caps_yaml: &str,
-) -> PromoteHarness {
+fn setup_promote_harness(outgoing_caps_yaml: &str, incoming_caps_yaml: &str) -> PromoteHarness {
     let temp = tempdir().expect("tempdir");
     let agents_dir = temp.path().join("agents");
     let agent_dir = agents_dir.join(AGENT_ID);
@@ -235,12 +228,7 @@ fn approve_without_acknowledgement_is_rejected() {
     let gateway_dir = temp.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = GatewayStore::open(&gateway_dir).expect("store");
-    store_revision_promote_approval(
-        &store,
-        "ar-no-ack",
-        vec!["NetworkAccess"],
-        vec![],
-    );
+    store_revision_promote_approval(&store, "ar-no-ack", vec!["NetworkAccess"], vec![]);
 
     let cfg = GatewayConfig::default();
     let result = approve_request_with_options(
@@ -256,7 +244,11 @@ fn approve_without_acknowledgement_is_rejected() {
     );
     let err = result.expect_err("approval without acknowledgement must fail");
     let msg = err.to_string();
-    assert!(msg.contains("Capability-accretion approval (R++2)"), "{}", msg);
+    assert!(
+        msg.contains("Capability-accretion approval (R++2)"),
+        "{}",
+        msg
+    );
     assert!(msg.contains("NetworkAccess"), "{}", msg);
     assert!(msg.contains("Missing: [NetworkAccess]"), "{}", msg);
 }

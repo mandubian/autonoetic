@@ -72,9 +72,8 @@ impl GatewayStore {
 
     pub fn memory_get(&self, memory_id: &str) -> Result<Option<MemoryObject>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM memories WHERE memory_id = ?1 AND quarantine_reason IS NULL",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT * FROM memories WHERE memory_id = ?1 AND quarantine_reason IS NULL")?;
         let mut rows = stmt.query(params![memory_id])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
@@ -271,11 +270,7 @@ impl GatewayStore {
         Ok(scopes)
     }
 
-    pub fn memory_quarantine_by_revision(
-        &self,
-        revision_id: &str,
-        reason: &str,
-    ) -> Result<usize> {
+    pub fn memory_quarantine_by_revision(&self, revision_id: &str, reason: &str) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let count = conn.execute(
             "UPDATE memories SET quarantine_reason = ?1 WHERE revision_id = ?2 AND quarantine_reason IS NULL",
@@ -292,9 +287,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT * FROM memories WHERE revision_id = ?1 AND quarantine_reason IS NOT NULL ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map(params![revision_id], |row| {
-            memory_object_from_row(row)
-        })?;
+        let rows = stmt.query_map(params![revision_id], |row| memory_object_from_row(row))?;
         let mut results = Vec::new();
         for r in rows {
             results.push(r?);

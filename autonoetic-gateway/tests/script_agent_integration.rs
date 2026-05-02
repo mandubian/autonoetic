@@ -439,16 +439,7 @@ async fn test_script_agent_args_mode_receives_payload_as_argv1() -> anyhow::Resu
 
     let result = execution
         .spawn_agent_once(
-            agent_id,
-            payload,
-            session_id,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
+            agent_id, payload, session_id, None, false, None, None, None, None, None,
         )
         .await;
 

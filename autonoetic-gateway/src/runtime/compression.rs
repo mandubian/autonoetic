@@ -105,9 +105,18 @@ pub fn effective_config(
     (threshold_pct, recent_turns, max_summary_tokens)
 }
 
-fn find_tool_call_parent<'a>(messages: &'a [Message], tool_call_id: &str, search_up_to: usize) -> Option<usize> {
+fn find_tool_call_parent<'a>(
+    messages: &'a [Message],
+    tool_call_id: &str,
+    search_up_to: usize,
+) -> Option<usize> {
     for i in (0..search_up_to).rev() {
-        if matches!(messages[i].role, Role::Assistant) && messages[i].tool_calls.iter().any(|tc| tc.id == tool_call_id) {
+        if matches!(messages[i].role, Role::Assistant)
+            && messages[i]
+                .tool_calls
+                .iter()
+                .any(|tc| tc.id == tool_call_id)
+        {
             return Some(i);
         }
     }
@@ -130,7 +139,10 @@ pub fn split_compressible_messages(
         return (&[], &[]);
     }
 
-    let non_system_count: usize = messages.iter().filter(|m| !matches!(m.role, Role::System)).count();
+    let non_system_count: usize = messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .count();
     let keep_count = recent_turns_to_keep * 2;
 
     if non_system_count <= keep_count {
@@ -173,7 +185,9 @@ pub fn split_compressible_messages(
         if !messages[i].tool_calls.is_empty() {
             for tc in &messages[i].tool_calls {
                 for j in adjusted_split..messages.len() {
-                    if matches!(messages[j].role, Role::Tool) && messages[j].tool_call_id.as_deref() == Some(&tc.id) {
+                    if matches!(messages[j].role, Role::Tool)
+                        && messages[j].tool_call_id.as_deref() == Some(&tc.id)
+                    {
                         if j + 1 > final_split {
                             final_split = j + 1;
                         }
@@ -372,7 +386,8 @@ pub async fn compress_context(
 
     let mut new_history: Vec<Message> = Vec::new();
 
-    let system_messages: Vec<_> = history.iter()
+    let system_messages: Vec<_> = history
+        .iter()
         .filter(|m| matches!(m.role, Role::System))
         .cloned()
         .collect();
@@ -383,9 +398,11 @@ pub async fn compress_context(
         turn_number, summary_text
     )));
 
-    new_history.extend(kept.iter()
-        .filter(|m| !matches!(m.role, Role::System))
-        .cloned());
+    new_history.extend(
+        kept.iter()
+            .filter(|m| !matches!(m.role, Role::System))
+            .cloned(),
+    );
 
     let metadata = CompressionMetadata {
         last_compression_turn: turn_number,
@@ -417,12 +434,7 @@ pub fn persist_compressed_context(
     let handle = store.write(serialized.as_bytes())?;
 
     let name = format!("compressed_context_turn_{}", metadata.last_compression_turn);
-    store.register_name_with_visibility(
-        session_id,
-        &name,
-        &handle,
-        ContentVisibility::Private,
-    )?;
+    store.register_name_with_visibility(session_id, &name, &handle, ContentVisibility::Private)?;
 
     Ok(Some(handle.to_string()))
 }
@@ -544,10 +556,7 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let history = vec![
-            Message::user("hello"),
-            Message::assistant("hi"),
-        ];
+        let history = vec![Message::user("hello"), Message::assistant("hi")];
         let result = CompressionResult {
             history: history.clone(),
             original_history: history.clone(),
@@ -560,22 +569,25 @@ mod tests {
     #[test]
     fn test_resolve_compression_llm_config_from_preset() {
         let mut presets = HashMap::new();
-        presets.insert("haiku".to_string(), LlmPreset {
-            provider: Some("anthropic".to_string()),
-            model: Some("claude-3-haiku-20240307".to_string()),
-            temperature: Some(0.1),
-            fallback_provider: None,
-            fallback_model: None,
-            chat_only: None,
-            context_window_tokens: None,
-            base_url: None,
-            api_key_env: None,
-            thinking: None,
-            tier: None,
-            cost: None,
-            latency: None,
-            routing: None,
-        });
+        presets.insert(
+            "haiku".to_string(),
+            LlmPreset {
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-3-haiku-20240307".to_string()),
+                temperature: Some(0.1),
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                api_key_env: None,
+                thinking: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: None,
+            },
+        );
         let gateway = ContextCompressionConfig {
             enabled: true,
             llm_preset: Some("haiku".to_string()),
@@ -628,11 +640,19 @@ mod tests {
         let (compressible, kept) = split_compressible_messages(&messages, 2);
         assert_eq!(compressible.len(), 4);
         assert_eq!(kept.len(), 4);
-        let kept_has_tool_result = kept.iter().any(|m| m.tool_call_id.as_deref() == Some("tc1"));
-        let kept_has_tool_call = kept.iter().any(|m| m.tool_calls.iter().any(|tc| tc.id == "tc1"));
+        let kept_has_tool_result = kept
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("tc1"));
+        let kept_has_tool_call = kept
+            .iter()
+            .any(|m| m.tool_calls.iter().any(|tc| tc.id == "tc1"));
         assert_eq!(kept_has_tool_result, kept_has_tool_call);
-        let comp_has_tool_result = compressible.iter().any(|m| m.tool_call_id.as_deref() == Some("tc1"));
-        let comp_has_tool_call = compressible.iter().any(|m| m.tool_calls.iter().any(|tc| tc.id == "tc1"));
+        let comp_has_tool_result = compressible
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("tc1"));
+        let comp_has_tool_call = compressible
+            .iter()
+            .any(|m| m.tool_calls.iter().any(|tc| tc.id == "tc1"));
         assert_eq!(comp_has_tool_result, comp_has_tool_call);
     }
 
@@ -657,15 +677,25 @@ mod tests {
             Message::assistant("a3"),
         ];
         let (compressible, kept) = split_compressible_messages(&messages, 2);
-        let has_tool_call = |msgs: &[Message]| msgs.iter().any(|m| m.tool_calls.iter().any(|tc| tc.id == "tc_x"));
-        let has_tool_result = |msgs: &[Message]| msgs.iter().any(|m| m.tool_call_id.as_deref() == Some("tc_x"));
+        let has_tool_call = |msgs: &[Message]| {
+            msgs.iter()
+                .any(|m| m.tool_calls.iter().any(|tc| tc.id == "tc_x"))
+        };
+        let has_tool_result = |msgs: &[Message]| {
+            msgs.iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("tc_x"))
+        };
         if has_tool_result(kept) {
-            assert!(has_tool_call(compressible) || has_tool_call(kept),
-                "Tool result in kept but parent assistant missing from both sides");
+            assert!(
+                has_tool_call(compressible) || has_tool_call(kept),
+                "Tool result in kept but parent assistant missing from both sides"
+            );
         }
         if has_tool_result(compressible) {
-            assert!(has_tool_call(compressible),
-                "Tool result in compressible but parent assistant not in compressible");
+            assert!(
+                has_tool_call(compressible),
+                "Tool result in compressible but parent assistant not in compressible"
+            );
         }
     }
 
@@ -690,11 +720,19 @@ mod tests {
             Message::assistant("a3"),
         ];
         let (compressible, kept) = split_compressible_messages(&messages, 2);
-        let has_tool_call = |msgs: &[Message]| msgs.iter().any(|m| m.tool_calls.iter().any(|tc| tc.id == "tc2"));
-        let has_tool_result = |msgs: &[Message]| msgs.iter().any(|m| m.tool_call_id.as_deref() == Some("tc2"));
+        let has_tool_call = |msgs: &[Message]| {
+            msgs.iter()
+                .any(|m| m.tool_calls.iter().any(|tc| tc.id == "tc2"))
+        };
+        let has_tool_result = |msgs: &[Message]| {
+            msgs.iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("tc2"))
+        };
         if has_tool_result(kept) {
-            assert!(has_tool_call(compressible) || has_tool_call(kept),
-                "Tool result in kept but parent assistant not in either side");
+            assert!(
+                has_tool_call(compressible) || has_tool_call(kept),
+                "Tool result in kept but parent assistant not in either side"
+            );
         }
     }
 
@@ -722,50 +760,53 @@ mod tests {
             last_compression_turn: 10,
             ..Default::default()
         };
-        let history = vec![
-            Message::user("hello"),
-            Message::assistant("hi"),
-        ];
+        let history = vec![Message::user("hello"), Message::assistant("hi")];
         let rt = tokio::runtime::Runtime::new().unwrap();
         let presets = std::collections::HashMap::new();
         let client = reqwest::Client::new();
-        let result = rt.block_on(compress_context(
-            history.clone(),
-            Some(128_000),
-            &gateway,
-            None,
-            &presets,
-            &client,
-            "sess",
-            12,
-            Some(&metadata),
-        )).unwrap();
+        let result = rt
+            .block_on(compress_context(
+                history.clone(),
+                Some(128_000),
+                &gateway,
+                None,
+                &presets,
+                &client,
+                "sess",
+                12,
+                Some(&metadata),
+            ))
+            .unwrap();
         assert!(!result.compressed);
 
-        let result = rt.block_on(compress_context(
-            history.clone(),
-            Some(128_000),
-            &gateway,
-            None,
-            &presets,
-            &client,
-            "sess",
-            16,
-            Some(&metadata),
-        )).unwrap();
+        let result = rt
+            .block_on(compress_context(
+                history.clone(),
+                Some(128_000),
+                &gateway,
+                None,
+                &presets,
+                &client,
+                "sess",
+                16,
+                Some(&metadata),
+            ))
+            .unwrap();
         assert!(!result.compressed);
 
-        let result = rt.block_on(compress_context(
-            history,
-            Some(128_000),
-            &gateway,
-            None,
-            &presets,
-            &client,
-            "sess",
-            20,
-            Some(&metadata),
-        )).unwrap();
+        let result = rt
+            .block_on(compress_context(
+                history,
+                Some(128_000),
+                &gateway,
+                None,
+                &presets,
+                &client,
+                "sess",
+                20,
+                Some(&metadata),
+            ))
+            .unwrap();
         assert!(!result.compressed);
     }
 }

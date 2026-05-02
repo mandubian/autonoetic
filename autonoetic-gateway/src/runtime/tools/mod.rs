@@ -244,9 +244,7 @@ fn with_intent_schema(mut definition: ToolDefinition) -> ToolDefinition {
         return definition;
     };
 
-    let properties = schema
-        .entry("properties")
-        .or_insert_with(|| json!({}));
+    let properties = schema.entry("properties").or_insert_with(|| json!({}));
     let Some(properties_map) = properties.as_object_mut() else {
         return definition;
     };
@@ -265,7 +263,10 @@ fn with_intent_schema(mut definition: ToolDefinition) -> ToolDefinition {
             .entry("required")
             .or_insert_with(|| Value::Array(Vec::new()));
         if let Some(required_arr) = required.as_array_mut() {
-            if !required_arr.iter().any(|value| value.as_str() == Some("intent")) {
+            if !required_arr
+                .iter()
+                .any(|value| value.as_str() == Some("intent"))
+            {
                 required_arr.push(Value::String("intent".to_string()));
             }
         }
@@ -445,9 +446,7 @@ pub(crate) fn tier2_memory_for_native_tool(
     let memory_store: Option<std::sync::Arc<dyn crate::runtime::memory::MemoryStore>> =
         gateway_store.map(|gs| {
             let store: std::sync::Arc<dyn crate::runtime::memory::MemoryStore> =
-                std::sync::Arc::new(
-                    crate::runtime::memory::SqliteMemoryStore::new(gs.clone()),
-                );
+                std::sync::Arc::new(crate::runtime::memory::SqliteMemoryStore::new(gs.clone()));
             store
         });
     crate::runtime::memory::Tier2Memory::open_for_agent(
@@ -994,7 +993,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
-        compression: None,
+            compression: None,
         };
         let unfiltered = registry.available_definitions(&manifest);
         let filtered = registry.available_definitions_filtered(&manifest, None);
@@ -1034,7 +1033,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
-        compression: None,
+            compression: None,
         };
         let filter = ToolTierFilter::core_only();
         let filtered = registry.available_definitions_filtered(&manifest, Some(&filter));
@@ -1253,7 +1252,10 @@ mod tests {
         )
         .unwrap();
 
-        let nested = args.env.get("AUTONOETIC_INPUT").expect("env var should exist");
+        let nested = args
+            .env
+            .get("AUTONOETIC_INPUT")
+            .expect("env var should exist");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(nested).unwrap(),
             serde_json::json!({"location": "Paris", "date": "tomorrow"})

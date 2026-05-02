@@ -45,7 +45,11 @@ pub fn compute_action_similarity(a: &ScheduledAction, b: &ScheduledAction) -> f6
             0.7 * cmd_sim + 0.3 * host_sim
         }
         _ => {
-            if a.kind() == b.kind() { 0.5 } else { 0.0 }
+            if a.kind() == b.kind() {
+                0.5
+            } else {
+                0.0
+            }
         }
     }
 }
@@ -71,7 +75,11 @@ pub fn find_similar_approvals(
             }
         })
         .collect();
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored.truncate(limit);
     scored
 }
@@ -86,7 +94,11 @@ fn jaccard<T: Hash + Eq>(a: &HashSet<T>, b: &HashSet<T>) -> f64 {
     }
     let intersection = a.intersection(b).count() as f64;
     let union = a.union(b).count() as f64;
-    if union == 0.0 { 0.0 } else { intersection / union }
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 #[cfg(test)]

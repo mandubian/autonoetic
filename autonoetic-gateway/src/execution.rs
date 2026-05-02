@@ -516,7 +516,10 @@ impl GatewayExecutionService {
             let decision = policy.can_request_emergency_stop();
             if !decision.is_allowed() {
                 return Err(tagged::Tagged::permission_with_rules(
-                    anyhow::anyhow!("Permission Denied: agent '{}' cannot request emergency stop", aid),
+                    anyhow::anyhow!(
+                        "Permission Denied: agent '{}' cannot request emergency stop",
+                        aid
+                    ),
                     decision
                         .enforced_rules
                         .into_iter()
@@ -547,12 +550,15 @@ impl GatewayExecutionService {
             status: "success".to_string(),
             enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
             target: None,
-            payload: Some(serde_json::json!({
-                "reason": reason,
-                "trigger_kind": trigger_kind,
-                "requested_by_type": requested_by_type,
-                "requested_by_id": requested_by_id,
-            }).to_string()),
+            payload: Some(
+                serde_json::json!({
+                    "reason": reason,
+                    "trigger_kind": trigger_kind,
+                    "requested_by_type": requested_by_type,
+                    "requested_by_id": requested_by_id,
+                })
+                .to_string(),
+            ),
             payload_ref: None,
             evidence_ref: None,
             reason: None,
@@ -2038,10 +2044,8 @@ impl GatewayExecutionService {
             && !result.suspended_for_user_input
             && (self.config.response_validation.enabled || enforcing_manifest_returns)
         {
-            let effective_metadata = build_effective_response_contract_metadata(
-                metadata,
-                manifest_loaded.as_ref(),
-            );
+            let effective_metadata =
+                build_effective_response_contract_metadata(metadata, manifest_loaded.as_ref());
             let metadata_ref: Option<&serde_json::Value> = effective_metadata.as_ref().or(metadata);
             match crate::runtime::response_validation::parse_response_contract(metadata_ref) {
                 Ok(Some(contract)) => {
@@ -2740,7 +2744,8 @@ impl GatewayExecutionService {
         let digest_turn_count = runtime.turn_counter;
         runtime.close_session(close_reason)?;
         {
-            let root_id = crate::runtime::live_digest::base_session_id(&resolved_session_id).to_string();
+            let root_id =
+                crate::runtime::live_digest::base_session_id(&resolved_session_id).to_string();
             let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
             let ctx = autonoetic_types::hooks::HookContext::for_session_closed(
                 &root_id,
@@ -3635,7 +3640,7 @@ mod tests {
             response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
-        compression: None,
+            compression: None,
         };
 
         let history = build_initial_history(

@@ -4,9 +4,7 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
-use autonoetic_types::background::{
-    UserInteraction, UserInteractionKind, UserInteractionStatus,
-};
+use autonoetic_types::background::{UserInteraction, UserInteractionKind, UserInteractionStatus};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use serde_json::json;
@@ -176,7 +174,8 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
     );
     let err = cnt_misuse.expect_err("cnt_ handle misuse should fail validation");
     assert!(
-        err.to_string().contains("content handles (cnt_...) are not filesystem paths"),
+        err.to_string()
+            .contains("content handles (cnt_...) are not filesystem paths"),
         "unexpected error: {}",
         err
     );

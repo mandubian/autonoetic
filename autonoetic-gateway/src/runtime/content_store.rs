@@ -774,9 +774,7 @@ mod tests {
 
         let content = b"resolve probe";
         let handle = store.write(content).unwrap();
-        store
-            .register_name("session-1", "f.py", &handle)
-            .unwrap();
+        store.register_name("session-1", "f.py", &handle).unwrap();
         let short = ContentStore::get_short_alias(&handle);
         let cnt_ref = format!("cnt_{}", short);
 

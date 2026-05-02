@@ -85,14 +85,25 @@ impl NativeTool for SchedulerCronCreateTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let decision = policy.can_schedule("scheduler_cron_create");
         if !decision.is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.create")
-                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
-                .to_error_response());
+            return Ok(ToolError::permission(
+                "Missing SchedulerAccess capability for scheduler.cron.create",
+            )
+            .with_enforced_rules(
+                decision
+                    .enforced_rules
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+            .to_error_response());
         }
 
         let cron = cron_parser::parse_schedule(&args.schedule_expr)
@@ -114,7 +125,8 @@ impl NativeTool for SchedulerCronCreateTool {
                     interval_secs, min_interval
                 ),
                 Some("Use a less frequent schedule.".to_string()),
-            ).to_error_response());
+            )
+            .to_error_response());
         }
 
         let job_count = store
@@ -122,9 +134,13 @@ impl NativeTool for SchedulerCronCreateTool {
             .len();
         if job_count >= cfg.scheduled_jobs.max_per_root {
             return Ok(ToolError::quota_exceeded(
-                format!("Maximum scheduled jobs per root ({}) reached", cfg.scheduled_jobs.max_per_root),
+                format!(
+                    "Maximum scheduled jobs per root ({}) reached",
+                    cfg.scheduled_jobs.max_per_root
+                ),
                 Some("Cancel existing jobs before creating new ones.".to_string()),
-            ).to_error_response());
+            )
+            .to_error_response());
         }
 
         let target = args
@@ -155,18 +171,17 @@ impl NativeTool for SchedulerCronCreateTool {
         }
 
         // Resolve target to a pinned revision ref at creation time.
-        let agent_ref = match crate::runtime::tools::resolve_target_to_agent_ref(
-            &target,
-            store.as_ref(),
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(ToolError::not_found(
-                    format!("target agent '{}'", target),
-                    Some(format!("Ensure the agent exists and is promoted. {}", e)),
-                ).to_error_response());
-            }
-        };
+        let agent_ref =
+            match crate::runtime::tools::resolve_target_to_agent_ref(&target, store.as_ref()) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(ToolError::not_found(
+                        format!("target agent '{}'", target),
+                        Some(format!("Ensure the agent exists and is promoted. {}", e)),
+                    )
+                    .to_error_response());
+                }
+            };
 
         // Guardrail: sub-10s schedules are only allowed for script-mode targets.
         if interval_secs < 10 {
@@ -183,8 +198,12 @@ impl NativeTool for SchedulerCronCreateTool {
                     Err(_) => {
                         return Ok(ToolError::not_found(
                             format!("script-mode target agent '{}'", agent_ref.agent_id),
-                            Some("Sub-10s schedules require an existing script-mode target agent.".to_string()),
-                        ).to_error_response());
+                            Some(
+                                "Sub-10s schedules require an existing script-mode target agent."
+                                    .to_string(),
+                            ),
+                        )
+                        .to_error_response());
                     }
                 }
             };
@@ -307,14 +326,25 @@ impl NativeTool for SchedulerCronListTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let decision = policy.can_schedule("scheduler_cron_list");
         if !decision.is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.list")
-                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
-                .to_error_response());
+            return Ok(ToolError::permission(
+                "Missing SchedulerAccess capability for scheduler.cron.list",
+            )
+            .with_enforced_rules(
+                decision
+                    .enforced_rules
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+            .to_error_response());
         }
 
         let jobs =
@@ -409,21 +439,35 @@ impl NativeTool for SchedulerCronPauseTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let decision = policy.can_schedule("scheduler_cron_pause");
         if !decision.is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.pause")
-                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
-                .to_error_response());
+            return Ok(ToolError::permission(
+                "Missing SchedulerAccess capability for scheduler.cron.pause",
+            )
+            .with_enforced_rules(
+                decision
+                    .enforced_rules
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+            .to_error_response());
         }
 
         let job = store.get_scheduled_job(&args.job_id)?;
         match job {
             Some(j) => {
                 if j.owner_agent_id != manifest.agent.id {
-                    return Ok(ToolError::permission("Not authorized to pause this job (ownership mismatch)").to_error_response());
+                    return Ok(ToolError::permission(
+                        "Not authorized to pause this job (ownership mismatch)",
+                    )
+                    .to_error_response());
                 }
                 let paused = store.pause_scheduled_job(&args.job_id)?;
                 Ok(serde_json::to_string(&serde_json::json!({
@@ -435,7 +479,8 @@ impl NativeTool for SchedulerCronPauseTool {
             None => Ok(ToolError::not_found(
                 format!("scheduled job '{}'", args.job_id),
                 Some("Use scheduler.cron.list to see your active jobs.".to_string()),
-            ).to_error_response()),
+            )
+            .to_error_response()),
         }
     }
 
@@ -496,21 +541,35 @@ impl NativeTool for SchedulerCronResumeTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let decision = policy.can_schedule("scheduler_cron_resume");
         if !decision.is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.resume")
-                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
-                .to_error_response());
+            return Ok(ToolError::permission(
+                "Missing SchedulerAccess capability for scheduler.cron.resume",
+            )
+            .with_enforced_rules(
+                decision
+                    .enforced_rules
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+            .to_error_response());
         }
 
         let job = store.get_scheduled_job(&args.job_id)?;
         match job {
             Some(j) => {
                 if j.owner_agent_id != manifest.agent.id {
-                    return Ok(ToolError::permission("Not authorized to resume this job (ownership mismatch)").to_error_response());
+                    return Ok(ToolError::permission(
+                        "Not authorized to resume this job (ownership mismatch)",
+                    )
+                    .to_error_response());
                 }
                 let resumed = store.resume_scheduled_job(&args.job_id)?;
                 Ok(serde_json::to_string(&serde_json::json!({
@@ -522,7 +581,8 @@ impl NativeTool for SchedulerCronResumeTool {
             None => Ok(ToolError::not_found(
                 format!("scheduled job '{}'", args.job_id),
                 Some("Use scheduler.cron.list to see your active jobs.".to_string()),
-            ).to_error_response()),
+            )
+            .to_error_response()),
         }
     }
 
@@ -585,21 +645,35 @@ impl NativeTool for SchedulerCronCancelTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let decision = policy.can_schedule("scheduler_cron_cancel");
         if !decision.is_allowed() {
-            return Ok(ToolError::permission("Missing SchedulerAccess capability for scheduler.cron.cancel")
-                .with_enforced_rules(decision.enforced_rules.iter().map(|s| s.to_string()).collect())
-                .to_error_response());
+            return Ok(ToolError::permission(
+                "Missing SchedulerAccess capability for scheduler.cron.cancel",
+            )
+            .with_enforced_rules(
+                decision
+                    .enforced_rules
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+            .to_error_response());
         }
 
         let job = store.get_scheduled_job(&args.job_id)?;
         match job {
             Some(j) => {
                 if j.owner_agent_id != manifest.agent.id {
-                    return Ok(ToolError::permission("Not authorized to cancel this job (ownership mismatch)").to_error_response());
+                    return Ok(ToolError::permission(
+                        "Not authorized to cancel this job (ownership mismatch)",
+                    )
+                    .to_error_response());
                 }
                 let cancelled = store.cancel_scheduled_job(&args.job_id)?;
                 Ok(serde_json::to_string(&serde_json::json!({
@@ -611,7 +685,8 @@ impl NativeTool for SchedulerCronCancelTool {
             None => Ok(ToolError::not_found(
                 format!("scheduled job '{}'", args.job_id),
                 Some("Use scheduler.cron.list to see your active jobs.".to_string()),
-            ).to_error_response()),
+            )
+            .to_error_response()),
         }
     }
 

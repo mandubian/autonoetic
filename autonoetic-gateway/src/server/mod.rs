@@ -81,10 +81,8 @@ impl GatewayServer {
         }
 
         // Reconcile system agents (create cron jobs if missing)
-        let reconcile_results = crate::scheduler::system_agents::reconcile_system_agents(
-            &self.config,
-            &gateway_store,
-        );
+        let reconcile_results =
+            crate::scheduler::system_agents::reconcile_system_agents(&self.config, &gateway_store);
         for r in &reconcile_results {
             match r.action {
                 crate::scheduler::system_agents::ReconcileAction::Created => {

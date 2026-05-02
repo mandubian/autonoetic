@@ -38,9 +38,7 @@ where
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         tokio::task::block_in_place(|| {
-            handle.block_on(async {
-                tokio::task::spawn_blocking(f).await
-            })
+            handle.block_on(async { tokio::task::spawn_blocking(f).await })
         })
         .map_err(|_| anyhow::anyhow!("blocking HTTP request panicked"))?
     } else {
@@ -134,7 +132,8 @@ impl NativeTool for CredentialCheckTool {
             return Ok(autonoetic_types::tool_error::ToolError::resource(
                 "Gateway store not available",
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         };
 
         let credentials = store.list_credentials_by_service(&args.service)?;
@@ -271,15 +270,20 @@ impl NativeTool for CredentialRequestTool {
             return Ok(autonoetic_types::tool_error::ToolError::resource(
                 "Gateway store not available",
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         };
 
         // Look up the credential to check service-scoped authorization
         let Some(cred) = store.get_credential(&args.credential_id)? else {
             return Ok(autonoetic_types::tool_error::ToolError::not_found(
                 format!("credential '{}'", args.credential_id),
-                Some("Use credential.check to list available credentials for this service.".to_string()),
-            ).to_error_response());
+                Some(
+                    "Use credential.check to list available credentials for this service."
+                        .to_string(),
+                ),
+            )
+            .to_error_response());
         };
 
         // Check service-scoped authorization
@@ -304,7 +308,8 @@ impl NativeTool for CredentialRequestTool {
         let approval_validated = if let Some(approval_ref) = args.approval_ref.as_deref() {
             match store.get_approval(approval_ref)? {
                 Some(approval)
-                    if approval.status == Some(autonoetic_types::background::ApprovalStatus::Approved) =>
+                    if approval.status
+                        == Some(autonoetic_types::background::ApprovalStatus::Approved) =>
                 {
                     match approval.action {
                         ScheduledAction::CredentialRequest {
@@ -375,16 +380,18 @@ impl NativeTool for CredentialRequestTool {
                 .unwrap_or_else(|| crate::runtime::content_store::root_session_id(sid).to_string());
             let workflow_id = _run_context
                 .and_then(|rc| rc.workflow_id.clone())
-                .or_else(|| crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root_session_id).ok().flatten());
-            let task_id = _run_context
-                .and_then(|rc| rc.task_id.clone())
                 .or_else(|| {
-                    workflow_id.as_ref().and_then(|wf| {
-                        crate::scheduler::resolve_task_id_for_session(cfg, None, wf, sid)
-                            .ok()
-                            .flatten()
-                    })
+                    crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root_session_id)
+                        .ok()
+                        .flatten()
                 });
+            let task_id = _run_context.and_then(|rc| rc.task_id.clone()).or_else(|| {
+                workflow_id.as_ref().and_then(|wf| {
+                    crate::scheduler::resolve_task_id_for_session(cfg, None, wf, sid)
+                        .ok()
+                        .flatten()
+                })
+            });
             let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
             let action = ScheduledAction::CredentialRequest {
                 credential_id: args.credential_id.clone(),
@@ -410,10 +417,10 @@ impl NativeTool for CredentialRequestTool {
                 reason: Some(format!("HTTP request to {} requires approval", url_host)),
                 evidence_ref: None,
                 decision_reason: None,
-            approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
-            similar_to_request_id: None,
-            similarity_score: None,
-        };
+                approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+                similar_to_request_id: None,
+                similarity_score: None,
+            };
 
             store.create_approval(&req)?;
             let message = format!(
@@ -472,7 +479,8 @@ impl NativeTool for CredentialRequestTool {
                     return Ok(autonoetic_types::tool_error::ToolError::validation(
                         format!("Credential has unparseable expiry timestamp: {}", exp_str),
                         None::<String>,
-                    ).to_error_response());
+                    )
+                    .to_error_response());
                 }
             }
         }
@@ -520,42 +528,41 @@ impl NativeTool for CredentialRequestTool {
             let svc = secret_value_clone.clone();
             let eff = effective_inject.clone();
 
-            let (status, body) = blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()?;
+            let (status, body) =
+                blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()?;
 
-                let mut req = client.request(reqwest::Method::from_bytes(method.as_bytes())?, &url);
+                    let mut req =
+                        client.request(reqwest::Method::from_bytes(method.as_bytes())?, &url);
 
-                if let Some(headers) = &headers {
-                    for (k, v) in headers {
-                        req = req.header(k, v);
+                    if let Some(headers) = &headers {
+                        for (k, v) in headers {
+                            req = req.header(k, v);
+                        }
                     }
-                }
 
-                if let Some(ref secret) = svc {
-                    let inject = eff
-                        .as_ref()
-                        .map(String::as_str)
-                        .unwrap_or("bearer");
-                    if inject == "bearer" || inject == "Authorization" {
-                        req = req.header("Authorization", format!("Bearer {}", secret));
-                    } else if inject.starts_with("header:") {
-                        req = req.header(&inject["header:".len()..], secret);
-                    } else {
-                        req = req.header("Authorization", format!("Bearer {}", secret));
+                    if let Some(ref secret) = svc {
+                        let inject = eff.as_ref().map(String::as_str).unwrap_or("bearer");
+                        if inject == "bearer" || inject == "Authorization" {
+                            req = req.header("Authorization", format!("Bearer {}", secret));
+                        } else if inject.starts_with("header:") {
+                            req = req.header(&inject["header:".len()..], secret);
+                        } else {
+                            req = req.header("Authorization", format!("Bearer {}", secret));
+                        }
                     }
-                }
 
-                if let Some(ref b) = body {
-                    req = req.json(b);
-                }
+                    if let Some(ref b) = body {
+                        req = req.json(b);
+                    }
 
-                let resp = req.send()?;
-                let status = resp.status().as_u16();
-                let body = resp.text()?;
-                Ok((status, body))
-            })?;
+                    let resp = req.send()?;
+                    let status = resp.status().as_u16();
+                    let body = resp.text()?;
+                    Ok((status, body))
+                })?;
 
             if status == 401 && !refreshed && cred.refresh_url.is_some() {
                 match try_auto_refresh(&cred, &store, &v_path) {
@@ -637,9 +644,10 @@ impl NativeTool for CredentialRefreshTool {
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest.capabilities.iter().any(|c| {
-            matches!(c, Capability::CredentialAccess { .. })
-        })
+        manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::CredentialAccess { .. }))
     }
 
     fn execute(
@@ -656,15 +664,13 @@ impl NativeTool for CredentialRefreshTool {
         _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: serde_json::Value = serde_json::from_str(arguments_json)?;
-        let credential_id = args["credential_id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let credential_id = args["credential_id"].as_str().unwrap_or("").to_string();
         if credential_id.is_empty() {
             return Ok(autonoetic_types::tool_error::ToolError::validation(
                 "credential_id is required",
                 Some("Provide the credential_id of the credential to refresh.".to_string()),
-            ).to_error_response());
+            )
+            .to_error_response());
         }
         crate::runtime::tools::ensure_safe_credential_id_reference(&credential_id)?;
 
@@ -672,7 +678,8 @@ impl NativeTool for CredentialRefreshTool {
             return Ok(autonoetic_types::tool_error::ToolError::resource(
                 "GatewayStore not available",
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         };
 
         let cap_service = manifest.capabilities.iter().find_map(|c| {
@@ -687,7 +694,8 @@ impl NativeTool for CredentialRefreshTool {
             None => {
                 return Ok(autonoetic_types::tool_error::ToolError::permission(
                     "CredentialAccess capability required",
-                ).to_error_response());
+                )
+                .to_error_response());
             }
         };
 
@@ -697,14 +705,20 @@ impl NativeTool for CredentialRefreshTool {
                 return Ok(autonoetic_types::tool_error::ToolError::not_found(
                     format!("credential '{}'", credential_id),
                     Some("Use credential.check to list available credentials.".to_string()),
-                ).to_error_response());
+                )
+                .to_error_response());
             }
         };
 
-        if !allowed_services.iter().any(|s| s == "*" || s == &cred.service) {
-            return Ok(autonoetic_types::tool_error::ToolError::permission(
-                format!("CredentialAccess does not permit service '{}'", cred.service),
-            ).to_error_response());
+        if !allowed_services
+            .iter()
+            .any(|s| s == "*" || s == &cred.service)
+        {
+            return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                "CredentialAccess does not permit service '{}'",
+                cred.service
+            ))
+            .to_error_response());
         }
 
         let refresh_url = match &cred.refresh_url {
@@ -712,8 +726,12 @@ impl NativeTool for CredentialRefreshTool {
             None => {
                 return Ok(autonoetic_types::tool_error::ToolError::validation(
                     "Credential has no refresh_url configured",
-                    Some("Use credential.setup with refresh metadata to enable token refresh.".to_string()),
-                ).to_error_response());
+                    Some(
+                        "Use credential.setup with refresh metadata to enable token refresh."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
             }
         };
 
@@ -722,8 +740,12 @@ impl NativeTool for CredentialRefreshTool {
             None => {
                 return Ok(autonoetic_types::tool_error::ToolError::validation(
                     "Credential has no refresh_token_secret_name",
-                    Some("Store a refresh token during credential.setup to enable refresh.".to_string()),
-                ).to_error_response());
+                    Some(
+                        "Store a refresh token during credential.setup to enable refresh."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
             }
         };
 
@@ -751,11 +773,7 @@ impl NativeTool for CredentialRefreshTool {
             .unwrap_or("access_token");
         let extract_refresh = cred.refresh_extract_refresh_token.as_deref();
         let extract_expires = cred.refresh_extract_expires_in.as_deref();
-        let refresh_method = cred
-            .refresh_method
-            .as_deref()
-            .unwrap_or("POST")
-            .to_string();
+        let refresh_method = cred.refresh_method.as_deref().unwrap_or("POST").to_string();
         let refresh_headers = cred.refresh_headers.clone();
 
         let rt = refresh_token.clone();
@@ -766,8 +784,7 @@ impl NativeTool for CredentialRefreshTool {
             let client = reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?;
-            let mut req =
-                client.request(reqwest::Method::from_bytes(rm.as_bytes())?, &ru);
+            let mut req = client.request(reqwest::Method::from_bytes(rm.as_bytes())?, &ru);
             if let Some(headers) = &rh {
                 for (k, v) in headers {
                     req = req.header(k, v);
@@ -790,22 +807,31 @@ impl NativeTool for CredentialRefreshTool {
             ).to_error_response());
         }
 
-        let body_value: serde_json::Value =
-            serde_json::from_str(&body).unwrap_or_default();
+        let body_value: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
 
         let new_access_token = match extract_json_path(&body_value, extract_access) {
             Some(t) => t,
             None => {
                 return Ok(autonoetic_types::tool_error::ToolError::execution(
-                    format!("Could not extract access token from refresh response at path '{}'", extract_access),
-                    Some("Check the credential's refresh_extract_access_token configuration.".to_string()),
-                ).to_error_response());
+                    format!(
+                        "Could not extract access token from refresh response at path '{}'",
+                        extract_access
+                    ),
+                    Some(
+                        "Check the credential's refresh_extract_access_token configuration."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
             }
         };
 
         vault.load_secret(&cred.secret_name, new_access_token);
 
-        if let (Some(rp), Some(new_rt)) = (extract_refresh, extract_refresh.and_then(|p| extract_json_path(&body_value, p))) {
+        if let (Some(rp), Some(new_rt)) = (
+            extract_refresh,
+            extract_refresh.and_then(|p| extract_json_path(&body_value, p)),
+        ) {
             if !rp.is_empty() {
                 vault.load_secret(&refresh_token_secret, new_rt);
             }
@@ -815,8 +841,7 @@ impl NativeTool for CredentialRefreshTool {
         if let Some(expires_path) = extract_expires {
             if let Some(expires_in_str) = extract_json_path(&body_value, expires_path) {
                 if let Ok(secs) = expires_in_str.parse::<i64>() {
-                    let new_expiry = chrono::Utc::now()
-                        + chrono::Duration::seconds(secs);
+                    let new_expiry = chrono::Utc::now() + chrono::Duration::seconds(secs);
                     updated_cred.expires_at = Some(new_expiry.to_rfc3339());
                 }
             }
@@ -830,7 +855,8 @@ impl NativeTool for CredentialRefreshTool {
             "credential_id": credential_id,
             "refreshed": true,
             "new_expires_at": updated_cred.expires_at,
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -864,11 +890,7 @@ fn try_auto_refresh(
         .unwrap_or("access_token");
     let extract_refresh = cred.refresh_extract_refresh_token.as_deref();
     let extract_expires = cred.refresh_extract_expires_in.as_deref();
-    let refresh_method = cred
-        .refresh_method
-        .as_deref()
-        .unwrap_or("POST")
-        .to_string();
+    let refresh_method = cred.refresh_method.as_deref().unwrap_or("POST").to_string();
     let refresh_headers = cred.refresh_headers.clone();
 
     let rt = refresh_token.clone();
@@ -879,8 +901,7 @@ fn try_auto_refresh(
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
-        let mut req =
-            client.request(reqwest::Method::from_bytes(rm.as_bytes())?, &ru);
+        let mut req = client.request(reqwest::Method::from_bytes(rm.as_bytes())?, &ru);
         if let Some(headers) = &rh {
             for (k, v) in headers {
                 req = req.header(k, v);
@@ -898,22 +919,21 @@ fn try_auto_refresh(
         anyhow::bail!("Refresh endpoint returned HTTP {}", status);
     }
 
-    let body_value: serde_json::Value =
-        serde_json::from_str(&body).unwrap_or_default();
+    let body_value: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
 
-    let new_access_token =
-        extract_json_path(&body_value, extract_access).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not extract access token at path '{}'",
-                extract_access
-            )
-        })?;
+    let new_access_token = extract_json_path(&body_value, extract_access).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not extract access token at path '{}'",
+            extract_access
+        )
+    })?;
 
     vault.load_secret(&cred.secret_name, new_access_token);
 
-    if let (Some(rp), Some(new_rt)) =
-        (extract_refresh, extract_refresh.and_then(|p| extract_json_path(&body_value, p)))
-    {
+    if let (Some(rp), Some(new_rt)) = (
+        extract_refresh,
+        extract_refresh.and_then(|p| extract_json_path(&body_value, p)),
+    ) {
         if !rp.is_empty() {
             vault.load_secret(rt_secret_name, new_rt);
         }
@@ -923,8 +943,7 @@ fn try_auto_refresh(
     if let Some(expires_path) = extract_expires {
         if let Some(expires_in_str) = extract_json_path(&body_value, expires_path) {
             if let Ok(secs) = expires_in_str.parse::<i64>() {
-                let new_expiry =
-                    chrono::Utc::now() + chrono::Duration::seconds(secs);
+                let new_expiry = chrono::Utc::now() + chrono::Duration::seconds(secs);
                 updated_cred.expires_at = Some(new_expiry.to_rfc3339());
             }
         }
@@ -1202,7 +1221,8 @@ impl NativeTool for CredentialSetupTool {
             return Ok(autonoetic_types::tool_error::ToolError::resource(
                 "Gateway store not available",
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         };
 
         // ------------------------------------------------------------------
@@ -1245,8 +1265,12 @@ impl NativeTool for CredentialSetupTool {
             let Some(state_json) = store.load_credential_setup_state(cred_id)? else {
                 return Ok(autonoetic_types::tool_error::ToolError::not_found(
                     format!("suspended setup state for credential '{}'", cred_id),
-                    Some("No in-progress setup was found. Start a new credential.setup call.".to_string()),
-                ).to_error_response());
+                    Some(
+                        "No in-progress setup was found. Start a new credential.setup call."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
             };
             let mut state: CredentialSetupState = serde_json::from_str(&state_json)?;
 
@@ -1256,9 +1280,11 @@ impl NativeTool for CredentialSetupTool {
                     if services.iter().any(|s| s == "*" || s == &state.service))
             });
             if !service_allowed {
-                return Ok(autonoetic_types::tool_error::ToolError::permission(
-                    format!("Credential setup denied for service: {}", state.service),
-                ).to_error_response());
+                return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                    "Credential setup denied for service: {}",
+                    state.service
+                ))
+                .to_error_response());
             }
 
             // Merge the user's answers and advance past the UserInput step.
@@ -1300,13 +1326,14 @@ impl NativeTool for CredentialSetupTool {
         // ------------------------------------------------------------------
         // Path 3: fresh start — may use skill_url or explicit service/steps
         // ------------------------------------------------------------------
-        let (service, steps, inject_as, allowed_hosts, base_url) =
-            if let Some(ref url) = args.skill_url {
-                // Policy-check the skill_url host.
-                let url_host = extract_host(url)?;
-                if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
-                    let message = format!("Network access denied for skill_url host: {}", url_host);
-                    return Ok(json!({
+        let (service, steps, inject_as, allowed_hosts, base_url) = if let Some(ref url) =
+            args.skill_url
+        {
+            // Policy-check the skill_url host.
+            let url_host = extract_host(url)?;
+            if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
+                let message = format!("Network access denied for skill_url host: {}", url_host);
+                return Ok(json!({
                         "ok": false,
                         "error_type": "permission",
                         "message": message,
@@ -1316,104 +1343,117 @@ impl NativeTool for CredentialSetupTool {
                         "reason": format!("Fetching skill.md from {} requires approval", url_host),
                     })
                     .to_string());
-                }
+            }
 
-                // Fetch and parse the skill.md.
-                let url_clone = url.clone();
-                let (http_status, content) =
-                    blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-                        let client = reqwest::blocking::Client::builder()
-                            .timeout(std::time::Duration::from_secs(15))
-                            .build()?;
-                        let resp = client.get(url_clone.as_str()).send()?;
-                        let status = resp.status().as_u16();
-                        if !resp.status().is_success() {
-                            let _ = resp.text()?;
-                            return Ok((status, String::new()));
-                        }
-                        let content = resp.text()?;
-                        Ok((status, content))
-                    })?;
-
-                if !(200..300).contains(&(http_status as i32)) {
-                    return Ok(autonoetic_types::tool_error::ToolError::execution(
-                        format!("Failed to fetch skill.md from {}: HTTP {}", url, http_status),
-                        Some("Verify the skill_url is correct and accessible.".to_string()),
-                    ).to_error_response());
-                }
-
-                let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
-                let parsed = match matter.parse::<SkillMdFrontmatter>(&content) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Ok(autonoetic_types::tool_error::ToolError::validation(
-                            format!("Failed to parse skill.md content: {}", e),
-                            Some("Ensure the skill.md has valid YAML frontmatter.".to_string()),
-                        ).to_error_response());
+            // Fetch and parse the skill.md.
+            let url_clone = url.clone();
+            let (http_status, content) =
+                blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(15))
+                        .build()?;
+                    let resp = client.get(url_clone.as_str()).send()?;
+                    let status = resp.status().as_u16();
+                    if !resp.status().is_success() {
+                        let _ = resp.text()?;
+                        return Ok((status, String::new()));
                     }
-                };
-                let fm = match parsed.data {
-                    Some(d) => d,
-                    None => {
-                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                    let content = resp.text()?;
+                    Ok((status, content))
+                })?;
+
+            if !(200..300).contains(&(http_status as i32)) {
+                return Ok(autonoetic_types::tool_error::ToolError::execution(
+                    format!(
+                        "Failed to fetch skill.md from {}: HTTP {}",
+                        url, http_status
+                    ),
+                    Some("Verify the skill_url is correct and accessible.".to_string()),
+                )
+                .to_error_response());
+            }
+
+            let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
+            let parsed = match matter.parse::<SkillMdFrontmatter>(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
+                        format!("Failed to parse skill.md content: {}", e),
+                        Some("Ensure the skill.md has valid YAML frontmatter.".to_string()),
+                    )
+                    .to_error_response());
+                }
+            };
+            let fm = match parsed.data {
+                Some(d) => d,
+                None => {
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
                             "No YAML frontmatter found in skill.md",
                             Some("The skill.md must start with a YAML frontmatter block (--- delimited).".to_string()),
                         ).to_error_response());
-                    }
-                };
+                }
+            };
 
-                let autonoetic = fm.autonoetic.unwrap_or(SkillMdAutonoetic {
-                    base_url: None,
-                    credential: None,
-                    onboarding: None,
-                });
-                let base_url = autonoetic.base_url.unwrap_or_else(|| extract_base_url(url));
-                let cred_spec = autonoetic.credential.unwrap_or(SkillCredentialSpec {
-                    service: None,
-                    inject_as: None,
-                    allowed_hosts: None,
-                });
-                let service = cred_spec
-                    .service
-                    .or_else(|| args.service.clone())
-                    .unwrap_or_else(|| url_host.clone());
-                let inject_as = cred_spec.inject_as.or_else(|| args.inject_as.clone());
-                let allowed_hosts = cred_spec
-                    .allowed_hosts
-                    .or_else(|| args.allowed_hosts.clone())
-                    .unwrap_or_else(|| vec![url_host.clone()]);
+            let autonoetic = fm.autonoetic.unwrap_or(SkillMdAutonoetic {
+                base_url: None,
+                credential: None,
+                onboarding: None,
+            });
+            let base_url = autonoetic.base_url.unwrap_or_else(|| extract_base_url(url));
+            let cred_spec = autonoetic.credential.unwrap_or(SkillCredentialSpec {
+                service: None,
+                inject_as: None,
+                allowed_hosts: None,
+            });
+            let service = cred_spec
+                .service
+                .or_else(|| args.service.clone())
+                .unwrap_or_else(|| url_host.clone());
+            let inject_as = cred_spec.inject_as.or_else(|| args.inject_as.clone());
+            let allowed_hosts = cred_spec
+                .allowed_hosts
+                .or_else(|| args.allowed_hosts.clone())
+                .unwrap_or_else(|| vec![url_host.clone()]);
 
-                let raw_steps = autonoetic.onboarding.map(|o| o.steps).unwrap_or_default();
-                let mut steps: Vec<CredentialSetupStep> = Vec::with_capacity(raw_steps.len());
-                for raw in raw_steps {
-                    match raw.into_credential_step(&base_url) {
-                        Ok(s) => steps.push(s),
-                        Err(e) => {
-                            return Ok(autonoetic_types::tool_error::ToolError::validation(
-                                format!("Invalid onboarding step in skill.md: {}", e),
-                                Some("Fix the step definition in the skill.md onboarding section.".to_string()),
-                            ).to_error_response());
-                        }
+            let raw_steps = autonoetic.onboarding.map(|o| o.steps).unwrap_or_default();
+            let mut steps: Vec<CredentialSetupStep> = Vec::with_capacity(raw_steps.len());
+            for raw in raw_steps {
+                match raw.into_credential_step(&base_url) {
+                    Ok(s) => steps.push(s),
+                    Err(e) => {
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            format!("Invalid onboarding step in skill.md: {}", e),
+                            Some(
+                                "Fix the step definition in the skill.md onboarding section."
+                                    .to_string(),
+                            ),
+                        )
+                        .to_error_response());
                     }
                 }
+            }
 
-                (service, steps, inject_as, allowed_hosts, Some(base_url))
-            } else {
-                // Explicit service + steps.
-                let service = match args.service {
-                    Some(s) => s,
-                    None => {
-                        return Ok(autonoetic_types::tool_error::ToolError::validation(
-                            "Either 'skill_url' or 'service' + 'steps' must be provided",
-                            Some("Provide a skill_url or specify service and steps directly.".to_string()),
-                        ).to_error_response());
-                    }
-                };
-                let steps = args.steps.unwrap_or_default();
-                let inject_as = args.inject_as.clone();
-                let allowed_hosts = args.allowed_hosts.clone().unwrap_or_default();
-                (service, steps, inject_as, allowed_hosts, None)
+            (service, steps, inject_as, allowed_hosts, Some(base_url))
+        } else {
+            // Explicit service + steps.
+            let service = match args.service {
+                Some(s) => s,
+                None => {
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
+                        "Either 'skill_url' or 'service' + 'steps' must be provided",
+                        Some(
+                            "Provide a skill_url or specify service and steps directly."
+                                .to_string(),
+                        ),
+                    )
+                    .to_error_response());
+                }
             };
+            let steps = args.steps.unwrap_or_default();
+            let inject_as = args.inject_as.clone();
+            let allowed_hosts = args.allowed_hosts.clone().unwrap_or_default();
+            (service, steps, inject_as, allowed_hosts, None)
+        };
 
         // Service-scoped authorization check.
         let service_allowed = manifest.capabilities.iter().any(|c| {
@@ -1421,9 +1461,11 @@ impl NativeTool for CredentialSetupTool {
                 if services.iter().any(|s| s == "*" || s == &service))
         });
         if !service_allowed {
-            return Ok(autonoetic_types::tool_error::ToolError::permission(
-                format!("Credential setup denied for service: {}", service),
-            ).to_error_response());
+            return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                "Credential setup denied for service: {}",
+                service
+            ))
+            .to_error_response());
         }
 
         // Network policy pre-check for all ApiCall step URLs.

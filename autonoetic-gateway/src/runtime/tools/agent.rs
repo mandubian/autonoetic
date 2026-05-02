@@ -36,7 +36,10 @@ struct SpawnAgentArgs {
     /// When true, enqueue the task for async execution and return immediately with task_id.
     /// The scheduler will execute the child agent in the background.
     /// Use workflow.wait to check task status.
-    #[serde(default, deserialize_with = "crate::runtime::tools::deserialize_bool_lenient")]
+    #[serde(
+        default,
+        deserialize_with = "crate::runtime::tools::deserialize_bool_lenient"
+    )]
     r#async: bool,
     /// Join group name. Tasks in the same join group are awaited together by the planner.
     #[serde(default)]
@@ -248,17 +251,18 @@ impl NativeTool for AgentSpawnTool {
                                             args.message = new_message;
                                         }
                                         SpawnSchemaOutcome::Reject(body) => {
-                                            let payload = serde_json::from_str::<serde_json::Value>(&body)
-                                                .unwrap_or_else(|_| {
-                                                    serde_json::json!({
-                                                        "contract": "io.accepts",
-                                                        "result": "rejected",
-                                                        "target_agent_id": &args.agent_id,
-                                                        "reason": &body,
-                                                        "expected_schema": accepts,
-                                                        "enforcer": "deterministic"
-                                                    })
-                                                });
+                                            let payload =
+                                                serde_json::from_str::<serde_json::Value>(&body)
+                                                    .unwrap_or_else(|_| {
+                                                        serde_json::json!({
+                                                            "contract": "io.accepts",
+                                                            "result": "rejected",
+                                                            "target_agent_id": &args.agent_id,
+                                                            "reason": &body,
+                                                            "expected_schema": accepts,
+                                                            "enforcer": "deterministic"
+                                                        })
+                                                    });
                                             log_io_contract_enforcement(
                                                 gateway_store.as_deref(),
                                                 &manifest.agent.id,
@@ -925,16 +929,8 @@ impl NativeTool for AgentListTool {
                 // Surface the I/O schema so callers (notably the planner) can map
                 // natural-language intent into the shape the target expects before
                 // calling agent.spawn.
-                let io_accepts = agent
-                    .manifest
-                    .io
-                    .as_ref()
-                    .and_then(|io| io.accepts.clone());
-                let io_returns = agent
-                    .manifest
-                    .io
-                    .as_ref()
-                    .and_then(|io| io.returns.clone());
+                let io_accepts = agent.manifest.io.as_ref().and_then(|io| io.accepts.clone());
+                let io_returns = agent.manifest.io.as_ref().and_then(|io| io.returns.clone());
                 let script_input_mode = matches!(
                     agent.manifest.execution_mode,
                     autonoetic_types::agent::ExecutionMode::Script
@@ -1328,8 +1324,7 @@ mod spawn_schema_tests {
     #[test]
     fn reject_plain_text_when_schema_expects_object() {
         let schema = object_schema_with_required();
-        let outcome =
-            enforce_spawn_message_schema("weather", "weather in paris tomorrow", &schema);
+        let outcome = enforce_spawn_message_schema("weather", "weather in paris tomorrow", &schema);
         let body = match outcome {
             SpawnSchemaOutcome::Reject(b) => b,
             _ => panic!("expected Reject, got other"),

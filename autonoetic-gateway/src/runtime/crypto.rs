@@ -158,7 +158,10 @@ impl GatewayIdentityKey {
     }
 }
 
-fn load_existing_key(private_path: &Path, public_path: &Path) -> anyhow::Result<GatewayIdentityKey> {
+fn load_existing_key(
+    private_path: &Path,
+    public_path: &Path,
+) -> anyhow::Result<GatewayIdentityKey> {
     check_private_permissions(private_path)?;
     let bytes = std::fs::read(private_path).map_err(|e| {
         anyhow::anyhow!(
@@ -186,10 +189,7 @@ fn load_existing_key(private_path: &Path, public_path: &Path) -> anyhow::Result<
     })
 }
 
-fn atomic_create_private_key(
-    path: &Path,
-    key: &SigningKey,
-) -> std::io::Result<()> {
+fn atomic_create_private_key(path: &Path, key: &SigningKey) -> std::io::Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
     #[cfg(unix)]
@@ -205,10 +205,7 @@ fn atomic_create_private_key(
     }
     #[cfg(not(unix))]
     {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
+        let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
         f.write_all(&key.to_bytes())?;
         f.sync_all().ok();
     }
@@ -217,11 +214,7 @@ fn atomic_create_private_key(
 
 fn write_public_key_file(path: &Path, key: &VerifyingKey) -> anyhow::Result<()> {
     std::fs::write(path, key.to_bytes()).map_err(|e| {
-        anyhow::anyhow!(
-            "Cannot write gateway public key {}: {}",
-            path.display(),
-            e
-        )
+        anyhow::anyhow!("Cannot write gateway public key {}: {}", path.display(), e)
     })?;
     Ok(())
 }
@@ -230,11 +223,7 @@ fn write_public_key_file(path: &Path, key: &VerifyingKey) -> anyhow::Result<()> 
 fn check_private_permissions(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::metadata(path).map_err(|e| {
-        anyhow::anyhow!(
-            "Cannot stat gateway identity key {}: {}",
-            path.display(),
-            e
-        )
+        anyhow::anyhow!("Cannot stat gateway identity key {}: {}", path.display(), e)
     })?;
     let mode = meta.permissions().mode() & 0o777;
     // Reject any permissions wider than 0o600 — group/world readability
@@ -341,11 +330,7 @@ mod tests {
 
         let err =
             GatewayIdentityKey::load_or_generate(temp.path()).expect_err("loose perms must fail");
-        assert!(
-            err.to_string().contains("overly permissive"),
-            "{}",
-            err
-        );
+        assert!(err.to_string().contains("overly permissive"), "{}", err);
     }
 
     #[test]
@@ -356,10 +341,12 @@ mod tests {
         let sig = key.sign(payload);
         let pub_bytes = key.public_key_bytes();
         assert!(verify_attestation_signature(&pub_bytes, payload, &sig).unwrap());
-        assert!(
-            !verify_attestation_signature(&pub_bytes, b"{\"agent_id\":\"b\",\"turn\":3}", &sig)
-                .unwrap()
-        );
+        assert!(!verify_attestation_signature(
+            &pub_bytes,
+            b"{\"agent_id\":\"b\",\"turn\":3}",
+            &sig
+        )
+        .unwrap());
     }
 
     #[test]
@@ -367,10 +354,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
         let pub_bytes = key.public_key_bytes();
-        assert!(
-            !verify_attestation_signature(&pub_bytes, b"payload", "!!!not-base64!!!")
-                .unwrap()
-        );
+        assert!(!verify_attestation_signature(&pub_bytes, b"payload", "!!!not-base64!!!").unwrap());
         assert!(!verify_attestation_signature(&pub_bytes, b"payload", "").unwrap());
     }
 
@@ -381,8 +365,6 @@ mod tests {
         let pub_bytes = key.public_key_bytes();
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let short_sig = STANDARD.encode(b"tooshort");
-        assert!(
-            !verify_attestation_signature(&pub_bytes, b"payload", &short_sig).unwrap()
-        );
+        assert!(!verify_attestation_signature(&pub_bytes, b"payload", &short_sig).unwrap());
     }
 }

@@ -139,7 +139,10 @@ fn test_native_tool_registry_availability() {
     let defs_all = registry.available_definitions(&manifest_all);
     assert!(defs_all.len() >= 22);
 
-    let manifest_spawn = test_manifest(vec![Capability::AgentSpawn { max_children: 4, max_spawn_depth: 0 }]);
+    let manifest_spawn = test_manifest(vec![Capability::AgentSpawn {
+        max_children: 4,
+        max_spawn_depth: 0,
+    }]);
     let defs_spawn = registry.available_definitions(&manifest_spawn);
     assert!(defs_spawn.len() >= 8);
     assert!(defs_spawn.iter().any(|d| d.name == "agent_spawn"));
@@ -184,7 +187,10 @@ fn test_native_tool_registry_availability() {
 
 #[test]
 fn test_workflow_wait_missing_task_returns_immediately_in_blocking_mode() {
-    let manifest = test_manifest(vec![Capability::AgentSpawn { max_children: 4, max_spawn_depth: 0 }]);
+    let manifest = test_manifest(vec![Capability::AgentSpawn {
+        max_children: 4,
+        max_spawn_depth: 0,
+    }]);
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
     let temp = tempdir().expect("tempdir should create");
@@ -841,12 +847,18 @@ fn test_scheduler_cron_create_rejects_sub10s_for_reasoning_target() {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .contains("Sub-10s schedules are only allowed for script-mode agents"));
-    assert_eq!(parsed.get("error_type"), Some(&serde_json::json!("validation")));
+    assert_eq!(
+        parsed.get("error_type"),
+        Some(&serde_json::json!("validation"))
+    );
 }
 
 #[test]
 fn test_agent_spawn_tool_validates_non_empty_message() {
-    let manifest = test_manifest(vec![Capability::AgentSpawn { max_children: 2, max_spawn_depth: 0 }]);
+    let manifest = test_manifest(vec![Capability::AgentSpawn {
+        max_children: 2,
+        max_spawn_depth: 0,
+    }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
     let agents_dir = temp.path().join("agents");
@@ -879,7 +891,10 @@ fn test_agent_spawn_tool_validates_non_empty_message() {
 
 #[test]
 fn test_agent_spawn_tool_accepts_metadata_argument() {
-    let manifest = test_manifest(vec![Capability::AgentSpawn { max_children: 2, max_spawn_depth: 0 }]);
+    let manifest = test_manifest(vec![Capability::AgentSpawn {
+        max_children: 2,
+        max_spawn_depth: 0,
+    }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
     let agents_dir = temp.path().join("agents");

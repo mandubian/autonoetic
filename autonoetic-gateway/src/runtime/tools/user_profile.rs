@@ -77,7 +77,10 @@ impl NativeTool for UserProfileReadTool {
         let args: Args = serde_json::from_str(arguments_json)?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let agent_id = &manifest.agent.id;
@@ -91,16 +94,21 @@ impl NativeTool for UserProfileReadTool {
             return Ok(ToolError::validation(
                 "No user_id provided and no bound user found for this agent",
                 Some("Provide a user_id or ensure the agent has a bound user.".to_string()),
-            ).to_error_response());
+            )
+            .to_error_response());
         }
 
         // Check binding
         let binding = store.get_user_binding(&user_id, agent_id)?;
         let Some(binding) = binding else {
             return Ok(ToolError::not_found(
-                format!("binding between user '{}' and agent '{}'", user_id, agent_id),
+                format!(
+                    "binding between user '{}' and agent '{}'",
+                    user_id, agent_id
+                ),
                 Some("Use user.profile.share to request access.".to_string()),
-            ).to_error_response());
+            )
+            .to_error_response());
         };
 
         if binding.scope == BindingScope::TaskOnly {
@@ -217,7 +225,10 @@ impl NativeTool for UserProfileUpdateTool {
         let args: Args = serde_json::from_str(arguments_json)?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let agent_id = &manifest.agent.id;
@@ -231,16 +242,21 @@ impl NativeTool for UserProfileUpdateTool {
             return Ok(ToolError::validation(
                 "No user_id provided and no bound user found",
                 Some("Provide a user_id or ensure the agent has a bound user.".to_string()),
-            ).to_error_response());
+            )
+            .to_error_response());
         }
 
         // Verify binding exists (agents can only update bound users)
         let binding = store.get_user_binding(&user_id, agent_id)?;
         if binding.is_none() {
             return Ok(ToolError::not_found(
-                format!("binding between user '{}' and agent '{}'", user_id, agent_id),
+                format!(
+                    "binding between user '{}' and agent '{}'",
+                    user_id, agent_id
+                ),
                 Some("Use user.profile.share to request access.".to_string()),
-            ).to_error_response());
+            )
+            .to_error_response());
         }
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -369,7 +385,10 @@ impl NativeTool for UserProfileShareTool {
         let args: Args = serde_json::from_str(arguments_json)?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let agent_id = &manifest.agent.id;
@@ -491,7 +510,10 @@ impl NativeTool for UserProfileRevokeTool {
         let args: Args = serde_json::from_str(arguments_json)?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("Gateway store not available", None::<String>).to_error_response());
+            return Ok(
+                ToolError::resource("Gateway store not available", None::<String>)
+                    .to_error_response(),
+            );
         };
 
         let target_agent_id = args.agent_id.unwrap_or_else(|| manifest.agent.id.clone());
@@ -507,9 +529,13 @@ impl NativeTool for UserProfileRevokeTool {
             .to_string())
         } else {
             Ok(ToolError::not_found(
-                format!("binding between user '{}' and agent '{}'", args.user_id, target_agent_id),
+                format!(
+                    "binding between user '{}' and agent '{}'",
+                    args.user_id, target_agent_id
+                ),
                 None::<String>,
-            ).to_error_response())
+            )
+            .to_error_response())
         }
     }
 }

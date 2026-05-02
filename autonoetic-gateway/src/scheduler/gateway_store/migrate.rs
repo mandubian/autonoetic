@@ -973,7 +973,11 @@ fn apply_credential_refresh_fields_v12(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![12_i64, "credential_refresh_fields", chrono::Utc::now().to_rfc3339()],
+        params![
+            12_i64,
+            "credential_refresh_fields",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -1027,8 +1031,13 @@ fn apply_memories_revision_provenance_v14(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
-    let cols: Vec<&str> = ["revision_id", "binding_session_id", "alias_ref", "quarantine_reason"]
-        .to_vec();
+    let cols: Vec<&str> = [
+        "revision_id",
+        "binding_session_id",
+        "alias_ref",
+        "quarantine_reason",
+    ]
+    .to_vec();
     for col in &cols {
         let col_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = ?1",
@@ -1177,12 +1186,11 @@ fn apply_grant_targets_table_v17(conn: &mut Connection) -> Result<()> {
           ON session_approval_grant_targets(grant_id);",
     )?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, host FROM session_approval_grants",
-    )?;
-    let rows: Vec<(i64, String)> = stmt.query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?))
-    })?.filter_map(|r| r.ok()).collect();
+    let mut stmt = conn.prepare("SELECT id, host FROM session_approval_grants")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
     drop(stmt);
 
     for (grant_id, host) in &rows {
@@ -1228,11 +1236,7 @@ fn apply_grant_expiry_v18(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            18_i64,
-            "grant_expiry",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![18_i64, "grant_expiry", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -1257,10 +1261,7 @@ fn apply_approval_similarity_v19(conn: &mut Connection) -> Result<()> {
             |row| row.get(0),
         )?;
         if col_count == 0 {
-            conn.execute(
-                &format!("ALTER TABLE approvals ADD COLUMN {col} {ty}"),
-                [],
-            )?;
+            conn.execute(&format!("ALTER TABLE approvals ADD COLUMN {col} {ty}"), [])?;
         }
     }
 
@@ -1337,7 +1338,11 @@ fn apply_causal_event_enforced_rules_v21(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![21_i64, "causal_event_enforced_rules", chrono::Utc::now().to_rfc3339()],
+        params![
+            21_i64,
+            "causal_event_enforced_rules",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -1379,7 +1384,11 @@ fn apply_constitutional_proposals_v22(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![22_i64, "constitutional_proposals", chrono::Utc::now().to_rfc3339()],
+        params![
+            22_i64,
+            "constitutional_proposals",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }

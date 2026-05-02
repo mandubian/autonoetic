@@ -79,12 +79,20 @@ pub struct StructuralValidation {
     pub issues: Vec<String>,
 }
 
-pub fn validate_compressed_history(original: &[Message], compressed: &[Message]) -> StructuralValidation {
+pub fn validate_compressed_history(
+    original: &[Message],
+    compressed: &[Message],
+) -> StructuralValidation {
     let mut issues = Vec::new();
 
-    let system_messages_first = compressed.iter()
+    let system_messages_first = compressed
+        .iter()
         .take_while(|m| matches!(m.role, Role::System))
-        .count() == compressed.iter().filter(|m| matches!(m.role, Role::System)).count();
+        .count()
+        == compressed
+            .iter()
+            .filter(|m| matches!(m.role, Role::System))
+            .count();
     if !system_messages_first {
         issues.push("System messages are not all at the start".to_string());
     }
@@ -94,7 +102,8 @@ pub fn validate_compressed_history(original: &[Message], compressed: &[Message])
         if matches!(msg.role, Role::Tool) {
             if let Some(ref tc_id) = msg.tool_call_id {
                 let has_parent = compressed.iter().any(|m| {
-                    matches!(m.role, Role::Assistant) && m.tool_calls.iter().any(|tc| &tc.id == tc_id)
+                    matches!(m.role, Role::Assistant)
+                        && m.tool_calls.iter().any(|tc| &tc.id == tc_id)
                 });
                 if !has_parent {
                     no_orphaned_tool_results = false;
@@ -104,7 +113,9 @@ pub fn validate_compressed_history(original: &[Message], compressed: &[Message])
         }
     }
 
-    let summary_present = compressed.iter().any(|m| m.content.starts_with("[COMPRESSED CONTEXT"));
+    let summary_present = compressed
+        .iter()
+        .any(|m| m.content.starts_with("[COMPRESSED CONTEXT"));
     let messages_reduced = compressed.len() < original.len();
 
     let mut tool_call_groups_intact = true;
@@ -178,7 +189,8 @@ pub async fn run_quality_validation(
         &session.id,
         session.turns.len() as u64,
         None,
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(result) => {
@@ -188,12 +200,16 @@ pub async fn run_quality_validation(
                     compressed: false,
                     validation: None,
                     tool_sequence_preserved: true,
-                    issues: vec!["Compression not triggered (threshold not exceeded or no LLM configured)".into()],
+                    issues: vec![
+                        "Compression not triggered (threshold not exceeded or no LLM configured)"
+                            .into(),
+                    ],
                 };
             }
             let validation = validate_compressed_history(&history, &result.history);
 
-            let tool_sequence_preserved = check_tool_sequence_preserved(&original_tool_sequence, &result.history);
+            let tool_sequence_preserved =
+                check_tool_sequence_preserved(&original_tool_sequence, &result.history);
             let mut issues = validation.issues.clone();
             if !validation.valid {
                 issues.push("Structural validation failed".into());
@@ -220,7 +236,8 @@ pub async fn run_quality_validation(
 }
 
 fn check_tool_sequence_preserved(original: &[GoldenToolCall], compressed: &[Message]) -> bool {
-    let compressed_tool_calls: Vec<&str> = compressed.iter()
+    let compressed_tool_calls: Vec<&str> = compressed
+        .iter()
         .filter_map(|m| {
             if matches!(m.role, Role::Tool) {
                 m.tool_call_id.as_deref()
@@ -238,7 +255,10 @@ fn check_tool_sequence_preserved(original: &[GoldenToolCall], compressed: &[Mess
     true
 }
 
-pub async fn run_threshold_scan(session: &GoldenSession, thresholds: &[f64]) -> Vec<(f64, QualityReport)> {
+pub async fn run_threshold_scan(
+    session: &GoldenSession,
+    thresholds: &[f64],
+) -> Vec<(f64, QualityReport)> {
     let mut results = Vec::new();
     for threshold in thresholds {
         let cfg = ContextCompressionConfig {
@@ -251,7 +271,10 @@ pub async fn run_threshold_scan(session: &GoldenSession, thresholds: &[f64]) -> 
             provider: None,
             model: None,
         };
-        results.push((*threshold, run_quality_validation(session, &cfg, None).await));
+        results.push((
+            *threshold,
+            run_quality_validation(session, &cfg, None).await,
+        ));
     }
     results
 }
@@ -282,7 +305,11 @@ mod tests {
                 GoldenTurn {
                     user_message: "What is the weather?".into(),
                     assistant_response: "Let me check.".into(),
-                    tool_calls: vec![GoldenToolCall { id: "tc1".into(), name: "weather.get".into(), arguments: r#"{"city":"NYC"}"#.into() }],
+                    tool_calls: vec![GoldenToolCall {
+                        id: "tc1".into(),
+                        name: "weather.get".into(),
+                        arguments: r#"{"city":"NYC"}"#.into(),
+                    }],
                     end_turn: false,
                 },
                 GoldenTurn {
@@ -293,14 +320,29 @@ mod tests {
                 },
             ],
             expected_outcome: "Done".into(),
-            expected_tool_sequence: vec![GoldenToolCall { id: "tc1".into(), name: "weather.get".into(), arguments: r#"{"city":"NYC"}"#.into() }],
+            expected_tool_sequence: vec![GoldenToolCall {
+                id: "tc1".into(),
+                name: "weather.get".into(),
+                arguments: r#"{"city":"NYC"}"#.into(),
+            }],
         }
     }
 
     #[tokio::test]
     async fn test_validate_compressed_history_no_orphans() {
-        let original = vec![Message::system("s"), Message::user("u1"), Message::assistant("a1"), Message::user("u2"), Message::assistant("a2")];
-        let compressed = vec![Message::system("s"), Message::user("[COMPRESSED CONTEXT - Turn 1]\nsummary"), Message::user("u2"), Message::assistant("a2")];
+        let original = vec![
+            Message::system("s"),
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+            Message::assistant("a2"),
+        ];
+        let compressed = vec![
+            Message::system("s"),
+            Message::user("[COMPRESSED CONTEXT - Turn 1]\nsummary"),
+            Message::user("u2"),
+            Message::assistant("a2"),
+        ];
         let v = validate_compressed_history(&original, &compressed);
         assert!(v.valid);
         assert!(v.no_orphaned_tool_results);
@@ -325,10 +367,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_detects_system_messages_not_first() {
         let original = vec![Message::system("s")];
-        let compressed = vec![
-            Message::user("u"),
-            Message::system("s"),
-        ];
+        let compressed = vec![Message::user("u"), Message::system("s")];
         let v = validate_compressed_history(&original, &compressed);
         assert!(!v.system_messages_first);
     }
@@ -347,7 +386,11 @@ mod tests {
     #[tokio::test]
     async fn test_quality_validation_when_compression_not_triggered() {
         let session = make_test_session();
-        let cfg = ContextCompressionConfig { enabled: true, threshold_pct: 99.0, ..Default::default() };
+        let cfg = ContextCompressionConfig {
+            enabled: true,
+            threshold_pct: 99.0,
+            ..Default::default()
+        };
         let report = run_quality_validation(&session, &cfg, None).await;
         assert!(!report.compressed);
         assert!(report.validation.is_none());
@@ -363,8 +406,16 @@ mod tests {
     #[tokio::test]
     async fn test_check_tool_sequence_preserved() {
         let original = vec![
-            GoldenToolCall { id: "tc1".into(), name: "tool_a".into(), arguments: "{}".into() },
-            GoldenToolCall { id: "tc2".into(), name: "tool_b".into(), arguments: "{}".into() },
+            GoldenToolCall {
+                id: "tc1".into(),
+                name: "tool_a".into(),
+                arguments: "{}".into(),
+            },
+            GoldenToolCall {
+                id: "tc2".into(),
+                name: "tool_b".into(),
+                arguments: "{}".into(),
+            },
         ];
         let history_with_both = vec![
             Message::system("s"),
@@ -377,6 +428,9 @@ mod tests {
             Message::system("s"),
             Message::tool_result("tc1", "tool_a", "r1"),
         ];
-        assert!(!check_tool_sequence_preserved(&original, &history_missing_one));
+        assert!(!check_tool_sequence_preserved(
+            &original,
+            &history_missing_one
+        ));
     }
 }

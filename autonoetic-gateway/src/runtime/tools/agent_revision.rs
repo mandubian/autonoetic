@@ -328,7 +328,9 @@ where
         .collect()
 }
 
-fn parse_frontmatter_capabilities(frontmatter: &serde_yaml::Value) -> anyhow::Result<Vec<Capability>> {
+fn parse_frontmatter_capabilities(
+    frontmatter: &serde_yaml::Value,
+) -> anyhow::Result<Vec<Capability>> {
     let frontmatter_json = serde_json::to_value(frontmatter).map_err(|e| {
         anyhow::anyhow!(
             "Promotion gate: failed to convert SKILL.md frontmatter to JSON for capability parsing: {e}"
@@ -680,55 +682,29 @@ fn create_revision_from_files(
     })
 }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct ResolvedRevisionArtifactInput {
-        artifact_id: String,
-        source_ref: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRevisionArtifactInput {
+    artifact_id: String,
+    source_ref: String,
+}
+
+fn resolve_revision_artifact_input(
+    artifact_id: Option<&str>,
+    artifact_ref: Option<&str>,
+    session_id: Option<&str>,
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<Option<ResolvedRevisionArtifactInput>> {
+    let artifact_id = artifact_id.map(str::trim);
+    let artifact_ref = artifact_ref.map(str::trim);
+
+    if matches!(artifact_id, Some("")) {
+        anyhow::bail!("artifact_id must not be empty");
+    }
+    if matches!(artifact_ref, Some("")) {
+        anyhow::bail!("artifact_ref must not be empty");
     }
 
-    fn resolve_revision_artifact_input(
-        artifact_id: Option<&str>,
-        artifact_ref: Option<&str>,
-        session_id: Option<&str>,
-        gateway_store: &crate::scheduler::gateway_store::GatewayStore,
-    ) -> anyhow::Result<Option<ResolvedRevisionArtifactInput>> {
-        let artifact_id = artifact_id.map(str::trim);
-        let artifact_ref = artifact_ref.map(str::trim);
-
-        if matches!(artifact_id, Some("")) {
-            anyhow::bail!("artifact_id must not be empty");
-        }
-        if matches!(artifact_ref, Some("")) {
-            anyhow::bail!("artifact_ref must not be empty");
-        }
-
-        let Some(direct_artifact_id) = artifact_id.filter(|value| !value.is_empty()) else {
-            if let Some(ref_id) = artifact_ref.filter(|value| !value.is_empty()) {
-                let sid = session_id
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "artifact_ref '{}' requires session context for scope resolution",
-                            ref_id
-                        )
-                    })?;
-                let record = gateway_store
-                    .resolve_artifact_ref_any_scope(ref_id, sid)?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "artifact_ref '{}' not found, expired, or revoked",
-                            ref_id
-                        )
-                    })?;
-                return Ok(Some(ResolvedRevisionArtifactInput {
-                    artifact_id: record.artifact_id,
-                    source_ref: ref_id.to_string(),
-                }));
-            }
-            return Ok(None);
-        };
-
+    let Some(direct_artifact_id) = artifact_id.filter(|value| !value.is_empty()) else {
         if let Some(ref_id) = artifact_ref.filter(|value| !value.is_empty()) {
             let sid = session_id
                 .map(str::trim)
@@ -744,24 +720,47 @@ fn create_revision_from_files(
                 .ok_or_else(|| {
                     anyhow::anyhow!("artifact_ref '{}' not found, expired, or revoked", ref_id)
                 })?;
-            anyhow::ensure!(
-                record.artifact_id == direct_artifact_id,
-                "artifact_ref '{}' resolves to '{}' but artifact_id '{}' was also provided",
-                ref_id,
-                record.artifact_id,
-                direct_artifact_id,
-            );
             return Ok(Some(ResolvedRevisionArtifactInput {
-                artifact_id: direct_artifact_id.to_string(),
+                artifact_id: record.artifact_id,
                 source_ref: ref_id.to_string(),
             }));
         }
+        return Ok(None);
+    };
 
-        Ok(Some(ResolvedRevisionArtifactInput {
+    if let Some(ref_id) = artifact_ref.filter(|value| !value.is_empty()) {
+        let sid = session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "artifact_ref '{}' requires session context for scope resolution",
+                    ref_id
+                )
+            })?;
+        let record = gateway_store
+            .resolve_artifact_ref_any_scope(ref_id, sid)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("artifact_ref '{}' not found, expired, or revoked", ref_id)
+            })?;
+        anyhow::ensure!(
+            record.artifact_id == direct_artifact_id,
+            "artifact_ref '{}' resolves to '{}' but artifact_id '{}' was also provided",
+            ref_id,
+            record.artifact_id,
+            direct_artifact_id,
+        );
+        return Ok(Some(ResolvedRevisionArtifactInput {
             artifact_id: direct_artifact_id.to_string(),
-            source_ref: direct_artifact_id.to_string(),
-        }))
+            source_ref: ref_id.to_string(),
+        }));
     }
+
+    Ok(Some(ResolvedRevisionArtifactInput {
+        artifact_id: direct_artifact_id.to_string(),
+        source_ref: direct_artifact_id.to_string(),
+    }))
+}
 
 pub struct AgentRevisionCreateTool;
 
@@ -1297,12 +1296,18 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
 
         let lock_rel_path = target_manifest.runtime.runtime_lock.clone();
         validate_relative_agent_path(&lock_rel_path)?;
-        let parsed_lock =
-            crate::runtime::install_contract::scaffold_runtime_lock_with_scopes(None, None, &artifact_layers, Some(gateway_dir))?;
+        let parsed_lock = crate::runtime::install_contract::scaffold_runtime_lock_with_scopes(
+            None,
+            None,
+            &artifact_layers,
+            Some(gateway_dir),
+        )?;
 
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
-            artifact_id: resolved_artifact.as_ref().map(|artifact| artifact.artifact_id.clone()),
+            artifact_id: resolved_artifact
+                .as_ref()
+                .map(|artifact| artifact.artifact_id.clone()),
             base_revision_id: args.base_revision_id.clone(),
             summary: args.summary.clone(),
             metadata: args.metadata.clone(),
@@ -1804,8 +1809,10 @@ impl NativeTool for AgentRevisionPromoteTool {
                     "broadened": delta.broadened,
                 });
 
-                let request_id =
-                    format!("apr-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]);
+                let request_id = format!(
+                    "apr-{}",
+                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
+                );
                 let action = autonoetic_types::background::ScheduledAction::RevisionPromote {
                     agent_id: args.agent_id.clone(),
                     revision_id: args.revision_id.clone(),
@@ -2423,20 +2430,22 @@ fn check_capability_delta(
         )
     })?;
     let outgoing_skill_text = String::from_utf8_lossy(&outgoing_skill_bytes);
-    let outgoing_frontmatter =
-        crate::runtime::install_contract::extract_frontmatter_raw(&outgoing_skill_text).map_err(
-            |e| {
-                anyhow::anyhow!(
-                    "Cannot parse SKILL.md frontmatter for outgoing revision '{}': {}",
-                    alias.revision_id,
-                    e
-                )
-            },
-        )?;
+    let outgoing_frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(
+        &outgoing_skill_text,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot parse SKILL.md frontmatter for outgoing revision '{}': {}",
+            alias.revision_id,
+            e
+        )
+    })?;
     let outgoing_capabilities = parse_frontmatter_capabilities(&outgoing_frontmatter)?;
 
-    let mut delta =
-        autonoetic_types::capability::compute_capability_delta(&outgoing_capabilities, current_capabilities);
+    let mut delta = autonoetic_types::capability::compute_capability_delta(
+        &outgoing_capabilities,
+        current_capabilities,
+    );
 
     if !delta.has_broadening() {
         return Ok(None);
@@ -2479,9 +2488,11 @@ fn scope_change_within_existing_envelope(previous_scope: &[String], new_scope: &
         return false;
     }
 
-    added
-        .iter()
-        .all(|candidate| wildcard_envelopes.iter().any(|pattern| wildcard_match(pattern, candidate)))
+    added.iter().all(|candidate| {
+        wildcard_envelopes
+            .iter()
+            .any(|pattern| wildcard_match(pattern, candidate))
+    })
 }
 
 fn wildcard_match(pattern: &str, value: &str) -> bool {
@@ -2806,9 +2817,8 @@ mod capability_lenient_deser_tests {
             .build(&inputs, Some(&entrypoints), None, session_id)
             .unwrap();
 
-        let gateway_store = Arc::new(
-            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
-        );
+        let gateway_store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
         let artifact_ref = "ar.testinstall01".to_string();
         gateway_store
             .create_artifact_ref(&ArtifactRefRecord {
@@ -2853,7 +2863,10 @@ mod capability_lenient_deser_tests {
             .unwrap();
 
         let response_json: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(response_json.get("ok").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(
+            response_json.get("ok").and_then(|value| value.as_bool()),
+            Some(true)
+        );
         assert_eq!(
             response_json
                 .get("artifact_id")
@@ -2865,8 +2878,14 @@ mod capability_lenient_deser_tests {
             .get("revision_id")
             .and_then(|value| value.as_str())
             .unwrap();
-        let revision = gateway_store.get_agent_revision(revision_id).unwrap().unwrap();
-        assert_eq!(revision.artifact_id.as_deref(), Some(bundle.artifact_id.as_str()));
+        let revision = gateway_store
+            .get_agent_revision(revision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            revision.artifact_id.as_deref(),
+            Some(bundle.artifact_id.as_str())
+        );
         assert_eq!(revision.source_ref.as_deref(), Some("ar.testinstall01"));
     }
 }

@@ -2,11 +2,11 @@
 
 mod support;
 
-use autonoetic_gateway::server::http::HttpState;
+use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::server::http::create_router;
+use autonoetic_gateway::server::http::HttpState;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use autonoetic_gateway::runtime::content_store::ContentStore;
 
 const TEST_SECRET: &str = "test-secret-for-constant-time";
 
@@ -52,7 +52,11 @@ async fn http_rejects_wrong_token_with_403() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 403, "wrong token should be rejected with 403");
+    assert_eq!(
+        resp.status(),
+        403,
+        "wrong token should be rejected with 403"
+    );
 
     handle.abort();
 }
@@ -95,7 +99,10 @@ async fn http_accepts_correct_token() {
         .await
         .unwrap();
 
-    assert!(resp.status().is_success(), "correct token should be accepted");
+    assert!(
+        resp.status().is_success(),
+        "correct token should be accepted"
+    );
 
     handle.abort();
 }

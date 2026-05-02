@@ -137,9 +137,8 @@ async fn test_session_escalate_creates_approval_and_suspends() -> anyhow::Result
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
 
-    let store = Arc::new(
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
-    );
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let manifest = test_manifest();
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
@@ -218,9 +217,8 @@ async fn test_session_escalate_non_human_no_approval() -> anyhow::Result<()> {
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
 
-    let store = Arc::new(
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
-    );
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let manifest = test_manifest();
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
@@ -278,9 +276,8 @@ async fn test_session_escalate_specialist_no_approval() -> anyhow::Result<()> {
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
 
-    let store = Arc::new(
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
-    );
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     let manifest = test_manifest();
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
@@ -337,9 +334,8 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
 
-    let store = Arc::new(
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
-    );
+    let store =
+        Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?);
 
     seed_test_agent(&config, store.as_ref())?;
 
@@ -432,9 +428,15 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
 
     // Verify the approval was recorded
     let updated = store.get_approval(&request_id)?;
-    assert!(updated.is_some(), "approved escalation should still be in store");
+    assert!(
+        updated.is_some(),
+        "approved escalation should still be in store"
+    );
     let updated = updated.unwrap();
-    assert!(updated.status.is_some(), "approval status should be set after decision");
+    assert!(
+        updated.status.is_some(),
+        "approval status should be set after decision"
+    );
 
     // Verify decision_reason is persisted (the operator's guidance note)
     assert_eq!(
@@ -477,4 +479,3 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
 
     Ok(())
 }
-

@@ -148,7 +148,10 @@ pub fn compose_and_sign(
 /// concatenation with surrounding text can't be confused for inclusion.
 pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
     let body = serde_json::to_string_pretty(att).map_err(|e| {
-        anyhow::anyhow!("Cannot serialise state attestation for prompt injection: {}", e)
+        anyhow::anyhow!(
+            "Cannot serialise state attestation for prompt injection: {}",
+            e
+        )
     })?;
     Ok(format!(
         "---\n\nGateway State Attestation (R++1)\n\n\
@@ -429,10 +432,6 @@ mod tests {
         att.key_fingerprint = "0000000000000000".to_string();
         let pub_bytes = key.public_key_bytes();
         let err = verify(&pub_bytes, &att).expect_err("tampered fingerprint must reject");
-        assert!(
-            err.to_string().contains("fingerprint mismatch"),
-            "{}",
-            err
-        );
+        assert!(err.to_string().contains("fingerprint mismatch"), "{}", err);
     }
 }

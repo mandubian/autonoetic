@@ -190,8 +190,25 @@ impl NativeTool for ArtifactBuildTool {
 
         let mut artifact_ref: Option<String> = None;
         let mut artifact_ref_scope: Option<serde_json::Value> = None;
-        if let Some(gs) = gateway_store {
-            if !bundle.reused {
+        if let Some(gs) = gateway_store.as_ref() {
+            let existing_ref = if bundle.reused {
+                gs.list_artifact_refs_for_scope(scope_type, &scope_id)?
+                    .into_iter()
+                    .find(|record| {
+                        record.artifact_id == bundle.artifact_id
+                            && record.artifact_manifest_digest == bundle.artifact_manifest_digest
+                    })
+            } else {
+                None
+            };
+
+            if let Some(record) = existing_ref {
+                artifact_ref = Some(record.ref_id);
+                artifact_ref_scope = Some(serde_json::json!({
+                    "type": record.scope_type.as_str(),
+                    "id": record.scope_id,
+                }));
+            } else {
                 let ref_id = mint_artifact_ref_id();
                 gs.create_artifact_ref(&autonoetic_types::artifact::ArtifactRefRecord {
                     ref_id: ref_id.clone(),

@@ -71,7 +71,8 @@ impl NativeTool for DigestAnnotateTool {
             return Ok(ToolError::validation(
                 format!("type must be one of: {}", allowed.join(", ")),
                 None::<String>,
-            ).to_error_response());
+            )
+            .to_error_response());
         }
         if let Some(ctx) = run_context {
             if let Some(w) = &ctx.live_digest {
@@ -81,8 +82,7 @@ impl NativeTool for DigestAnnotateTool {
             }
             if let Some(w) = &ctx.live_report {
                 if let Ok(mut g) = w.lock() {
-                    let _ =
-                        g.record_annotation(&args.annotation_type, &args.content, _turn_id);
+                    let _ = g.record_annotation(&args.annotation_type, &args.content, _turn_id);
                 }
             }
             if let Some(store) = _gateway_store.as_ref() {

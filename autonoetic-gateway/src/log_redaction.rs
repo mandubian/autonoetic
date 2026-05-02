@@ -67,9 +67,7 @@ fn redact_json_value(value: &Value) -> Value {
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
-        Value::String(s) => {
-            Value::String(redact_embedded_secrets(s))
-        }
+        Value::String(s) => Value::String(redact_embedded_secrets(s)),
         other => other.clone(),
     }
 }
@@ -145,8 +143,7 @@ pub fn redact_text_for_logs(text: &str) -> String {
             }
 
             // Non-JSON payloads: avoid accidentally dumping long secrets.
-            if lower.contains("api_key") || lower.contains("apikey")
-            {
+            if lower.contains("api_key") || lower.contains("apikey") {
                 REDACTED.to_string()
             } else {
                 text.to_string()
@@ -177,8 +174,7 @@ mod tests {
 
     #[test]
     fn test_redacts_api_key_assignment_in_json_string_value() {
-        let input =
-            r#"{"command":"export OPENWEATHER_API_KEY=testplaceholder_not_a_real_key_0000 && python3 /tmp/weather.py"}"#;
+        let input = r#"{"command":"export OPENWEATHER_API_KEY=testplaceholder_not_a_real_key_0000 && python3 /tmp/weather.py"}"#;
         let out = redact_text_for_logs(input);
         assert!(out.contains("OPENWEATHER_API_KEY=***REDACTED***"));
         assert!(!out.contains("testplaceholder_not_a_real_key_0000"));
