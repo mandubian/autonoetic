@@ -240,15 +240,18 @@ fn normalize_capability_from_llm(v: serde_json::Value) -> anyhow::Result<Capabil
 
 fn capability_from_shorthand(s: &str) -> anyhow::Result<Capability> {
     match s.trim() {
-        "SandboxFunctions" => Ok(Capability::SandboxFunctions {
-            allowed: vec!["*".to_string()],
-        }),
-        "ReadAccess" => Ok(Capability::ReadAccess {
-            scopes: vec!["*".to_string()],
-        }),
-        "WriteAccess" => Ok(Capability::WriteAccess {
-            scopes: vec!["*".to_string()],
-        }),
+        "SandboxFunctions" => Err(anyhow::anyhow!(
+            "capability 'SandboxFunctions' cannot be a bare string — explicit tool scoping required. \
+             Use {{ \"type\": \"SandboxFunctions\", \"allowed\": [\"content.\", \"knowledge.\"] }} instead."
+        )),
+        "ReadAccess" => Err(anyhow::anyhow!(
+            "capability 'ReadAccess' cannot be a bare string — explicit scope required. \
+             Use {{ \"type\": \"ReadAccess\", \"scopes\": [\"self.*\"] }} instead."
+        )),
+        "WriteAccess" => Err(anyhow::anyhow!(
+            "capability 'WriteAccess' cannot be a bare string — explicit scope required. \
+             Use {{ \"type\": \"WriteAccess\", \"scopes\": [\"self.*\"] }} instead."
+        )),
         "NetworkAccess" => Err(anyhow::anyhow!(
             "capability 'NetworkAccess' cannot be a bare string — explicit host scoping required. \
              Use {{ \"type\": \"NetworkAccess\", \"hosts\": [\"api.example.com\"] }} instead."
@@ -257,31 +260,55 @@ fn capability_from_shorthand(s: &str) -> anyhow::Result<Capability> {
             "capability 'CodeExecution' cannot be a bare string — explicit command patterns required. \
              Use {{ \"type\": \"CodeExecution\", \"patterns\": [\"python*\"] }} instead."
         )),
-        "AgentMessage" => Ok(Capability::AgentMessage {
-            patterns: vec!["*".to_string()],
-        }),
-        "AgentRevision" => Ok(Capability::AgentRevision {
-            patterns: vec!["*".to_string()],
-        }),
-        "Evaluation" => Ok(Capability::Evaluation {
-            patterns: vec!["*".to_string()],
-        }),
-        "ApprovalQueue" => Ok(Capability::ApprovalQueue {
-            patterns: vec!["*".to_string()],
-        }),
-        "SchedulerSignal" => Ok(Capability::SchedulerSignal {
-            patterns: vec!["*".to_string()],
-        }),
+        "AgentMessage" => Err(anyhow::anyhow!(
+            "capability 'AgentMessage' cannot be a bare string — explicit patterns required. \
+             Use {{ \"type\": \"AgentMessage\", \"patterns\": [\"*\"] }} instead."
+        )),
+        "AgentRevision" => Err(anyhow::anyhow!(
+            "capability 'AgentRevision' cannot be a bare string — explicit patterns required. \
+             Use {{ \"type\": \"AgentRevision\", \"patterns\": [\"*\"] }} instead."
+        )),
+        "Evaluation" => Err(anyhow::anyhow!(
+            "capability 'Evaluation' cannot be a bare string — explicit patterns required. \
+             Use {{ \"type\": \"Evaluation\", \"patterns\": [\"*\"] }} instead."
+        )),
+        "ApprovalQueue" => Err(anyhow::anyhow!(
+            "capability 'ApprovalQueue' cannot be a bare string — explicit patterns required. \
+             Use {{ \"type\": \"ApprovalQueue\", \"patterns\": [\"*\"] }} instead."
+        )),
+        "SchedulerSignal" => Err(anyhow::anyhow!(
+            "capability 'SchedulerSignal' cannot be a bare string — explicit patterns required. \
+             Use {{ \"type\": \"SchedulerSignal\", \"patterns\": [\"*\"] }} instead."
+        )),
+        "SchedulerAccess" => Err(anyhow::anyhow!(
+            "capability 'SchedulerAccess' cannot be a bare string — explicit patterns required. \
+             Use {{ \"type\": \"SchedulerAccess\", \"patterns\": [\"scheduler.cron.*\"] }} instead."
+        )),
         "CredentialAccess" => Err(anyhow::anyhow!(
             "capability 'CredentialAccess' cannot be a bare string — explicit service scoping required. \
              Use {{ \"type\": \"CredentialAccess\", \"services\": [\"github\"] }} instead."
         )),
-        "EmergencyStop" => Ok(Capability::EmergencyStop),
+        "UserProfileAccess" => Err(anyhow::anyhow!(
+            "capability 'UserProfileAccess' cannot be a bare string — explicit scope required. \
+             Use {{ \"type\": \"UserProfileAccess\", \"scopes\": [\"basic\"] }} instead."
+        )),
+        "SkillInstall" => Err(anyhow::anyhow!(
+            "capability 'SkillInstall' cannot be a bare string — explicit source scoping required. \
+             Use {{ \"type\": \"SkillInstall\", \"allowed_sources\": [\"agentskills.io\"] }} instead."
+        )),
+        "ConstitutionalProposal" => Err(anyhow::anyhow!(
+            "capability 'ConstitutionalProposal' cannot be a bare string — explicit patterns required. \
+             Use {{ \"type\": \"ConstitutionalProposal\", \"patterns\": [\"*\"] }} instead."
+        )),
+        "EmergencyStop" => Err(anyhow::anyhow!(
+            "capability 'EmergencyStop' cannot be a bare string — use a tagged object instead. \
+             Use {{ \"type\": \"EmergencyStop\" }} instead."
+        )),
         "AgentSpawn" | "BackgroundReevaluation" => Err(anyhow::anyhow!(
             "capability '{s}' cannot be a bare string; use a JSON object with required fields (see Capability schema)"
         )),
         other => Err(anyhow::anyhow!(
-            "unknown capability shorthand '{other}'; use {{ \"type\": \"ReadAccess\", \"scopes\": [\"*\"] }} or another tagged Capability object"
+            "unknown capability '{other}'; use a tagged Capability object, e.g. {{ \"type\": \"ReadAccess\", \"scopes\": [\"*\"] }}"
         )),
     }
 }
@@ -988,7 +1015,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "llm_config": { "type": "object" },
                     "capabilities": {
                         "type": "array",
-                        "description": "Each item is a tagged Capability object, e.g. {\"type\":\"NetworkAccess\",\"hosts\":[\"*\"]} (not scopes); {\"type\":\"ReadAccess\",\"scopes\":[\"*\"]}; or a string shorthand for simple caps: \"ReadAccess\", \"NetworkAccess\", \"CodeExecution\". AgentSpawn and BackgroundReevaluation must be full objects."
+                        "description": "Each item must be a tagged Capability object — bare strings are rejected. Examples: {\"type\":\"NetworkAccess\",\"hosts\":[\"*\"]}, {\"type\":\"ReadAccess\",\"scopes\":[\"self.*\"]}, {\"type\":\"SandboxFunctions\",\"allowed\":[\"content.\",\"knowledge.\"]}, {\"type\":\"EmergencyStop\"}."
                     },
                     "io": {
                         "type": "object",
@@ -2581,13 +2608,94 @@ mod capability_lenient_deser_tests {
     }
 
     #[test]
-    fn string_shorthand_read_access_allowed() {
+    fn string_shorthand_read_access_refused() {
         let j = r#"{"capabilities":["ReadAccess"]}"#;
-        let c: CapsOnly = serde_json::from_str(j).unwrap();
-        assert!(matches!(
-            c.capabilities.as_slice(),
-            [Capability::ReadAccess { scopes }] if scopes == &["*".to_string()]
-        ));
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("capabilities[0]"),
+            "error should reference index, got: {msg}"
+        );
+        assert!(
+            msg.contains("ReadAccess"),
+            "error should name capability, got: {msg}"
+        );
+        assert!(
+            msg.contains("scopes"),
+            "error should mention required field, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn string_shorthand_sandbox_functions_refused() {
+        let j = r#"{"capabilities":["SandboxFunctions"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("SandboxFunctions"), "got: {msg}");
+        assert!(msg.contains("allowed"), "got: {msg}");
+    }
+
+    #[test]
+    fn string_shorthand_write_access_refused() {
+        let j = r#"{"capabilities":["WriteAccess"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("WriteAccess"), "got: {msg}");
+        assert!(msg.contains("scopes"), "got: {msg}");
+    }
+
+    #[test]
+    fn string_shorthand_agent_message_refused() {
+        let j = r#"{"capabilities":["AgentMessage"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("AgentMessage"), "got: {msg}");
+        assert!(msg.contains("patterns"), "got: {msg}");
+    }
+
+    #[test]
+    fn string_shorthand_emergency_stop_refused() {
+        let j = r#"{"capabilities":["EmergencyStop"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("EmergencyStop"), "got: {msg}");
+        assert!(msg.contains("tagged object"), "got: {msg}");
+    }
+
+    #[test]
+    fn string_shorthand_skill_install_refused() {
+        let j = r#"{"capabilities":["SkillInstall"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("SkillInstall"), "got: {msg}");
+        assert!(msg.contains("allowed_sources"), "got: {msg}");
+    }
+
+    #[test]
+    fn string_shorthand_scheduler_access_refused() {
+        let j = r#"{"capabilities":["SchedulerAccess"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("SchedulerAccess"), "got: {msg}");
+        assert!(msg.contains("patterns"), "got: {msg}");
+    }
+
+    #[test]
+    fn string_shorthand_constitutional_proposal_refused() {
+        let j = r#"{"capabilities":["ConstitutionalProposal"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("ConstitutionalProposal"), "got: {msg}");
+        assert!(msg.contains("patterns"), "got: {msg}");
+    }
+
+    #[test]
+    fn string_shorthand_user_profile_access_refused() {
+        let j = r#"{"capabilities":["UserProfileAccess"]}"#;
+        let e = serde_json::from_str::<CapsOnly>(j).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("UserProfileAccess"), "got: {msg}");
+        assert!(msg.contains("scopes"), "got: {msg}");
     }
 
     #[test]

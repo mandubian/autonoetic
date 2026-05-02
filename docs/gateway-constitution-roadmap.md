@@ -575,7 +575,7 @@ cancelled, active parent not reaped, no store noop, multiple orphans.
 
 ---
 
-### 2.7 `R+1` Structured scopes for all capabilities
+### 2.7 `R+1` Structured scopes for all capabilities — **ENFORCED**
 
 **Threat.** Bare-string shorthand for low-risk capabilities is a soft
 path for underdeclaration. Auditing a manifest requires reading Rust
