@@ -4,9 +4,9 @@ This document describes the static analysis system for detecting remote/network 
 
 ## Overview
 
-When `sandbox_exec` is called, the code is **statically analyzed** before execution to detect patterns that require network access. If detected, execution is blocked and requires operator approval.
+When `sandbox_exec` runs, the gateway **statically analyzes** the invoked command/code before execution to detect patterns that imply network access. If detected, execution is blocked pending operator approval. The **artifact_exec** path uses the same remote-access analysis and attaches the **same operator-facing hint suffix** (`→ hosts:` or `→ signals:`) when it requires approval.
 
-This is a **deterministic** security check that does not rely on the LLM's self-declaration.
+This is a **deterministic** security check that does not rely on LLM self-declaration.
 
 ## Why Static Analysis?
 
@@ -64,9 +64,15 @@ Static analysis inspects the **actual code** to detect remote access patterns de
 
 | Pattern | Example | Reason |
 |---------|---------|--------|
-| Public IP | `"192.168.1.100"` | External host |
+| Literal IPv4 | `203.0.113.42` | External-looking host |
 
-**Excluded**: `127.x.x.x`, `0.0.0.0` (local/loopback)
+**Excluded**: `127.x.x.x`, `0.0.0.0` (loopback/all interfaces)
+
+## Operator-facing approval hints
+
+Detected patterns are surfaced in **`stderr`**, **`ApprovalRequest.reason`**, and the embedded **`approval`** payload. Concrete URL/IP literals are distilled to hostnames/IP strings via **`normalize_targets`** (`approved_exec_cache.rs`). When hosts are known, approvals append **` → hosts: host1, host2`**.
+
+When there is remote-access risk but **no** extractable literal host (`function_call`, `import`, `network_command`, etc.), approvals append **` → signals: category:snippet; ...`** built by **`approval_remote_operator_suffix`** in `remote_access.rs` (snippet length is capped so lines stay usable in operator UIs and session summaries).
 
 ## Approval Flow
 
@@ -77,13 +83,13 @@ Static analysis inspects the **actual code** to detect remote access patterns de
 │ 1. Policy check (CodeExecution capability)                  │
 │    ↓ allowed                                                │
 │ 2. Static analysis (remote_access.rs)                       │
-│    ├─ No remote patterns → Execute immediately              │
-│    └─ Remote patterns found → proceed to approval checks    │
+│    ├─ No remote patterns → Execute immediately             │
+│    └─ Remote patterns found → proceed to approval checks     │
 │ 3. Approval resolution checks (in order):                   │
 │    a. Exec cache hit (identical code fingerprint) → EXECUTE │
 │    b. Root-session grant covers targets → EXECUTE           │
 │    c. Existing approved/pending approval → REUSE            │
-│    d. None of the above → BLOCK + require approval          │
+│    d. None of the above → BLOCK + require approval           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -117,59 +123,16 @@ The `promotion_record` tool enforces mechanical validation:
 
 This prevents evaluators from passing code that has never been functionally validated.
 
-### When Remote Access Detected
+### When Remote Access Detected (`sandbox_exec`)
 
-The tool returns a structured response instead of executing:
+The tool returns a structured response instead of executing. **`stderr`** and **`approval.reason`** repeat the analyzer summary plus the hint suffix (**`hosts`** or **`signals`**):
 
 ```json
 {
   "ok": false,
   "exit_code": null,
   "stdout": "",
-  "stderr": "Remote access detected: Detected 2 remote access pattern(s) in categories: import, url_literal. Operator approval required to execute code with network access.",
-  "approval_required": true,
-  "remote_access_detected": true,
-  "detected_patterns": [
-    {
-      "category": "import",
-      "pattern": "import requests",
-      "line_number": 1,
-      "reason": "Makes HTTP requests"
-    },
-    {
-      "category": "url_literal",
-      "pattern": "https://api.open-meteo.com/v1/forecast",
-      "line_number": 5,
-      "reason": "External resource"
-    }
-  ],
-  "request_id": "apr-a1b2c3d4",
-  "suspended": true,
-  "message": "Execution suspended pending operator approval (apr-a1b2c3d4). The approved command is persisted and will be used automatically on resume.",
-  "approval": {
-    "kind": "sandbox_exec",
-    "reason": "Remote access detected: 2 patterns → hosts: api.open-meteo.com",
-    "summary": "Sandbox exec: python3 weather_client.py",
-    "requested_by_agent_id": "coder.default",
-    "session_id": "demo-session-1/coder.default-abc123",
-    "retry_field": "approval_ref",
-    "subject": {
-      "command": "python3 weather_client.py",
-      "remote_access_detected": true,
-      "detected_patterns": [...],
-      "normalized_targets": ["api.open-meteo.com"],
-      "hosts": ["api.open-meteo.com"]
-    }
-  }
-}
-```
-
-The `reason` field now includes extracted hostnames when URL literals are detected in the code, giving operators immediate visibility into what domains will be accessed.```json
-{
-  "ok": false,
-  "exit_code": null,
-  "stdout": "",
-  "stderr": "Remote access detected: Detected 2 remote access pattern(s) in categories: import, url_literal. Operator approval required to execute code with network access.",
+  "stderr": "Remote access detected: Detected 2 remote access pattern(s) in categories: import, url_literal. Operator approval required to execute code with network access. → hosts: api.open-meteo.com",
   "approval_required": true,
   "remote_access_detected": true,
   "detected_patterns": [
@@ -185,7 +148,45 @@ The `reason` field now includes extracted hostnames when URL literals are detect
       "line_number": 5,
       "reason": "URL literal indicates external resource access"
     }
-  ]
+  ],
+  "request_id": "apr-a1b2c3d4",
+  "suspended": true,
+  "message": "Execution suspended pending operator approval (apr-a1b2c3d4). The approved command is persisted and will be used automatically on resume.",
+  "approval": {
+    "kind": "sandbox_exec",
+    "reason": "Remote access detected: Detected 2 remote access pattern(s) in categories: import, url_literal → hosts: api.open-meteo.com",
+    "summary": "Sandbox exec: python3 weather_client.py",
+    "requested_by_agent_id": "coder.default",
+    "session_id": "demo-session-1/coder.default-abc123",
+    "retry_field": "approval_ref",
+    "subject": {
+      "command": "python3 weather_client.py",
+      "remote_access_detected": true,
+      "detected_patterns": [],
+      "normalized_targets": ["api.open-meteo.com"],
+      "hosts": ["api.open-meteo.com"]
+    }
+  }
+}
+```
+
+When there are **imports or call shapes** suggesting network access but **no literal URL/IP** landed in **`normalize_targets`**, the suffix uses **`signals`** instead (illustrative shape):
+
+```
+ ... Operator approval required to execute code with network access. → signals: import:from urllib.request import urlopen; function_call:urlopen(
+```
+
+Subject JSON still carries full **`detected_patterns`** for review.
+
+### `artifact_exec`
+
+If an artifact triggers remote-access approval, persisted **`ApprovalRequest.reason`** and returned **`stderr`** use the same suffix: the line starts with **`Artifact exec: {artifact_id} → {remote_analysis.summary}`** and then **` → hosts:`** or **` → signals:`** depending on whether literal targets were extracted.
+
+Example shape:
+
+```json
+{
+  "stderr": "Remote access detected in artifact weather-artifact. Operator approval required. → hosts: api.example.com"
 }
 ```
 
@@ -194,11 +195,9 @@ The `reason` field now includes extracted hostnames when URL literals are detect
 When an agent encounters remote access approval:
 
 1. **Agent reports the approval requirement** to the user
-2. **User reviews the detected patterns** to understand what network access is needed
+2. **User reviews the detected patterns** and the **`hosts` / `signals`** line to understand what network access may occur
 3. **User decides** whether to approve or deny
-4. **If approved**, user can:
-   - Grant `NetworkAccess` capability to the agent
-   - Or provide an alternative implementation that doesn't require network access
+4. **If approved**, user can grant **`NetworkAccess`** for specific hosts or issue an approval that persists the cleared command/effective scope
 
 ## Pattern Details
 
@@ -219,14 +218,16 @@ if analysis.requires_approval {
 // Proceed with execution
 ```
 
+Operator hint suffixes are assembled with **`approval_remote_operator_suffix(concrete_hosts, &detected_patterns)`** so **`sandbox_exec`** and **`artifact_exec`** stay consistent.
+
 ### DetectedPattern Structure
 
 ```rust
 struct DetectedPattern {
-    category: String,      // "import", "function_call", "url_literal", "ip_address"
-    pattern: String,       // The matched text
-    line_number: Option<usize>,  // Line where found (1-indexed)
-    reason: String,        // Why this indicates remote access
+    category: String,              // import, function_call, url_literal, ip_address, …
+    pattern: String,              // matched text (may be shortened in signals output)
+    line_number: Option<usize>,    // approximate line where found (1-indexed)
+    reason: String,               // human explanation used for diagnostics
 }
 ```
 
@@ -238,7 +239,7 @@ Run remote access analyzer tests:
 cargo test --lib remote_access
 ```
 
-Test coverage:
+Test coverage includes:
 - No remote access (pure computation)
 - HTTP import detection
 - urllib import detection
@@ -247,6 +248,7 @@ Test coverage:
 - IP address detection
 - Local IP exclusion
 - Combined patterns (import + usage)
+- **`approval_remote_operator_suffix`** (hosts preferred; signals when no literals)
 
 ## Integration with Agent Capabilities
 
@@ -260,4 +262,4 @@ capabilities:
     patterns: ["python3 "]
 ```
 
-With `NetworkAccess` declared, the static analysis check can be bypassed for approved hosts.
+With `NetworkAccess` declared, policy can allow outbound access consistent with manifests and approvals.
