@@ -1279,6 +1279,11 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         "Sandbox exec: {}",
                         &effective_command[..effective_command.len().min(60)]
                     );
+                    let remote_hint_suffix =
+                        crate::runtime::remote_access::approval_remote_operator_suffix(
+                            &normalized_targets,
+                            &detected_patterns,
+                        );
                     let action = ScheduledAction::SandboxExec {
                         command: effective_command.clone(),
                         dependencies: args.dependencies.as_ref().map(|d| {
@@ -1313,9 +1318,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         reason: Some({
                             let mut r =
                                 format!("Remote access detected: {}", remote_analysis.summary);
-                            if !normalized_targets.is_empty() {
-                                r.push_str(&format!(" → hosts: {}", normalized_targets.join(", ")));
-                            }
+                            r.push_str(&remote_hint_suffix);
                             r
                         }),
                         evidence_ref: None,
@@ -1372,7 +1375,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         "ok": false,
                         "exit_code": null,
                         "stdout": "",
-                        "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.", remote_analysis.summary),
+                        "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.{}", remote_analysis.summary, remote_hint_suffix),
                         "approval_required": true,
                         "request_id": request_id,
                         "remote_access_detected": true,
@@ -1386,17 +1389,22 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
 
                 let detected_patterns = remote_analysis.detected_patterns.clone();
                 let normalized_targets = normalize_targets(&detected_patterns);
+                let remote_hint_suffix =
+                    crate::runtime::remote_access::approval_remote_operator_suffix(
+                        &normalized_targets,
+                        &detected_patterns,
+                    );
                 return serde_json::to_string(&serde_json::json!({
                     "ok": false,
                     "exit_code": null,
                     "stdout": "",
-                    "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.", remote_analysis.summary),
+                    "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.{}", remote_analysis.summary, remote_hint_suffix),
                     "approval_required": true,
                     "remote_access_detected": true,
                     "detected_patterns": remote_analysis.detected_patterns,
                     "approval": {
                         "kind": "sandbox_exec",
-                        "reason": format!("Remote access detected: {}", remote_analysis.summary),
+                        "reason": format!("Remote access detected: {}{}", remote_analysis.summary, remote_hint_suffix),
                         "summary": format!("Sandbox exec: {}", &effective_command[..effective_command.len().min(60)]),
                         "requested_by_agent_id": manifest.agent.id,
                         "session_id": session_id.unwrap_or(""),
