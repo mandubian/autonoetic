@@ -1788,6 +1788,14 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
             overrides.share_net = true;
         }
 
+        let has_evaluation_cap = manifest.capabilities.iter().any(|c| {
+            matches!(c, autonoetic_types::capability::Capability::Evaluation { .. })
+        });
+        if has_evaluation_cap {
+            overrides.force_network_off = true;
+            overrides.share_net = false;
+        }
+
         let layer_python_path_str = layer_python_paths.join(":");
         let mut extra_env: Vec<(String, String)> = if !layer_python_path_str.is_empty() {
             vec![("PYTHONPATH".to_string(), layer_python_path_str)]

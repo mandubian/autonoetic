@@ -3795,7 +3795,14 @@ async fn execute_script_in_sandbox(
     );
 
     let driver = crate::sandbox::SandboxDriverKind::parse(sandbox_type)?;
-    let overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
+    let mut overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
+    let has_evaluation_cap = capabilities.iter().any(|c| {
+        matches!(c, autonoetic_types::capability::Capability::Evaluation { .. })
+    });
+    if has_evaluation_cap {
+        overrides.force_network_off = true;
+        overrides.share_net = false;
+    }
     let entrypoint_relative = match script_path.strip_prefix(agent_dir) {
         Ok(relative) => format!(
             "{}/{}",
