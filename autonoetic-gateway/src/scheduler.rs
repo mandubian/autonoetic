@@ -196,6 +196,11 @@ async fn run_scheduler_tick_at(
         tracing::warn!(error = %e, "Failed to process queued workflow tasks");
     }
 
+    // Orphan-child reaper: cancel children of terminated parent sessions (R+12)
+    if let Err(e) = reap_orphaned_sessions(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to reap orphaned sessions");
+    }
+
     // Resume standalone sessions whose user interaction has been answered
     if let Err(e) = resume_answered_standalone_interactions(execution).await {
         tracing::warn!(error = %e, "Failed to resume answered standalone interactions");
@@ -489,6 +494,138 @@ async fn check_stuck_running_tasks(
                 occurred_at: chrono::Utc::now().to_rfc3339(),
             };
             let _ = workflow_store::append_workflow_event(&config, store, &event);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn reap_orphaned_sessions(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let store = match execution.gateway_store() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let orphans = store.find_orphaned_sessions()?;
+    if orphans.is_empty() {
+        return Ok(());
+    }
+
+    let config = execution.config();
+    let now = chrono::Utc::now();
+    let now_rfc = now.to_rfc3339();
+    let event_seq_base = now.timestamp_millis().max(0) as u64;
+
+    let workflows_root = crate::scheduler::workflow_store::workflows_root(&config).join("runs");
+    let mut workflow_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if workflows_root.is_dir() {
+        for entry in std::fs::read_dir(&workflows_root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                workflow_dirs.push(entry.path());
+            }
+        }
+    }
+
+    for (idx, (child_session_id, parent_session_id, root_session_id, agent_id)) in
+        orphans.into_iter().enumerate()
+    {
+        tracing::info!(
+            child_session_id = %child_session_id,
+            parent_session_id = %parent_session_id,
+            root_session_id = %root_session_id,
+            agent_id = %agent_id,
+            "Reaping orphaned session (R+12)"
+        );
+
+        let _ = store.finalize_session_transcript(&child_session_id, &now_rfc, "failed");
+
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: agent_id.clone(),
+            session_id: child_session_id.clone(),
+            turn_id: None,
+            event_seq: event_seq_base + idx as u64,
+            timestamp: now_rfc.clone(),
+            category: "session".to_string(),
+            action: "parent_terminated".to_string(),
+            status: "error".to_string(),
+            enforced_rules: vec!["R+12".to_string()],
+            target: Some(parent_session_id.clone()),
+            payload: Some(
+                serde_json::json!({
+                    "parent_session_id": parent_session_id,
+                    "root_session_id": root_session_id,
+                    "reason": "parent_session_ended",
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("Orphan-child reaper: parent session terminated".to_string()),
+        };
+        let _ = store.create_causal_event(&event);
+
+        for wf_dir in &workflow_dirs {
+            let tasks_dir = wf_dir.join("tasks");
+            if !tasks_dir.is_dir() {
+                continue;
+            }
+            let wf_id = match wf_dir.file_name().and_then(|n| n.to_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            let tasks = match crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                &config,
+                Some(store.as_ref()),
+                &wf_id,
+            ) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            for mut task in tasks {
+                if task.session_id != child_session_id {
+                    continue;
+                }
+                let is_terminal = matches!(
+                    task.status,
+                    autonoetic_types::workflow::TaskRunStatus::Succeeded
+                        | autonoetic_types::workflow::TaskRunStatus::Failed
+                        | autonoetic_types::workflow::TaskRunStatus::Cancelled
+                        | autonoetic_types::workflow::TaskRunStatus::Aborted
+                );
+                if is_terminal {
+                    continue;
+                }
+                task.status = autonoetic_types::workflow::TaskRunStatus::Cancelled;
+                task.updated_at = now_rfc.clone();
+                task.result_summary = Some(
+                    "Cancelled by orphan-child reaper (R+12): parent session terminated"
+                        .to_string(),
+                );
+                let _ = crate::scheduler::workflow_store::save_task_run(
+                    &config,
+                    Some(store.as_ref()),
+                    &task,
+                );
+                crate::scheduler::workflow_store::dequeue_task(
+                    &config,
+                    Some(store.as_ref()),
+                    &task.workflow_id,
+                    &task.task_id,
+                )
+                .ok();
+            }
+        }
+
+        let sanitized = crate::runtime::checkpoint::sanitize_path_component(&child_session_id);
+        let checkpoint_dir = crate::execution::gateway_root_dir(&config)
+            .join("checkpoints")
+            .join(&sanitized);
+        if checkpoint_dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&checkpoint_dir);
         }
     }
 
