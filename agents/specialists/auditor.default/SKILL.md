@@ -26,6 +26,8 @@ metadata:
         scopes: ["self.*", "skills/*"]
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
+      - type: "Evaluation"
+        patterns: ["*"]
     validation: "soft"
 ---
 # Auditor

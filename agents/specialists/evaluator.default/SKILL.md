@@ -33,6 +33,8 @@ metadata:
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
+      - type: "Evaluation"
+        patterns: ["*"]
     validation: "soft"
     response_contract:
       max_reply_length_chars: 8000
