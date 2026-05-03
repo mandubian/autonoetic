@@ -17,6 +17,7 @@ use autonoetic_gateway::causal_chain::CausalLogger;
 use autonoetic_gateway::llm::{
     CompletionRequest, CompletionResponse, LlmDriver, Message, StopReason, TokenUsage,
 };
+use autonoetic_gateway::log_redaction::RedactedPayload;
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store;
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
@@ -366,8 +367,8 @@ fn ri_0_11_every_event_carries_agent_id() {
     let logger = CausalLogger::new(&path).unwrap();
 
     logger.log(agent_id, session_id, None, 0, "session", "start", EntryStatus::Success, None).unwrap();
-    logger.log(agent_id, session_id, None, 1, "tool", "sandbox_exec", EntryStatus::Success, Some(serde_json::json!({"cmd": "ls"}))).unwrap();
-    logger.log(agent_id, session_id, None, 2, "tool", "content_write", EntryStatus::Denied, Some(serde_json::json!({"name": "secret"}))).unwrap();
+    logger.log(agent_id, session_id, None, 1, "tool", "sandbox_exec", EntryStatus::Success, Some(RedactedPayload::from_redacted(serde_json::json!({"cmd": "ls"})))).unwrap();
+    logger.log(agent_id, session_id, None, 2, "tool", "content_write", EntryStatus::Denied, Some(RedactedPayload::from_redacted(serde_json::json!({"name": "secret"})))).unwrap();
     logger.log(agent_id, session_id, None, 3, "session", "end", EntryStatus::Success, None).unwrap();
 
     let entries = CausalLogger::read_entries(&path).unwrap();
@@ -398,7 +399,7 @@ fn ri_0_11_hash_chain_integrity() {
     let logger = CausalLogger::new(&path).unwrap();
 
     logger.log(agent_id, session_id, None, 0, "session", "start", EntryStatus::Success, None).unwrap();
-    logger.log(agent_id, session_id, None, 1, "tool", "sandbox_exec", EntryStatus::Success, Some(serde_json::json!({"cmd": "echo hello"}))).unwrap();
+    logger.log(agent_id, session_id, None, 1, "tool", "sandbox_exec", EntryStatus::Success, Some(RedactedPayload::from_redacted(serde_json::json!({"cmd": "echo hello"})))).unwrap();
     logger.log(agent_id, session_id, None, 2, "session", "end", EntryStatus::Success, None).unwrap();
 
     let entries = CausalLogger::read_entries(&path).unwrap();
@@ -441,7 +442,7 @@ fn ri_0_11_tampered_actor_id_leaves_stale_hash() {
 
     let logger = CausalLogger::new(&path).unwrap();
 
-    logger.log(real_agent, session_id, None, 0, "tool", "sandbox_exec", EntryStatus::Success, Some(serde_json::json!({"cmd": "ls"}))).unwrap();
+    logger.log(real_agent, session_id, None, 0, "tool", "sandbox_exec", EntryStatus::Success, Some(RedactedPayload::from_redacted(serde_json::json!({"cmd": "ls"})))).unwrap();
 
     let entries = CausalLogger::read_entries(&path).unwrap();
     let original = entries[0].clone();

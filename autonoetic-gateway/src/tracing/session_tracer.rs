@@ -166,7 +166,7 @@ impl TraceSession {
             "gateway",
             &format!("{}.requested", action),
             EntryStatus::Success,
-            payload,
+            payload.map(crate::log_redaction::RedactedPayload::from_raw),
         )
     }
 
@@ -186,7 +186,7 @@ impl TraceSession {
             "gateway",
             &format!("{}.completed", action),
             EntryStatus::Success,
-            payload,
+            payload.map(crate::log_redaction::RedactedPayload::from_raw),
         )
     }
 
@@ -206,7 +206,7 @@ impl TraceSession {
             "gateway",
             &format!("{}.failed", action),
             EntryStatus::Error,
-            Some(serde_json::json!({"reason": reason})),
+            Some(crate::log_redaction::RedactedPayload::from_redacted(serde_json::json!({"reason": reason}))),
         )
     }
 
@@ -226,7 +226,7 @@ impl TraceSession {
             "gateway",
             &format!("{}.skipped", action),
             EntryStatus::Success,
-            Some(serde_json::json!({"reason": reason})),
+            Some(crate::log_redaction::RedactedPayload::from_redacted(serde_json::json!({"reason": reason}))),
         )
     }
 
@@ -246,7 +246,7 @@ impl TraceSession {
             "gateway",
             &format!("{}.denied", action),
             EntryStatus::Denied,
-            Some(serde_json::json!({"reason": reason})),
+            Some(crate::log_redaction::RedactedPayload::from_redacted(serde_json::json!({"reason": reason}))),
         )
     }
 }

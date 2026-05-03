@@ -214,7 +214,7 @@ Vault in `vault.rs`, redaction in `log_redaction.rs`, injection in
 | R-4.11 | `credential_refresh` 401 auto-retry fires at most once per request. | credential-management.md | `credential.rs` | ENFORCED |
 | R-4.12 | Secret-shaped text in responses is blocked by `prohibited_text_patterns`. | response-validation-gate.md | `runtime/response_validation.rs:68` | ENFORCED |
 | R-4.13 | Logs, traces, digests, and LLM prompts are redacted via `redact_text_for_logs` before storage. | security-sentinel.md | `log_redaction.rs:128` | ENFORCED |
-| R-4.14 | Redaction happens **before** causal-chain append (ordering invariant). | (R+9) | not pinned | MISSING |
+| R-4.14 | Redaction happens **before** causal-chain append (ordering invariant). | (R+9) | `log_redaction.rs:RedactedPayload`, `causal_chain.rs:65` | ENFORCED |
 
 ## 5. I/O Schema Validation
 
@@ -387,7 +387,7 @@ before it moves into its category.
 | R+6 | Causal-chain fsync ordering invariant — state transitions gated on event durability. | ENFORCED (R-8.16) |
 | R+7 | Runtime-lock drift check at session start. | ENFORCED (R-8.12) |
 | R+8 | Vault master-key presence probe at gateway startup. | P2 |
-| R+9 | Redaction-before-write ordering invariant. | P1 |
+| R+9 | Redaction-before-write ordering invariant. | ENFORCED |
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | P1 |
 | R+11 | Bundle signature verification at `agent_revision_create`. | P1 |
 | R+12 | Orphan-child reaper on parent session termination. | ENFORCED (R-7.16) |

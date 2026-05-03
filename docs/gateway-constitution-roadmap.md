@@ -464,7 +464,7 @@ build SHA drift, matching SHA, absent lock, malformed lock, payload fields.
 
 ---
 
-### 2.2 `R+9` Redaction-before-write ordering
+### 2.2 `R+9` Redaction-before-write ordering — **ENFORCED**
 
 **Threat.** A raw payload (tool args, LLM completion, error string)
 lands in the JSONL file before `redact_text_for_logs` runs. Even if

@@ -523,7 +523,7 @@ fn log_sdk_memory_event(
         "memory",
         action,
         EntryStatus::Success,
-        Some(payload),
+        Some(crate::log_redaction::RedactedPayload::from_raw(payload)),
     )
 }
 
