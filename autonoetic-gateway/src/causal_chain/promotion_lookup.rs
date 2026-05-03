@@ -114,6 +114,7 @@ impl PromotionLookup {
 mod tests {
     use super::*;
     use crate::causal_chain::CausalLogger;
+    use crate::log_redaction::RedactedPayload;
     use tempfile::tempdir;
 
     #[test]
@@ -132,13 +133,13 @@ mod tests {
                 "tool",
                 "promotion_record",
                 autonoetic_types::causal_chain::EntryStatus::Success,
-                Some(serde_json::json!({
+                Some(RedactedPayload::from_redacted(serde_json::json!({
                     "arguments": {
                         "artifact_id": "art_abc123",
                         "role": "evaluator",
                         "pass": true
                     }
-                })),
+                }))),
             )
             .unwrap();
 
@@ -166,13 +167,13 @@ mod tests {
                 "tool",
                 "promotion_record",
                 autonoetic_types::causal_chain::EntryStatus::Success,
-                Some(serde_json::json!({
+                Some(RedactedPayload::from_redacted(serde_json::json!({
                     "arguments": {
                         "artifact_id": "art_abc123",
                         "role": "evaluator",
                         "pass": true
                     }
-                })),
+                }))),
             )
             .unwrap();
 
@@ -200,13 +201,13 @@ mod tests {
                 "tool",
                 "promotion_record",
                 autonoetic_types::causal_chain::EntryStatus::Success,
-                Some(serde_json::json!({
+                Some(RedactedPayload::from_redacted(serde_json::json!({
                     "arguments": {
                         "artifact_id": "art_abc123",
                         "role": "evaluator",
                         "pass": true
                     }
-                })),
+                }))),
             )
             .unwrap();
 

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use autonoetic_gateway::log_redaction::RedactedPayload;
 use autonoetic_gateway::sandbox::{
     SdkBridgeRateLimiter, SDK_BRIDGE_MAX_PAYLOAD_BYTES, SDK_BRIDGE_RATE_LIMIT_PER_SEC,
 };
@@ -264,10 +265,10 @@ fn handle_sdk_in_test(
             "abuse",
             "payload_too_large",
             autonoetic_types::causal_chain::EntryStatus::Denied,
-            Some(serde_json::json!({
+            Some(RedactedPayload::from_raw(serde_json::json!({
                 "detail": format!("{} bytes exceeds {} limit", line.len(), rate_limiter.max_payload_bytes()),
                 "violation": "payload_too_large",
-            })),
+            }))),
         )?;
         let error_resp = serde_json::json!({
             "jsonrpc": "2.0",
@@ -307,10 +308,10 @@ fn handle_sdk_in_test(
             "abuse",
             "rate_limited",
             autonoetic_types::causal_chain::EntryStatus::Denied,
-            Some(serde_json::json!({
+            Some(RedactedPayload::from_raw(serde_json::json!({
                 "detail": format!("sdk bridge call '{}' exceeded rate limit of {}/sec", method, rate_limiter.rate_limit()),
                 "violation": "rate_limited",
-            })),
+            }))),
         )?;
         let error_resp = serde_json::json!({
             "jsonrpc": "2.0",

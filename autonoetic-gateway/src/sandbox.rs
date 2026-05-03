@@ -635,7 +635,7 @@ fn log_sdk_memory_event(
         "memory",
         action,
         EntryStatus::Success,
-        Some(payload),
+        Some(crate::log_redaction::RedactedPayload::from_raw(payload)),
     )
 }
 
@@ -659,10 +659,10 @@ fn log_sdk_bridge_abuse(
         "abuse",
         violation,
         EntryStatus::Denied,
-        Some(serde_json::json!({
+        Some(crate::log_redaction::RedactedPayload::from_raw(serde_json::json!({
             "detail": detail,
             "violation": violation,
-        })),
+        }))),
     )
 }
 
