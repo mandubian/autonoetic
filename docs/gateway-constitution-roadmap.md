@@ -488,28 +488,37 @@ call and verifies the JSONL on disk never contains the raw form.
 
 ---
 
-### 2.3 `R+11` Bundle signature verification
+### 2.3 `R+11` Bundle signature verification — **ENFORCED**
 
 **Threat.** Content-addressing pins a bundle *once created* but does
 not verify authenticity. Any party with write access to the revision
 creation surface can inject a malicious revision that will then be
 trusted by content-digest downstream.
 
-**Sketch.** Add a `signature` field to the revision-create input,
-verify against a configured trust-root at the time of
-`agent_revision_create`. Reject unsigned or invalid bundles unless a
-`trust_local` config flag is set (dev mode only).
+**Implementation.** Both `agent_revision_create` and
+`agent_revision_create_from_intent` accept an optional `signature`
+field (base64 Ed25519 signature over the canonical revision content
+digest). When `trust_unsigned_bundles` is false (default), the
+signature is required and verified against the gateway identity public
+key (`state_attestation.ed25519.pub`). If the public key file does not
+exist or the signature is invalid, the revision is rejected with an
+R+11 error. When the public key file is absent, signatures are
+accepted but not verified (bootstrapping scenario).
 
-Sign with existing Rust crypto (ed25519, `ring` or `ed25519-dalek`).
-Key material configured via `AUTONOETIC_SIGNING_PUBLIC_KEYS` (path to
-PEM or JSON key set).
+Config: `trust_unsigned_bundles: true` in `GatewayConfig` disables the
+gate entirely (dev mode only). Default is false — fail-shut even when
+no config is provided.
 
-Files: new `autonoetic-gateway/src/crypto/signatures.rs`,
-`autonoetic-gateway/src/runtime/tools/agent_revision.rs`,
-`autonoetic-gateway/src/config.rs`.
+Files: `autonoetic-gateway/src/runtime/tools/agent_revision.rs`
+(signature gate in both `execute()` methods + verification in
+`create_revision_from_files`),
+`autonoetic-gateway/src/runtime/crypto.rs` (`ManifestSigner`,
+`ManifestVerifier`, `GatewayIdentityKey::PUBLIC_FILENAME`),
+`autonoetic-types/src/config.rs` (`trust_unsigned_bundles`).
 
-**Test.** `constitution_install_signature.rs` — create with valid
-signature, assert pass; tamper one byte, assert reject.
+**Test.** `constitution_install_signature.rs` — sign/verify roundtrip,
+unsigned rejected when strict, invalid signature rejected, unsigned
+allowed when trusted, config default is strict.
 
 **Size.** M.
 

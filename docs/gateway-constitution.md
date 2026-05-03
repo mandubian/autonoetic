@@ -338,7 +338,7 @@ revision.promote`.
 | R-9.10 | External Python imports are detected at install. | spec-install-pipeline-hardening.md §3.3 | `install_contract.rs::detect_external_python_imports` | ENFORCED |
 | R-9.11 | Dependency files with no layers block promotion for high-risk agents. | spec-install-pipeline-hardening.md §3.2 | same | ENFORCED |
 | R-9.12 | `BundleHealthReport` is returned in `create_from_intent` responses. | spec-install-pipeline-hardening.md §3.4 | `install_contract.rs::analyze_bundle_health` | ENFORCED |
-| R-9.13 | Agent bundle signatures are verified at `agent_revision_create`. | ARCHITECTURE.md (aspirational) | not implemented | MISSING |
+| R-9.13 | Agent bundle signatures are verified at `agent_revision_create`. | `agent_revision.rs:848`, `constitution_install_signature.rs` | ENFORCED |
 | R-9.14 | Trust domains constrain cross-domain agent spawns. | agent-messaging.md | not implemented | DESIGN DEBT |
 
 ## 10. Federation / Remote
@@ -389,7 +389,7 @@ before it moves into its category.
 | R+8 | Vault master-key presence probe at gateway startup. | P2 |
 | R+9 | Redaction-before-write ordering invariant. | ENFORCED |
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | ENFORCED (`sandbox.rs:76`, `constitution_abuse_sdk_bridge.rs`) |
-| R+11 | Bundle signature verification at `agent_revision_create`. | P1 |
+| R+11 | Bundle signature verification at `agent_revision_create` and `agent_revision_create_from_intent`. Ed25519 signature over canonical content digest, verified against gateway identity public key. | ENFORCED (`agent_revision.rs`, `crypto.rs`, `constitution_install_signature.rs`) |
 | R+12 | Orphan-child reaper on parent session termination. | ENFORCED (R-7.16) |
 | R+13 | Approval grant TTL. | P2 |
 | R+14 | `can_invoke_tool` denies unknown tool names explicitly. | P2 |

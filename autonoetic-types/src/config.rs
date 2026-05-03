@@ -668,6 +668,15 @@ pub struct GatewayConfig {
     /// Default: false (drift is fatal).
     #[serde(default)]
     pub allow_runtime_lock_drift: bool,
+
+    /// When true, accept unsigned agent bundle revisions at
+    /// `agent_revision_create` and `agent_revision_create_from_intent`
+    /// (R+11 / R-9.13). Intended for local development only. In production,
+    /// every revision must carry a valid Ed25519 signature over the canonical
+    /// content digest, verified against the gateway identity public key.
+    /// Default: false (signatures required).
+    #[serde(default)]
+    pub trust_unsigned_bundles: bool,
 }
 
 fn default_interaction_answer_orchestration() -> bool {
@@ -1266,6 +1275,7 @@ impl Default for GatewayConfig {
             system_agents: Vec::new(),
             interaction_answer_orchestration: default_interaction_answer_orchestration(),
             allow_runtime_lock_drift: false,
+            trust_unsigned_bundles: false,
         }
     }
 }
