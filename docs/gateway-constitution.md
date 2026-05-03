@@ -388,7 +388,7 @@ before it moves into its category.
 | R+7 | Runtime-lock drift check at session start. | ENFORCED (R-8.12) |
 | R+8 | Vault master-key presence probe at gateway startup. | P2 |
 | R+9 | Redaction-before-write ordering invariant. | P1 |
-| R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | P1 |
+| R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | ENFORCED |
 | R+11 | Bundle signature verification at `agent_revision_create`. | P1 |
 | R+12 | Orphan-child reaper on parent session termination. | ENFORCED (R-7.16) |
 | R+13 | Approval grant TTL. | P2 |
