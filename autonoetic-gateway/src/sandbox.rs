@@ -7,14 +7,17 @@ use sha2::{Digest, Sha256};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
 };
+
+pub const SDK_BRIDGE_RATE_LIMIT_PER_SEC: u32 = 100;
+pub const SDK_BRIDGE_MAX_PAYLOAD_BYTES: usize = 1_048_576;
 
 const DOCKER_IMAGE_ENV: &str = "AUTONOETIC_DOCKER_IMAGE";
 const FIRECRACKER_CONFIG_ENV: &str = "AUTONOETIC_FIRECRACKER_CONFIG";
@@ -46,6 +49,55 @@ impl BwrapIsolationOverrides {
 
     pub fn promotion_gate_overrides() -> Self {
         Self { share_net: false, force_network_off: true }
+    }
+}
+
+pub struct SdkBridgeRateLimiter {
+    calls_this_second: AtomicU32,
+    second_start_epoch: AtomicU64,
+    rate_limit: u32,
+    max_payload_bytes: usize,
+}
+
+impl SdkBridgeRateLimiter {
+    pub fn new(rate_limit: u32, max_payload_bytes: usize) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            calls_this_second: AtomicU32::new(0),
+            second_start_epoch: AtomicU64::new(now),
+            rate_limit,
+            max_payload_bytes,
+        }
+    }
+
+    pub fn check_rate(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.check_rate_at(now)
+    }
+
+    pub fn check_rate_at(&self, now_secs: u64) -> bool {
+        let current_window = self.second_start_epoch.load(Ordering::Relaxed);
+        if now_secs != current_window {
+            self.second_start_epoch.store(now_secs, Ordering::Relaxed);
+            self.calls_this_second.store(1, Ordering::Relaxed);
+            return true;
+        }
+        let count = self.calls_this_second.fetch_add(1, Ordering::Relaxed);
+        count < self.rate_limit
+    }
+
+    pub fn max_payload_bytes(&self) -> usize {
+        self.max_payload_bytes
+    }
+
+    pub fn rate_limit(&self) -> u32 {
+        self.rate_limit
     }
 }
 
@@ -348,9 +400,6 @@ fn start_sdk_bridge(
     agent_dir: &str,
     root_session_id: Option<String>,
 ) -> anyhow::Result<StartedSdkBridge> {
-    // Use a short hash-based socket path in /tmp to avoid SUN_LEN (108 byte) limit.
-    // The socket path must be <= 108 bytes on Linux, so we use:
-    //   /tmp/autonoetic-{16_hex_chars}.sock  = 36 bytes (well under limit)
     let mut hasher = Sha256::new();
     hasher.update(agent_dir.as_bytes());
     hasher.update(std::process::id().to_ne_bytes());
@@ -369,6 +418,10 @@ fn start_sdk_bridge(
     let agent_dir_buf = PathBuf::from(agent_dir);
     let gateway_dir_buf = gateway_dir_from_agent_dir(&agent_dir_buf)?;
     let root_session_id_for_bridge = root_session_id;
+    let rate_limiter = Arc::new(SdkBridgeRateLimiter::new(
+        SDK_BRIDGE_RATE_LIMIT_PER_SEC,
+        SDK_BRIDGE_MAX_PAYLOAD_BYTES,
+    ));
 
     let handle = thread::spawn(move || {
         run_sdk_bridge_loop(
@@ -377,6 +430,7 @@ fn start_sdk_bridge(
             &gateway_dir_buf,
             stop_flag,
             root_session_id_for_bridge,
+            rate_limiter,
         );
     });
 
@@ -396,13 +450,20 @@ fn run_sdk_bridge_loop(
     gateway_dir: &std::path::Path,
     stop: Arc<AtomicBool>,
     root_session_id: Option<String>,
+    rate_limiter: Arc<SdkBridgeRateLimiter>,
 ) {
+    let abuse_seq = Arc::new(AtomicU64::new(1));
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                if let Err(_e) =
-                    handle_sdk_client(stream, agent_dir, gateway_dir, root_session_id.as_deref())
-                {
+                if let Err(_e) = handle_sdk_client(
+                    stream,
+                    agent_dir,
+                    gateway_dir,
+                    root_session_id.as_deref(),
+                    &rate_limiter,
+                    &abuse_seq,
+                ) {
                     // Ignore bridge client failures in thin compatibility mode.
                 }
             }
@@ -419,29 +480,80 @@ fn handle_sdk_client(
     agent_dir: &std::path::Path,
     gateway_dir: &std::path::Path,
     root_session_id: Option<&str>,
+    rate_limiter: &SdkBridgeRateLimiter,
+    abuse_seq: &AtomicU64,
 ) -> anyhow::Result<()> {
-    let mut line = String::new();
-    {
-        let mut reader = BufReader::new(&stream);
-        reader.read_line(&mut line)?;
-    }
+    let max_bytes = rate_limiter.max_payload_bytes();
+    let mut buf = vec![0u8; max_bytes + 1];
+    let n = {
+        let mut reader = BufReader::new(&stream).take((max_bytes + 1) as u64);
+        reader.read(&mut buf)?
+    };
+    let line = String::from_utf8_lossy(&buf[..n]);
     if line.trim().is_empty() {
         return Ok(());
     }
+
+    if n > max_bytes {
+        let seq = abuse_seq.fetch_add(1, Ordering::Relaxed);
+        let _ = log_sdk_bridge_abuse(
+            agent_dir,
+            "payload_too_large",
+            &format!("payload exceeds {} byte limit", max_bytes),
+            seq,
+        );
+        let error_resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {
+                "code": -32001,
+                "message": "payload_too_large",
+                "data": {"error_type": "sdk_bridge_abuse", "max_bytes": max_bytes}
+            }
+        });
+        let payload = serde_json::to_string(&error_resp)? + "\n";
+        stream.write_all(payload.as_bytes())?;
+        stream.flush()?;
+        return Ok(());
+    }
+
     let request: serde_json::Value = serde_json::from_str(&line)?;
     let id = request
         .get("id")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let params = request
         .get("params")
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
 
+    if !rate_limiter.check_rate() {
+        let seq = abuse_seq.fetch_add(1, Ordering::Relaxed);
+        let _ = log_sdk_bridge_abuse(
+            agent_dir,
+            "rate_limited",
+            &format!("sdk bridge call '{}' exceeded rate limit of {}/sec", method, rate_limiter.rate_limit()),
+            seq,
+        );
+        let error_resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32002,
+                "message": "rate_limited",
+                "data": {"error_type": "sdk_bridge_abuse", "rate_limit_per_sec": rate_limiter.rate_limit}
+            }
+        });
+        let payload = serde_json::to_string(&error_resp)? + "\n";
+        stream.write_all(payload.as_bytes())?;
+        stream.flush()?;
+        return Ok(());
+    }
+
     let response =
-        match dispatch_sdk_method(method, &params, agent_dir, gateway_dir, root_session_id) {
+        match dispatch_sdk_method(&method, &params, agent_dir, gateway_dir, root_session_id) {
             Ok(result) => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -466,7 +578,7 @@ fn handle_sdk_client(
     Ok(())
 }
 
-fn validate_sdk_relative_path(path: &str) -> anyhow::Result<()> {
+pub fn validate_sdk_relative_path(path: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!path.trim().is_empty(), "path must not be empty");
     anyhow::ensure!(!path.starts_with('/'), "absolute paths are not allowed");
     anyhow::ensure!(
@@ -478,7 +590,7 @@ fn validate_sdk_relative_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn gateway_dir_from_agent_dir(agent_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+pub fn gateway_dir_from_agent_dir(agent_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
     let agents_root = agent_dir
         .parent()
         .ok_or_else(|| anyhow::anyhow!("agent directory is missing agents-root parent"))?;
@@ -524,6 +636,33 @@ fn log_sdk_memory_event(
         action,
         EntryStatus::Success,
         Some(crate::log_redaction::RedactedPayload::from_raw(payload)),
+    )
+}
+
+fn log_sdk_bridge_abuse(
+    agent_dir: &std::path::Path,
+    violation: &str,
+    detail: &str,
+    event_seq: u64,
+) -> anyhow::Result<()> {
+    let actor_id = agent_id_from_agent_dir(agent_dir)?;
+    let log_path = agent_dir.join("history").join("causal_chain.jsonl");
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let logger = crate::causal_chain::CausalLogger::new(&log_path)?;
+    logger.log(
+        &actor_id,
+        "sdk-bridge",
+        None,
+        event_seq,
+        "abuse",
+        violation,
+        EntryStatus::Denied,
+        Some(crate::log_redaction::RedactedPayload::from_raw(serde_json::json!({
+            "detail": detail,
+            "violation": violation,
+        }))),
     )
 }
 
