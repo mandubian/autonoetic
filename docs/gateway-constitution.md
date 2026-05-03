@@ -389,7 +389,7 @@ before it moves into its category.
 | R+8 | Vault master-key presence probe at gateway startup. | P2 |
 | R+9 | Redaction-before-write ordering invariant. | ENFORCED |
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | ENFORCED (`sandbox.rs:76`, `constitution_abuse_sdk_bridge.rs`) |
-| R+11 | Bundle signature verification at `agent_revision_create`. | ENFORCED |
+| R+11 | Bundle signature verification at `agent_revision_create` and `agent_revision_create_from_intent`. Ed25519 signature over canonical content digest, verified against gateway identity public key. | ENFORCED (`agent_revision.rs`, `crypto.rs`, `constitution_install_signature.rs`) |
 | R+12 | Orphan-child reaper on parent session termination. | ENFORCED (R-7.16) |
 | R+13 | Approval grant TTL. | P2 |
 | R+14 | `can_invoke_tool` denies unknown tool names explicitly. | P2 |

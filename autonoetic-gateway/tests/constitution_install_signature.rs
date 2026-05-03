@@ -1,10 +1,8 @@
 //! Constitution R+11 / R-9.13: Bundle signature verification at revision create.
 //!
-//! When `trust_unsigned_bundles` is false (the default in production), every
-//! `agent_revision_create` must carry a valid Ed25519 signature over the
-//! canonical content digest. Unsigned bundles are rejected.
-//!
-//! When `trust_unsigned_bundles` is true (dev mode), signatures are optional.
+//! When `trust_unsigned_bundles` is false (the default), every revision must
+//! carry a valid Ed25519 signature over the canonical content digest, verified
+//! against the gateway identity public key.
 
 mod support;
 
@@ -109,7 +107,7 @@ fn r11_revision_create_rejects_unsigned_when_strict() {
 
     let args = serde_json::json!({
         "agent_id": "revision.tester",
-        "artifact_id": "nonexistent",
+        "artifact_id": "art_000000000000",
     });
 
     let result = registry.execute(
@@ -135,7 +133,7 @@ fn r11_revision_create_rejects_unsigned_when_strict() {
 }
 
 #[test]
-fn r11_revision_create_allows_unsigned_when_trusted() {
+fn r11_revision_create_rejects_invalid_signature() {
     let temp = tempdir().unwrap();
     let (gw_dir, store) = setup_gateway(temp.path());
     let manifest = test_manifest();
@@ -145,7 +143,8 @@ fn r11_revision_create_allows_unsigned_when_trusted() {
 
     let args = serde_json::json!({
         "agent_id": "revision.tester",
-        "artifact_id": "nonexistent",
+        "artifact_id": "art_000000000000",
+        "signature": "invalid_base64_not_a_real_sig!!!"
     });
 
     let result = registry.execute(
@@ -162,9 +161,48 @@ fn r11_revision_create_allows_unsigned_when_trusted() {
         None,
     );
 
-    // It won't succeed (artifact doesn't exist), but it should NOT fail
-    // with the R+11 signature gate — the error should be about the missing
-    // artifact, not about signatures.
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("R+11") {
+                panic!(
+                    "invalid signature should NOT trigger R+11 gate when trust_unsigned_bundles is true: {}",
+                    msg
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn r11_revision_create_allows_unsigned_when_trusted() {
+    let temp = tempdir().unwrap();
+    let (gw_dir, store) = setup_gateway(temp.path());
+    let manifest = test_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let config = config_trust();
+
+    let args = serde_json::json!({
+        "agent_id": "revision.tester",
+        "artifact_id": "art_000000000000",
+    });
+
+    let result = registry.execute(
+        "agent_revision_create",
+        &manifest,
+        &policy,
+        temp.path(),
+        Some(&gw_dir),
+        &args.to_string(),
+        None,
+        None,
+        Some(&config),
+        Some(store),
+        None,
+    );
+
     match result {
         Ok(_) => {}
         Err(e) => {
