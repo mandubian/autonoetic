@@ -214,7 +214,7 @@ Vault in `vault.rs`, redaction in `log_redaction.rs`, injection in
 | R-4.11 | `credential_refresh` 401 auto-retry fires at most once per request. | credential-management.md | `credential.rs` | ENFORCED |
 | R-4.12 | Secret-shaped text in responses is blocked by `prohibited_text_patterns`. | response-validation-gate.md | `runtime/response_validation.rs:68` | ENFORCED |
 | R-4.13 | Logs, traces, digests, and LLM prompts are redacted via `redact_text_for_logs` before storage. | security-sentinel.md | `log_redaction.rs:128` | ENFORCED |
-| R-4.14 | Redaction happens **before** causal-chain append (ordering invariant). | (R+9) | `log_redaction.rs:RedactedPayload`, `causal_chain.rs:65` | ENFORCED |
+| R-4.14 | Redaction happens **before** causal-chain append (ordering invariant). | (R+9) | `log_redaction.rs:15`, `causal_chain.rs:67` | ENFORCED |
 
 ## 5. I/O Schema Validation
 

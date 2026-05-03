@@ -30,10 +30,6 @@ impl RedactedPayload {
         Self(value)
     }
 
-    pub fn from_redacted_none() -> Option<Self> {
-        None
-    }
-
     pub fn into_inner(self) -> Value {
         self.0
     }
