@@ -83,7 +83,6 @@ async fn test_agent_spawn_happy_path() {
 
     exec.dispatch_async(ctx);
 
-    // The send happens inside a tokio::spawn; give it a moment.
     let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
         .expect("timed out waiting for HookSpawnRequest")
@@ -102,7 +101,7 @@ async fn test_agent_spawn_happy_path() {
     assert_eq!(req.root_session_id, "root-test");
 }
 
-/// When `allowed_agents` is set and the target agent is in the list, the spawn goes through.
+/// When `allowed_agents` is set and the target is in the list, the spawn goes through.
 #[tokio::test]
 async fn test_agent_spawn_acl_allow() {
     let hook = make_hook(
@@ -127,7 +126,7 @@ async fn test_agent_spawn_acl_allow() {
     assert_eq!(req.agent_id, "evaluator.default");
 }
 
-/// When `allowed_agents` is set and the target is **not** in the list, no spawn request is sent.
+/// When `allowed_agents` is set and the target is NOT in the list, no spawn is sent.
 #[tokio::test]
 async fn test_agent_spawn_acl_block() {
     let hook = make_hook(
@@ -135,50 +134,38 @@ async fn test_agent_spawn_acl_block() {
         HookAction::AgentSpawn,
         true,
         serde_json::json!({
-            "agent_id": "coder.default",   // not in allowed_agents
+            "agent_id": "coder.default",
             "message_template": "Evaluate {{request_id}}"
         }),
-        vec!["evaluator.default"],          // only evaluator is allowed
+        vec!["evaluator.default"],
     );
 
     let (exec, mut rx) = build_executor_with_channel(vec![hook]);
     exec.dispatch_async(approval_resolved_ctx("apr-789", "approved"));
 
-    // Nothing should arrive within a short window.
-    let result =
-        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
-    assert!(
-        result.is_err(),
-        "no HookSpawnRequest should be sent when ACL blocks the agent"
-    );
+    let result = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+    assert!(result.is_err(), "no HookSpawnRequest should be sent when ACL blocks");
 }
 
-/// When `params.agent_id` is absent or empty, no spawn request is sent.
+/// When `params.agent_id` is absent, no spawn is sent.
 #[tokio::test]
 async fn test_agent_spawn_missing_agent_id() {
     let hook = make_hook(
         HookEvent::ApprovalResolved,
         HookAction::AgentSpawn,
         true,
-        serde_json::json!({
-            "message_template": "Evaluate {{request_id}}"
-            // no agent_id!
-        }),
+        serde_json::json!({ "message_template": "Evaluate {{request_id}}" }),
         vec![],
     );
 
     let (exec, mut rx) = build_executor_with_channel(vec![hook]);
     exec.dispatch_async(approval_resolved_ctx("apr-000", "approved"));
 
-    let result =
-        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
-    assert!(
-        result.is_err(),
-        "no HookSpawnRequest should be sent when agent_id param is missing"
-    );
+    let result = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+    assert!(result.is_err(), "no HookSpawnRequest without agent_id");
 }
 
-/// Template `{{event}}` is substituted with the hook event's string name.
+/// `{{event}}` is substituted with the event's string name.
 #[tokio::test]
 async fn test_agent_spawn_event_placeholder() {
     let hook = make_hook(
@@ -196,23 +183,18 @@ async fn test_agent_spawn_event_placeholder() {
     exec.dispatch_async(approval_resolved_ctx("apr-evt", "rejected"));
 
     let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("timed out")
-        .expect("closed");
+        .await.expect("timed out").expect("closed");
 
-    assert_eq!(
-        req.message,
-        "Event=approval.resolved req=apr-evt"
-    );
+    assert_eq!(req.message, "Event=approval.resolved req=apr-evt");
 }
 
-/// `agent.spawn` hooks with `async: false` must be silently skipped (no spawn).
+/// `agent.spawn` hooks with `async: false` are skipped — both via dispatch() and dispatch_async().
 #[tokio::test]
 async fn test_agent_spawn_sync_not_supported() {
     let hook = make_hook(
         HookEvent::ApprovalResolved,
         HookAction::AgentSpawn,
-        false, // sync — should be rejected
+        false, // sync — should be rejected by agent_spawn()
         serde_json::json!({
             "agent_id": "evaluator.default",
             "message_template": "Evaluate {{request_id}}"
@@ -220,20 +202,16 @@ async fn test_agent_spawn_sync_not_supported() {
         vec![],
     );
 
-    let (exec, mut rx) = build_executor_with_channel(vec![hook]);
-    // dispatch (not dispatch_async) is the sync path
-    exec.dispatch(&approval_resolved_ctx("apr-sync", "approved"));
+    let (exec, mut rx) = build_executor_with_channel(vec![hook.clone()]);
+    // Both dispatch paths should route through agent_spawn() which checks async flag.
+    exec.dispatch(&approval_resolved_ctx("apr-sync1", "approved"));
+    exec.dispatch_async(approval_resolved_ctx("apr-sync2", "approved"));
 
-    let result =
-        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
-    assert!(
-        result.is_err(),
-        "synchronous agent.spawn dispatch should produce no HookSpawnRequest"
-    );
+    let result = tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await;
+    assert!(result.is_err(), "sync agent.spawn should produce no HookSpawnRequest");
 }
 
-/// When the spawn channel is not wired (`set_spawn_tx` not called), dispatching
-/// an agent.spawn hook should not panic and should silently skip.
+/// When spawn channel is not wired, dispatching should not panic.
 #[tokio::test]
 async fn test_agent_spawn_no_channel_wired() {
     let hook = make_hook(
@@ -249,12 +227,21 @@ async fn test_agent_spawn_no_channel_wired() {
 
     // Do NOT call set_spawn_tx — spawn_tx remains None.
     let exec = HookExecutor::new(vec![hook], None, 4000, 10);
-    // Deliberately NOT calling exec.set_spawn_tx(...)
-
-    // Should not panic.
     exec.dispatch_async(approval_resolved_ctx("apr-nowire", "approved"));
 
-    // Give the spawned task a chance to run.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     // No assertion needed beyond "did not panic".
+}
+
+/// HookEvent serde uses dotted names — verify round-trip serialization matches config format.
+#[test]
+fn test_hook_event_serde_dotted_names() {
+    let event: HookEvent = serde_json::from_str("\"approval.resolved\"").unwrap();
+    assert_eq!(event, HookEvent::ApprovalResolved);
+
+    let serialized = serde_json::to_string(&HookEvent::SessionClosed).unwrap();
+    assert_eq!(serialized, "\"session.closed\"");
+
+    let wj: HookEvent = serde_json::from_str("\"workflow.join.satisfied\"").unwrap();
+    assert_eq!(wj, HookEvent::WorkflowJoinSatisfied);
 }

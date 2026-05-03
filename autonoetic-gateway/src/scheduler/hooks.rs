@@ -109,7 +109,7 @@ impl HookExecutor {
                     });
                 }
                 HookAction::AgentSpawn => {
-                    self.agent_spawn_async(ctx.clone(), hook.clone());
+                    self.agent_spawn(&ctx, hook);
                 }
                 HookAction::HttpCallback => {
                     tracing::warn!(

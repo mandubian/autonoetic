@@ -409,10 +409,17 @@ impl GatewayExecutionService {
             while let Some(req) = spawn_rx.recv().await {
                 let svc = drain_svc.clone();
                 tokio::spawn(async move {
+                    // Scope child under root: "root/hook-spawn-uuid"
+                    // so root_session_id(), root-budget, emergency stop all work.
+                    let child_session_id = if req.root_session_id.is_empty() {
+                        req.session_id.clone()
+                    } else {
+                        format!("{}/{}", req.root_session_id, req.session_id)
+                    };
                     tracing::info!(
                         target: "hooks",
                         agent_id = %req.agent_id,
-                        session_id = %req.session_id,
+                        session_id = %child_session_id,
                         root_session_id = %req.root_session_id,
                         "agent.spawn hook: executing spawn"
                     );
@@ -420,7 +427,7 @@ impl GatewayExecutionService {
                         .spawn_agent_once(
                             &req.agent_id,
                             &req.message,
-                            &req.session_id,
+                            &child_session_id,
                             None, // no source_agent_id — gateway-initiated
                             false,
                             Some("hook.agent_spawn"),
@@ -435,7 +442,7 @@ impl GatewayExecutionService {
                             tracing::info!(
                                 target: "hooks",
                                 agent_id = %req.agent_id,
-                                session_id = %req.session_id,
+                                session_id = %child_session_id,
                                 reply_len = result.assistant_reply.as_deref().map(|s| s.len()).unwrap_or(0),
                                 "agent.spawn hook: spawn completed"
                             );
@@ -444,7 +451,7 @@ impl GatewayExecutionService {
                             tracing::warn!(
                                 target: "hooks",
                                 agent_id = %req.agent_id,
-                                session_id = %req.session_id,
+                                session_id = %child_session_id,
                                 error = %e,
                                 "agent.spawn hook: spawn failed"
                             );

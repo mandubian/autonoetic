@@ -2,15 +2,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
 pub enum HookEvent {
+    #[serde(rename = "session.closed")]
     SessionClosed,
+    #[serde(rename = "session.suspended")]
     SessionSuspended,
+    #[serde(rename = "approval.resolved")]
     ApprovalResolved,
+    #[serde(rename = "approval.requested")]
     ApprovalRequested,
+    #[serde(rename = "workflow.join.satisfied")]
     WorkflowJoinSatisfied,
+    #[serde(rename = "artifact.created")]
     ArtifactCreated,
+    #[serde(rename = "agent.promoted")]
     AgentPromoted,
+    #[serde(rename = "emergency_stop")]
     EmergencyStop,
 }
 
