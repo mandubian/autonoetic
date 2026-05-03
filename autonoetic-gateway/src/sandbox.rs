@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
 };
 
 pub const SDK_BRIDGE_RATE_LIMIT_PER_SEC: u32 = 100;
@@ -78,9 +78,13 @@ impl SdkBridgeRateLimiter {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        self.check_rate_at(now)
+    }
+
+    pub fn check_rate_at(&self, now_secs: u64) -> bool {
         let current_window = self.second_start_epoch.load(Ordering::Relaxed);
-        if now != current_window {
-            self.second_start_epoch.store(now, Ordering::Relaxed);
+        if now_secs != current_window {
+            self.second_start_epoch.store(now_secs, Ordering::Relaxed);
             self.calls_this_second.store(1, Ordering::Relaxed);
             return true;
         }
@@ -448,6 +452,7 @@ fn run_sdk_bridge_loop(
     root_session_id: Option<String>,
     rate_limiter: Arc<SdkBridgeRateLimiter>,
 ) {
+    let abuse_seq = Arc::new(AtomicU64::new(1));
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -457,6 +462,7 @@ fn run_sdk_bridge_loop(
                     gateway_dir,
                     root_session_id.as_deref(),
                     &rate_limiter,
+                    &abuse_seq,
                 ) {
                     // Ignore bridge client failures in thin compatibility mode.
                 }
@@ -475,21 +481,26 @@ fn handle_sdk_client(
     gateway_dir: &std::path::Path,
     root_session_id: Option<&str>,
     rate_limiter: &SdkBridgeRateLimiter,
+    abuse_seq: &AtomicU64,
 ) -> anyhow::Result<()> {
-    let mut line = String::new();
-    {
-        let mut reader = BufReader::new(&stream);
-        reader.read_line(&mut line)?;
-    }
+    let max_bytes = rate_limiter.max_payload_bytes();
+    let mut buf = vec![0u8; max_bytes + 1];
+    let n = {
+        let mut reader = BufReader::new(&stream).take((max_bytes + 1) as u64);
+        reader.read(&mut buf)?
+    };
+    let line = String::from_utf8_lossy(&buf[..n]);
     if line.trim().is_empty() {
         return Ok(());
     }
 
-    if line.len() > rate_limiter.max_payload_bytes() {
+    if n > max_bytes {
+        let seq = abuse_seq.fetch_add(1, Ordering::Relaxed);
         let _ = log_sdk_bridge_abuse(
             agent_dir,
             "payload_too_large",
-            &format!("{} bytes exceeds {} limit", line.len(), rate_limiter.max_payload_bytes()),
+            &format!("payload exceeds {} byte limit", max_bytes),
+            seq,
         );
         let error_resp = serde_json::json!({
             "jsonrpc": "2.0",
@@ -497,7 +508,7 @@ fn handle_sdk_client(
             "error": {
                 "code": -32001,
                 "message": "payload_too_large",
-                "data": {"error_type": "sdk_bridge_abuse", "max_bytes": rate_limiter.max_payload_bytes()}
+                "data": {"error_type": "sdk_bridge_abuse", "max_bytes": max_bytes}
             }
         });
         let payload = serde_json::to_string(&error_resp)? + "\n";
@@ -519,10 +530,12 @@ fn handle_sdk_client(
         .unwrap_or_default();
 
     if !rate_limiter.check_rate() {
+        let seq = abuse_seq.fetch_add(1, Ordering::Relaxed);
         let _ = log_sdk_bridge_abuse(
             agent_dir,
             "rate_limited",
-            &format!("sdk bridge call '{}' exceeded rate limit of {}/sec", method, rate_limiter.rate_limit),
+            &format!("sdk bridge call '{}' exceeded rate limit of {}/sec", method, rate_limiter.rate_limit()),
+            seq,
         );
         let error_resp = serde_json::json!({
             "jsonrpc": "2.0",
@@ -630,6 +643,7 @@ fn log_sdk_bridge_abuse(
     agent_dir: &std::path::Path,
     violation: &str,
     detail: &str,
+    event_seq: u64,
 ) -> anyhow::Result<()> {
     let actor_id = agent_id_from_agent_dir(agent_dir)?;
     let log_path = agent_dir.join("history").join("causal_chain.jsonl");
@@ -637,7 +651,6 @@ fn log_sdk_bridge_abuse(
         fs::create_dir_all(parent)?;
     }
     let logger = crate::causal_chain::CausalLogger::new(&log_path)?;
-    let event_seq = next_sdk_event_seq(&log_path)?;
     logger.log(
         &actor_id,
         "sdk-bridge",

@@ -11,7 +11,7 @@ mod support;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -38,18 +38,20 @@ fn parse_response(raw: &str) -> serde_json::Value {
 #[test]
 fn r10_rate_limiter_allows_under_limit() {
     let limiter = SdkBridgeRateLimiter::new(10, 1024);
+    let t = 1000;
     for _ in 0..10 {
-        assert!(limiter.check_rate(), "calls under limit should succeed");
+        assert!(limiter.check_rate_at(t), "calls under limit should succeed");
     }
 }
 
 #[test]
 fn r10_rate_limiter_blocks_over_limit() {
     let limiter = SdkBridgeRateLimiter::new(5, 1024);
+    let t = 2000;
     for _ in 0..5 {
-        assert!(limiter.check_rate(), "calls under limit should succeed");
+        assert!(limiter.check_rate_at(t), "calls under limit should succeed");
     }
-    assert!(!limiter.check_rate(), "call over limit should be blocked");
+    assert!(!limiter.check_rate_at(t), "call over limit should be blocked");
 }
 
 #[test]
