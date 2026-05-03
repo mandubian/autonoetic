@@ -1195,7 +1195,13 @@ impl AgentExecutor {
         if let Some(gw) = self.gateway_dir.as_ref() {
             if self.live_digest.is_none() {
                 let agent_id = &self.manifest.agent.id;
-                match crate::runtime::live_digest::LiveDigestWriter::open(gw, &session_id, agent_id)
+                match crate::runtime::live_digest::LiveDigestWriter::open(
+                    gw,
+                    &session_id,
+                    agent_id,
+                    self.task_id.as_deref(),
+                    self.workflow_id.as_deref(),
+                )
                 {
                     Ok(w) => {
                         self.live_digest = Some(Arc::new(std::sync::Mutex::new(w)));
@@ -3014,7 +3020,7 @@ fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
 ///
 /// Manifest-declared tiers always take precedence over runtime inference — if an
 /// agent explicitly restricts itself, the restriction is honoured.
-pub fn determine_tool_tier_filter(
+fn determine_tool_tier_filter(
     manifest: &AgentManifest,
     session_id: Option<&str>,
     has_pending_approvals: bool,
