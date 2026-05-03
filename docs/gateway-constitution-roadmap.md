@@ -650,34 +650,48 @@ passes with the same `agent_id`, attempt promote, assert rejection.
 
 ---
 
-### 2.10 `R++4` Operator approval hardening
+### 2.10 `R++4` Operator approval hardening — **ENFORCED**
 
 **Threat.** Approval fatigue. A distracted operator clicking through
 50 near-identical prompts is the real trust boundary, and today there
 is nothing between "prompt displayed" and "prompt approved." High-risk
 approvals get the same UX affordances as low-risk ones.
 
-**Sketch.** Three sub-changes, each a new field on the approval record:
+**Implementation.** Three sub-features, all enforced at
+`approve_request_with_options`:
 
-1. `min_dwell_ms`: how long the operator must see the prompt before
-   the confirm action enables. Set non-zero for bundle promotions,
-   new-credential registration, first-ever host approvals. CLI and TUI
-   respect it.
-2. `typed_confirm_phrase`: a string the operator must type to confirm
-   (e.g. `promote research-v7`). Set for destructive classes.
-3. Operator-facing structural-similarity dedup: hash the rendered
-   human-readable *description* (not the gateway fingerprint) and
-   suppress N consecutive near-duplicates in the operator view with a
-   banner ("N similar approvals — expand to review"). Gateway-side
-   dedup (R-2.3) is unchanged.
+1. **Dwell time** (`min_dwell_ms`): minimum milliseconds the operator
+   must wait before confirming. Risk classes: Standard (0 ms), High
+   (3 000 ms), Critical (5 000 ms). Persisted on the approval record.
+   Scaled by `approval_dwell_multiplier` in `GatewayConfig` (default
+   1.0, set to 0 in tests).
 
-Files: `autonoetic-gateway/src/gateway_store/approvals.rs` (schema),
-`autonoetic/src/bin/` CLI, TUI, approval signal dispatch.
+2. **Typed confirmation phrase** (`confirm_phrase`): required for
+   Critical-risk approvals (`RevisionPromote`, `CredentialPrompt`).
+   The phrase encodes the action identity (e.g. `promote {agent_id}
+   {revision_id[:16]}`). Operator must provide it via
+   `--confirm-phrase`.
 
-**Test.** Three tests, one per sub-part.
-`constitution_approval_dwell.rs`,
-`constitution_approval_typed_confirm.rs`,
-`constitution_approval_operator_dedup.rs`.
+3. **Structural-similarity dedup**: Jaccard similarity over command
+   tokens (70%) + hosts (30%) computed at approval creation, stored
+   as `similar_to_request_id` + `similarity_score`. Displayed in CLI
+   `gateway approval show` and TUI.
+
+Risk classification (`ApprovalRisk` enum):
+- Critical: `RevisionPromote`, `CredentialPrompt`
+- High: `AgentInstall`, `SessionEscalate`, `SandboxExec` with detected
+  hosts, `CredentialRequest`, `LayerMount`
+- Standard: everything else
+
+Files: `autonoetic-gateway/src/scheduler/approval_hardening.rs`
+(classification, enrich), `scheduler/approval.rs` (dwell/phrase
+enforcement), `scheduler/gateway_store/approvals.rs` (schema v23),
+`autonoetic/src/cli/gateway.rs` (`--confirm-phrase` flag, Show display).
+
+**Test.** `constitution_approval_hardening.rs` — 12 tests: risk
+classification for all action types, enrich sets dwell/phrase,
+dwell rejection, phrase rejection (wrong/missing), success after dwell
+with correct phrase, standard no-phrase, persistence in store.
 
 **Size.** M.
 

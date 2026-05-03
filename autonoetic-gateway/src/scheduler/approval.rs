@@ -153,6 +153,9 @@ pub struct ApproveOptions {
     /// `added_capabilities + broadened_capabilities` exactly. Empty for any
     /// other action type.
     pub acknowledged_capabilities: Vec<String>,
+    /// R++4: Confirmation phrase for destructive approval classes. Must match
+    /// the `confirm_phrase` stored on the approval request exactly (case-insensitive).
+    pub confirm_phrase: Option<String>,
 }
 
 pub fn approve_request(
@@ -203,6 +206,42 @@ pub fn approve_request_with_options(
             req.approval_level,
             provided_level
         );
+    }
+
+    // R++4: Dwell time enforcement. Reject if the approval was decided too
+    // quickly after the request was created (operator must see the prompt
+    // for a minimum time before confirming).
+    if let Some(min_dwell_ms) = req.min_dwell_ms {
+        let effective_dwell = (min_dwell_ms as f64 * config.approval_dwell_multiplier) as i64;
+        if effective_dwell > 0 {
+            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&req.created_at) {
+                let elapsed_ms = chrono::Utc::now()
+                    .signed_duration_since(created.with_timezone(&chrono::Utc))
+                    .num_milliseconds();
+                if elapsed_ms < effective_dwell {
+                    anyhow::bail!(
+                        "R++4: Dwell time not met — this approval class requires {} ms \
+                         before confirmation, but only {} ms have elapsed since creation. \
+                         Wait and retry.",
+                        effective_dwell,
+                        elapsed_ms
+                    );
+                }
+            }
+        }
+    }
+
+    // R++4: Confirm phrase enforcement. Destructive approval classes require
+    // the operator to type a specific phrase to confirm.
+    if let Some(ref required_phrase) = req.confirm_phrase {
+        let provided = options.confirm_phrase.as_deref().unwrap_or("");
+        if !provided.eq_ignore_ascii_case(required_phrase) {
+            anyhow::bail!(
+                "R++4: Confirmation phrase required for this approval class. \
+                 Expected: '{}'. Provide via --confirm-phrase.",
+                required_phrase
+            );
+        }
     }
 
     // R++2: a `RevisionPromote` approval can only be approved when the
@@ -1169,7 +1208,7 @@ mod tests {
         };
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
 
-        let req = ApprovalRequest {
+        let mut req = ApprovalRequest {
             request_id: "apr-test1234".to_string(),
             agent_id: "coder.default".to_string(),
             session_id: "root-session/coder-abc".to_string(),
@@ -1193,8 +1232,10 @@ mod tests {
             approval_level: ApprovalLevel::Operator,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
-        store.create_approval(&req).unwrap();
+        store.create_approval(&mut req).unwrap();
 
         let loaded = super::load_approval_requests(&cfg, Some(&store)).unwrap();
         assert_eq!(loaded.len(), 1);
@@ -1237,12 +1278,14 @@ mod tests {
             decision_reason: None,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
         store
-            .create_approval(&req("apr-a", "root-a/coder-1"))
+            .create_approval(&mut req("apr-a", "root-a/coder-1"))
             .unwrap();
         store
-            .create_approval(&req("apr-b", "root-b/coder-1"))
+            .create_approval(&mut req("apr-b", "root-b/coder-1"))
             .unwrap();
 
         let for_a =
@@ -1287,15 +1330,17 @@ mod tests {
             decision_reason: None,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
         store
-            .create_approval(&req("apr-second", "2020-01-02T00:00:00Z"))
+            .create_approval(&mut req("apr-second", "2020-01-02T00:00:00Z"))
             .unwrap();
         store
-            .create_approval(&req("apr-first", "2020-01-01T00:00:00Z"))
+            .create_approval(&mut req("apr-first", "2020-01-01T00:00:00Z"))
             .unwrap();
         // Install-style request same session — must not appear in sandbox-only list
-        let install = ApprovalRequest {
+        let mut install = ApprovalRequest {
             request_id: "apr-install".to_string(),
             agent_id: "b".to_string(),
             session_id: "sess/evaluator-1".to_string(),
@@ -1319,8 +1364,10 @@ mod tests {
             approval_level: ApprovalLevel::Operator,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
-        store.create_approval(&install).unwrap();
+        store.create_approval(&mut install).unwrap();
 
         let list = super::pending_sandbox_exec_requests_for_session(
             &cfg,
@@ -1518,7 +1565,7 @@ mod tests {
         };
         save_task_run(&cfg, Some(&store), &task).unwrap();
 
-        let request = ApprovalRequest {
+        let mut request = ApprovalRequest {
             request_id: "apr-write123".to_string(),
             agent_id: "coder.default".to_string(),
             session_id: task.session_id.clone(),
@@ -1541,8 +1588,10 @@ mod tests {
             approval_level: ApprovalLevel::Operator,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
-        store.create_approval(&request).unwrap();
+        store.create_approval(&mut request).unwrap();
 
         super::approve_request(
             &cfg,
@@ -1635,7 +1684,7 @@ mod tests {
         };
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
 
-        let request = ApprovalRequest {
+        let mut request = ApprovalRequest {
             request_id: "apr-admin-needed".to_string(),
             agent_id: "coder.default".to_string(),
             session_id: "root/coder-1".to_string(),
@@ -1659,8 +1708,10 @@ mod tests {
             approval_level: ApprovalLevel::Admin,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
-        store.create_approval(&request).unwrap();
+        store.create_approval(&mut request).unwrap();
 
         // Missing approver_level defaults to Operator and should fail for admin requests.
         let denied = super::approve_request(
@@ -1704,7 +1755,7 @@ mod tests {
         };
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
 
-        let request = ApprovalRequest {
+        let mut request = ApprovalRequest {
             request_id: "apr-double".to_string(),
             agent_id: "coder.default".to_string(),
             session_id: "root/coder-abc".to_string(),
@@ -1728,8 +1779,10 @@ mod tests {
             approval_level: ApprovalLevel::Operator,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
-        store.create_approval(&request).unwrap();
+        store.create_approval(&mut request).unwrap();
 
         // First approve succeeds
         let result = super::approve_request(

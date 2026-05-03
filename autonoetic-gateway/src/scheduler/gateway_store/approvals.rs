@@ -7,7 +7,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::GatewayStore;
 
 impl GatewayStore {
-    pub fn create_approval(&self, request: &ApprovalRequest) -> Result<()> {
+    pub fn create_approval(&self, request: &mut ApprovalRequest) -> Result<()> {
+        crate::scheduler::approval_hardening::enrich_request(request);
         let conn = self.conn.lock().unwrap();
 
         if let Some(ref root_session_id) = request.root_session_id {
@@ -36,8 +37,9 @@ impl GatewayStore {
             "INSERT INTO approvals (
                 request_id, agent_id, session_id, root_session_id, workflow_id, task_id,
                 action_type, action_payload, reason, evidence_ref, status, created_at,
-                approval_level, similar_to_request_id, similarity_score
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                approval_level, similar_to_request_id, similarity_score,
+                min_dwell_ms, confirm_phrase
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 request.request_id,
                 request.agent_id,
@@ -54,6 +56,8 @@ impl GatewayStore {
                 serde_json::to_string(&request.approval_level)?,
                 request.similar_to_request_id,
                 request.similarity_score,
+                request.min_dwell_ms,
+                request.confirm_phrase,
             ],
         )?;
         Ok(())
@@ -79,7 +83,7 @@ impl GatewayStore {
         request_id: &str,
     ) -> Result<Option<ApprovalRequest>> {
         conn.query_row(
-            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, similar_to_request_id, similarity_score FROM approvals WHERE request_id = ?1",
+            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, similar_to_request_id, similarity_score, min_dwell_ms, confirm_phrase FROM approvals WHERE request_id = ?1",
             params![request_id],
             |row| {
                 let action_payload: String = row.get(3)?;
@@ -113,6 +117,8 @@ impl GatewayStore {
                     approval_level,
                     similar_to_request_id: row.get(15)?,
                     similarity_score: row.get(16)?,
+                    min_dwell_ms: row.get(17)?,
+                    confirm_phrase: row.get(18)?,
                 })
             },
         ).optional().map_err(Into::into)

@@ -1875,7 +1875,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                 let approval_level = config
                     .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
                     .unwrap_or(autonoetic_types::background::ApprovalLevel::Operator);
-                let req = autonoetic_types::background::ApprovalRequest {
+                let mut req = autonoetic_types::background::ApprovalRequest {
                     request_id: request_id.clone(),
                     agent_id: manifest.agent.id.clone(),
                     session_id: session_id.unwrap_or("").to_string(),
@@ -1898,8 +1898,10 @@ impl NativeTool for AgentRevisionPromoteTool {
                     approval_level,
                     similar_to_request_id: None,
                     similarity_score: None,
+                    min_dwell_ms: None,
+                    confirm_phrase: None,
                 };
-                gateway_store.create_approval(&req)?;
+                gateway_store.create_approval(&mut req)?;
 
                 return Ok(serde_json::json!({
                     "ok": false,

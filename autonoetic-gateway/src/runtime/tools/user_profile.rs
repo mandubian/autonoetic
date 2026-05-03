@@ -407,7 +407,7 @@ impl NativeTool for UserProfileShareTool {
 
         // Create approval request
         let request_id = format!("profile_share_{}_{}", args.user_id, uuid::Uuid::new_v4());
-        let approval = ApprovalRequest {
+        let mut approval = ApprovalRequest {
             request_id: request_id.clone(),
             agent_id: agent_id.clone(),
             session_id: session_id.unwrap_or("").to_string(),
@@ -434,9 +434,11 @@ impl NativeTool for UserProfileShareTool {
             approval_level: ApprovalLevel::Operator,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
 
-        store.create_approval(&approval)?;
+        store.create_approval(&mut approval)?;
 
         Ok(json!({
             "ok": true,

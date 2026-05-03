@@ -267,6 +267,7 @@ pub async fn handle_gateway_approvals(
             ttl,
             until,
             acknowledge_capabilities,
+            confirm_phrase,
         } => {
             let approval_level = approval_level.to_runtime();
             let grant_scope = scope.to_runtime();
@@ -309,6 +310,7 @@ pub async fn handle_gateway_approvals(
                     grant_targets: parsed_targets,
                     grant_expires_at: expires_at,
                     acknowledged_capabilities: acknowledge_capabilities.clone(),
+                    confirm_phrase: confirm_phrase.clone(),
                 },
             )?;
             println!(
@@ -425,6 +427,13 @@ pub async fn handle_gateway_approvals(
                             }).unwrap_or("pending");
                             println!("  Similar approval was: {}", status_str);
                         }
+                    }
+
+                    if let Some(dwell) = a.min_dwell_ms {
+                        println!("\nR++4 min dwell: {} ms", dwell);
+                    }
+                    if let Some(ref phrase) = a.confirm_phrase {
+                        println!("R++4 confirm:   --confirm-phrase '{}'", phrase);
                     }
                 }
             }
