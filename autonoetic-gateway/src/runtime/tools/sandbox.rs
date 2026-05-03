@@ -751,7 +751,11 @@ impl NativeTool for SandboxExecTool {
                     },
                     "artifact_id": {
                         "type": "string",
-                        "description": "Optional artifact ID. When provided, only artifact files are mounted into the sandbox (closed boundary). When omitted, all session content is mounted."
+                        "description": "Optional canonical artifact bundle id (art_*). When set, only that bundle's files are mounted (closed boundary). For stable handles like ar.* from content/artifact_build, use artifact_ref instead — do not pass ar.* here."
+                    },
+                    "artifact_ref": {
+                        "type": "string",
+                        "description": "Optional artifact ref (e.g. ar.*). Resolved server-side to the canonical art_* id and mounted like artifact_id. If both artifact_id and artifact_ref are set, they must refer to the same bundle."
                     },
                     "capture_paths": {
                         "type": "array",
@@ -805,6 +809,77 @@ impl NativeTool for SandboxExecTool {
             "sandbox command must not be empty"
         );
 
+        let artifact_ref_trimmed = args
+            .artifact_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        if let Some(aid) = args.artifact_id.as_deref() {
+            let aid = aid.trim();
+            if aid.starts_with("ar.") {
+                return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                    "sandbox_exec: '{}' looks like an artifact ref (ar.*). \
+                     Use the \"artifact_ref\" field, not \"artifact_id\". \
+                     \"artifact_id\" must be the canonical on-disk bundle id (art_*...).",
+                    aid
+                ))
+                .into());
+            }
+        }
+
+        let resolved_from_ref: Option<String> = if let Some(ref aref) = artifact_ref_trimmed {
+            let Some(store) = gateway_store.as_ref() else {
+                return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                    "sandbox_exec: artifact_ref requires GatewayStore to be configured"
+                ))
+                .into());
+            };
+            let Some(sid) = session_id else {
+                return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                    "sandbox_exec: artifact_ref requires an active session (session_id)"
+                ))
+                .into());
+            };
+            let resolved = match store.resolve_artifact_ref_any_scope(aref, sid) {
+                Ok(o) => o,
+                Err(e) => return Err(tagged::Tagged::validation(e).into()),
+            };
+            let Some(artifact_id) = resolved.map(|r| r.artifact_id) else {
+                return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                    "artifact_ref '{}' not found, expired, or revoked",
+                    aref
+                ))
+                .into());
+            };
+            Some(artifact_id)
+        } else {
+            None
+        };
+
+        let explicit_mount_artifact_id: Option<String> =
+            match (&args.artifact_id, &resolved_from_ref) {
+                (Some(id), Some(rid)) => {
+                    let id = id.trim();
+                    if id == rid.as_str() {
+                        Some(id.to_string())
+                    } else {
+                        return Err(tagged::Tagged::validation(anyhow::anyhow!(
+                            "sandbox_exec: artifact_id '{}' does not match artifact_ref '{}' (resolved to '{}')",
+                            id,
+                            artifact_ref_trimmed.as_deref().unwrap_or_default(),
+                            rid
+                        ))
+                        .into());
+                    }
+                }
+                (Some(id), None) => Some(id.trim().to_string()),
+                (None, Some(rid)) => Some(rid.clone()),
+                (None, None) => None,
+            };
+        let explicit_mount_artifact_id = explicit_mount_artifact_id.filter(|s| !s.is_empty());
+
         let mut approval_validated_for_command = false;
         let mut layer_mount_approved = false;
         let mut approved_layer_mount_layers: Option<Vec<LayerMountScopeInfo>> = None;
@@ -855,7 +930,7 @@ impl NativeTool for SandboxExecTool {
                                 &manifest.agent.id,
                                 &normalized_targets,
                                 &code_to_analyze,
-                                args.artifact_id.as_deref(),
+                                explicit_mount_artifact_id.as_deref(),
                             );
                             if let Some(gw_dir) = gateway_dir {
                                 if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
@@ -934,7 +1009,7 @@ impl NativeTool for SandboxExecTool {
             }
         }
 
-        if let Some(artifact_id) = args.artifact_id.as_deref() {
+        if let Some(artifact_id) = explicit_mount_artifact_id.as_deref() {
             if artifact_id.starts_with("impl_") {
                 return Ok(crate::runtime::tools::implicit_artifact_id_error(
                     self.name(),
@@ -975,7 +1050,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
         let mut artifact_analysis_override: Option<
             crate::runtime::remote_access::RemoteAccessAnalysis,
         > = None;
-        let code_to_analyze = if let Some(ref aid) = args.artifact_id {
+        let code_to_analyze = if let Some(ref aid) = explicit_mount_artifact_id {
             if let Some(gw_dir) = gateway_dir {
                 match extract_and_cache_artifact_analysis(gw_dir, aid) {
                     Some((code, analysis)) => {
@@ -1200,7 +1275,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             &manifest.agent.id,
                             &targets,
                             &code_to_analyze,
-                            args.artifact_id.as_deref(),
+                            explicit_mount_artifact_id.as_deref(),
                         );
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                             if let Some(entry) = cache.find(&fingerprint) {
@@ -1245,7 +1320,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                                             &manifest.agent.id,
                                             &targets,
                                             &code_to_analyze,
-                                            args.artifact_id.as_deref(),
+                                            explicit_mount_artifact_id.as_deref(),
                                         );
                                         if let Some(gw_dir) = gateway_dir {
                                             if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
@@ -1411,7 +1486,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                     };
                     let sid = session_id.unwrap_or("");
                     let root_session_id = crate::runtime::content_store::root_session_id(sid);
-                    let mut request = autonoetic_types::background::ApprovalRequest {
+                    let request = autonoetic_types::background::ApprovalRequest {
                         request_id: request_id.clone(),
                         agent_id: manifest.agent.id.clone(),
                         session_id: sid.to_string(),
@@ -1444,11 +1519,9 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         },
                         similar_to_request_id: None,
                         similarity_score: None,
-                        min_dwell_ms: None,
-                        confirm_phrase: None,
                     };
                     if let Some(store) = &gateway_store {
-                        store.create_approval(&mut request).map_err(|e| {
+                        store.create_approval(&request).map_err(|e| {
                             anyhow::anyhow!(
                                 "Failed to persist sandbox approval request '{}': {}",
                                 request_id,
@@ -1614,8 +1687,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                 };
 
                 // Resolve the effective artifact_id early for the scope check.
-                let effective_artifact_id_for_scope = args
-                    .artifact_id
+                let effective_artifact_id_for_scope = explicit_mount_artifact_id
                     .as_ref()
                     .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
 
@@ -1704,7 +1776,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                                 .collect::<std::collections::BTreeSet<_>>()
                                 .into_iter()
                                 .collect();
-                            let mut request = autonoetic_types::background::ApprovalRequest {
+                            let request = autonoetic_types::background::ApprovalRequest {
                             request_id: request_id.clone(),
                             agent_id: manifest.agent.id.clone(),
                             session_id: sid.to_string(),
@@ -1738,11 +1810,9 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             },
                             similar_to_request_id: None,
                             similarity_score: None,
-                            min_dwell_ms: None,
-                            confirm_phrase: None,
                         };
                             if let Some(store) = &gateway_store {
-                                store.create_approval(&mut request).map_err(|e| {
+                                store.create_approval(&request).map_err(|e| {
                                     anyhow::anyhow!(
                                         "Failed to persist layer mount approval request '{}': {}",
                                         request_id,
@@ -1814,10 +1884,9 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Agent directory is not valid UTF-8"))?;
 
-        // Resolve effective artifact_id: explicit arg takes priority, then fall back to
-        // the artifact_id from the tool run context (set by parent agent.spawn).
-        let effective_artifact_id = args
-            .artifact_id
+        // Resolve effective artifact_id: explicit arg (or artifact_ref) takes priority, then fall
+        // back to the artifact_id from the tool run context (set by parent agent.spawn).
+        let effective_artifact_id = explicit_mount_artifact_id
             .as_ref()
             .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
 
@@ -2174,7 +2243,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                 &manifest.agent.id,
                 &normalized_targets,
                 &code_to_analyze,
-                args.artifact_id.as_deref(),
+                explicit_mount_artifact_id.as_deref(),
             );
             if let Some(gw_dir) = gateway_dir {
                 if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
@@ -2448,8 +2517,6 @@ mod approval_binding_tests {
             approval_level: ApprovalLevel::Operator,
             similar_to_request_id: None,
             similarity_score: None,
-            min_dwell_ms: None,
-            confirm_phrase: None,
         };
         assert!(approved_requests_cover_targets(
             &[req.clone()],
