@@ -332,7 +332,7 @@ pub enum GatewayApprovalCommands {
         acknowledge_capabilities: Vec<String>,
         /// Confirmation phrase for destructive approval classes (R++4).
         /// Required when the approval has a `confirm_phrase` field set
-        /// (e.g. RevisionPromote, CredentialPrompt). Must match exactly.
+        /// (e.g. RevisionPromote, CredentialPrompt). Case-insensitive match.
         #[arg(long = "confirm-phrase")]
         confirm_phrase: Option<String>,
     },

@@ -212,21 +212,31 @@ pub fn approve_request_with_options(
     // quickly after the request was created (operator must see the prompt
     // for a minimum time before confirming).
     if let Some(min_dwell_ms) = req.min_dwell_ms {
-        let effective_dwell = (min_dwell_ms as f64 * config.approval_dwell_multiplier) as i64;
+        let multiplier = if config.approval_dwell_multiplier.is_finite()
+            && config.approval_dwell_multiplier >= 0.0
+        {
+            config.approval_dwell_multiplier
+        } else {
+            1.0
+        };
+        let effective_dwell = (min_dwell_ms as f64 * multiplier) as i64;
         if effective_dwell > 0 {
-            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&req.created_at) {
-                let elapsed_ms = chrono::Utc::now()
-                    .signed_duration_since(created.with_timezone(&chrono::Utc))
-                    .num_milliseconds();
-                if elapsed_ms < effective_dwell {
-                    anyhow::bail!(
-                        "R++4: Dwell time not met — this approval class requires {} ms \
-                         before confirmation, but only {} ms have elapsed since creation. \
-                         Wait and retry.",
-                        effective_dwell,
-                        elapsed_ms
-                    );
-                }
+            let created = chrono::DateTime::parse_from_rfc3339(&req.created_at)
+                .map_err(|e| anyhow::anyhow!(
+                    "R++4: Cannot parse created_at '{}' for dwell-time check: {}",
+                    req.created_at, e
+                ))?;
+            let elapsed_ms = chrono::Utc::now()
+                .signed_duration_since(created.with_timezone(&chrono::Utc))
+                .num_milliseconds();
+            if elapsed_ms < effective_dwell {
+                anyhow::bail!(
+                    "R++4: Dwell time not met — this approval class requires {} ms \
+                     before confirmation, but only {} ms have elapsed since creation. \
+                     Wait and retry.",
+                    effective_dwell,
+                    elapsed_ms
+                );
             }
         }
     }
