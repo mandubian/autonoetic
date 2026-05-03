@@ -294,7 +294,7 @@ fn payload_hash(payload: &Option<serde_json::Value>) -> anyhow::Result<Option<St
     Ok(Some(sha256_hex(&encoded)?))
 }
 
-fn compute_entry_hash(
+pub fn compute_entry_hash(
     timestamp: &str,
     log_id: &str,
     actor_id: &str,

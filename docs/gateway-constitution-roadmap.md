@@ -796,7 +796,7 @@ of the reproducible-digest computation.
 
 ---
 
-### 2.14 §0 Rights audit — early bucket (test-only pins)
+### 2.14 §0 Rights audit — early bucket (test-only pins) — **ENFORCED**
 
 **Threat.** Rights already enforced under the rule framing need
 dedicated tests named `constitution_right_<ri_id>.rs` to pin them *as
