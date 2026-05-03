@@ -534,7 +534,7 @@ rejected with 403, correct token accepted.
 
 ---
 
-### 2.5 `R+10` Sandbox → gateway SDK-bridge limits
+### 2.5 `R+10` Sandbox → gateway SDK-bridge limits — **ENFORCED**
 
 **Threat.** A sandboxed process makes unbounded or oversized
 `dispatch_sdk_method` calls (`events.emit`, `memory.remember`,
