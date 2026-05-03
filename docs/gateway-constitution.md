@@ -175,6 +175,7 @@ approve via `runtime/continuation.rs`.
 | R-2.14 | `user_ask` is refused if the workflow has active children or pending approvals. | architecture-interaction-mechanisms.md | runtime guard | PARTIAL |
 | R-2.15 | Spawn payload is preserved verbatim across approval resume. | approval-system.md | `continuation.rs:332` | ENFORCED |
 | R-2.16 | Promotion of revision N computes `cap_set(N) \ cap_set(N-1)`. A non-empty delta triggers a **separate, differently-shaped approval** (`ScheduledAction::RevisionPromote`) that names each added capability explicitly. The operator must acknowledge every added/broadened capability by name (`--acknowledge-capability`) — silent accretion across approvals is impossible. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs` (gate creation), `autonoetic-gateway/src/scheduler/approval.rs` (acknowledgement check) | ENFORCED |
+| R-2.17 | The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). A single agent recording both evaluator and auditor passes is rejected. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs` `AgentRevisionPromoteTool::execute` (identity comparison in promotion gate) | ENFORCED |
 
 ## 3. Sandbox Isolation
 
@@ -408,7 +409,6 @@ item will move into its numbered category once ENFORCED.
 
 | ID | Rule | Priority | Target category |
 |---|---|---|---|
-| R++3 | The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). | P1 | §2 Approval |
 | R++4 | Operator approval hardening: (a) dwell time (minimum-visible seconds) on high-risk approvals before the confirm action enables; (b) typed confirmation string required for destructive approval classes (bundle promotion, credential register, first-ever host approval); (c) structural-similarity dedup to the operator, not just fingerprint dedup (prevents near-identical prompt floods from bypassing attention). | P1 | §2 Approval |
 | R++7 | Cross-gateway causal continuity: cross-gateway events carry a `peer_event_ref` pointing to the corresponding remote chain entry; gateways periodically exchange signed `chain_attestation` digests allowing end-to-end federated trace verification. | P1 | §10 Federation + §8 Audit |
 | R++8 | Sandbox-escape attempts are counted. Kernel-denied syscalls (seccomp), denied mount attempts, ptrace calls, and equivalents on docker/microvm drivers increment a per-session counter. Threshold crossings trigger R-7.18 degraded mode; further escalation triggers emergency stop. | P2 | §3 Sandbox + §7 Abuse |
