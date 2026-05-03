@@ -2914,12 +2914,29 @@ fn agent_turn_range(
 }
 
 /// Is a close reason not a clean finish?
+///
+/// The `completed` substring matches checkpoint-style reasons but not `_complete` suffixes
+/// on JSON-RPC spawn closures (e.g. `jsonrpc_spawn_complete`); those are whitelisted
+/// explicitly alongside JSON-RPC suspend reasons (`*_suspended_*`).
 fn is_abnormal_close(reason: &str) -> bool {
     let r = reason.to_lowercase();
-    !r.contains("task_completed")
-        && !r.contains("completed")
-        && !r.contains("budget_reached")
-        && !r.contains("max_turns")
+    if r.contains("task_completed")
+        || r.contains("completed")
+        || r.contains("budget_reached")
+        || r.contains("max_turns")
+    {
+        return false;
+    }
+    if r.contains("jsonrpc_spawn_complete")
+        || r.contains("jsonrpc_spawn_suspended_approval")
+        || r.contains("jsonrpc_spawn_suspended_user_input")
+        || r.contains("checkpoint_respawn_complete")
+        || r.contains("execute_loop_complete")
+        || r.starts_with("execute_loop_suspended")
+    {
+        return false;
+    }
+    true
 }
 
 /// Maximum run of consecutive ERROR events without an intervening successful RESULT.
@@ -3204,6 +3221,22 @@ fn format_duration(started_at: Option<&str>, ended_at: Option<&str>) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn is_abnormal_close_allows_known_clean_exit_reasons() {
+        assert!(!is_abnormal_close("jsonrpc_spawn_complete"));
+        assert!(!is_abnormal_close("jsonrpc_spawn_complete_empty"));
+        assert!(!is_abnormal_close("jsonrpc_spawn_suspended_approval"));
+        assert!(!is_abnormal_close("jsonrpc_spawn_suspended_user_input"));
+        assert!(is_abnormal_close("spawn_execute_error"));
+        assert!(!is_abnormal_close("checkpoint_respawn_complete"));
+        assert!(!is_abnormal_close("checkpoint_respawn_complete_empty"));
+        assert!(!is_abnormal_close("execute_loop_complete"));
+        assert!(!is_abnormal_close("execute_loop_suspended"));
+        assert!(!is_abnormal_close("execute_loop_suspended_user_input"));
+        assert!(is_abnormal_close("execute_loop_error"));
+        assert!(is_abnormal_close("execute_loop_escalated"));
+    }
 
     #[test]
     fn session_report_writes_live_and_final_views() {

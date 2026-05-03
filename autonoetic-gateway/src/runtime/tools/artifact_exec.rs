@@ -33,7 +33,12 @@ struct ArtifactExecArgs {
     entrypoint: String,
     #[serde(default)]
     args: Vec<String>,
-    #[serde(default, deserialize_with = "crate::runtime::tools::deserialize_string_map_values_lenient")]
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::runtime::tools::deserialize_string_map_values_lenient"
+    )]
     env: std::collections::HashMap<String, String>,
     #[serde(default)]
     approval_ref: Option<String>,
@@ -44,6 +49,94 @@ struct ArtifactExecArgs {
 }
 
 pub struct ArtifactExecTool;
+
+const ARTIFACT_APPROVAL_SUMMARY_CMD_MAX: usize = 260;
+const ARTIFACT_APPROVAL_INTENT_PREVIEW_MAX: usize = 280;
+const ARTIFACT_APPROVAL_PATTERN_APPEND_MAX: usize = 8;
+
+fn truncate_unicode_display(s: &str, max_chars: usize) -> String {
+    let t = s.trim();
+    let n = t.chars().count();
+    if n <= max_chars {
+        t.to_string()
+    } else {
+        let keep = max_chars.saturating_sub(3);
+        format!("{}...", t.chars().take(keep).collect::<String>())
+    }
+}
+
+fn artifact_exec_approval_summary_line(
+    agent_id: &str,
+    artifact_ref: &str,
+    entrypoint: &str,
+    command: &str,
+    intent: Option<&str>,
+) -> String {
+    let cmd = truncate_unicode_display(command, ARTIFACT_APPROVAL_SUMMARY_CMD_MAX);
+    match intent.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(i) => {
+            let ip = truncate_unicode_display(i, ARTIFACT_APPROVAL_INTENT_PREVIEW_MAX);
+            format!("Artifact exec ({agent_id}): {ip} — `{artifact_ref}:{entrypoint}` · `{cmd}`")
+        }
+        None => format!("Artifact exec ({agent_id}): `{artifact_ref}:{entrypoint}` · `{cmd}`"),
+    }
+}
+
+fn artifact_exec_approval_operator_reason(
+    artifact_ref: &str,
+    artifact_id: &str,
+    entrypoint: &str,
+    command: &str,
+    intent: Option<&str>,
+    remote_summary: &str,
+    remote_suffix: &str,
+    patterns: &[crate::runtime::remote_access::DetectedPattern],
+) -> String {
+    let mut sections = vec![
+        format!("What will run:\n{}", command.trim()),
+        format!(
+            "Artifact target:\nref `{}` → id `{}`\nentrypoint `{}`",
+            artifact_ref, artifact_id, entrypoint
+        ),
+        format!(
+            "Analyzed for network/reachable APIs: `{}` inside artifact `{}`",
+            entrypoint, artifact_id
+        ),
+    ];
+    if let Some(i) = intent.map(str::trim).filter(|s| !s.is_empty()) {
+        sections.push(format!("Agent-stated purpose:\n{}", i));
+    }
+    let mut trigger = format!(
+        "Why approval is required:\n{}{}",
+        remote_summary.trim(),
+        remote_suffix.trim_end()
+    );
+    if !patterns.is_empty() {
+        trigger.push_str("\n\nStatic analysis cues:");
+        for p in patterns.iter().take(ARTIFACT_APPROVAL_PATTERN_APPEND_MAX) {
+            let line = p
+                .line_number
+                .map(|n| format!("line {n}"))
+                .unwrap_or_else(|| "line ?".into());
+            let excerpt = truncate_unicode_display(&p.pattern, 120);
+            trigger.push_str(&format!(
+                "\n- [{}] [{}] `{}` — {}",
+                line,
+                p.category,
+                excerpt,
+                p.reason.trim()
+            ));
+        }
+        if patterns.len() > ARTIFACT_APPROVAL_PATTERN_APPEND_MAX {
+            trigger.push_str(&format!(
+                "\n- … (+{} more pattern(s))",
+                patterns.len() - ARTIFACT_APPROVAL_PATTERN_APPEND_MAX
+            ));
+        }
+    }
+    sections.push(trigger);
+    sections.join("\n\n")
+}
 
 impl NativeTool for ArtifactExecTool {
     fn name(&self) -> &'static str {
@@ -76,6 +169,10 @@ impl NativeTool for ArtifactExecTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Arguments to pass to the entrypoint"
+                    },
+                    "intent": {
+                        "type": "string",
+                        "description": "Short human explanation for the operator (recommended when this run may need approval): what the execution does and why it is safe/necessary."
                     },
                     "env": {
                         "type": "object",
@@ -146,9 +243,11 @@ impl NativeTool for ArtifactExecTool {
 
         if let Some(ticket_id) = &args.deployment_ticket {
             if let Some(store) = &gateway_store {
-                if let Some(ticket) = crate::runtime::tools::artifact_prepare::resolve_deployment_ticket(
-                    store, ticket_id,
-                )? {
+                if let Some(ticket) =
+                    crate::runtime::tools::artifact_prepare::resolve_deployment_ticket(
+                        store, ticket_id,
+                    )?
+                {
                     if !ticket.approved_domains.is_empty() {
                         tracing::info!(
                             target: "artifact_exec",
@@ -158,7 +257,14 @@ impl NativeTool for ArtifactExecTool {
                         );
                     }
                     return execute_with_ticket(
-                        manifest, policy, agent_dir, gw_dir, &args, &ticket, config, gateway_store,
+                        manifest,
+                        policy,
+                        agent_dir,
+                        gw_dir,
+                        &args,
+                        &ticket,
+                        config,
+                        gateway_store,
                     );
                 } else {
                     anyhow::bail!("deployment_ticket '{}' not found or expired", ticket_id);
@@ -392,14 +498,25 @@ impl NativeTool for ArtifactExecTool {
                         let primary = &existing[0];
                         let ids: Vec<String> =
                             existing.iter().map(|r| r.request_id.clone()).collect();
+                        let summary = artifact_exec_approval_summary_line(
+                            &manifest.agent.id,
+                            &args.artifact_ref,
+                            &entrypoint,
+                            &command,
+                            args.intent.as_deref(),
+                        );
                         let approval = build_approval_details(
                             primary,
                             "artifact_exec",
-                            format!("Artifact {}: remote access detected", artifact_id),
+                            summary.clone(),
                             "approval_ref",
                             serde_json::json!({
                                 "artifact_ref": args.artifact_ref,
+                                "artifact_id": artifact_id,
                                 "entrypoint": entrypoint,
+                                "args": args.args,
+                                "intent": args.intent,
+                                "command": command,
                                 "approval_already_pending": true,
                             }),
                         );
@@ -407,7 +524,10 @@ impl NativeTool for ArtifactExecTool {
                             "ok": false,
                             "exit_code": null,
                             "stdout": "",
-                            "stderr": format!("Remote access detected in artifact {}. Approval already pending.", artifact_id),
+                            "stderr": format!(
+                                "{}\n\nApproval already pending for this session.",
+                                summary
+                            ),
                             "approval_required": true,
                             "approval_already_pending": true,
                             "suspended": true,
@@ -422,8 +542,13 @@ impl NativeTool for ArtifactExecTool {
 
                 if let Some(cfg) = config {
                     let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                    let summary =
-                        format!("Artifact {}: {}", artifact_id, remote_analysis.summary);
+                    let summary = artifact_exec_approval_summary_line(
+                        &manifest.agent.id,
+                        &args.artifact_ref,
+                        &entrypoint,
+                        &command,
+                        args.intent.as_deref(),
+                    );
                     let remote_hint_suffix =
                         approval_remote_operator_suffix(&concrete_targets, &detected_patterns);
                     let action = ScheduledAction::SandboxExec {
@@ -452,9 +577,15 @@ impl NativeTool for ArtifactExecTool {
                         status: None,
                         decided_at: None,
                         decided_by: None,
-                        reason: Some(format!(
-                            "Artifact exec: {} → {}{}",
-                            artifact_id, remote_analysis.summary, remote_hint_suffix
+                        reason: Some(artifact_exec_approval_operator_reason(
+                            &args.artifact_ref,
+                            &artifact_id,
+                            &entrypoint,
+                            &command,
+                            args.intent.as_deref(),
+                            &remote_analysis.summary,
+                            &remote_hint_suffix,
+                            &detected_patterns,
                         )),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
@@ -488,7 +619,11 @@ impl NativeTool for ArtifactExecTool {
                         "approval_ref",
                         serde_json::json!({
                             "artifact_ref": args.artifact_ref,
+                            "artifact_id": artifact_id,
                             "entrypoint": entrypoint,
+                            "args": args.args,
+                            "intent": args.intent,
+                            "command": command,
                             "remote_access_detected": true,
                             "detected_patterns": detected_patterns,
                             "normalized_targets": concrete_targets,
@@ -499,9 +634,9 @@ impl NativeTool for ArtifactExecTool {
                         "exit_code": null,
                         "stdout": "",
                         "stderr": format!(
-                            "Remote access detected in artifact {}. Operator approval required.{}",
-                            artifact_id,
-                            remote_hint_suffix
+                            "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute artifact code that may reach the network/APIs.",
+                            approval["summary"].as_str().unwrap_or("Artifact exec pending operator approval."),
+                            format!("{}{}", remote_analysis.summary, remote_hint_suffix)
                         ),
                         "approval_required": true,
                         "request_id": request_id,
@@ -517,12 +652,56 @@ impl NativeTool for ArtifactExecTool {
                     "exit_code": null,
                     "stdout": "",
                     "stderr": format!(
-                        "Remote access detected in artifact {}. Operator approval required.{}",
-                        artifact_id,
-                        approval_remote_operator_suffix(&concrete_targets, &detected_patterns)
+                        "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute artifact code that may reach the network/APIs.",
+                        artifact_exec_approval_summary_line(
+                            &manifest.agent.id,
+                            &args.artifact_ref,
+                            &entrypoint,
+                            &command,
+                            args.intent.as_deref(),
+                        ),
+                        format!(
+                            "{}{}",
+                            remote_analysis.summary,
+                            approval_remote_operator_suffix(&concrete_targets, &detected_patterns)
+                        )
                     ),
                     "approval_required": true,
                     "suspended": true,
+                    "approval": {
+                        "kind": "artifact_exec",
+                        "reason": artifact_exec_approval_operator_reason(
+                            &args.artifact_ref,
+                            &artifact_id,
+                            &entrypoint,
+                            &command,
+                            args.intent.as_deref(),
+                            &remote_analysis.summary,
+                            &approval_remote_operator_suffix(&concrete_targets, &detected_patterns),
+                            &detected_patterns,
+                        ),
+                        "summary": artifact_exec_approval_summary_line(
+                            &manifest.agent.id,
+                            &args.artifact_ref,
+                            &entrypoint,
+                            &command,
+                            args.intent.as_deref(),
+                        ),
+                        "requested_by_agent_id": manifest.agent.id,
+                        "session_id": session_id.unwrap_or(""),
+                        "retry_field": "approval_ref",
+                        "subject": {
+                            "artifact_ref": args.artifact_ref,
+                            "artifact_id": artifact_id,
+                            "entrypoint": entrypoint,
+                            "args": args.args,
+                            "intent": args.intent,
+                            "command": command,
+                            "remote_access_detected": true,
+                            "detected_patterns": detected_patterns,
+                            "normalized_targets": concrete_targets,
+                        }
+                    }
                 })
                 .to_string());
             }
@@ -602,16 +781,18 @@ impl NativeTool for ArtifactExecTool {
                     crate::runtime::tools::ensure_safe_credential_id_reference(
                         &mapping.credential_id,
                     )?;
-                    let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
-                        anyhow::anyhow!("credential_env: credential reference not found in store")
-                    })?;
-                    let secret_value = vault
-                        .get_secret(&cred.secret_name)
+                    let cred = store
+                        .get_credential(&mapping.credential_id)?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "credential_env: secret for referenced credential not found in vault"
+                                "credential_env: credential reference not found in store"
                             )
                         })?;
+                    let secret_value = vault.get_secret(&cred.secret_name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "credential_env: secret for referenced credential not found in vault"
+                        )
+                    })?;
                     tracing::info!(
                         target: "artifact_exec",
                         credential_id = %mapping.credential_id,
@@ -816,9 +997,11 @@ fn execute_with_ticket(
         let vault = crate::vault::Vault::load_from_file(&vault_path)?;
         for mapping in &ticket.credential_env {
             crate::runtime::tools::ensure_safe_credential_id_reference(&mapping.credential_id)?;
-            let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
-                anyhow::anyhow!("deployment_ticket: credential reference not found in store")
-            })?;
+            let cred = store
+                .get_credential(&mapping.credential_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("deployment_ticket: credential reference not found in store")
+                })?;
             let secret_value = vault.get_secret(&cred.secret_name).ok_or_else(|| {
                 anyhow::anyhow!(
                     "deployment_ticket: secret for referenced credential not found in vault"
@@ -880,4 +1063,62 @@ fn execute_with_ticket(
     }
 
     serde_json::to_string(&body).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        artifact_exec_approval_operator_reason, artifact_exec_approval_summary_line,
+        ArtifactExecArgs,
+    };
+    use crate::runtime::remote_access::DetectedPattern;
+
+    #[test]
+    fn artifact_exec_args_accepts_optional_intent() {
+        let args: ArtifactExecArgs = serde_json::from_str(
+            r#"{"artifact_ref":"ar.abcd1234","entrypoint":"main.py","intent":"Smoke-test output formatting","args":["--json"]}"#,
+        )
+        .unwrap();
+        assert_eq!(args.intent.as_deref(), Some("Smoke-test output formatting"));
+        assert_eq!(args.args, vec!["--json"]);
+    }
+
+    #[test]
+    fn artifact_exec_summary_prefers_intent_when_present() {
+        let summary = artifact_exec_approval_summary_line(
+            "coder.default",
+            "ar.abcd1234",
+            "main.py",
+            "python3 /tmp/main.py --json",
+            Some("Run smoke tests with deterministic args"),
+        );
+        assert!(summary.contains("Run smoke tests with deterministic args"));
+        assert!(summary.contains("`ar.abcd1234:main.py`"));
+        assert!(summary.contains("`python3 /tmp/main.py --json`"));
+    }
+
+    #[test]
+    fn artifact_exec_reason_includes_sections_and_pattern_cues() {
+        let patterns = vec![DetectedPattern {
+            category: "import".to_string(),
+            pattern: "import requests".to_string(),
+            line_number: Some(12),
+            reason: "HTTP client library".to_string(),
+        }];
+        let reason = artifact_exec_approval_operator_reason(
+            "ar.abcd1234",
+            "art_deadbeef",
+            "main.py",
+            "python3 /tmp/main.py --json",
+            Some("Validate formatting with a real API call"),
+            "Detected 1 remote access pattern(s) in categories: import",
+            " → signals: import:import requests",
+            &patterns,
+        );
+        assert!(reason.contains("What will run:"));
+        assert!(reason.contains("Artifact target:"));
+        assert!(reason.contains("Agent-stated purpose:"));
+        assert!(reason.contains("Static analysis cues:"));
+        assert!(reason.contains("[line 12] [import] `import requests`"));
+    }
 }

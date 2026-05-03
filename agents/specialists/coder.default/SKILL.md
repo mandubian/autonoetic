@@ -223,7 +223,8 @@ content_write({
 
 // Step 2: Run the file directly (it's mounted at /tmp/script.py)
 sandbox_exec({
-  "command": "python3 /tmp/script.py"
+  "command": "python3 /tmp/script.py",
+  "intent": "Smoke-test the script stdout (no network)."
 })
 ```
 
@@ -289,6 +290,8 @@ When `sandbox_exec` fails (exit code != 0):
 3. **DO** report environment issues to user if persistent
 
 ## Remote Access Approval
+
+When your command may hit the network/API approval gate, **always** pass `"intent"` on `sandbox_exec`: one clear sentence for the operator (what runs, why it is needed, and whether traffic is real or mocked).
 
 When `sandbox_exec` returns `approval_required: true` with `request_id`:
 

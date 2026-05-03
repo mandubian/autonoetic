@@ -761,6 +761,9 @@ pub(crate) fn implicit_artifact_id_error(tool_name: &str, artifact_id: &str) -> 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SandboxExecArgs {
     pub command: String,
+    /// Free-text rationale for operators (recommended when execution may trigger approval).
+    #[serde(default)]
+    pub intent: Option<String>,
     #[serde(default, deserialize_with = "deserialize_deps_lenient")]
     pub dependencies: Option<SandboxExecDependencies>,
     #[serde(default)]
@@ -1063,6 +1066,16 @@ mod tests {
         let args: SandboxExecArgs =
             serde_json::from_str(r#"{"command": "python3 /tmp/test.py"}"#).unwrap();
         assert!(args.dependencies.is_none());
+        assert!(args.intent.is_none());
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_optional_intent() {
+        let args: SandboxExecArgs = serde_json::from_str(
+            r#"{"command": "python3 /tmp/main.py", "intent": "Run unit tests"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.intent.as_deref(), Some("Run unit tests"));
     }
 
     #[test]

@@ -135,12 +135,18 @@ fn sandbox_command_misuses_content_handle_as_path(command: &str) -> bool {
                 let prev_ok = if i == 0 {
                     true
                 } else {
-                    matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/')
+                    matches!(
+                        bytes[i - 1],
+                        b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/'
+                    )
                 };
                 let next_ok = if i + 12 >= bytes.len() {
                     true
                 } else {
-                    matches!(bytes[i + 12], b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/')
+                    matches!(
+                        bytes[i + 12],
+                        b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/'
+                    )
                 };
                 if prev_ok && next_ok {
                     return true;
@@ -280,6 +286,103 @@ fn extract_code_for_analysis(
     }
 
     command.to_string()
+}
+
+const SANDBOX_APPROVAL_SUMMARY_CMD_MAX: usize = 260;
+const SANDBOX_APPROVAL_INTENT_PREVIEW_MAX: usize = 280;
+const SANDBOX_APPROVAL_PATTERN_APPEND_MAX: usize = 8;
+
+fn truncate_unicode_display(s: &str, max_chars: usize) -> String {
+    let t = s.trim();
+    let n = t.chars().count();
+    if n <= max_chars {
+        t.to_string()
+    } else {
+        let keep = max_chars.saturating_sub(3);
+        format!("{}...", t.chars().take(keep).collect::<String>())
+    }
+}
+
+fn infer_primary_script_display(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    for python_cmd in &["python3", "python", "python3.11", "python3.12"] {
+        if trimmed.starts_with(python_cmd) || trimmed.starts_with(&format!("{python_cmd} ")) {
+            let after_python = trimmed[python_cmd.len()..].trim();
+            if after_python.starts_with('-') {
+                return None;
+            }
+            let script_path = after_python.split_whitespace().next()?;
+            if script_path.is_empty() {
+                return None;
+            }
+            return Some(script_path.to_string());
+        }
+    }
+    None
+}
+
+/// One-line label for approvals (session overview, notifications).
+fn sandbox_approval_summary_line(agent_id: &str, command: &str, intent: Option<&str>) -> String {
+    let cmd = truncate_unicode_display(command, SANDBOX_APPROVAL_SUMMARY_CMD_MAX);
+    match intent.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(i) => {
+            let ip = truncate_unicode_display(i, SANDBOX_APPROVAL_INTENT_PREVIEW_MAX);
+            format!("Sandbox exec ({agent_id}): {ip} — `{cmd}`")
+        }
+        None => match infer_primary_script_display(command) {
+            Some(s) => format!("Sandbox exec ({agent_id}): `{cmd}` · analyzes `{s}`"),
+            None => format!("Sandbox exec ({agent_id}): `{cmd}`"),
+        },
+    }
+}
+
+fn sandbox_approval_operator_reason(
+    command: &str,
+    intent: Option<&str>,
+    remote_summary: &str,
+    remote_suffix: &str,
+    patterns: &[crate::runtime::remote_access::DetectedPattern],
+) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    sections.push(format!("What will run:\n{}", command.trim()));
+    if let Some(i) = intent.map(str::trim).filter(|s| !s.is_empty()) {
+        sections.push(format!("Agent-stated purpose:\n{}", i.trim()));
+    }
+    if let Some(s) = infer_primary_script_display(command) {
+        sections.push(format!(
+            "Analyzed for network/reachable APIs: `{s}` (file content loaded from session/workspace)",
+        ));
+    }
+    let mut trigger = format!(
+        "Why approval is required:\n{}{}",
+        remote_summary.trim(),
+        remote_suffix.trim_end()
+    );
+    if !patterns.is_empty() {
+        trigger.push_str("\n\nStatic analysis cues:");
+        for p in patterns.iter().take(SANDBOX_APPROVAL_PATTERN_APPEND_MAX) {
+            let line = p
+                .line_number
+                .map(|n| format!("line {n}"))
+                .unwrap_or_else(|| "line ?".into());
+            let excerpt = truncate_unicode_display(&p.pattern, 120);
+            trigger.push_str(&format!(
+                "\n- [{}] [{}] `{}` — {}",
+                line,
+                p.category,
+                excerpt,
+                p.reason.trim()
+            ));
+        }
+        if patterns.len() > SANDBOX_APPROVAL_PATTERN_APPEND_MAX {
+            trigger.push_str(&format!(
+                "\n- … (+{} more pattern(s))",
+                patterns.len() - SANDBOX_APPROVAL_PATTERN_APPEND_MAX
+            ));
+        }
+    }
+    sections.push(trigger);
+    sections.join("\n\n")
 }
 
 #[cfg(unix)]
@@ -626,6 +729,10 @@ impl NativeTool for SandboxExecTool {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
+                    "intent": {
+                        "type": "string",
+                        "description": "Short human explanation for the operator (recommended when this run may need approval): what the command does and why it is safe/necessary."
+                    },
                     "dependencies": {
                         "type": "object",
                         "properties": {
@@ -829,10 +936,11 @@ impl NativeTool for SandboxExecTool {
 
         if let Some(artifact_id) = args.artifact_id.as_deref() {
             if artifact_id.starts_with("impl_") {
-                return Ok(
-                    crate::runtime::tools::implicit_artifact_id_error(self.name(), artifact_id)
-                        .to_string(),
-                );
+                return Ok(crate::runtime::tools::implicit_artifact_id_error(
+                    self.name(),
+                    artifact_id,
+                )
+                .to_string());
             }
         }
 
@@ -861,17 +969,15 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                 }
                 _ => "sandbox command denied by CodeExecution policy".to_string(),
             };
-            return Err(
-                tagged::Tagged::permission_with_rules(
-                    anyhow::anyhow!(reason),
-                    decision
-                        .enforced_rules
-                        .into_iter()
-                        .map(|rule| rule.to_string())
-                        .collect(),
-                )
-                .into(),
-            );
+            return Err(tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(reason),
+                decision
+                    .enforced_rules
+                    .into_iter()
+                    .map(|rule| rule.to_string())
+                    .collect(),
+            )
+            .into());
         }
 
         let mut artifact_analysis_override: Option<
@@ -1036,7 +1142,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             )
                         }
                     };
-                    let summary = format!("Sandbox exec: {}", &cmd[..cmd.len().min(60)]);
+                    let summary = sandbox_approval_summary_line(&manifest.agent.id, &cmd, None);
                     let approval = build_approval_details(
                         primary,
                         "sandbox_exec",
@@ -1229,7 +1335,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                                 )
                             }
                         };
-                        let summary = format!("Sandbox exec: {}", &cmd[..cmd.len().min(60)]);
+                        let summary = sandbox_approval_summary_line(&manifest.agent.id, &cmd, None);
                         let approval = build_approval_details(
                             primary,
                             "sandbox_exec",
@@ -1282,9 +1388,10 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
             if !approval_validated_for_command {
                 if let Some(cfg) = config {
                     let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                    let summary = format!(
-                        "Sandbox exec: {}",
-                        &effective_command[..effective_command.len().min(60)]
+                    let summary = sandbox_approval_summary_line(
+                        &manifest.agent.id,
+                        &effective_command,
+                        args.intent.as_deref(),
                     );
                     let remote_hint_suffix =
                         crate::runtime::remote_access::approval_remote_operator_suffix(
@@ -1322,12 +1429,13 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         status: None,
                         decided_at: None,
                         decided_by: None,
-                        reason: Some({
-                            let mut r =
-                                format!("Remote access detected: {}", remote_analysis.summary);
-                            r.push_str(&remote_hint_suffix);
-                            r
-                        }),
+                        reason: Some(sandbox_approval_operator_reason(
+                            &effective_command,
+                            args.intent.as_deref(),
+                            &remote_analysis.summary,
+                            &remote_hint_suffix,
+                            &detected_patterns,
+                        )),
                         evidence_ref: None,
                         workflow_id: approval_workflow_id.clone(),
                         decision_reason: None,
@@ -1369,6 +1477,8 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         "approval_ref",
                         serde_json::json!({
                             "command": effective_command,
+                            "intent": args.intent.clone(),
+                            "primary_script": infer_primary_script_display(&effective_command),
                             "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
                                 "runtime": d.runtime,
                                 "packages": d.packages,
@@ -1384,7 +1494,11 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         "ok": false,
                         "exit_code": null,
                         "stdout": "",
-                        "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.{}", remote_analysis.summary, remote_hint_suffix),
+                        "stderr": format!(
+                            "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute code that may reach the network/APIs.",
+                            summary,
+                            format!("{}{}", remote_analysis.summary, remote_hint_suffix)
+                        ),
                         "approval_required": true,
                         "request_id": request_id,
                         "remote_access_detected": true,
@@ -1396,36 +1510,54 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                     .map_err(Into::into);
                 }
 
-                let detected_patterns = remote_analysis.detected_patterns.clone();
-                let normalized_targets = normalize_targets(&detected_patterns);
+                let detected_patterns_fallback = remote_analysis.detected_patterns.clone();
+                let normalized_targets = normalize_targets(&detected_patterns_fallback);
                 let remote_hint_suffix =
                     crate::runtime::remote_access::approval_remote_operator_suffix(
                         &normalized_targets,
-                        &detected_patterns,
+                        &detected_patterns_fallback,
                     );
+                let summary_fallback = sandbox_approval_summary_line(
+                    &manifest.agent.id,
+                    &effective_command,
+                    args.intent.as_deref(),
+                );
+                let reason_fallback = sandbox_approval_operator_reason(
+                    &effective_command,
+                    args.intent.as_deref(),
+                    &remote_analysis.summary,
+                    &remote_hint_suffix,
+                    &detected_patterns_fallback,
+                );
                 return serde_json::to_string(&serde_json::json!({
                     "ok": false,
                     "exit_code": null,
                     "stdout": "",
-                    "stderr": format!("Remote access detected: {}. Operator approval required to execute code with network access.{}", remote_analysis.summary, remote_hint_suffix),
+                    "stderr": format!(
+                        "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute code that may reach the network/APIs.",
+                        summary_fallback,
+                        format!("{}{}", remote_analysis.summary, remote_hint_suffix)
+                    ),
                     "approval_required": true,
                     "remote_access_detected": true,
                     "detected_patterns": remote_analysis.detected_patterns,
                     "approval": {
                         "kind": "sandbox_exec",
-                        "reason": format!("Remote access detected: {}{}", remote_analysis.summary, remote_hint_suffix),
-                        "summary": format!("Sandbox exec: {}", &effective_command[..effective_command.len().min(60)]),
+                        "reason": reason_fallback,
+                        "summary": summary_fallback,
                         "requested_by_agent_id": manifest.agent.id,
                         "session_id": session_id.unwrap_or(""),
                         "retry_field": "approval_ref",
                         "subject": {
                             "command": effective_command,
+                            "intent": args.intent.clone(),
+                            "primary_script": infer_primary_script_display(&effective_command),
                             "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
                                 "runtime": d.runtime,
                                 "packages": d.packages,
                             })),
                             "remote_access_detected": true,
-                            "detected_patterns": detected_patterns,
+                            "detected_patterns": detected_patterns_fallback,
                             "normalized_targets": normalized_targets,
                             "hosts": normalized_targets
                         }
@@ -1532,10 +1664,8 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                 if !scope_issues.is_empty() {
                     if layer_mount_approved {
                         let approved_layers = approved_layer_mount_layers.as_deref().unwrap_or(&[]);
-                        if !layer_mount_approval_covers_scope_issues(
-                            approved_layers,
-                            &scope_issues,
-                        ) {
+                        if !layer_mount_approval_covers_scope_issues(approved_layers, &scope_issues)
+                        {
                             return Err(tagged::Tagged::validation(anyhow::anyhow!(
                                 "approval_ref '{}' does not cover the currently requested layer scope; retry without approval_ref to request approval for the new layers or hosts",
                                 args.approval_ref.as_deref().unwrap_or("")
@@ -1548,41 +1678,41 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             "Approved LayerMount still covers current layer scope"
                         );
                     } else {
-                    tracing::warn!(
-                        target: "sandbox_exec",
-                        agent_id = %manifest.agent.id,
-                        issue_count = scope_issues.len(),
-                        "Layer mount approval required: build-time scope not covered by session grants"
-                    );
+                        tracing::warn!(
+                            target: "sandbox_exec",
+                            agent_id = %manifest.agent.id,
+                            issue_count = scope_issues.len(),
+                            "Layer mount approval required: build-time scope not covered by session grants"
+                        );
 
-                    if let Some(cfg) = config {
-                        let request_id =
-                            format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                        let summary = format!(
+                        if let Some(cfg) = config {
+                            let request_id =
+                                format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                            let summary = format!(
                             "Layer mount approval: {} layer(s) with unapproved build-time hosts",
                             scope_issues.len()
                         );
-                        let action = ScheduledAction::LayerMount {
-                            layers: scope_issues.clone(),
-                            command: effective_command.clone(),
-                        };
-                        let approval_workflow_id = {
+                            let action = ScheduledAction::LayerMount {
+                                layers: scope_issues.clone(),
+                                command: effective_command.clone(),
+                            };
+                            let approval_workflow_id = {
+                                let sid = session_id.unwrap_or("");
+                                let root = crate::runtime::content_store::root_session_id(sid);
+                                crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
+                                    .ok()
+                                    .flatten()
+                            };
                             let sid = session_id.unwrap_or("");
-                            let root = crate::runtime::content_store::root_session_id(sid);
-                            crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
-                                .ok()
-                                .flatten()
-                        };
-                        let sid = session_id.unwrap_or("");
-                        let root_session_id =
-                            crate::runtime::content_store::root_session_id(sid);
-                        let all_unapproved: Vec<String> = scope_issues
-                            .iter()
-                            .flat_map(|i| i.unapproved_delta.iter().cloned())
-                            .collect::<std::collections::BTreeSet<_>>()
-                            .into_iter()
-                            .collect();
-                        let mut request = autonoetic_types::background::ApprovalRequest {
+                            let root_session_id =
+                                crate::runtime::content_store::root_session_id(sid);
+                            let all_unapproved: Vec<String> = scope_issues
+                                .iter()
+                                .flat_map(|i| i.unapproved_delta.iter().cloned())
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .into_iter()
+                                .collect();
+                            let mut request = autonoetic_types::background::ApprovalRequest {
                             request_id: request_id.clone(),
                             agent_id: manifest.agent.id.clone(),
                             session_id: sid.to_string(),
@@ -1619,38 +1749,38 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             min_dwell_ms: None,
                             confirm_phrase: None,
                         };
-                        if let Some(store) = &gateway_store {
-                            store.create_approval(&mut request).map_err(|e| {
-                                anyhow::anyhow!(
-                                    "Failed to persist layer mount approval request '{}': {}",
-                                    request_id,
-                                    e
-                                )
-                            })?;
-                        } else {
-                            anyhow::bail!(
+                            if let Some(store) = &gateway_store {
+                                store.create_approval(&mut request).map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to persist layer mount approval request '{}': {}",
+                                        request_id,
+                                        e
+                                    )
+                                })?;
+                            } else {
+                                anyhow::bail!(
                                 "GatewayStore missing; cannot persist layer mount approval request '{}'",
                                 request_id
                             );
-                        }
-                        let approval = build_approval_details(
-                            &request,
-                            "layer_mount",
-                            summary.clone(),
-                            "approval_ref",
-                            serde_json::json!({
-                                "layers": scope_issues.iter().map(|i| serde_json::json!({
-                                    "layer_id": i.layer_id,
-                                    "name": i.name,
-                                    "mount_path": i.mount_path,
-                                    "source": i.source,
-                                    "build_time_approved_hosts": i.build_time_approved_hosts,
-                                    "unapproved_delta": i.unapproved_delta,
-                                })).collect::<Vec<_>>(),
-                                "command": effective_command,
-                            }),
-                        );
-                        return serde_json::to_string(&serde_json::json!({
+                            }
+                            let approval = build_approval_details(
+                                &request,
+                                "layer_mount",
+                                summary.clone(),
+                                "approval_ref",
+                                serde_json::json!({
+                                    "layers": scope_issues.iter().map(|i| serde_json::json!({
+                                        "layer_id": i.layer_id,
+                                        "name": i.name,
+                                        "mount_path": i.mount_path,
+                                        "source": i.source,
+                                        "build_time_approved_hosts": i.build_time_approved_hosts,
+                                        "unapproved_delta": i.unapproved_delta,
+                                    })).collect::<Vec<_>>(),
+                                    "command": effective_command,
+                                }),
+                            );
+                            return serde_json::to_string(&serde_json::json!({
                             "ok": false,
                             "exit_code": null,
                             "stdout": "",
@@ -1670,12 +1800,12 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             "approval": approval
                         }))
                         .map_err(Into::into);
-                    }
+                        }
 
-                    // No config available — fail closed rather than silently bypassing the gate.
-                    // Layer scope violations must be explicitly approved; a misconfigured gateway
-                    // should not silently allow untrusted supply-chain content to run.
-                    return Err(anyhow::anyhow!(
+                        // No config available — fail closed rather than silently bypassing the gate.
+                        // Layer scope violations must be explicitly approved; a misconfigured gateway
+                        // should not silently allow untrusted supply-chain content to run.
+                        return Err(anyhow::anyhow!(
                         "Layer mount approval required: {} layer(s) have build-time scope not covered by \
                          session grants, but GatewayConfig is not available to enforce approvals. \
                          Approvals cannot be bypass-able via misconfiguration.",
@@ -1800,7 +1930,10 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
         }
 
         let has_evaluation_cap = manifest.capabilities.iter().any(|c| {
-            matches!(c, autonoetic_types::capability::Capability::Evaluation { .. })
+            matches!(
+                c,
+                autonoetic_types::capability::Capability::Evaluation { .. }
+            )
         });
         if has_evaluation_cap {
             overrides.force_network_off = true;
@@ -1837,16 +1970,18 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                     crate::runtime::tools::ensure_safe_credential_id_reference(
                         &mapping.credential_id,
                     )?;
-                    let cred = store.get_credential(&mapping.credential_id)?.ok_or_else(|| {
-                        anyhow::anyhow!("credential_env: credential reference not found in store")
-                    })?;
-                    let secret_value = vault
-                        .get_secret(&cred.secret_name)
+                    let cred = store
+                        .get_credential(&mapping.credential_id)?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "credential_env: secret for referenced credential not found in vault"
+                                "credential_env: credential reference not found in store"
                             )
                         })?;
+                    let secret_value = vault.get_secret(&cred.secret_name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "credential_env: secret for referenced credential not found in vault"
+                        )
+                    })?;
                     tracing::info!(
                         target: "sandbox_exec",
                         credential_id = %mapping.credential_id,
@@ -1949,17 +2084,17 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                     // access to these hosts for this session — detected patterns == build-time
                     // approved hosts. Future sessions mounting this layer will need the same
                     // approval. Layers built without network access get None (no scope gate).
-                    let capture_approval_scope: Option<LayerApprovalScope> =
-                        if overrides.share_net {
-                            let detected = normalize_targets(&remote_analysis.detected_patterns);
-                            Some(LayerApprovalScope {
-                                approved_hosts: detected,
-                                built_by_agent_id: manifest.agent.id.clone(),
-                                captured_at: chrono::Utc::now().to_rfc3339(),
-                            })
-                        } else {
-                            None
-                        };
+                    let capture_approval_scope: Option<LayerApprovalScope> = if overrides.share_net
+                    {
+                        let detected = normalize_targets(&remote_analysis.detected_patterns);
+                        Some(LayerApprovalScope {
+                            approved_hosts: detected,
+                            built_by_agent_id: manifest.agent.id.clone(),
+                            captured_at: chrono::Utc::now().to_rfc3339(),
+                        })
+                    } else {
+                        None
+                    };
 
                     match crate::layer_store::LayerStore::new(gw_dir, Default::default()) {
                         Ok(layer_store) => {
@@ -2345,5 +2480,45 @@ mod approval_binding_tests {
             hosts,
             vec!["api.example.com".to_string(), "x.y".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod approval_message_tests {
+    use super::{sandbox_approval_operator_reason, sandbox_approval_summary_line};
+    use crate::runtime::remote_access::DetectedPattern;
+
+    #[test]
+    fn sandbox_approval_summary_uses_intent_and_command() {
+        let summary = sandbox_approval_summary_line(
+            "coder.default",
+            "python3 /tmp/test_main.py",
+            Some("Run mocked unit tests for weather query"),
+        );
+        assert!(summary.contains("Run mocked unit tests for weather query"));
+        assert!(summary.contains("`python3 /tmp/test_main.py`"));
+        assert!(summary.contains("Sandbox exec (coder.default):"));
+    }
+
+    #[test]
+    fn sandbox_approval_reason_lists_cues() {
+        let patterns = vec![DetectedPattern {
+            category: "import".to_string(),
+            pattern: "import requests".to_string(),
+            line_number: Some(67),
+            reason: "HTTP client library".to_string(),
+        }];
+        let reason = sandbox_approval_operator_reason(
+            "python3 /tmp/test_main.py",
+            Some("Validate output formatting against API response"),
+            "Detected 1 remote access pattern(s) in categories: import",
+            " → signals: import:import requests",
+            &patterns,
+        );
+        assert!(reason.contains("What will run:"));
+        assert!(reason.contains("Agent-stated purpose:"));
+        assert!(reason.contains("Why approval is required:"));
+        assert!(reason.contains("Static analysis cues:"));
+        assert!(reason.contains("[line 67] [import] `import requests`"));
     }
 }
