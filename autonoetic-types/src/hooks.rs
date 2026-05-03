@@ -49,6 +49,11 @@ pub struct HookConfig {
     pub r#async: bool,
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
+    /// Allowlist of agent IDs that may be spawned by an `agent.spawn` hook.
+    /// When non-empty the gateway enforces that `params.agent_id` is in this
+    /// list before dispatching. An empty list means any agent is allowed.
+    #[serde(default)]
+    pub allowed_agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
