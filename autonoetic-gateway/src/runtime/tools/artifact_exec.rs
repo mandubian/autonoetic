@@ -442,7 +442,7 @@ impl NativeTool for ArtifactExecTool {
                     };
                     let sid = session_id.unwrap_or("");
                     let root_session_id = crate::runtime::content_store::root_session_id(sid);
-                    let request = ApprovalRequest {
+                    let mut request = ApprovalRequest {
                         request_id: request_id.clone(),
                         agent_id: manifest.agent.id.clone(),
                         session_id: sid.to_string(),
@@ -472,9 +472,11 @@ impl NativeTool for ArtifactExecTool {
                         },
                         similar_to_request_id: None,
                         similarity_score: None,
+                        min_dwell_ms: None,
+                        confirm_phrase: None,
                     };
                     if let Some(store) = &gateway_store {
-                        store.create_approval(&request)?;
+                        store.create_approval(&mut request)?;
                     } else {
                         anyhow::bail!("GatewayStore missing; cannot persist approval request");
                     }

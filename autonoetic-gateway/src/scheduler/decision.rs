@@ -168,7 +168,7 @@ mod tests {
 
         let request_id = "apr-1234abcd";
         // Create an approval in the store and record its decision
-        let req = ApprovalRequest {
+        let mut req = ApprovalRequest {
             request_id: request_id.to_string(),
             agent_id: "agent-a".to_string(),
             session_id: "session-a".to_string(),
@@ -192,8 +192,10 @@ mod tests {
             approval_level: ApprovalLevel::Operator,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
-        store.create_approval(&req).unwrap();
+        store.create_approval(&mut req).unwrap();
 
         let state = BackgroundState::default();
         let reevaluation = ReevaluationState {

@@ -192,8 +192,8 @@ fn store_revision_promote_approval(
     request_id: &str,
     added: Vec<&str>,
     broadened: Vec<&str>,
-) {
-    let req = ApprovalRequest {
+) -> ApprovalRequest {
+    let mut req = ApprovalRequest {
         request_id: request_id.to_string(),
         agent_id: AGENT_ID.to_string(),
         session_id: "sess".to_string(),
@@ -208,7 +208,7 @@ fn store_revision_promote_approval(
             broadened_capabilities: broadened.into_iter().map(String::from).collect(),
             payload: None,
         },
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
         status: None,
         decided_at: None,
         decided_by: None,
@@ -218,8 +218,11 @@ fn store_revision_promote_approval(
         approval_level: ApprovalLevel::Operator,
         similar_to_request_id: None,
         similarity_score: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
     };
-    store.create_approval(&req).unwrap();
+    store.create_approval(&mut req).unwrap();
+    req
 }
 
 #[test]
@@ -228,9 +231,9 @@ fn approve_without_acknowledgement_is_rejected() {
     let gateway_dir = temp.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = GatewayStore::open(&gateway_dir).expect("store");
-    store_revision_promote_approval(&store, "ar-no-ack", vec!["NetworkAccess"], vec![]);
+    let stored = store_revision_promote_approval(&store, "ar-no-ack", vec!["NetworkAccess"], vec![]);
 
-    let cfg = GatewayConfig::default();
+    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
     let result = approve_request_with_options(
         &cfg,
         Some(&store),
@@ -240,7 +243,10 @@ fn approve_without_acknowledgement_is_rejected() {
         None,
         Some(&ApprovalLevel::Operator),
         None,
-        ApproveOptions::default(),
+        ApproveOptions {
+            confirm_phrase: stored.confirm_phrase.clone(),
+            ..Default::default()
+        },
     );
     let err = result.expect_err("approval without acknowledgement must fail");
     let msg = err.to_string();
@@ -259,14 +265,14 @@ fn approve_with_partial_acknowledgement_is_rejected() {
     let gateway_dir = temp.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = GatewayStore::open(&gateway_dir).expect("store");
-    store_revision_promote_approval(
+    let stored = store_revision_promote_approval(
         &store,
         "ar-partial",
         vec!["NetworkAccess"],
         vec!["SandboxFunctions"],
     );
 
-    let cfg = GatewayConfig::default();
+    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
     let result = approve_request_with_options(
         &cfg,
         Some(&store),
@@ -278,6 +284,7 @@ fn approve_with_partial_acknowledgement_is_rejected() {
         None,
         ApproveOptions {
             acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+            confirm_phrase: stored.confirm_phrase.clone(),
             ..Default::default()
         },
     );
@@ -291,9 +298,9 @@ fn approve_with_extra_acknowledgement_is_rejected() {
     let gateway_dir = temp.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = GatewayStore::open(&gateway_dir).expect("store");
-    store_revision_promote_approval(&store, "ar-extra", vec!["NetworkAccess"], vec![]);
+    let stored = store_revision_promote_approval(&store, "ar-extra", vec!["NetworkAccess"], vec![]);
 
-    let cfg = GatewayConfig::default();
+    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
     let result = approve_request_with_options(
         &cfg,
         Some(&store),
@@ -308,6 +315,7 @@ fn approve_with_extra_acknowledgement_is_rejected() {
                 "NetworkAccess".to_string(),
                 "SandboxFunctions".to_string(),
             ],
+            confirm_phrase: stored.confirm_phrase.clone(),
             ..Default::default()
         },
     );
@@ -321,14 +329,14 @@ fn approve_with_exact_acknowledgement_succeeds() {
     let gateway_dir = temp.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = GatewayStore::open(&gateway_dir).expect("store");
-    store_revision_promote_approval(
+    let stored = store_revision_promote_approval(
         &store,
         "ar-exact",
         vec!["NetworkAccess"],
         vec!["SandboxFunctions"],
     );
 
-    let cfg = GatewayConfig::default();
+    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
     let decision = approve_request_with_options(
         &cfg,
         Some(&store),
@@ -341,8 +349,9 @@ fn approve_with_exact_acknowledgement_succeeds() {
         ApproveOptions {
             acknowledged_capabilities: vec![
                 "SandboxFunctions".to_string(),
-                "NetworkAccess".to_string(), // order does not matter
+                "NetworkAccess".to_string(),
             ],
+            confirm_phrase: stored.confirm_phrase.clone(),
             ..Default::default()
         },
     )
@@ -472,7 +481,8 @@ fn approval_ref_bypass_is_invalidated_when_alias_moves() {
     );
     let approval_ref = first["approval_ref"].as_str().unwrap().to_string();
 
-    let cfg = GatewayConfig::default();
+    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
+    let apr_row = h.store.get_approval(&approval_ref).unwrap().unwrap();
     approve_request_with_options(
         &cfg,
         Some(&h.store),
@@ -484,6 +494,7 @@ fn approval_ref_bypass_is_invalidated_when_alias_moves() {
         None,
         ApproveOptions {
             acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+            confirm_phrase: apr_row.confirm_phrase.clone(),
             ..Default::default()
         },
     )
@@ -553,7 +564,8 @@ fn approval_ref_bypasses_gate_after_approval() {
     let approval_ref = first["approval_ref"].as_str().unwrap().to_string();
 
     // Operator approves with the matching acknowledgement.
-    let cfg = GatewayConfig::default();
+    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
+    let apr_row = h.store.get_approval(&approval_ref).unwrap().unwrap();
     approve_request_with_options(
         &cfg,
         Some(&h.store),
@@ -565,6 +577,7 @@ fn approval_ref_bypasses_gate_after_approval() {
         None,
         ApproveOptions {
             acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+            confirm_phrase: apr_row.confirm_phrase.clone(),
             ..Default::default()
         },
     )

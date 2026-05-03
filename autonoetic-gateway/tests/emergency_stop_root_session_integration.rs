@@ -300,7 +300,7 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
     save_task_run(&config, Some(store.as_ref()), &task)?;
 
     // Create a pending approval
-    store.create_approval(&ApprovalRequest {
+    store.create_approval(&mut ApprovalRequest {
         request_id: "apr-2c-test".to_string(),
         agent_id: "coder.default".to_string(),
         session_id: format!("{root_session}/child-running"),
@@ -324,6 +324,8 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
         approval_level: ApprovalLevel::Operator,
         similar_to_request_id: None,
         similarity_score: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
     })?;
 
     // Create a pending user interaction

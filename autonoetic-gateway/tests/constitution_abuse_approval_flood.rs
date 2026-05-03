@@ -34,6 +34,8 @@ fn make_request(ix: usize, root_session_id: &str) -> ApprovalRequest {
         approval_level: ApprovalLevel::Operator,
         similar_to_request_id: None,
         similarity_score: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
     }
 }
 
@@ -52,13 +54,13 @@ fn flood_cap_rejects_at_limit_and_keeps_existing() -> anyhow::Result<()> {
 
     // Insert exactly `cap` approvals — all should succeed.
     for i in 0..cap {
-        let req = make_request(i, root);
-        store.create_approval(&req)?;
+        let mut req = make_request(i, root);
+        store.create_approval(&mut req)?;
     }
 
     // The cap+1th should be rejected.
-    let over = make_request(cap, root);
-    let result = store.create_approval(&over);
+    let mut over = make_request(cap, root);
+    let result = store.create_approval(&mut over);
     assert!(result.is_err(), "approval beyond cap should be rejected");
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -82,8 +84,8 @@ fn flood_cap_rejects_at_limit_and_keeps_existing() -> anyhow::Result<()> {
 
     // A different root session should not be affected.
     let other_root = "other-root-session";
-    let other_req = make_request(999, other_root);
-    store.create_approval(&other_req)?;
+    let mut other_req = make_request(999, other_root);
+    store.create_approval(&mut other_req)?;
     assert_eq!(store.count_pending_for_root(other_root)?, 1);
 
     Ok(())
@@ -103,8 +105,8 @@ fn flood_cap_zero_means_disabled() -> anyhow::Result<()> {
 
     // Insert 60 approvals — all should succeed when cap = 0.
     for i in 0..60 {
-        let req = make_request(i, root);
-        store.create_approval(&req)?;
+        let mut req = make_request(i, root);
+        store.create_approval(&mut req)?;
     }
 
     let pending = store.count_pending_for_root(root)?;
@@ -127,7 +129,7 @@ fn flood_cap_skipped_when_no_root_session_id() -> anyhow::Result<()> {
     for i in 0..5 {
         let mut req = make_request(i, "unused");
         req.root_session_id = None;
-        store.create_approval(&req)?;
+        store.create_approval(&mut req)?;
     }
 
     Ok(())

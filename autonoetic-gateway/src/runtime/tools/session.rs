@@ -184,7 +184,7 @@ impl NativeTool for SessionEscalateTool {
                 });
                 let approval_level =
                     crate::scheduler::approval::resolve_approval_level(gw_config, &action);
-                let request = autonoetic_types::background::ApprovalRequest {
+                let mut request = autonoetic_types::background::ApprovalRequest {
                     request_id: request_id.clone(),
                     agent_id: manifest.agent.id.clone(),
                     session_id: sid.to_string(),
@@ -205,8 +205,10 @@ impl NativeTool for SessionEscalateTool {
                     approval_level,
                     similar_to_request_id: None,
                     similarity_score: None,
+                    min_dwell_ms: None,
+                    confirm_phrase: None,
                 };
-                store.create_approval(&request)?;
+                store.create_approval(&mut request)?;
 
                 serde_json::json!({
                     "escalation_type": "human",
