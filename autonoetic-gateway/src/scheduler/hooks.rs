@@ -4,11 +4,28 @@ use autonoetic_types::hooks::{HookAction, HookConfig, HookContext, HookEvent};
 
 use crate::scheduler::gateway_store::GatewayStore;
 
+/// Request sent over the spawn channel when an `agent.spawn` hook fires.
+/// The receiver in `GatewayExecutionService` calls `spawn_agent_once`.
+#[derive(Debug)]
+pub struct HookSpawnRequest {
+    /// Target agent to spawn (from `params.agent_id`).
+    pub agent_id: String,
+    /// Rendered message (template substitution applied).
+    pub message: String,
+    /// Session ID for the new spawn — `hook-spawn-<uuid>`.
+    pub session_id: String,
+    /// Root session that fired the hook.
+    pub root_session_id: String,
+}
+
 pub struct HookExecutor {
     hooks: Vec<HookConfig>,
     store: Option<Arc<GatewayStore>>,
     port: u16,
     signal_timeout_secs: u64,
+    /// Sender half of the spawn channel. When `None`, `agent.spawn` hooks are
+    /// logged as warnings and skipped (pre-wiring state, e.g. in tests).
+    spawn_tx: Option<tokio::sync::mpsc::Sender<HookSpawnRequest>>,
 }
 
 impl HookExecutor {
@@ -23,7 +40,14 @@ impl HookExecutor {
             store,
             port,
             signal_timeout_secs,
+            spawn_tx: None,
         }
+    }
+
+    /// Wire up the spawn channel. Called by `GatewayExecutionService` after
+    /// creating both the executor and the channel.
+    pub fn set_spawn_tx(&mut self, tx: tokio::sync::mpsc::Sender<HookSpawnRequest>) {
+        self.spawn_tx = Some(tx);
     }
 
     pub fn dispatch(&self, ctx: &HookContext) {
@@ -34,7 +58,8 @@ impl HookExecutor {
             match hook.action {
                 HookAction::PublishReport => self.publish_report(ctx, hook),
                 HookAction::DeliverSignal => self.deliver_signal(ctx, hook),
-                HookAction::AgentSpawn | HookAction::HttpCallback => {
+                HookAction::AgentSpawn => self.agent_spawn(ctx, hook),
+                HookAction::HttpCallback => {
                     tracing::warn!(
                         target: "hooks",
                         action = ?hook.action,
@@ -83,11 +108,14 @@ impl HookExecutor {
                         }
                     });
                 }
-                HookAction::AgentSpawn | HookAction::HttpCallback => {
+                HookAction::AgentSpawn => {
+                    self.agent_spawn(&ctx, hook);
+                }
+                HookAction::HttpCallback => {
                     tracing::warn!(
-                    target: "hooks",
-                    action = ?hook.action,
-                    "hook action not yet implemented"
+                        target: "hooks",
+                        action = ?hook.action,
+                        "hook action not yet implemented"
                     );
                 }
             }
@@ -376,6 +404,96 @@ impl HookExecutor {
 
         Ok(())
     }
+
+    // ── agent.spawn ──────────────────────────────────────────────────────
+
+    fn agent_spawn(&self, ctx: &HookContext, hook: &HookConfig) {
+        if !hook.r#async {
+            tracing::warn!(
+                target: "hooks",
+                "agent.spawn hook requires async: true — skipping synchronous dispatch"
+            );
+            return;
+        }
+        self.agent_spawn_async(ctx.clone(), hook.clone());
+    }
+
+    fn agent_spawn_async(&self, ctx: HookContext, hook: HookConfig) {
+        // Validate required params.
+        let agent_id = match hook.params.get("agent_id").and_then(|v| v.as_str()) {
+            Some(id) if !id.trim().is_empty() => id.to_string(),
+            _ => {
+                tracing::warn!(
+                    target: "hooks",
+                    event = ?ctx.event,
+                    "agent.spawn hook is missing required param 'agent_id' — skipping"
+                );
+                return;
+            }
+        };
+
+        // ACL: if allowed_agents is non-empty, target must be in the list.
+        if !hook.allowed_agents.is_empty() && !hook.allowed_agents.iter().any(|a| a == &agent_id) {
+            tracing::warn!(
+                target: "hooks",
+                agent_id = %agent_id,
+                allowed = ?hook.allowed_agents,
+                "agent.spawn hook: agent_id not in allowed_agents — ACL blocked"
+            );
+            return;
+        }
+
+        // Render message template.
+        let template = hook
+            .params
+            .get("message_template")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Hook-triggered spawn from event {{event}}");
+        let message = render_template(template, &ctx);
+
+        // Build a unique, traceable session ID.
+        let session_id = format!(
+            "hook-spawn-{}",
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
+        );
+
+        let Some(ref tx) = self.spawn_tx else {
+            tracing::warn!(
+                target: "hooks",
+                agent_id = %agent_id,
+                session_id = %session_id,
+                "agent.spawn hook fired but spawn channel is not wired — skipping"
+            );
+            return;
+        };
+
+        let req = HookSpawnRequest {
+            agent_id: agent_id.clone(),
+            message,
+            session_id: session_id.clone(),
+            root_session_id: ctx.root_session_id.clone(),
+        };
+
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tx.send(req).await {
+                tracing::warn!(
+                    target: "hooks",
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    error = %e,
+                    "agent.spawn hook: failed to send on spawn channel"
+                );
+            } else {
+                tracing::info!(
+                    target: "hooks",
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    "agent.spawn hook: spawn request queued"
+                );
+            }
+        });
+    }
 }
 
 fn sanitize_report_for_publishing(report_json: &str) -> String {
@@ -421,4 +539,20 @@ fn sanitize_report_for_publishing(report_json: &str) -> String {
     }
 
     serde_json::to_string(&parsed).unwrap_or_else(|_| report_json.to_string())
+}
+
+/// Renders a `message_template` string by replacing `{{key}}` placeholders
+/// with values from `HookContext.fields`. The special key `{{event}}` is
+/// substituted with the event's string name.
+///
+/// Unknown placeholders are left as-is.
+fn render_template(template: &str, ctx: &HookContext) -> String {
+    let mut out = template.to_string();
+    // Substitute the event name first.
+    out = out.replace("{{event}}", ctx.event.as_str());
+    // Then all context fields.
+    for (key, value) in &ctx.fields {
+        out = out.replace(&format!("{{{{{}}}}}", key), value);
+    }
+    out
 }

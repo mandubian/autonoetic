@@ -85,6 +85,21 @@ approval_timeout_secs: 600
 #   - on: "workflow.join.satisfied"
 #     action: "deliver_signal"
 #     async: true
+#
+#   # Spawn an evaluator agent whenever an approval is resolved.
+#   # message_template supports {{field}} substitution from the hook context:
+#   #   approval.resolved: request_id, decision
+#   #   session.closed:    close_reason, turn_count
+#   #   workflow.join.satisfied: workflow_id, task_ids
+#   # allowed_agents restricts which agent IDs the hook may spawn (ACL).
+#   - on: "approval.resolved"
+#     action: "agent.spawn"
+#     async: true                 # must be true — synchronous spawn is not supported
+#     params:
+#       agent_id: "evaluator.default"
+#       message_template: "Evaluate approval {{request_id}} (decision: {{decision}})"
+#     allowed_agents:
+#       - evaluator.default       # ACL: only this agent may be spawned by this hook
 
 # ── Chat TUI ──────────────────────────────────────────────────────────
 # Inline approval from the chat interface (Ctrl+A).

@@ -2,15 +2,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
 pub enum HookEvent {
+    #[serde(rename = "session.closed")]
     SessionClosed,
+    #[serde(rename = "session.suspended")]
     SessionSuspended,
+    #[serde(rename = "approval.resolved")]
     ApprovalResolved,
+    #[serde(rename = "approval.requested")]
     ApprovalRequested,
+    #[serde(rename = "workflow.join.satisfied")]
     WorkflowJoinSatisfied,
+    #[serde(rename = "artifact.created")]
     ArtifactCreated,
+    #[serde(rename = "agent.promoted")]
     AgentPromoted,
+    #[serde(rename = "emergency_stop")]
     EmergencyStop,
 }
 
@@ -49,6 +56,11 @@ pub struct HookConfig {
     pub r#async: bool,
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
+    /// Allowlist of agent IDs that may be spawned by an `agent.spawn` hook.
+    /// When non-empty the gateway enforces that `params.agent_id` is in this
+    /// list before dispatching. An empty list means any agent is allowed.
+    #[serde(default)]
+    pub allowed_agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

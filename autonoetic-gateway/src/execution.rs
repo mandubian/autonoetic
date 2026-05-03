@@ -373,13 +373,23 @@ impl GatewayExecutionService {
         let root_session_budget = Arc::new(RootSessionBudgetRegistry::new(
             config.root_session_budget.clone(),
         ));
-        let hook_executor = Arc::new(crate::scheduler::hooks::HookExecutor::new(
+
+        // ── Hook spawn channel ──────────────────────────────────────────
+        // Buffer 32 requests; back-pressure beyond that will warn-and-drop
+        // (the send is a try_send in the tokio::spawn wrapper).
+        let (spawn_tx, mut spawn_rx) =
+            tokio::sync::mpsc::channel::<crate::scheduler::hooks::HookSpawnRequest>(32);
+
+        let mut hook_exec = crate::scheduler::hooks::HookExecutor::new(
             config.hooks.clone(),
             gateway_store.clone(),
             config.port,
             config.signal_delivery_timeout_secs,
-        ));
-        Self {
+        );
+        hook_exec.set_spawn_tx(spawn_tx);
+        let hook_executor = Arc::new(hook_exec);
+
+        let svc = Self {
             execution_semaphore: Arc::new(Semaphore::new(config.max_concurrent_spawns.max(1))),
             agent_admission: Arc::new(Mutex::new(HashMap::new())),
             agent_execution_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -391,7 +401,67 @@ impl GatewayExecutionService {
             active_executions: ActiveExecutionRegistry::new(),
             hook_executor,
             degraded_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        }
+        };
+
+        // Spawn the drain task that turns HookSpawnRequests into actual agent runs.
+        let drain_svc = svc.clone();
+        tokio::spawn(async move {
+            while let Some(req) = spawn_rx.recv().await {
+                let svc = drain_svc.clone();
+                tokio::spawn(async move {
+                    // Scope child under root: "root/hook-spawn-uuid"
+                    // so root_session_id(), root-budget, emergency stop all work.
+                    let child_session_id = if req.root_session_id.is_empty() {
+                        req.session_id.clone()
+                    } else {
+                        format!("{}/{}", req.root_session_id, req.session_id)
+                    };
+                    tracing::info!(
+                        target: "hooks",
+                        agent_id = %req.agent_id,
+                        session_id = %child_session_id,
+                        root_session_id = %req.root_session_id,
+                        "agent.spawn hook: executing spawn"
+                    );
+                    match svc
+                        .spawn_agent_once(
+                            &req.agent_id,
+                            &req.message,
+                            &child_session_id,
+                            None, // no source_agent_id — gateway-initiated
+                            false,
+                            Some("hook.agent_spawn"),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(result) => {
+                            tracing::info!(
+                                target: "hooks",
+                                agent_id = %req.agent_id,
+                                session_id = %child_session_id,
+                                reply_len = result.assistant_reply.as_deref().map(|s| s.len()).unwrap_or(0),
+                                "agent.spawn hook: spawn completed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "hooks",
+                                agent_id = %req.agent_id,
+                                session_id = %child_session_id,
+                                error = %e,
+                                "agent.spawn hook: spawn failed"
+                            );
+                        }
+                    }
+                });
+            }
+        });
+
+        svc
     }
 
     pub fn config(&self) -> Arc<GatewayConfig> {
