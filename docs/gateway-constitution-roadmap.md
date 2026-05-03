@@ -836,7 +836,7 @@ lie. This bucket lands early because it requires no new code.
 
 ---
 
-### 2.15 §0 Rights audit — mid bucket (small additions)
+### 2.15 §0 Rights audit — mid bucket (small additions) — **ENFORCED**
 
 For rights that need one small piece of new code plus a test.
 
@@ -844,6 +844,16 @@ For rights that need one small piece of new code plus a test.
 |---|---|
 | Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via R-7.18 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
 | Ri-0.12 continuity — closed list of termination reasons | Audit every `lifecycle.rs` termination path, enumerate, document, refactor so every exit calls a single `terminate(reason, rule_id, evidence)` helper. Test: fuzz inputs, no termination occurs outside the declared set. |
+
+**Implementation.** `YieldReason` enum in `checkpoint.rs` enumerates all
+10 valid termination reasons. Ri-0.6 tests verify: degraded-mode entry
+and clearing emit causal events, capability serialization is stable,
+and YieldReason covers all narrowing paths. Ri-0.12 tests verify: all
+YieldReason variants roundtrip through JSON, unknown variants are
+rejected at deserialization, closed set has exactly 10 members, and
+each termination class serializes with the expected tag.
+
+Test: `constitution_rights_mid_bucket.rs` — 12 tests.
 
 **Size.** M. Ri-0.12 is the larger piece — requires refactoring
 termination paths — but once done, I-9 (every termination attributed
