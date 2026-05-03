@@ -960,15 +960,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
 
         let decision = policy.can_exec_shell_detailed(&effective_command);
         if !decision.is_allowed() {
-            let reason = match decision.security_analysis.as_ref() {
-                Some(a) if !a.threats.is_empty() => {
-                    format!(
-                        "sandbox command denied by security policy: {}",
-                        a.reason.as_deref().unwrap_or("security threats detected")
-                    )
-                }
-                _ => "sandbox command denied by CodeExecution policy".to_string(),
-            };
+            let reason = decision.explain_shell_denial("Sandbox execution");
             return Err(tagged::Tagged::permission_with_rules(
                 anyhow::anyhow!(reason),
                 decision

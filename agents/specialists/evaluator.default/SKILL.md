@@ -241,7 +241,7 @@ When `sandbox_exec` returns an approval request (`approval_required: true`, or a
 
 ### Policy-Denied Command Handling
 
-If `sandbox_exec` returns `error_type: permission` / `sandbox command denied by CodeExecution policy`:
+If `sandbox_exec` returns `error_type: permission` and the message indicates **rule R-1.9** / manifest pattern mismatch (not security static analysis and not `approval_required`):
 
 1. Record an error finding that the attempted command shape violates policy.
 2. Do not try alternate shell wrappers to bypass policy.

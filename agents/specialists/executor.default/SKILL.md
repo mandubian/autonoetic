@@ -24,7 +24,7 @@ metadata:
         allowed: ["knowledge.", "sandbox."]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "bash -c ", "sh -c ", "python3 scripts/", "python scripts/"]
-        commands: ["date", "ls", "echo", "cat", "pwd", "wc", "grep", "sed", "awk", "sort", "head", "tail", "cut", "tr", "tee", "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat", "du", "df", "uname", "hostname", "whoami", "which", "basename", "dirname", "readlink", "file", "sleep", "test", "true", "false"]
+        commands: ["date", "ls", "echo", "cat", "pwd", "wc", "grep", "sed", "awk", "sort", "head", "tail", "cut", "tr", "tee", "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat", "du", "df", "uname", "hostname", "whoami", "which", "basename", "dirname", "readlink", "file", "sleep", "test", "true", "false", "curl", "wget"]
       - type: "WriteAccess"
         scopes: ["self.*"]
       - type: "ReadAccess"
@@ -61,6 +61,7 @@ If the task is primarily root-cause analysis, tell the planner to use `debugger.
 - Summarize stdout/stderr clearly and concisely
 - Do not call `artifact_build`
 - Do not produce install intent or agent bundle outputs
+- **Outbound HTTP** (`curl` / `wget`): allowed as first-class commands here so the gateway can run **remote-access analysis** and **operator approval** when needed. The planner should still prefer `web_fetch` or HTTP-capable specialists when possible so policies stay centralized. This agent does **not** declare `NetworkAccess`; approval is per request, not auto-approved.
 
 ## Running Built Artifacts
 

@@ -79,6 +79,25 @@ impl PolicyDecision {
             .map(str::to_string)
             .collect()
     }
+
+    /// Explains a denial from [`PolicyEngine::can_exec_shell_detailed`]. Separates static security
+    /// blocks from capability pattern mismatch (R‑1.9) so operators do not confuse manifest limits
+    /// with missing remote-access approval (which is evaluated later in `sandbox_exec`).
+    pub fn explain_shell_denial(&self, context_label: &'static str) -> String {
+        match self.security_analysis.as_ref() {
+            Some(a) if !a.threats.is_empty() => format!(
+                "{} blocked by security policy (static analysis): {}",
+                context_label,
+                a.reason.as_deref().unwrap_or("security threats detected")
+            ),
+            _ => format!(
+                "{} not permitted: this command does not match any CodeExecution pattern or allowed command (rule R-1.9). \
+This is not a missing operator approval step—remote/network gating runs only after the command is allowed here. \
+Fix: widen the agent's CodeExecution patterns or `commands` list, wrap with an allowed prefix when appropriate (e.g. `bash -c 'curl …'`), or delegate HTTP to a gateway fetch tool / another agent.",
+                context_label
+            ),
+        }
+    }
 }
 
 /// Analyzes shell commands for security threats.
@@ -1015,6 +1034,20 @@ mod tests {
 
         let decision = policy.can_exec_shell_detailed("whoami");
         assert!(!decision.is_allowed());
+    }
+
+    #[test]
+    fn explain_shell_denial_separates_r1_9_from_approval_confusion() {
+        let manifest = manifest_with_caps(vec![Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec![],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        let decision = policy.can_exec_shell_detailed("curl -s https://example.com");
+        assert!(!decision.is_allowed());
+        let msg = decision.explain_shell_denial("Sandbox execution");
+        assert!(msg.contains("R-1.9"), "{msg}");
+        assert!(msg.contains("operator approval"), "{msg}");
     }
 
     #[test]

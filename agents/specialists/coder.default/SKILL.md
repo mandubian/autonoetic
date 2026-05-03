@@ -305,15 +305,16 @@ When `sandbox_exec` returns `approval_required: true` with `request_id`:
 
 ## Permission Denied
 
-When `sandbox_exec` returns `"error_type": "permission"` with `"message": "sandbox command denied by CodeExecution policy"`:
+When `sandbox_exec` returns `"error_type": "permission"`:
 
-**DO NOT retry the same command** - it will fail again.
+- If the message is **static analysis / security policy** (destructive commands, privilege escalation, environment disclosure, etc.), **do not retry** the same command.
+- If the message references **rule R-1.9** / **CodeExecution pattern** / **command does not match any** declared capability, the shell is **not allowed by this agent's manifest** (this is **not** missing operator network approval). **Do not retry** the same shape: fix patterns/`commands` via promotion, use an allowed prefix, or delegate.
 
 **Options:**
-1. Check if the command matches allowed patterns (`python3 `, `node `, `bash -c `, `sh -c `)
+1. Check if the command matches allowed patterns (`python3 `, `node `, `bash -c `, `sh -c `) or the `commands` allow-list
 2. If using packages, add `dependencies` field
-3. If the command is not in allowed patterns, inform the user that the operation is not permitted
-4. If command matches pattern but is still denied, it likely hit a security boundary (destructive, privilege escalation, or environment disclosure)
+3. If the command is not in allowed patterns, inform the user or planner that the operation is not permitted for this revision
+4. If the command matches an allowed pattern but is still denied, it hit a security boundary (see static-analysis wording in the error)
 
 ## Clarification Protocol
 

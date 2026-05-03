@@ -149,7 +149,10 @@ impl LoopGuard {
     /// This prevents agents from spinning on repeated identical successful calls
     /// (e.g., web.search returning the same cached results).
     pub fn register_progress(&mut self, tool_name: &str, arguments: &str) {
-        let fp = compute_fingerprint(tool_name, arguments);
+        let fp = compute_fingerprint(
+            tool_name,
+            normalize_arguments_for_progress_fingerprint(arguments).as_ref(),
+        );
         let is_new = self.last_progress_fingerprint.as_ref() != Some(&fp);
 
         if is_new {
@@ -191,6 +194,23 @@ impl LoopGuard {
             consecutive_progress_count: state.consecutive_progress_count,
             child_failure_count: state.child_failure_count,
         }
+    }
+}
+
+/// Strips echoed / non-schema fields from tool `arguments_json` before progress
+/// fingerprints. Models often attach a changing `"intent"` string; hashing the raw
+/// JSON would otherwise treat repeated semantically-identical calls as new
+/// progress and disable `max_loops_without_progress` protection.
+fn normalize_arguments_for_progress_fingerprint(arguments: &str) -> std::borrow::Cow<'_, str> {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return std::borrow::Cow::Borrowed(arguments);
+    };
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("intent");
+    }
+    match serde_json::to_string(&v) {
+        Ok(s) => std::borrow::Cow::Owned(s),
+        Err(_) => std::borrow::Cow::Borrowed(arguments),
     }
 }
 
@@ -237,6 +257,32 @@ mod tests {
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_err());
+    }
+
+    /// Regression: LLMs sometimes add a superficially different `"intent"` string on every
+    /// tool call while the semantic args are unchanged. Without normalization, fingerprints
+    /// never match → every call looks like fresh progress → the loop counter never climbs.
+    #[test]
+    fn repeating_same_tool_with_only_intent_varying_trips_guard() {
+        let cfg = autonoetic_types::config::LoopGuardConfig {
+            max_loops_without_progress: 5,
+            ..Default::default()
+        };
+        let mut guard = LoopGuard::with_config(&cfg);
+        for epoch in 0usize..7usize {
+            if epoch == 6 {
+                assert!(guard.check_loop().is_err());
+                return;
+            }
+            assert!(guard.check_loop().is_ok(), "epoch {}", epoch);
+            guard.register_progress(
+                "agent_exists",
+                &format!(
+                    r#"{{"agent_id":"weather.default","intent":"check-{epoch}"}}"#
+                ),
+            );
+        }
+        unreachable!("check_loop did not trip");
     }
 
     #[test]
