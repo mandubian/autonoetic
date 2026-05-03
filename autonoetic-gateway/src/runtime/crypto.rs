@@ -29,6 +29,10 @@ impl ManifestSigner {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         STANDARD.encode(signature.to_bytes())
     }
+
+    pub fn public_key_bytes(&self) -> [u8; 32] {
+        self.key.verifying_key().to_bytes()
+    }
 }
 
 pub struct ManifestVerifier;

@@ -1,10 +1,49 @@
 //! Log redaction helpers to avoid leaking secrets in traces.
+//!
+//! The [`RedactedPayload`] newtype enforces R+9: redaction happens **before**
+//! causal-chain append. Callers must wrap payloads through one of the
+//! constructors; raw `serde_json::Value` cannot be passed to
+//! [`CausalLogger::log`] or [`CausalLogger::log_durable`].
 
 use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
 
 const REDACTED: &str = "***REDACTED***";
+
+#[derive(Debug, Clone)]
+pub struct RedactedPayload(Value);
+
+impl RedactedPayload {
+    pub fn from_raw(value: Value) -> Self {
+        Self(redact_json_value(&value))
+    }
+
+    pub fn from_raw_str(text: &str) -> Self {
+        let redacted = redact_text_for_logs(text);
+        Self(
+            serde_json::from_str(&redacted).unwrap_or(Value::String(redacted)),
+        )
+    }
+
+    pub fn from_redacted(value: Value) -> Self {
+        Self(value)
+    }
+
+    pub fn into_inner(self) -> Value {
+        self.0
+    }
+
+    pub fn as_inner(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl From<Value> for RedactedPayload {
+    fn from(value: Value) -> Self {
+        Self::from_raw(value)
+    }
+}
 
 static ENV_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(

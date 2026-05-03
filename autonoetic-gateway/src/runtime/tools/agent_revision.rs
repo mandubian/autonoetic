@@ -360,7 +360,7 @@ fn parse_frontmatter_capabilities(
 }
 
 #[derive(Debug, Deserialize)]
-struct RevisionCreateArgs {
+ struct RevisionCreateArgs {
     agent_id: String,
     artifact_id: String,
     #[serde(default, alias = "base_ref")]
@@ -369,6 +369,8 @@ struct RevisionCreateArgs {
     summary: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +404,8 @@ struct RevisionCreateFromIntentArgs {
     summary: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[derive(Debug)]
@@ -413,6 +417,7 @@ struct RevisionCreateCommonArgs {
     metadata: Option<serde_json::Value>,
     source_kind: String,
     source_ref: Option<String>,
+    signature: Option<String>,
 }
 
 #[derive(Debug)]
@@ -530,6 +535,7 @@ fn create_revision_from_files(
     health_report: Option<&crate::runtime::install_contract::BundleHealthReport>,
     script_entry: Option<&str>,
     artifact_content_digest: Option<&str>,
+    config: Option<&GatewayConfig>,
 ) -> anyhow::Result<PersistedRevisionResult> {
     let expected_layers = bundle.map(expected_locked_layers).unwrap_or_default();
     let normalized_lock = normalize_runtime_lock(parsed_lock);
@@ -564,6 +570,27 @@ fn create_revision_from_files(
     let content_digest = artifact_content_digest
         .map(|d| d.to_string())
         .unwrap_or_else(|| format!("sha256:{}", revision_digest_hex));
+
+    if let Some(sig) = &common.signature {
+        let pub_path = gateway_dir.join(crate::runtime::crypto::GatewayIdentityKey::PUBLIC_FILENAME);
+        if pub_path.exists() {
+            let pub_bytes = std::fs::read(&pub_path)?;
+            if pub_bytes.len() == 32 {
+                let mut pk = [0u8; 32];
+                pk.copy_from_slice(&pub_bytes);
+                let valid = crate::runtime::crypto::ManifestVerifier::verify(
+                    &pk,
+                    &revision_digest_hex,
+                    sig,
+                )?;
+                anyhow::ensure!(
+                    valid,
+                    "R+11: Bundle signature verification failed — signature does not match \
+                     the canonical content digest. Tampered or mis-signed bundle."
+                );
+            }
+        }
+    }
 
     if let Some(existing_rev) = gateway_store.get_agent_revision(&revision_id)? {
         let _ = materialize_revision_directory(
@@ -786,7 +813,8 @@ impl NativeTool for AgentRevisionCreateTool {
                     "agent_id": { "type": "string", "description": "Logical agent ID for this revision" },
                     "artifact_id": { "type": "string", "description": "Artifact ID containing the agent bundle (SKILL.md + files)" },
                     "base_revision_id": { "type": "string", "description": "Optional: base revision this is derived from" },
-                    "summary": { "type": "string", "description": "Optional: human-readable summary of changes" }
+                    "summary": { "type": "string", "description": "Optional: human-readable summary of changes" },
+                    "signature": { "type": "string", "description": "Ed25519 signature over the canonical content digest of the bundle, base64-encoded. Required unless trust_unsigned_bundles is enabled (R+11)." }
                 },
                 "required": ["agent_id", "artifact_id"],
                 "additionalProperties": false
@@ -838,6 +866,15 @@ impl NativeTool for AgentRevisionCreateTool {
         };
 
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
+
+        let trust_unsigned = _config.map_or(false, |c| c.trust_unsigned_bundles);
+        if !trust_unsigned && args.signature.is_none() {
+            return Err(anyhow::anyhow!(
+                "R+11: Bundle signature required but not provided. \
+                 Set trust_unsigned_bundles: true in config for local development."
+            ));
+        }
+
         let artifact = crate::ArtifactStore::new(gateway_dir)?;
 
         let bundle = artifact
@@ -963,6 +1000,7 @@ impl NativeTool for AgentRevisionCreateTool {
             metadata: args.metadata.clone(),
             source_kind: "artifact".to_string(),
             source_ref: Some(args.artifact_id.clone()),
+            signature: args.signature.clone(),
         };
         let persisted = create_revision_from_files(
             &common,
@@ -977,6 +1015,7 @@ impl NativeTool for AgentRevisionCreateTool {
             None,
             None,
             bundle_manifest.script_entry.as_deref(),
+            _config,
         )?;
         Ok(persisted.response.to_string())
     }
@@ -1023,7 +1062,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "middleware": { "type": "object" },
                     "response_contract": { "type": "object" },
                     "base_revision_id": { "type": "string" },
-                    "summary": { "type": "string" }
+                    "summary": { "type": "string" },
+                    "signature": { "type": "string", "description": "Ed25519 signature over the canonical content digest of the bundle, base64-encoded. Required unless trust_unsigned_bundles is enabled (R+11)." }
                 },
                 "required": ["agent_id", "instructions", "description", "capabilities"],
                 "additionalProperties": false
@@ -1085,6 +1125,15 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             ));
         };
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
+
+        let trust_unsigned = _config.map_or(false, |c| c.trust_unsigned_bundles);
+        if !trust_unsigned && args.signature.is_none() {
+            return Err(anyhow::anyhow!(
+                "R+11: Bundle signature required but not provided. \
+                 Set trust_unsigned_bundles: true in config for local development."
+            ));
+        }
+
         let resolved_artifact = resolve_revision_artifact_input(
             args.artifact_id.as_deref(),
             args.artifact_ref.as_deref(),
@@ -1313,6 +1362,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             metadata: args.metadata.clone(),
             source_kind,
             source_ref,
+            signature: args.signature.clone(),
         };
         let persisted = create_revision_from_files(
             &common,
@@ -1327,6 +1377,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             health_report.as_ref(),
             resolved_script_entry.as_deref(),
             artifact_only_digest.as_deref(),
+            _config,
         )?;
 
         let mut response = persisted.response;
@@ -1824,7 +1875,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                 let approval_level = config
                     .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
                     .unwrap_or(autonoetic_types::background::ApprovalLevel::Operator);
-                let req = autonoetic_types::background::ApprovalRequest {
+                let mut req = autonoetic_types::background::ApprovalRequest {
                     request_id: request_id.clone(),
                     agent_id: manifest.agent.id.clone(),
                     session_id: session_id.unwrap_or("").to_string(),
@@ -1847,8 +1898,10 @@ impl NativeTool for AgentRevisionPromoteTool {
                     approval_level,
                     similar_to_request_id: None,
                     similarity_score: None,
+                    min_dwell_ms: None,
+                    confirm_phrase: None,
                 };
-                gateway_store.create_approval(&req)?;
+                gateway_store.create_approval(&mut req)?;
 
                 return Ok(serde_json::json!({
                     "ok": false,
@@ -1917,6 +1970,32 @@ impl NativeTool for AgentRevisionPromoteTool {
                      Fix the audit findings and re-run auditor.default.",
                 artifact_id
             );
+
+            // R-2.17 (formerly R++3) — Distinct evaluator/auditor identity.
+            // The evaluator and auditor must be different agent identities,
+            // not merely distinct sessions of the same agent.
+            {
+                let eval_id = record.evaluator_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Promotion gate: evaluator identity missing for artifact '{}' (R-2.17). \
+                         Re-run evaluator.default to record its identity.",
+                        artifact_id
+                    )
+                })?;
+                let audit_id = record.auditor_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Promotion gate: auditor identity missing for artifact '{}' (R-2.17). \
+                         Re-run auditor.default to record its identity.",
+                        artifact_id
+                    )
+                })?;
+                anyhow::ensure!(
+                    eval_id != audit_id,
+                    "Promotion gate: evaluator and auditor are the same agent '{}' (R-2.17). \
+                     A single agent cannot self-approve. Use distinct evaluator and auditor agents.",
+                    eval_id
+                );
+            }
 
             let has_unresolved = rev
                 .metadata_json

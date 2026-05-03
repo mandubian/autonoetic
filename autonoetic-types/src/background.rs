@@ -389,6 +389,10 @@ pub struct ApprovalRequest {
     pub similar_to_request_id: Option<String>,
     #[serde(default)]
     pub similarity_score: Option<f64>,
+    #[serde(default)]
+    pub min_dwell_ms: Option<i64>,
+    #[serde(default)]
+    pub confirm_phrase: Option<String>,
 }
 
 impl ApprovalRequest {

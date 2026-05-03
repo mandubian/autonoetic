@@ -15,6 +15,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::log_redaction::RedactedPayload;
+
 pub struct CausalLogger {
     pub log_path: PathBuf,
     last_hash: Mutex<String>,
@@ -71,8 +73,9 @@ impl CausalLogger {
         category: &str,
         action: &str,
         status: EntryStatus,
-        payload: Option<serde_json::Value>,
+        payload: Option<RedactedPayload>,
     ) -> anyhow::Result<()> {
+        let payload = payload.map(|p| p.into_inner());
         let mut last_hash_guard = self
             .last_hash
             .lock()
@@ -155,8 +158,9 @@ impl CausalLogger {
         category: &str,
         action: &str,
         status: EntryStatus,
-        payload: Option<serde_json::Value>,
+        payload: Option<RedactedPayload>,
     ) -> anyhow::Result<()> {
+        let payload = payload.map(|p| p.into_inner());
         let mut last_hash_guard = self
             .last_hash
             .lock()
@@ -294,7 +298,7 @@ fn payload_hash(payload: &Option<serde_json::Value>) -> anyhow::Result<Option<St
     Ok(Some(sha256_hex(&encoded)?))
 }
 
-fn compute_entry_hash(
+pub fn compute_entry_hash(
     timestamp: &str,
     log_id: &str,
     actor_id: &str,
@@ -351,7 +355,7 @@ mod tests {
                 "lifecycle",
                 "wake",
                 EntryStatus::Success,
-                Some(serde_json::json!({"k":"v"})),
+                Some(RedactedPayload::from_redacted(serde_json::json!({"k":"v"}))),
             )
             .expect("first log should append");
 

@@ -195,13 +195,13 @@ impl NativeTool for PromotionRecordTool {
             "tool",
             "promotion_record",
             EntryStatus::Success,
-            Some(serde_json::json!({
+            Some(crate::log_redaction::RedactedPayload::from_raw(serde_json::json!({
                 "arguments": {
                     "artifact_id": args.artifact_id,
                     "role": args.role.as_str(),
                     "pass": args.pass,
                 }
-            })),
+            }))),
         )?;
 
         let store = PromotionStore::new(gw_dir)?;

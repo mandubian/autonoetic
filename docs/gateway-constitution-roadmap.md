@@ -464,7 +464,7 @@ build SHA drift, matching SHA, absent lock, malformed lock, payload fields.
 
 ---
 
-### 2.2 `R+9` Redaction-before-write ordering
+### 2.2 `R+9` Redaction-before-write ordering — **ENFORCED**
 
 **Threat.** A raw payload (tool args, LLM completion, error string)
 lands in the JSONL file before `redact_text_for_logs` runs. Even if
@@ -488,28 +488,37 @@ call and verifies the JSONL on disk never contains the raw form.
 
 ---
 
-### 2.3 `R+11` Bundle signature verification
+### 2.3 `R+11` Bundle signature verification — **ENFORCED**
 
 **Threat.** Content-addressing pins a bundle *once created* but does
 not verify authenticity. Any party with write access to the revision
 creation surface can inject a malicious revision that will then be
 trusted by content-digest downstream.
 
-**Sketch.** Add a `signature` field to the revision-create input,
-verify against a configured trust-root at the time of
-`agent_revision_create`. Reject unsigned or invalid bundles unless a
-`trust_local` config flag is set (dev mode only).
+**Implementation.** Both `agent_revision_create` and
+`agent_revision_create_from_intent` accept an optional `signature`
+field (base64 Ed25519 signature over the canonical revision content
+digest). When `trust_unsigned_bundles` is false (default), the
+signature is required and verified against the gateway identity public
+key (`state_attestation.ed25519.pub`). If the public key file does not
+exist or the signature is invalid, the revision is rejected with an
+R+11 error. When the public key file is absent, signatures are
+accepted but not verified (bootstrapping scenario).
 
-Sign with existing Rust crypto (ed25519, `ring` or `ed25519-dalek`).
-Key material configured via `AUTONOETIC_SIGNING_PUBLIC_KEYS` (path to
-PEM or JSON key set).
+Config: `trust_unsigned_bundles: true` in `GatewayConfig` disables the
+gate entirely (dev mode only). Default is false — fail-shut even when
+no config is provided.
 
-Files: new `autonoetic-gateway/src/crypto/signatures.rs`,
-`autonoetic-gateway/src/runtime/tools/agent_revision.rs`,
-`autonoetic-gateway/src/config.rs`.
+Files: `autonoetic-gateway/src/runtime/tools/agent_revision.rs`
+(signature gate in both `execute()` methods + verification in
+`create_revision_from_files`),
+`autonoetic-gateway/src/runtime/crypto.rs` (`ManifestSigner`,
+`ManifestVerifier`, `GatewayIdentityKey::PUBLIC_FILENAME`),
+`autonoetic-types/src/config.rs` (`trust_unsigned_bundles`).
 
-**Test.** `constitution_install_signature.rs` — create with valid
-signature, assert pass; tamper one byte, assert reject.
+**Test.** `constitution_install_signature.rs` — sign/verify roundtrip,
+unsigned rejected when strict, invalid signature rejected, unsigned
+allowed when trusted, config default is strict.
 
 **Size.** M.
 
@@ -534,7 +543,7 @@ rejected with 403, correct token accepted.
 
 ---
 
-### 2.5 `R+10` Sandbox → gateway SDK-bridge limits
+### 2.5 `R+10` Sandbox → gateway SDK-bridge limits — **ENFORCED**
 
 **Threat.** A sandboxed process makes unbounded or oversized
 `dispatch_sdk_method` calls (`events.emit`, `memory.remember`,
@@ -620,7 +629,7 @@ ECONNREFUSED.
 
 ---
 
-### 2.9 `R++3` Distinct auditor / evaluator identity at promotion
+### 2.9 `R++3` Distinct auditor / evaluator identity at promotion — **ENFORCED** (now R-2.17)
 
 **Threat.** Today's gate (R-2.8) requires both evaluator and auditor
 records but does not require their `agent_id` to differ. A single
@@ -641,34 +650,48 @@ passes with the same `agent_id`, attempt promote, assert rejection.
 
 ---
 
-### 2.10 `R++4` Operator approval hardening
+### 2.10 `R++4` Operator approval hardening — **ENFORCED**
 
 **Threat.** Approval fatigue. A distracted operator clicking through
 50 near-identical prompts is the real trust boundary, and today there
 is nothing between "prompt displayed" and "prompt approved." High-risk
 approvals get the same UX affordances as low-risk ones.
 
-**Sketch.** Three sub-changes, each a new field on the approval record:
+**Implementation.** Three sub-features, all enforced at
+`approve_request_with_options`:
 
-1. `min_dwell_ms`: how long the operator must see the prompt before
-   the confirm action enables. Set non-zero for bundle promotions,
-   new-credential registration, first-ever host approvals. CLI and TUI
-   respect it.
-2. `typed_confirm_phrase`: a string the operator must type to confirm
-   (e.g. `promote research-v7`). Set for destructive classes.
-3. Operator-facing structural-similarity dedup: hash the rendered
-   human-readable *description* (not the gateway fingerprint) and
-   suppress N consecutive near-duplicates in the operator view with a
-   banner ("N similar approvals — expand to review"). Gateway-side
-   dedup (R-2.3) is unchanged.
+1. **Dwell time** (`min_dwell_ms`): minimum milliseconds the operator
+   must wait before confirming. Risk classes: Standard (0 ms), High
+   (3 000 ms), Critical (5 000 ms). Persisted on the approval record.
+   Scaled by `approval_dwell_multiplier` in `GatewayConfig` (default
+   1.0, set to 0 in tests).
 
-Files: `autonoetic-gateway/src/gateway_store/approvals.rs` (schema),
-`autonoetic/src/bin/` CLI, TUI, approval signal dispatch.
+2. **Typed confirmation phrase** (`confirm_phrase`): required for
+   Critical-risk approvals (`RevisionPromote`, `CredentialPrompt`).
+   The phrase encodes the action identity (e.g. `promote {agent_id}
+   {revision_id[:16]}`). Operator must provide it via
+   `--confirm-phrase`.
 
-**Test.** Three tests, one per sub-part.
-`constitution_approval_dwell.rs`,
-`constitution_approval_typed_confirm.rs`,
-`constitution_approval_operator_dedup.rs`.
+3. **Structural-similarity dedup**: Jaccard similarity over command
+   tokens (70%) + hosts (30%) computed at approval creation, stored
+   as `similar_to_request_id` + `similarity_score`. Displayed in CLI
+   `gateway approval show` and TUI.
+
+Risk classification (`ApprovalRisk` enum):
+- Critical: `RevisionPromote`, `CredentialPrompt`
+- High: `AgentInstall`, `SessionEscalate`, `SandboxExec` with detected
+  hosts, `CredentialRequest`, `LayerMount`
+- Standard: everything else
+
+Files: `autonoetic-gateway/src/scheduler/approval_hardening.rs`
+(classification, enrich), `scheduler/approval.rs` (dwell/phrase
+enforcement), `scheduler/gateway_store/approvals.rs` (schema v23),
+`autonoetic/src/cli/gateway.rs` (`--confirm-phrase` flag, Show display).
+
+**Test.** `constitution_approval_hardening.rs` — 12 tests: risk
+classification for all action types, enrich sets dwell/phrase,
+dwell rejection, phrase rejection (wrong/missing), success after dwell
+with correct phrase, standard no-phrase, persistence in store.
 
 **Size.** M.
 
@@ -796,7 +819,7 @@ of the reproducible-digest computation.
 
 ---
 
-### 2.14 §0 Rights audit — early bucket (test-only pins)
+### 2.14 §0 Rights audit — early bucket (test-only pins) — **ENFORCED**
 
 **Threat.** Rights already enforced under the rule framing need
 dedicated tests named `constitution_right_<ri_id>.rs` to pin them *as
@@ -813,7 +836,7 @@ lie. This bucket lands early because it requires no new code.
 
 ---
 
-### 2.15 §0 Rights audit — mid bucket (small additions)
+### 2.15 §0 Rights audit — mid bucket (small additions) — PARTIAL
 
 For rights that need one small piece of new code plus a test.
 
@@ -821,6 +844,25 @@ For rights that need one small piece of new code plus a test.
 |---|---|
 | Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via R-7.18 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
 | Ri-0.12 continuity — closed list of termination reasons | Audit every `lifecycle.rs` termination path, enumerate, document, refactor so every exit calls a single `terminate(reason, rule_id, evidence)` helper. Test: fuzz inputs, no termination occurs outside the declared set. |
+
+**Implementation.** Ri-0.6: Tests verify that `degrade_session()` emits a
+`session.degraded` causal event with `source: "operator"` and
+`enforced_rules: ["R++6"]`, that `clear_session_degradation()` emits
+`session.degradation_cleared`, that degraded state clamps the tool tier
+filter to `core_only()` (blocking specialized tools), and that the
+declared narrowing paths are enumerated (degraded_mode, operator_command).
+Still needed: per-turn capability snapshot comparison.
+
+Ri-0.12: `YieldReason` enum in `checkpoint.rs` enumerates all 10 yield
+causes. Tests verify all variants roundtrip through JSON, unknown variants
+are rejected at deserialization, and terminal (6) vs resumable (4)
+categories are correct. The enum also covers resumable suspension states
+(Hibernation, ApprovalRequired, UserInputRequired, HumanEscalation), so
+the documentation should distinguish terminal termination from checkpoint
+suspension. Still needed: refactor lifecycle exit paths to a single
+`terminate()` helper.
+
+Test: `constitution_rights_mid_bucket.rs` — 10 tests.
 
 **Size.** M. Ri-0.12 is the larger piece — requires refactoring
 termination paths — but once done, I-9 (every termination attributed

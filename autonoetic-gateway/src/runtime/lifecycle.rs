@@ -793,7 +793,7 @@ impl AgentExecutor {
                     .flatten()
             })
         });
-        let request = ApprovalRequest {
+        let mut request = ApprovalRequest {
             request_id: request_id.clone(),
             agent_id: self.manifest.agent.id.clone(),
             session_id: session_id.to_string(),
@@ -814,8 +814,10 @@ impl AgentExecutor {
             approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
-        store.create_approval(&request)?;
+        store.create_approval(&mut request)?;
         Ok(request_id)
     }
 
@@ -3011,7 +3013,7 @@ fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
 ///
 /// Manifest-declared tiers always take precedence over runtime inference — if an
 /// agent explicitly restricts itself, the restriction is honoured.
-fn determine_tool_tier_filter(
+pub fn determine_tool_tier_filter(
     manifest: &AgentManifest,
     session_id: Option<&str>,
     has_pending_approvals: bool,

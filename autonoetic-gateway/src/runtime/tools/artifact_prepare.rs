@@ -397,7 +397,7 @@ impl NativeTool for ArtifactPrepareTool {
                 .ok()
                 .flatten();
 
-        let request = ApprovalRequest {
+        let mut request = ApprovalRequest {
             request_id: request_id.clone(),
             agent_id: manifest.agent.id.clone(),
             session_id: sid.to_string(),
@@ -422,9 +422,11 @@ impl NativeTool for ArtifactPrepareTool {
             },
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
 
-        store.create_approval(&request)?;
+        store.create_approval(&mut request)?;
 
         let approval = build_approval_details(
             &request,

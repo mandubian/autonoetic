@@ -24,7 +24,7 @@ fn make_config(tmp: &tempfile::TempDir) -> GatewayConfig {
 
 fn seed_approval(store: &GatewayStore, task_id: &str) -> String {
     let request_id = format!("req-{}", task_id);
-    let request = ApprovalRequest {
+    let mut request = ApprovalRequest {
         request_id: request_id.clone(),
         agent_id: "agent-1".to_string(),
         session_id: "session-1".to_string(),
@@ -48,8 +48,10 @@ fn seed_approval(store: &GatewayStore, task_id: &str) -> String {
         decision_reason: None,
         similar_to_request_id: None,
         similarity_score: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
     };
-    store.create_approval(&request).unwrap();
+    store.create_approval(&mut request).unwrap();
     request_id
 }
 

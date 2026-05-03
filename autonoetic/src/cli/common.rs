@@ -330,6 +330,11 @@ pub enum GatewayApprovalCommands {
         /// added/broadened capability type. Repeatable.
         #[arg(long = "acknowledge-capability", value_name = "TYPE")]
         acknowledge_capabilities: Vec<String>,
+        /// Confirmation phrase for destructive approval classes (R++4).
+        /// Required when the approval has a `confirm_phrase` field set
+        /// (e.g. RevisionPromote, CredentialPrompt). Case-insensitive match.
+        #[arg(long = "confirm-phrase")]
+        confirm_phrase: Option<String>,
     },
     /// Reject one pending request.
     Reject {

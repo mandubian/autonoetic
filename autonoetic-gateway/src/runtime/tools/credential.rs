@@ -402,7 +402,7 @@ impl NativeTool for CredentialRequestTool {
                 inject_secret_as: args.inject_secret_as.clone(),
                 payload: Some(json!({ "host": url_host, "retry_field": "approval_ref" })),
             };
-            let req = ApprovalRequest {
+            let mut req = ApprovalRequest {
                 request_id: request_id.clone(),
                 agent_id: manifest.agent.id.clone(),
                 session_id: sid.to_string(),
@@ -420,9 +420,11 @@ impl NativeTool for CredentialRequestTool {
                 approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
                 similar_to_request_id: None,
                 similarity_score: None,
+                min_dwell_ms: None,
+                confirm_phrase: None,
             };
 
-            store.create_approval(&req)?;
+            store.create_approval(&mut req)?;
             let message = format!(
                 "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
                 request_id
@@ -1731,7 +1733,7 @@ fn execute_steps(
                         "expires_at": expires_at,
                     })),
                 };
-                let approval_req = ApprovalRequest {
+                let mut approval_req = ApprovalRequest {
                     request_id: request_id.clone(),
                     agent_id: manifest.agent.id.clone(),
                     session_id: session_id.unwrap_or("").to_string(),
@@ -1756,8 +1758,10 @@ fn execute_steps(
                         .unwrap_or(ApprovalLevel::Operator),
                     similar_to_request_id: None,
                     similarity_score: None,
+                    min_dwell_ms: None,
+                    confirm_phrase: None,
                 };
-                store.create_approval(&approval_req)?;
+                store.create_approval(&mut approval_req)?;
 
                 step_results.push(json!({
                     "step": i,
