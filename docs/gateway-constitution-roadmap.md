@@ -620,7 +620,7 @@ ECONNREFUSED.
 
 ---
 
-### 2.9 `R++3` Distinct auditor / evaluator identity at promotion
+### 2.9 `R++3` Distinct auditor / evaluator identity at promotion — **ENFORCED** (now R-2.17)
 
 **Threat.** Today's gate (R-2.8) requires both evaluator and auditor
 records but does not require their `agent_id` to differ. A single
