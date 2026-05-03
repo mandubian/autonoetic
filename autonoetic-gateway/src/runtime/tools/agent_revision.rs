@@ -360,7 +360,7 @@ fn parse_frontmatter_capabilities(
 }
 
 #[derive(Debug, Deserialize)]
-struct RevisionCreateArgs {
+ struct RevisionCreateArgs {
     agent_id: String,
     artifact_id: String,
     #[serde(default, alias = "base_ref")]
@@ -369,6 +369,8 @@ struct RevisionCreateArgs {
     summary: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +404,8 @@ struct RevisionCreateFromIntentArgs {
     summary: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[derive(Debug)]
@@ -413,6 +417,7 @@ struct RevisionCreateCommonArgs {
     metadata: Option<serde_json::Value>,
     source_kind: String,
     source_ref: Option<String>,
+    signature: Option<String>,
 }
 
 #[derive(Debug)]
@@ -838,6 +843,16 @@ impl NativeTool for AgentRevisionCreateTool {
         };
 
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
+
+        if let Some(config) = _config {
+            if !config.trust_unsigned_bundles && args.signature.is_none() {
+                return Err(anyhow::anyhow!(
+                    "R+11: Bundle signature required but not provided. \
+                     Set trust_unsigned_bundles: true in config for local development."
+                ));
+            }
+        }
+
         let artifact = crate::ArtifactStore::new(gateway_dir)?;
 
         let bundle = artifact
@@ -963,6 +978,7 @@ impl NativeTool for AgentRevisionCreateTool {
             metadata: args.metadata.clone(),
             source_kind: "artifact".to_string(),
             source_ref: Some(args.artifact_id.clone()),
+            signature: args.signature.clone(),
         };
         let persisted = create_revision_from_files(
             &common,
@@ -1085,6 +1101,16 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             ));
         };
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
+
+        if let Some(config) = _config {
+            if !config.trust_unsigned_bundles && args.signature.is_none() {
+                return Err(anyhow::anyhow!(
+                    "R+11: Bundle signature required but not provided. \
+                     Set trust_unsigned_bundles: true in config for local development."
+                ));
+            }
+        }
+
         let resolved_artifact = resolve_revision_artifact_input(
             args.artifact_id.as_deref(),
             args.artifact_ref.as_deref(),
@@ -1313,6 +1339,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             metadata: args.metadata.clone(),
             source_kind,
             source_ref,
+            signature: args.signature.clone(),
         };
         let persisted = create_revision_from_files(
             &common,

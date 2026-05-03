@@ -488,7 +488,7 @@ call and verifies the JSONL on disk never contains the raw form.
 
 ---
 
-### 2.3 `R+11` Bundle signature verification
+### 2.3 `R+11` Bundle signature verification — **ENFORCED**
 
 **Threat.** Content-addressing pins a bundle *once created* but does
 not verify authenticity. Any party with write access to the revision
