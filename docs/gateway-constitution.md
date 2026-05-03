@@ -175,7 +175,7 @@ approve via `runtime/continuation.rs`.
 | R-2.14 | `user_ask` is refused if the workflow has active children or pending approvals. | architecture-interaction-mechanisms.md | runtime guard | PARTIAL |
 | R-2.15 | Spawn payload is preserved verbatim across approval resume. | approval-system.md | `continuation.rs:332` | ENFORCED |
 | R-2.16 | Promotion of revision N computes `cap_set(N) \ cap_set(N-1)`. A non-empty delta triggers a **separate, differently-shaped approval** (`ScheduledAction::RevisionPromote`) that names each added capability explicitly. The operator must acknowledge every added/broadened capability by name (`--acknowledge-capability`) — silent accretion across approvals is impossible. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs` (gate creation), `autonoetic-gateway/src/scheduler/approval.rs` (acknowledgement check) | ENFORCED |
-| R-2.17 | The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). A single agent recording both evaluator and auditor passes is rejected. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs::enforce_promotion_gate` (identity comparison) | ENFORCED |
+| R-2.17 | The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). A single agent recording both evaluator and auditor passes is rejected. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs` `AgentRevisionPromoteTool::execute` (identity comparison in promotion gate) | ENFORCED |
 
 ## 3. Sandbox Isolation
 

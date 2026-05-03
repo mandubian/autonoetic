@@ -1918,15 +1918,27 @@ impl NativeTool for AgentRevisionPromoteTool {
                 artifact_id
             );
 
-            // R++3 — Distinct evaluator/auditor identity.
+            // R-2.17 (formerly R++3) — Distinct evaluator/auditor identity.
             // The evaluator and auditor must be different agent identities,
             // not merely distinct sessions of the same agent.
             {
-                let eval_id = record.evaluator_id.as_deref().unwrap_or("<unknown>");
-                let audit_id = record.auditor_id.as_deref().unwrap_or("<unknown>");
+                let eval_id = record.evaluator_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Promotion gate: evaluator identity missing for artifact '{}' (R-2.17). \
+                         Re-run evaluator.default to record its identity.",
+                        artifact_id
+                    )
+                })?;
+                let audit_id = record.auditor_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Promotion gate: auditor identity missing for artifact '{}' (R-2.17). \
+                         Re-run auditor.default to record its identity.",
+                        artifact_id
+                    )
+                })?;
                 anyhow::ensure!(
                     eval_id != audit_id,
-                    "Promotion gate: evaluator and auditor are the same agent '{}' (R++3). \
+                    "Promotion gate: evaluator and auditor are the same agent '{}' (R-2.17). \
                      A single agent cannot self-approve. Use distinct evaluator and auditor agents.",
                     eval_id
                 );

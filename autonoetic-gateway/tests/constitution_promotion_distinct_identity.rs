@@ -91,7 +91,7 @@ fn build_agent_bundle(base_dir: &Path, skill_md: &str) -> (String, PathBuf) {
     let session_id = "test-session";
 
     let runtime_lock = r#"gateway:
-  artifact: autonogetic-gateway
+  artifact: autonoetic-gateway
   version: "0.1.0"
   sha256: unmanaged
   signature: null
@@ -302,8 +302,8 @@ fn same_agent_identity_rejected_even_if_both_passed() {
     assert!(result.is_err(), "promote should fail when evaluator and auditor share identity");
     let err = result.unwrap_err();
     assert!(
-        err.contains("R++3"),
-        "error should reference R++3: {err}"
+        err.contains("R-2.17"),
+        "error should reference R-2.17: {err}"
     );
     assert!(
         err.contains("same agent"),
