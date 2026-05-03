@@ -3,7 +3,8 @@
 //! Test-only pins for rights that are already enforced under the rule
 //! framing but lack dedicated rights-level tests:
 //!
-//! - Ri-0.2: Every agent may read its own causal chain and execution trace.
+//! - Ri-0.2: Every agent granted ReadAccess may search published session
+//!           reports and read its own causal chain / execution trace.
 //! - Ri-0.7: An agent may explicitly request session termination; the
 //!           gateway may not refuse.
 //! - Ri-0.11: Every action is attributed to the agent on the causal chain;
@@ -13,10 +14,15 @@
 mod support;
 
 use autonoetic_gateway::causal_chain::CausalLogger;
+use autonoetic_gateway::llm::{
+    CompletionRequest, CompletionResponse, LlmDriver, Message, StopReason, TokenUsage,
+};
 use autonoetic_gateway::policy::PolicyEngine;
+use autonoetic_gateway::runtime::content_store;
+use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::{EntryStatus, PublishedSessionReportRecord};
 use autonoetic_types::config::GatewayConfig;
@@ -80,11 +86,12 @@ fn ri_0_2_agent_with_read_access_can_search_own_traces() {
     let (gw_dir, store) = setup_gateway(temp.path());
 
     let agent_id = "coder.default";
-    let session_id = "root/coder.default-abc";
+    let full_session_id = "root/coder.default-abc";
+    let root_session_id = content_store::root_session_id(full_session_id).to_string();
 
     store
         .upsert_published_session_report(&PublishedSessionReportRecord {
-            root_session_id: session_id.to_string(),
+            root_session_id: root_session_id.clone(),
             report_handle: "cnt_report".to_string(),
             overview_handle: None,
             html_handle: None,
@@ -118,7 +125,7 @@ fn ri_0_2_agent_with_read_access_can_search_own_traces() {
             temp.path(),
             Some(&gw_dir),
             &args.to_string(),
-            Some(session_id),
+            Some(&full_session_id),
             None,
             Some(&config),
             Some(store),
@@ -170,60 +177,179 @@ fn ri_0_2_agent_without_read_access_cannot_use_observability() {
 
 // ── Ri-0.7: Session termination ─────────────────────────────────
 
-#[test]
-fn ri_0_7_session_close_commits_causal_event() {
+struct EndTurnDriver;
+
+#[async_trait::async_trait]
+impl LlmDriver for EndTurnDriver {
+    async fn complete(&self, _req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
+        Ok(CompletionResponse {
+            text: "Done.".to_string(),
+            tool_calls: vec![],
+            reasoning_content: None,
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })
+    }
+}
+
+fn ri_0_7_manifest() -> AgentManifest {
+    AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "ri07.tester".to_string(),
+            name: "ri07.tester".to_string(),
+            description: "test".to_string(),
+        },
+        capabilities: vec![],
+        llm_config: Some(LlmConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            temperature: 0.0,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: false,
+            context_window_tokens: None,
+            base_url: None,
+            api_key_env: None,
+            routing_preset: None,
+            thinking: None,
+        }),
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        response_contract: None,
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
+        compression: None,
+    }
+}
+
+#[tokio::test]
+async fn ri_0_7_session_close_commits_causal_event() {
     let temp = tempdir().unwrap();
-    let agent_dir = temp.path().join("agent");
-    let path = log_path_for(&agent_dir);
-    let agent_id = "test-agent";
-    let session_id = "root/test-agent-001";
+    let agents_dir = temp.path().join("agents");
+    let agent_dir = agents_dir.join("ri07.tester");
+    std::fs::create_dir_all(agent_dir.join("history")).unwrap();
+    std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []\n").unwrap();
+    std::fs::write(agent_dir.join("SKILL.md"), "# ri07 tester\n").unwrap();
 
-    let mut logger = CausalLogger::new(&path).unwrap();
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
 
-    logger.log(agent_id, session_id, None, 0, "session", "start", EntryStatus::Success, Some(serde_json::json!({"reason": "test"}))).unwrap();
-    logger.log(agent_id, session_id, None, 1, "tool", "invoked", EntryStatus::Success, Some(serde_json::json!({"tool": "content_read"}))).unwrap();
-    logger.log(agent_id, session_id, None, 2, "session", "end", EntryStatus::Success, Some(serde_json::json!({"reason": "agent_initiated"}))).unwrap();
+    let driver = Arc::new(EndTurnDriver);
+    let session_id = "session-ri07-close";
 
-    let entries = CausalLogger::read_entries(&path).unwrap();
-    assert!(entries.len() >= 3, "should have start + tool + end events");
+    let mut runtime = AgentExecutor::new(
+        ri_0_7_manifest(),
+        "You are a test agent.".to_string(),
+        driver,
+        agent_dir.clone(),
+        default_registry(),
+        Some(store),
+    )
+    .with_gateway_dir(gateway_dir)
+    .with_session_id(session_id);
 
+    let mut history = vec![
+        Message::system("You are a test agent.".to_string()),
+        Message::user("End.".to_string()),
+    ];
+
+    let _ = runtime
+        .execute_with_history(&mut history)
+        .await
+        .expect("execute should succeed");
+
+    let close_result = runtime.close_session("agent_initiated");
+    assert!(
+        close_result.is_ok(),
+        "close_session must not be refused — Ri-0.7: {:?}",
+        close_result
+    );
+
+    let history_dir = agent_dir.join("history");
+    let entries = CausalLogger::read_all_entries(&history_dir).unwrap();
     let end_events: Vec<_> = entries
         .iter()
         .filter(|e| e.category == "session" && e.action == "end")
         .collect();
-    assert_eq!(end_events.len(), 1, "should have exactly one session.end event");
+    assert!(
+        !end_events.is_empty(),
+        "should have at least one session.end event after close_session"
+    );
 
     let end = &end_events[0];
     let payload = end.payload.as_ref().expect("end event should have payload");
     let reason = payload.get("reason").and_then(|r| r.as_str());
-    assert_eq!(
-        reason,
-        Some("agent_initiated"),
-        "end event should record the termination reason"
+    assert!(
+        reason.unwrap_or("").contains("agent_initiated"),
+        "end event should record the termination reason: {:?}",
+        reason
     );
     assert_eq!(
-        end.actor_id, agent_id,
+        end.actor_id, "ri07.tester",
         "end event should be attributed to the agent"
     );
 }
 
-#[test]
-fn ri_0_7_session_close_cannot_be_refused() {
+#[tokio::test]
+async fn ri_0_7_session_close_cannot_be_refused() {
     let temp = tempdir().unwrap();
-    let agent_dir = temp.path().join("agent");
-    let path = log_path_for(&agent_dir);
-    let agent_id = "test-agent";
-    let session_id = "root/test-agent-002";
+    let agents_dir = temp.path().join("agents");
+    let agent_dir = agents_dir.join("ri07.tester");
+    std::fs::create_dir_all(agent_dir.join("history")).unwrap();
+    std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []\n").unwrap();
+    std::fs::write(agent_dir.join("SKILL.md"), "# ri07 tester\n").unwrap();
 
-    let mut logger = CausalLogger::new(&path).unwrap();
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
 
-    let start_result = logger.log(agent_id, session_id, None, 0, "session", "start", EntryStatus::Success, None);
-    assert!(start_result.is_ok(), "session start should not be refused");
+    let driver = Arc::new(EndTurnDriver);
+    let session_id = "session-ri07-refuse";
 
-    let end_result = logger.log(agent_id, session_id, None, 1, "session", "end", EntryStatus::Success, Some(serde_json::json!({"reason": "agent_exit"})));
+    let mut runtime = AgentExecutor::new(
+        ri_0_7_manifest(),
+        "You are a test agent.".to_string(),
+        driver,
+        agent_dir,
+        default_registry(),
+        Some(store),
+    )
+    .with_gateway_dir(gateway_dir)
+    .with_session_id(session_id);
+
+    let mut history = vec![
+        Message::system("You are a test agent.".to_string()),
+        Message::user("End.".to_string()),
+    ];
+
+    let _ = runtime
+        .execute_with_history(&mut history)
+        .await
+        .expect("execute should succeed");
+
+    let result = runtime.close_session("agent_exit");
     assert!(
-        end_result.is_ok(),
-        "session.end must never be refused — Ri-0.7"
+        result.is_ok(),
+        "close_session must never be refused — Ri-0.7: {:?}",
+        result
     );
 }
 
@@ -237,7 +363,7 @@ fn ri_0_11_every_event_carries_agent_id() {
     let agent_id = "test-agent";
     let session_id = "root/test-agent-003";
 
-    let mut logger = CausalLogger::new(&path).unwrap();
+    let logger = CausalLogger::new(&path).unwrap();
 
     logger.log(agent_id, session_id, None, 0, "session", "start", EntryStatus::Success, None).unwrap();
     logger.log(agent_id, session_id, None, 1, "tool", "sandbox_exec", EntryStatus::Success, Some(serde_json::json!({"cmd": "ls"}))).unwrap();
@@ -269,7 +395,7 @@ fn ri_0_11_hash_chain_integrity() {
     let agent_id = "test-agent";
     let session_id = "root/test-agent-004";
 
-    let mut logger = CausalLogger::new(&path).unwrap();
+    let logger = CausalLogger::new(&path).unwrap();
 
     logger.log(agent_id, session_id, None, 0, "session", "start", EntryStatus::Success, None).unwrap();
     logger.log(agent_id, session_id, None, 1, "tool", "sandbox_exec", EntryStatus::Success, Some(serde_json::json!({"cmd": "echo hello"}))).unwrap();
@@ -313,7 +439,7 @@ fn ri_0_11_tampered_actor_id_leaves_stale_hash() {
     let impostor = "impostor-agent";
     let session_id = "root/test-agent-005";
 
-    let mut logger = CausalLogger::new(&path).unwrap();
+    let logger = CausalLogger::new(&path).unwrap();
 
     logger.log(real_agent, session_id, None, 0, "tool", "sandbox_exec", EntryStatus::Success, Some(serde_json::json!({"cmd": "ls"}))).unwrap();
 
