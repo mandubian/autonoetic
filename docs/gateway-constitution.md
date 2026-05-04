@@ -149,7 +149,7 @@ capability evaluator. Every native tool call passes through
 | R-1.8 | `CredentialAccess` is scoped by service pattern. | credential-management.md | `runtime/tools/credential.rs:358,1304,1430` | ENFORCED |
 | R-1.9 | `CodeExecution` patterns match against command strings. | agent-capabilities.md | `policy.rs:406 can_exec_shell_detailed` | ENFORCED |
 | R-1.10 | Missing capability returns permission error, never advisory. | gateway-architecture-principles.md | uniform error envelope | ENFORCED |
-| R-1.11 | Unknown tool names deny by default (not silent-allow). | (R+14) | needs explicit check | PARTIAL |
+| R-1.11 | Unknown tool names deny by default (not silent-allow). | (R+14) | `can_invoke_tool` falls through to deny; `constitution_deny_unknown_tools.rs` | ENFORCED |
 
 ## 2. Approval Gates
 
@@ -316,7 +316,7 @@ separate. Runtime-lock in `runtime_lock.rs`.
 | R-8.14 | Knowledge records carry `owner_agent_id`, `writer_agent_id`, `source_ref`; visibility is enforced on recall. | ARCHITECTURE.md | `runtime/memory/*` | ENFORCED |
 | R-8.15 | Session approval grants are tracked by `(root_session_id, host)` and included in cleanup audits. | approved-resources-caching.md | `session_approval_grants` table | ENFORCED |
 | R-8.16 | Causal-chain append is `fsync`-durable before any state transition that depends on it. | (R+6) | `causal_chain.rs:149` `runtime/tools/promotion.rs:189` `execution.rs:455` `gateway_store/mod.rs:112` | ENFORCED |
-| R-8.17 | Retention pruning emits a `retention.pruned` causal event. | (R+17) | not pinned | MISSING |
+| R-8.17 | Retention pruning emits a `retention.pruned` causal event. | (R+17) | `apply_retention_policy` emits event with counts and cutoffs; `constitution_retention_pruned.rs` | ENFORCED |
 | R-8.18 | Every tool call may carry a top-level `intent` field (free-text, 1-2 sentences, max 500 chars) describing the agent's reason for invoking the tool. For privileged tool classes, missing intent is a validation error. When present, the gateway persists the intent verbatim on the `tool_invoke.requested` causal event alongside args. | gateway-constitution-roadmap.md | `runtime/tools/mod.rs` `runtime/tool_call_processor.rs` `runtime/session_tracer.rs` | ENFORCED |
 
 ## 9. Agent Install & Provenance

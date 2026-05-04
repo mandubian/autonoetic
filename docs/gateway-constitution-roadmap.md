@@ -971,11 +971,19 @@ Default 24h per grant. Expiry re-opens the approval gate.
 
 Audit `policy.can_invoke_tool` to ensure unknown names fail shut. If
 already correct, add an explicit test pinning the behavior. S.
+**ENFORCED:** `can_invoke_tool` falls through to deny on unknown names.
+6 tests in `constitution_deny_unknown_tools.rs` pin the behavior for
+unknown names, no capability, non-matching prefix, wildcard, and
+registry lookup.
 
 ### 3.4 `R+17` `retention.pruned` causal events
 
 Emit a single event per prune batch with counts and bounds. S.
-`autonoetic-gateway/src/causal_chain/rotation.rs`.
+**ENFORCED:** `apply_retention_policy` in `observability.rs` emits a
+`retention.pruned` causal event (category `retention`, action `pruned`,
+agent `gateway`, session `system`) with counts, cutoffs, and config.
+4 tests in `constitution_retention_pruned.rs` verify event emission,
+payload structure, actor attribution, and zero-days behavior.
 
 ### 3.5 `R++8` Sandbox-escape-attempt accounting
 
