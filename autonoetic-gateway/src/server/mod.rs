@@ -54,7 +54,7 @@ impl GatewayServer {
         gateway_store.set_approval_flood_cap(self.config.max_pending_approvals_per_root);
 
         {
-            let probe_result = crate::vault::probe_master_key();
+            let probe_result = crate::vault::probe_master_key(&self.config.agents_dir);
             if !probe_result.is_present() {
                 tracing::warn!(
                     target: "vault",
@@ -62,13 +62,7 @@ impl GatewayServer {
                     "Vault master key not available — credential operations will fail at runtime (R+8)"
                 );
             }
-            if let Err(e) = gateway_store.emit_vault_key_probe_event(&probe_result) {
-                tracing::warn!(
-                    target: "vault",
-                    error = %e,
-                    "Failed to emit vault.key_probe causal event"
-                );
-            }
+            gateway_store.emit_vault_key_probe_event(&probe_result);
         }
 
         // Apply data retention policy on startup
