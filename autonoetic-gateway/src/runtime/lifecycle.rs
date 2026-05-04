@@ -2130,6 +2130,7 @@ impl AgentExecutor {
                 &tool_call_details,
                 context_window_tokens,
                 input_context_pct,
+                response.reasoning_content.as_deref(),
             )?;
 
             let _ = tracer.record_digest_llm_round(
