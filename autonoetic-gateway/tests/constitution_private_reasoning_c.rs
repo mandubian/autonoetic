@@ -137,11 +137,11 @@ fn ri_0_13c_policy_rule_id_is_ri_0_13() {
     let allow = policy.can_audit_reasoning("any.agent");
     assert!(allow.enforced_rules.contains(&"Ri-0.13"));
 
-    let deny = policy.can_audit_reasoning("denied.agent");
     let manifest_no = manifest_without_audit();
     let policy_no = PolicyEngine::new(manifest_no);
     let deny = policy_no.can_audit_reasoning("denied.agent");
-    assert!(deny.enforced_rules.contains(&"Ri-0.13"));}
+    assert!(deny.enforced_rules.contains(&"Ri-0.13"));
+}
 
 // ---------------------------------------------------------------------------
 // Tool: is_available gates on ReasoningAudit
@@ -198,6 +198,52 @@ fn ri_0_13c_execute_denies_uncovered_target() -> anyhow::Result<()> {
     let json: serde_json::Value = serde_json::from_str(&result)?;
     assert_eq!(json["ok"], false);
     assert_eq!(json["error_type"], "capability");
+    Ok(())
+}
+
+#[test]
+fn ri_0_13c_execute_rejects_path_traversal() -> anyhow::Result<()> {
+    let manifest = manifest_with_reasoning_audit(vec!["*"]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let tempdir = tempfile::tempdir()?;
+
+    let agents_dir = tempdir.path().join("agents");
+    let auditor_dir = agents_dir.join("auditor.agent");
+    std::fs::create_dir_all(&auditor_dir)?;
+
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let tool = ObservabilityReadReasoningTool;
+
+    let result = tool.execute(
+        &manifest,
+        &policy,
+        &auditor_dir,
+        None,
+        r#"{"target_session_id":"../../../etc","target_agent_id":"shadow"}"#,
+        Some("caller-sess"),
+        Some("turn-1"),
+        None,
+        Some(store.clone()),
+        None,
+    );
+    assert!(result.is_err(), "path traversal in session_id must be rejected");
+
+    let result2 = tool.execute(
+        &manifest,
+        &policy,
+        &auditor_dir,
+        None,
+        r#"{"target_session_id":"ok","target_agent_id":"../evil"}"#,
+        Some("caller-sess"),
+        Some("turn-1"),
+        None,
+        Some(store.clone()),
+        None,
+    );
+    assert!(result2.is_err(), "path traversal in agent_id must be rejected");
+
     Ok(())
 }
 
@@ -277,6 +323,16 @@ fn ri_0_13c_execute_reads_and_discloses() -> anyhow::Result<()> {
     assert_eq!(payload["reader_agent_id"], "auditor.agent");
     assert_eq!(payload["reader_session_id"], "caller-sess");
     assert_eq!(payload["entries_read"], 1);
+
+    assert_eq!(
+        disclosed.target.as_deref(),
+        Some("auditor.agent"),
+        "disclosure event target must be the reader, not the reviewed agent"
+    );
+    assert!(
+        disclosed.enforced_rules.iter().any(|r| r == "Ri-0.13"),
+        "disclosure event must cite Ri-0.13 in enforced_rules"
+    );
 
     Ok(())
 }

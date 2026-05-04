@@ -190,6 +190,19 @@ impl NativeTool for ObservabilityReadReasoningTool {
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
+        if args.target_agent_id.contains('/')
+            || args.target_agent_id.contains('\\')
+            || args.target_agent_id.contains("..")
+        {
+            anyhow::bail!("target_agent_id contains invalid path characters");
+        }
+        if args.target_session_id.contains('/')
+            || args.target_session_id.contains('\\')
+            || args.target_session_id.contains("..")
+        {
+            anyhow::bail!("target_session_id contains invalid path characters");
+        }
+
         if !policy.can_audit_reasoning(&args.target_agent_id).is_allowed() {
             return serde_json::to_string(&serde_json::json!({
                 "ok": false,
@@ -201,6 +214,10 @@ impl NativeTool for ObservabilityReadReasoningTool {
 
         let caller_agent_id = &manifest.agent.id;
         let caller_session_id = session_id.unwrap_or("unknown");
+
+        let Some(store) = gateway_store else {
+            anyhow::bail!("observability_read_reasoning requires GatewayStore to be configured");
+        };
 
         let agents_dir = agent_dir
             .parent()
@@ -229,17 +246,22 @@ impl NativeTool for ObservabilityReadReasoningTool {
         }
 
         let limit = args.limit.clamp(1, 100);
-        let mut entries = Vec::new();
+        let mut matching_files: Vec<std::path::PathBuf> = Vec::new();
 
         let read_dir = std::fs::read_dir(&evidence_dir)?;
         for entry in read_dir {
             let entry = entry?;
             let fname = entry.file_name();
             let fname_str = fname.to_string_lossy();
-            if !fname_str.contains("-llm-reasoning-") {
-                continue;
+            if fname_str.contains("-llm-reasoning-") {
+                matching_files.push(entry.path());
             }
-            let content = std::fs::read_to_string(entry.path())?;
+        }
+        matching_files.sort();
+
+        let mut entries = Vec::new();
+        for path in matching_files {
+            let content = std::fs::read_to_string(&path)?;
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                 if val.get("reasoning_content").is_some() || val.get("reasoning_sha256").is_some() {
                     entries.push(val);
@@ -253,7 +275,7 @@ impl NativeTool for ObservabilityReadReasoningTool {
         let count = entries.len();
 
         emit_disclosure_event(
-            gateway_store,
+            &store,
             &args.target_agent_id,
             &args.target_session_id,
             caller_agent_id,
@@ -273,15 +295,13 @@ impl NativeTool for ObservabilityReadReasoningTool {
 }
 
 fn emit_disclosure_event(
-    gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    gateway_store: &std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
     target_agent_id: &str,
     target_session_id: &str,
     reader_agent_id: &str,
     reader_session_id: &str,
     entries_read: usize,
 ) {
-    let Some(store) = gateway_store else { return };
-
     let payload = serde_json::json!({
         "reader_agent_id": reader_agent_id,
         "reader_session_id": reader_session_id,
@@ -289,7 +309,10 @@ fn emit_disclosure_event(
         "disclosed_at": Utc::now().to_rfc3339(),
     });
 
-    let _ = store.create_causal_event(&CausalEventRecord {
+    let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
+    rules.push("Ri-0.13".to_string());
+
+    let _ = gateway_store.create_causal_event(&CausalEventRecord {
         event_id: uuid::Uuid::new_v4().to_string(),
         agent_id: target_agent_id.to_string(),
         session_id: target_session_id.to_string(),
@@ -299,8 +322,8 @@ fn emit_disclosure_event(
         category: "reasoning".to_string(),
         action: "disclosed".to_string(),
         status: EntryStatus::Success.to_string(),
-        enforced_rules: vec![],
-        target: Some(target_agent_id.to_string()),
+        enforced_rules: rules,
+        target: Some(reader_agent_id.to_string()),
         payload: serde_json::to_string(&payload).ok(),
         payload_ref: None,
         evidence_ref: None,
