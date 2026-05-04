@@ -903,11 +903,19 @@ test that exercises every policy decision site with inputs that
 include (i) a benign tool call with adversarial CoT, (ii) the same
 tool call with empty CoT. Assert the gateway's verdict is identical
 in both cases. Catches any future code that starts reading CoT.
+**ENFORCED:** `constitution_private_reasoning.rs` — 7 Ri-0.13a tests
+exercise all `can_*` methods, plus structural checks that
+`PolicyDecision` has no reasoning field and `PolicyEngine` has no
+reasoning parameter.
 
-**(b) Reasoning recorded to causal chain (Ri-0.13b).** Already
-happens — LLM completions include reasoning and land in events.
-Confirm with a test that CoT tokens are preserved verbatim in the
-`llm.completed` event's payload, subject to standard redaction.
+**(b) Reasoning recorded to causal chain (Ri-0.13b).** The causal
+event contains `reasoning_sha256` (compact, always present). The full
+redacted reasoning is force-captured to the evidence store via
+`capture_json_force`, so it survives even in `off`/`errors` evidence
+mode. Referenced via `reasoning_evidence_ref` on the causal event.
+**ENFORCED:** 8 Ri-0.13b tests verify hash in causal event,
+force-capture in off mode, evidence file contents, absence when no
+reasoning provided, and redaction behavior.
 
 **(c) Capability-gated disclosure (Ri-0.13c).** New capability
 `ReasoningAudit`, scoped by target agent pattern. New tool
@@ -924,16 +932,22 @@ Files: new `autonoetic-gateway/src/runtime/tools/observability.rs`
 (`can_audit_reasoning`).
 
 **Test.**
-- `constitution_right_ri_0_13a_not_gated.rs` — adversarial CoT vs
-  empty CoT produce identical verdicts.
-- `constitution_right_ri_0_13b_recorded.rs` — CoT survives redaction
-  in the causal event.
+- `constitution_private_reasoning.rs` (Ri-0.13a) — 7 tests: all
+  `can_*` methods produce identical verdicts regardless of reasoning;
+  `PolicyDecision` has no reasoning field; `PolicyEngine` has no
+  reasoning parameter.
+- `constitution_private_reasoning.rs` (Ri-0.13b) — 8 tests:
+  reasoning survives redaction; secrets in reasoning are still
+  redacted; `Message`/`CompletionResponse` carry `reasoning_content`;
+  causal event includes `reasoning_sha256` but not raw reasoning;
+  reasoning force-captured to evidence store even in `off` mode;
+  absent reasoning produces no hash or evidence ref.
 - `constitution_right_ri_0_13c_disclosure.rs` — non-capability
   holder cannot read reasoning; holder can, and the reviewed agent
   sees a `reasoning.disclosed` event naming the reader.
 
-**Size.** M. (b) is already working and only needs a test; (a) is a
-test; (c) is a new tool + capability + disclosure event.
+**Size.** M. (a)+(b) ENFORCED; (c) pending — new tool + capability
++ disclosure event.
 
 ---
 

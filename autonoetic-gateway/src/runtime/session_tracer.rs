@@ -533,6 +533,7 @@ impl SessionTracer {
         tool_call_details: &[serde_json::Value],
         context_window_tokens: Option<u32>,
         input_context_pct: Option<f32>,
+        reasoning_content: Option<&str>,
     ) -> anyhow::Result<()> {
         let mut usage = serde_json::json!({
             "input_tokens": input_tokens,
@@ -553,13 +554,19 @@ impl SessionTracer {
             "tool_calls": tool_calls,
             "usage": usage.clone()
         });
-        let llm_evidence = serde_json::json!({
+        if let Some(rc) = &reasoning_content {
+            llm_payload["reasoning_sha256"] = serde_json::json!(sha256_hex(rc));
+        }
+        let mut llm_evidence = serde_json::json!({
             "model": model,
             "stop_reason": stop_reason,
             "text": redact_text_for_logs(text),
             "tool_calls": tool_call_details,
             "usage": usage
         });
+        if let Some(rc) = &reasoning_content {
+            llm_evidence["reasoning_content"] = serde_json::json!(redact_text_for_logs(rc));
+        }
         if let Some(evidence_ref) = self.evidence_store.capture_json(
             self.turn_id.as_deref(),
             "llm",
@@ -567,6 +574,20 @@ impl SessionTracer {
             &llm_evidence,
         )? {
             llm_payload["evidence_ref"] = serde_json::json!(evidence_ref);
+        }
+        if let Some(rc) = &reasoning_content {
+            let reasoning_evidence = serde_json::json!({
+                "reasoning_content": redact_text_for_logs(rc),
+                "reasoning_sha256": sha256_hex(rc),
+            });
+            if let Some(ref_) = self.evidence_store.capture_json_force(
+                self.turn_id.as_deref(),
+                "llm",
+                "reasoning",
+                &reasoning_evidence,
+            )? {
+                llm_payload["reasoning_evidence_ref"] = serde_json::json!(ref_);
+            }
         }
         self.log_event("llm", "completion", EntryStatus::Success, Some(llm_payload))?;
         Ok(())
