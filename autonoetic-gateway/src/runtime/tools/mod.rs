@@ -501,6 +501,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::SchedulerAccess { .. } => "SchedulerAccess".to_string(),
         Capability::SkillInstall { .. } => "SkillInstall".to_string(),
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal".to_string(),
+        Capability::ReasoningAudit { .. } => "ReasoningAudit".to_string(),
     }
 }
 

@@ -266,11 +266,11 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::SchedulerAccess { .. } => "SchedulerAccess",
         Capability::SkillInstall { .. } => "SkillInstall",
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal",
+        Capability::ReasoningAudit { .. } => "ReasoningAudit",
     }
 }
 
 /// Check if declared capabilities cover all inferred capabilities.
-///
 /// Returns list of missing capability types (inferred but not declared).
 pub fn find_missing_capabilities(
     declared: &[Capability],

@@ -139,6 +139,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::SchedulerAccess { .. } => "SchedulerAccess",
         Capability::SkillInstall { .. } => "SkillInstall",
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal",
+        Capability::ReasoningAudit { .. } => "ReasoningAudit",
     }
 }
 

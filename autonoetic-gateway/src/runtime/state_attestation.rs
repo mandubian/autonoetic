@@ -216,6 +216,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::SchedulerAccess { .. } => "SchedulerAccess",
         Capability::SkillInstall { .. } => "SkillInstall",
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal",
+        Capability::ReasoningAudit { .. } => "ReasoningAudit",
     }
     .to_string()
 }

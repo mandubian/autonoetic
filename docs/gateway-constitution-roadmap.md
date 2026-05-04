@@ -918,14 +918,17 @@ force-capture in off mode, evidence file contents, absence when no
 reasoning provided, and redaction behavior.
 
 **(c) Capability-gated disclosure (Ri-0.13c).** New capability
-`ReasoningAudit`, scoped by target agent pattern. New tool
-`observability_read_reasoning` that fetches reasoning traces for the
-target — gated by the capability and **writes a disclosure event
-visible to the reviewed agent** listing who read what and when.
-Holders: auditor, security-sentinel, evolution-steward, operator
-(via bypass-with-audit).
+`ReasoningAudit { targets }`, scoped by target agent pattern
+(prefix match, `*` for all). New tool `observability_read_reasoning`
+that reads reasoning evidence files for a target session — gated by
+the capability via `can_audit_reasoning()`. Every successful read
+writes a `reasoning.disclosed` causal event to the target agent's
+session, listing reader agent ID, reader session ID, and entries read.
+**ENFORCED:** `ReasoningAudit` variant in `Capability` enum;
+`can_audit_reasoning` in `PolicyEngine`; tool in `observability.rs`;
+11 tests in `constitution_private_reasoning_c.rs`.
 
-Files: new `autonoetic-gateway/src/runtime/tools/observability.rs`
+Files: `autonoetic-gateway/src/runtime/tools/observability.rs`
 (extension), `autonoetic-types/src/capability.rs`
 (`ReasoningAudit` variant), causal event schema
 (`reasoning.disclosed` event), `policy.rs`
@@ -942,12 +945,13 @@ Files: new `autonoetic-gateway/src/runtime/tools/observability.rs`
   causal event includes `reasoning_sha256` but not raw reasoning;
   reasoning force-captured to evidence store even in `off` mode;
   absent reasoning produces no hash or evidence ref.
-- `constitution_right_ri_0_13c_disclosure.rs` — non-capability
-  holder cannot read reasoning; holder can, and the reviewed agent
-  sees a `reasoning.disclosed` event naming the reader.
+- `constitution_private_reasoning_c.rs` (Ri-0.13c) — 11 tests:
+  policy wildcard/prefix/deny; `is_available` gates on capability;
+  execute denies uncovered target; execute reads and emits
+  `reasoning.disclosed` event; no disclosure when no capability;
+  tool in default registry.
 
-**Size.** M. (a)+(b) ENFORCED; (c) pending — new tool + capability
-+ disclosure event.
+**Size.** M. (a)+(b)+(c) all ENFORCED.
 
 ---
 

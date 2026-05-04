@@ -4,12 +4,15 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
+use chrono::Utc;
 use serde::Deserialize;
 use std::path::Path;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(ObservabilitySearchTool));
     registry.register(Box::new(ObservabilityReadTool));
+    registry.register(Box::new(ObservabilityReadReasoningTool));
 }
 
 pub struct ObservabilitySearchTool;
@@ -115,6 +118,194 @@ impl NativeTool for ObservabilitySearchTool {
         }))
         .map_err(Into::into)
     }
+}
+
+pub struct ObservabilityReadReasoningTool;
+
+impl NativeTool for ObservabilityReadReasoningTool {
+    fn name(&self) -> &'static str {
+        "observability_read_reasoning"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::ReasoningAudit { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Read reasoning traces from another agent's session. Requires ReasoningAudit capability. Every call writes a reasoning.disclosed causal event visible to the reviewed agent. This is the enforcement of Ri-0.13(c): reasoning is private-under-law, disclosed only through a declared capability, with accountable surveillance.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target_session_id": {
+                        "type": "string",
+                        "description": "The session ID to read reasoning from."
+                    },
+                    "target_agent_id": {
+                        "type": "string",
+                        "description": "The agent ID whose reasoning traces to read."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum reasoning entries to return (default: 20, max: 100).",
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                },
+                "required": ["target_session_id", "target_agent_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            target_session_id: String,
+            target_agent_id: String,
+            #[serde(default = "default_reasoning_limit")]
+            limit: i64,
+        }
+
+        fn default_reasoning_limit() -> i64 {
+            20
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        if !policy.can_audit_reasoning(&args.target_agent_id).is_allowed() {
+            return serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error_type": "capability",
+                "message": format!("ReasoningAudit capability does not cover target agent '{}'", args.target_agent_id),
+            }))
+            .map_err(Into::into);
+        }
+
+        let caller_agent_id = &manifest.agent.id;
+        let caller_session_id = session_id.unwrap_or("unknown");
+
+        let agents_dir = agent_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Cannot resolve agents directory"))?;
+        let target_agent_dir = agents_dir.join(&args.target_agent_id);
+        if !target_agent_dir.exists() {
+            return serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": format!("Target agent directory not found: {}", args.target_agent_id),
+            }))
+            .map_err(Into::into);
+        }
+
+        let evidence_dir = target_agent_dir
+            .join("history")
+            .join("evidence")
+            .join(&args.target_session_id);
+        if !evidence_dir.exists() {
+            return serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "reasoning_entries": [],
+                "count": 0,
+                "message": format!("No reasoning evidence found for session '{}'", args.target_session_id),
+            }))
+            .map_err(Into::into);
+        }
+
+        let limit = args.limit.clamp(1, 100);
+        let mut entries = Vec::new();
+
+        let read_dir = std::fs::read_dir(&evidence_dir)?;
+        for entry in read_dir {
+            let entry = entry?;
+            let fname = entry.file_name();
+            let fname_str = fname.to_string_lossy();
+            if !fname_str.contains("-llm-reasoning-") {
+                continue;
+            }
+            let content = std::fs::read_to_string(entry.path())?;
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if val.get("reasoning_content").is_some() || val.get("reasoning_sha256").is_some() {
+                    entries.push(val);
+                }
+            }
+            if entries.len() >= limit as usize {
+                break;
+            }
+        }
+
+        let count = entries.len();
+
+        emit_disclosure_event(
+            gateway_store,
+            &args.target_agent_id,
+            &args.target_session_id,
+            caller_agent_id,
+            caller_session_id,
+            count,
+        );
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "target_session_id": args.target_session_id,
+            "target_agent_id": args.target_agent_id,
+            "reasoning_entries": entries,
+            "count": count,
+        }))
+        .map_err(Into::into)
+    }
+}
+
+fn emit_disclosure_event(
+    gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    target_agent_id: &str,
+    target_session_id: &str,
+    reader_agent_id: &str,
+    reader_session_id: &str,
+    entries_read: usize,
+) {
+    let Some(store) = gateway_store else { return };
+
+    let payload = serde_json::json!({
+        "reader_agent_id": reader_agent_id,
+        "reader_session_id": reader_session_id,
+        "entries_read": entries_read,
+        "disclosed_at": Utc::now().to_rfc3339(),
+    });
+
+    let _ = store.create_causal_event(&CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: target_agent_id.to_string(),
+        session_id: target_session_id.to_string(),
+        turn_id: None,
+        event_seq: Utc::now().timestamp_millis().max(0) as u64,
+        timestamp: Utc::now().to_rfc3339(),
+        category: "reasoning".to_string(),
+        action: "disclosed".to_string(),
+        status: EntryStatus::Success.to_string(),
+        enforced_rules: vec![],
+        target: Some(target_agent_id.to_string()),
+        payload: serde_json::to_string(&payload).ok(),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: None,
+    });
 }
 
 pub struct ObservabilityReadTool;
