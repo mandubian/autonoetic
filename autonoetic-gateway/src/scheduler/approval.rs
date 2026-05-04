@@ -1105,10 +1105,12 @@ fn decide_request_with_options(
                         let computed_expiry = if options.grant_expires_at.is_none()
                             && config.default_grant_ttl_secs > 0
                         {
-                            let t = chrono::Utc::now()
-                                + chrono::Duration::seconds(
-                                    config.default_grant_ttl_secs as i64,
-                                );
+                            let ttl_secs = i64::try_from(config.default_grant_ttl_secs)
+                                .unwrap_or(i64::MAX);
+                            let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
+                                .map(|dt| dt.with_timezone(&chrono::Utc))
+                                .unwrap_or_else(|_| chrono::Utc::now());
+                            let t = base + chrono::Duration::seconds(ttl_secs);
                             Some(t.to_rfc3339())
                         } else {
                             None

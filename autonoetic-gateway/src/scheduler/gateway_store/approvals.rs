@@ -662,33 +662,25 @@ impl GatewayStore {
     }
 
     pub fn prune_expired_grants(&self) -> Result<usize> {
-        let now = chrono::Utc::now();
+        let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         let expired_ids: Vec<i64> = {
             let mut stmt = conn.prepare(
-                "SELECT id, expires_at FROM session_approval_grants WHERE expires_at IS NOT NULL",
+                "SELECT id FROM session_approval_grants WHERE expires_at IS NOT NULL AND expires_at < ?1",
             )?;
-            let rows = stmt.query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let expires_at: String = row.get(1)?;
-                Ok((id, expires_at))
-            })?;
-            rows.filter_map(|r| r.ok())
-                .filter(|(_, exp)| {
-                    chrono::DateTime::parse_from_rfc3339(exp)
-                        .map(|dt| dt.with_timezone(&chrono::Utc) < now)
-                        .unwrap_or(false)
-                })
-                .map(|(id, _)| id)
-                .collect()
+            let rows = stmt.query_map(params![now], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
         };
+        if expired_ids.is_empty() {
+            return Ok(0);
+        }
+        let count = expired_ids.len();
         for gid in &expired_ids {
             let _ = conn.execute(
                 "DELETE FROM session_approval_grant_targets WHERE grant_id = ?1",
                 params![gid],
             );
         }
-        let count = expired_ids.len();
         for gid in &expired_ids {
             let _ = conn.execute(
                 "DELETE FROM session_approval_grants WHERE id = ?1",
