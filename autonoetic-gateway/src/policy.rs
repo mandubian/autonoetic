@@ -785,6 +785,20 @@ impl PolicyEngine {
         }
         PolicyDecision::deny("R-1.1")
     }
+
+    pub fn can_audit_reasoning(&self, target_agent_id: &str) -> PolicyDecision {
+        for cap in &self.manifest.capabilities {
+            if let Capability::ReasoningAudit { targets } = cap {
+                for pattern in targets {
+                    let prefix = pattern.trim_end_matches('*');
+                    if target_agent_id.starts_with(prefix) {
+                        return PolicyDecision::allow("Ri-0.13");
+                    }
+                }
+            }
+        }
+        PolicyDecision::deny("Ri-0.13")
+    }
 }
 
 #[cfg(test)]

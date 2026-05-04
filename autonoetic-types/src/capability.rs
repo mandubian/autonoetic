@@ -133,6 +133,16 @@ pub enum Capability {
         #[serde(default = "default_patterns_all")]
         patterns: Vec<String>,
     },
+
+    /// Read reasoning traces from other agents' sessions via `observability_read_reasoning`.
+    /// Enforcement of Ri-0.13(c) — reasoning disclosure is capability-gated.
+    /// The `targets` field scopes which agent IDs can be audited (prefix match, `*` for all).
+    /// Every disclosure writes a `reasoning.disclosed` causal event to the reviewed agent's
+    /// session, listing who read what and when.
+    ReasoningAudit {
+        #[serde(default = "default_patterns_all")]
+        targets: Vec<String>,
+    },
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -232,6 +242,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::SchedulerAccess { .. } => "SchedulerAccess".to_string(),
         Capability::SkillInstall { .. } => "SkillInstall".to_string(),
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal".to_string(),
+        Capability::ReasoningAudit { .. } => "ReasoningAudit".to_string(),
     }
 }
 
@@ -283,6 +294,10 @@ fn capability_broadening(
         (
             Capability::ConstitutionalProposal { patterns: a },
             Capability::ConstitutionalProposal { patterns: b },
+        ) => scope_broadening(capability_type, a, b),
+        (
+            Capability::ReasoningAudit { targets: a },
+            Capability::ReasoningAudit { targets: b },
         ) => scope_broadening(capability_type, a, b),
         (
             Capability::CodeExecution {
