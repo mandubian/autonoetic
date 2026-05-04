@@ -29,6 +29,7 @@ fn make_hook(
             .unwrap_or_default()
             .into_iter()
             .collect(),
+        callback_allowlist: Vec::new(),
         allowed_agents: allowed_agents.into_iter().map(str::to_string).collect(),
     }
 }

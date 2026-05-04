@@ -1,6 +1,13 @@
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::Context;
 use autonoetic_types::hooks::{HookAction, HookConfig, HookContext, HookEvent};
+use hmac::{Hmac, Mac};
+use reqwest::Url;
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::scheduler::gateway_store::GatewayStore;
 
@@ -59,13 +66,7 @@ impl HookExecutor {
                 HookAction::PublishReport => self.publish_report(ctx, hook),
                 HookAction::DeliverSignal => self.deliver_signal(ctx, hook),
                 HookAction::AgentSpawn => self.agent_spawn(ctx, hook),
-                HookAction::HttpCallback => {
-                    tracing::warn!(
-                        target: "hooks",
-                        action = ?hook.action,
-                        "hook action not yet implemented"
-                    );
-                }
+                HookAction::HttpCallback => self.http_callback(ctx, hook),
             }
         }
     }
@@ -112,11 +113,21 @@ impl HookExecutor {
                     self.agent_spawn(&ctx, hook);
                 }
                 HookAction::HttpCallback => {
-                    tracing::warn!(
-                        target: "hooks",
-                        action = ?hook.action,
-                        "hook action not yet implemented"
-                    );
+                    // dispatch_async always fires hooks in background tasks;
+                    // the hook.async flag is only honored by the blocking
+                    // dispatch() path (used in tests / non-tokio callers).
+                    let store = self.store.clone();
+                    let ctx = ctx.clone();
+                    let hook = hook.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::http_callback_sync(&store, &ctx, &hook).await {
+                            tracing::warn!(
+                                target: "hooks",
+                                error = %e,
+                                "http.callback hook failed"
+                            );
+                        }
+                    });
                 }
             }
         }
@@ -405,6 +416,167 @@ impl HookExecutor {
         Ok(())
     }
 
+    fn http_callback(&self, ctx: &HookContext, hook: &HookConfig) {
+        if hook.r#async {
+            let store = self.store.clone();
+            let ctx = ctx.clone();
+            let hook = hook.clone();
+            tokio::spawn(async move {
+                if let Err(e) = Self::http_callback_sync(&store, &ctx, &hook).await {
+                    tracing::warn!(
+                        target: "hooks",
+                        error = %e,
+                        "http.callback hook failed"
+                    );
+                }
+            });
+        } else if let Err(e) =
+            crate::runtime::tools::block_on_http(Self::http_callback_sync(&self.store, ctx, hook))
+        {
+            tracing::warn!(
+                target: "hooks",
+                error = %e,
+                "http.callback hook failed"
+            );
+        }
+    }
+
+    async fn http_callback_sync(
+        store: &Option<Arc<GatewayStore>>,
+        ctx: &HookContext,
+        hook: &HookConfig,
+    ) -> anyhow::Result<()> {
+        let callback_url = required_string_param(hook, "url")?;
+        let secret_env = required_string_param(hook, "secret_env")?;
+        let parsed_url = validate_callback_url(&callback_url, &hook.callback_allowlist)?;
+        // Resolve the hostname *before* connecting and reject if any returned
+        // address is internal. This catches the common case of a hostname
+        // pointing at RFC-1918/loopback space without requiring a custom
+        // connector. Note: this does not fully prevent DNS-rebinding (TOCTOU),
+        // but it raises the bar significantly.
+        check_resolved_ips_not_internal(&parsed_url).await?;
+        let delivery_id = build_http_callback_delivery_id(ctx, &parsed_url, hook);
+        let event_name = ctx.event.as_str();
+        let action_name = "http.callback";
+
+        if let Some(store) = store {
+            if let Some(existing) = store.get_hook_delivery(&delivery_id, event_name, action_name)? {
+                if existing.status == "delivered" {
+                    tracing::debug!(
+                        target: "hooks",
+                        delivery_id = %delivery_id,
+                        url = %callback_url,
+                        "http.callback already delivered, skipping duplicate dispatch"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        let payload = build_http_callback_payload(ctx, &delivery_id)?;
+        let body = serde_json::to_vec(&payload)?;
+        let secret = std::env::var(&secret_env)
+            .with_context(|| format!("http.callback secret env '{}' is not set", secret_env))?;
+        anyhow::ensure!(
+            !secret.trim().is_empty(),
+            "http.callback secret env '{}' is empty",
+            secret_env
+        );
+        let signature = compute_hmac_sha256_hex(secret.as_bytes(), &body)?;
+        // Disable all redirects: a 30x to an internal address would bypass the
+        // allowlist/SSRF check that ran against the original URL.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+
+        let mut last_error: Option<String> = None;
+        let mut backoff = Duration::from_millis(250);
+
+        for attempt in 1..=3_i64 {
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(store) = store {
+                store.upsert_hook_delivery(
+                    &delivery_id,
+                    event_name,
+                    action_name,
+                    "pending",
+                    attempt,
+                    last_error.as_deref(),
+                    &now,
+                )?;
+            }
+
+            match client
+                .post(parsed_url.clone())
+                .header("content-type", "application/json")
+                .header("x-autonoetic-event", event_name)
+                .header("x-autonoetic-delivery-id", &delivery_id)
+                .header("x-autonoetic-signature", format!("sha256={signature}"))
+                .body(body.clone())
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    if let Some(store) = store {
+                        store.upsert_hook_delivery(
+                            &delivery_id,
+                            event_name,
+                            action_name,
+                            "delivered",
+                            attempt,
+                            None,
+                            &chrono::Utc::now().to_rfc3339(),
+                        )?;
+                    }
+                    tracing::info!(
+                        target: "hooks",
+                        delivery_id = %delivery_id,
+                        event = %event_name,
+                        url = %callback_url,
+                        attempts = attempt,
+                        "http.callback delivered"
+                    );
+                    return Ok(());
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let body_preview = response
+                        .text()
+                        .await
+                        .unwrap_or_default();
+                    last_error = Some(format_http_callback_error(status, &body_preview));
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                }
+            }
+
+            let status = if attempt == 3 { "failed" } else { "pending" };
+            if let Some(store) = store {
+                store.upsert_hook_delivery(
+                    &delivery_id,
+                    event_name,
+                    action_name,
+                    status,
+                    attempt,
+                    last_error.as_deref(),
+                    &chrono::Utc::now().to_rfc3339(),
+                )?;
+            }
+
+            if attempt < 3 {
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "http.callback delivery failed after 3 attempts: {}",
+            last_error.unwrap_or_else(|| "unknown error".to_string())
+        ))
+    }
+
     // ── agent.spawn ──────────────────────────────────────────────────────
 
     fn agent_spawn(&self, ctx: &HookContext, hook: &HookConfig) {
@@ -496,6 +668,273 @@ impl HookExecutor {
     }
 }
 
+fn required_string_param(hook: &HookConfig, key: &str) -> anyhow::Result<String> {
+    let value = hook
+        .params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("hook param '{}' is required", key))?;
+    Ok(value.to_string())
+}
+
+fn validate_callback_url(
+    url: &str,
+    allowlist: &[autonoetic_types::background::GrantTarget],
+) -> anyhow::Result<Url> {
+    anyhow::ensure!(
+        !allowlist.is_empty(),
+        "http.callback requires a non-empty callback_allowlist"
+    );
+    let parsed = Url::parse(url)?;
+    let scheme = parsed.scheme();
+    anyhow::ensure!(
+        scheme == "https" || scheme == "http",
+        "http.callback only supports http/https URLs"
+    );
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("http.callback URL is missing a host"))?;
+    anyhow::ensure!(
+        !is_disallowed_callback_host(host),
+        "http.callback URL host '{}' is not allowed",
+        host
+    );
+
+    let port = parsed.port_or_known_default();
+    let host_and_port = port.map(|p| format!("{}:{p}", host.to_ascii_lowercase()));
+    let allowed = allowlist.iter().any(|target| match target {
+        autonoetic_types::background::GrantTarget::UrlPrefix(_) => target.matches(url),
+        autonoetic_types::background::GrantTarget::HostAndPort { .. } => host_and_port
+            .as_deref()
+            .map(|authority| target.matches(authority))
+            .unwrap_or(false),
+        autonoetic_types::background::GrantTarget::ExactHost(_)
+        | autonoetic_types::background::GrantTarget::HostSuffix(_) => target.matches(host),
+    });
+    anyhow::ensure!(
+        allowed,
+        "http.callback URL '{}' is not covered by callback_allowlist",
+        url
+    );
+    Ok(parsed)
+}
+
+/// Resolve the URL's hostname and check every returned address against the
+/// same disallow-list used for literal IP validation. This blocks the common
+/// case of a public hostname pointing at RFC-1918 / loopback space.
+///
+/// Limitation: this cannot prevent DNS rebinding (the resolution may change
+/// between this check and the actual TCP connection), but it raises the bar
+/// significantly compared to no check at all.
+async fn check_resolved_ips_not_internal(url: &Url) -> anyhow::Result<()> {
+    let host = match url.host() {
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
+            // IP literals are already validated by validate_callback_url via
+            // is_disallowed_callback_host; no DNS resolution needed.
+            return Ok(());
+        }
+        Some(url::Host::Domain(d)) => d.to_string(),
+        None => return Ok(()),
+    };
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .with_context(|| format!("http.callback: failed to resolve host '{}'", host))?;
+    for addr in addrs {
+        if is_disallowed_callback_host(&addr.ip().to_string()) {
+            anyhow::bail!(
+                "http.callback URL resolves to a disallowed address '{}' for host '{}'",
+                addr.ip(),
+                host
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_disallowed_callback_host(host: &str) -> bool {
+    if cfg!(test)
+        && std::env::var("AUTONOETIC_TEST_ALLOW_LOOPBACK_HTTP_CALLBACK")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+    {
+        return false;
+    }
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(ip) => {
+                let octets = ip.octets();
+                let is_documentation = matches!(
+                    octets,
+                    [192, 0, 2, _] | [198, 51, 100, _] | [203, 0, 113, _]
+                );
+                ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_broadcast()
+                    || ip.is_unspecified()
+                    || ip.octets()[0] == 0
+                    || is_documentation
+            }
+            IpAddr::V6(ip) => {
+                let segments = ip.segments();
+                let is_documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+                ip.is_loopback()
+                    || ip.is_unique_local()
+                    || ip.is_unspecified()
+                    || ip.is_multicast()
+                    || ip.is_unicast_link_local()
+                    || is_documentation
+            }
+        };
+    }
+    false
+}
+
+fn build_http_callback_delivery_id(ctx: &HookContext, url: &Url, hook: &HookConfig) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ctx.event.as_str().as_bytes());
+    hasher.update(b"\n");
+    hasher.update(ctx.root_session_id.as_bytes());
+    hasher.update(b"\n");
+    if let Some(session_id) = &ctx.session_id {
+        hasher.update(session_id.as_bytes());
+    }
+    hasher.update(b"\n");
+    if let Some(agent_id) = &ctx.agent_id {
+        hasher.update(agent_id.as_bytes());
+    }
+    hasher.update(b"\n");
+    hasher.update(url.as_str().as_bytes());
+    let mut field_pairs: Vec<_> = ctx.fields.iter().collect();
+    field_pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (key, value) in field_pairs {
+        hasher.update(b"\n");
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.as_bytes());
+    }
+    // Include the hook params so that two hooks sharing the same event+URL
+    // but differing in params (e.g. different secret_env) get distinct IDs.
+    hasher.update(b"\nhook_params:");
+    let mut param_pairs: Vec<_> = hook.params.iter().collect();
+    param_pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (key, val) in param_pairs {
+        hasher.update(b"\n");
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(val.to_string().as_bytes());
+    }
+    format!("hook-{}", hex::encode(hasher.finalize()))
+}
+
+fn build_http_callback_payload(
+    ctx: &HookContext,
+    delivery_id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let mut payload = json!({
+        "delivery_id": delivery_id,
+        "event": ctx.event.as_str(),
+        "root_session_id": ctx.root_session_id,
+        "session_id": ctx.session_id,
+        "agent_id": ctx.agent_id,
+        "fields": ctx.fields,
+        "sent_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    if let Some(report) = load_sanitized_session_report(ctx)? {
+        payload["report"] = report;
+    }
+
+    let redacted = crate::log_redaction::RedactedPayload::from_raw(payload).into_inner();
+    Ok(redact_callback_payload_strings(redacted))
+}
+
+fn load_sanitized_session_report(ctx: &HookContext) -> anyhow::Result<Option<serde_json::Value>> {
+    if ctx.event != HookEvent::SessionClosed {
+        return Ok(None);
+    }
+    let Some(gateway_dir) = &ctx.gateway_dir else {
+        return Ok(None);
+    };
+    let session_id = ctx.session_id.as_deref().unwrap_or(&ctx.root_session_id);
+    let path = std::path::Path::new(gateway_dir)
+        .join("sessions")
+        .join(session_id)
+        .join("session_report.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => {
+            // For child sessions the report may live under the root session
+            // directory; try the root path as a fallback.
+            if session_id != ctx.root_session_id {
+                let root_path = std::path::Path::new(gateway_dir)
+                    .join("sessions")
+                    .join(&ctx.root_session_id)
+                    .join("session_report.json");
+                match std::fs::read_to_string(&root_path) {
+                    Ok(raw) => raw,
+                    Err(_) => return Ok(None),
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+    let sanitized = sanitize_report_for_publishing(&raw);
+    let parsed = serde_json::from_str(&sanitized)
+        .with_context(|| format!("failed to parse sanitized session report {}", path.display()))?;
+    Ok(Some(parsed))
+}
+
+fn compute_hmac_sha256_hex(secret: &[u8], body: &[u8]) -> anyhow::Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret)
+        .map_err(|e| anyhow::anyhow!("failed to initialize HMAC: {e}"))?;
+    mac.update(body);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn redact_callback_payload_strings(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, redact_callback_payload_strings(value)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(redact_callback_payload_strings)
+                .collect(),
+        ),
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(crate::log_redaction::redact_text_for_logs(&text))
+        }
+        other => other,
+    }
+}
+
+fn format_http_callback_error(status: reqwest::StatusCode, response_body: &str) -> String {
+    let body = crate::log_redaction::redact_text_for_logs(response_body);
+    if body.is_empty() {
+        format!("HTTP {}", status.as_u16())
+    } else {
+        format!("HTTP {} {}", status.as_u16(), truncate_chars(&body, 240))
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    text.chars().take(max_chars).collect()
+}
+
 fn sanitize_report_for_publishing(report_json: &str) -> String {
     let mut parsed: serde_json::Value = match serde_json::from_str(report_json) {
         Ok(v) => v,
@@ -555,4 +994,320 @@ fn render_template(template: &str, ctx: &HookContext) -> String {
         out = out.replace(&format!("{{{{{}}}}}", key), value);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use autonoetic_types::background::GrantTarget;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    #[derive(Debug, Clone)]
+    struct CapturedRequest {
+        headers: HashMap<String, String>,
+        body_raw: String,
+        body_json: serde_json::Value,
+    }
+
+    #[derive(Clone)]
+    struct CaptureState {
+        requests: Arc<Mutex<Vec<CapturedRequest>>>,
+    }
+
+    #[derive(Clone)]
+    struct FlakyState {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    async fn capture_request(
+        State(state): State<CaptureState>,
+        headers: HeaderMap,
+        body: String,
+    ) -> StatusCode {
+        let captured = CapturedRequest {
+            headers: headers
+                .iter()
+                .filter_map(|(key, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (key.to_string(), value.to_string()))
+                })
+                .collect(),
+            body_json: serde_json::from_str(&body).expect("valid hook payload json"),
+            body_raw: body,
+        };
+        state.requests.lock().unwrap().push(captured);
+        StatusCode::OK
+    }
+
+    async fn flaky_handler(State(state): State<FlakyState>) -> StatusCode {
+        let attempt = state.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt < 3 {
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            StatusCode::OK
+        }
+    }
+
+    fn http_callback_hook(url: &str, secret_env: &str) -> HookConfig {
+        HookConfig {
+            event: HookEvent::SessionClosed,
+            action: HookAction::HttpCallback,
+            r#async: true,
+            params: serde_json::json!({
+                "url": url,
+                "secret_env": secret_env,
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+            callback_allowlist: vec![GrantTarget::UrlPrefix(url.to_string())],
+            allowed_agents: Vec::new(),
+        }
+    }
+
+    fn session_closed_ctx(gateway_dir: &std::path::Path) -> HookContext {
+        HookContext::for_session_closed(
+            "root-session-1",
+            "root-session-1",
+            "coder.default",
+            "token=top-secret",
+            4,
+            Some(gateway_dir),
+        )
+    }
+
+    fn write_session_report(gateway_dir: &std::path::Path) {
+        let session_dir = gateway_dir.join("sessions").join("root-session-1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("session_report.json"),
+            serde_json::json!({
+                "status": "completed",
+                "agents": {
+                    "coder.default": {
+                        "agent_id": "coder.default",
+                        "input_preview": "token=should-not-leak",
+                        "output_preview": "secret response",
+                        "approvals": [{
+                            "reason": "token=secret",
+                            "resolution_summary": "done"
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_http_callback_delivers_signed_redacted_payload_and_persists_delivery() {
+        let _secret = ScopedEnv::set("AUTONOETIC_HOOK_SECRET", "hook-secret");
+        let _loopback = ScopedEnv::set("AUTONOETIC_TEST_ALLOW_LOOPBACK_HTTP_CALLBACK", "1");
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        write_session_report(&gateway_dir);
+
+        let requests = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let app = Router::new()
+            .route("/hooks", post(capture_request))
+            .with_state(CaptureState {
+                requests: requests.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{addr}/hooks");
+        let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+        let executor = HookExecutor::new(
+            vec![http_callback_hook(&url, "AUTONOETIC_HOOK_SECRET")],
+            Some(store.clone()),
+            4000,
+            60,
+        );
+        let ctx = session_closed_ctx(&gateway_dir);
+        let delivery_id = build_http_callback_delivery_id(
+            &ctx,
+            &Url::parse(&url).unwrap(),
+            &http_callback_hook(&url, "AUTONOETIC_HOOK_SECRET"),
+        );
+
+        executor.dispatch_async(ctx);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !requests.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("request should arrive");
+
+        let captured = requests.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1);
+        let request = &captured[0];
+        assert_eq!(
+            request.headers.get("x-autonoetic-event").map(String::as_str),
+            Some("session.closed")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("x-autonoetic-delivery-id")
+                .map(String::as_str),
+            Some(delivery_id.as_str())
+        );
+        let expected_sig = format!(
+            "sha256={}",
+            compute_hmac_sha256_hex(b"hook-secret", request.body_raw.as_bytes()).unwrap()
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("x-autonoetic-signature")
+                .map(String::as_str),
+            Some(expected_sig.as_str())
+        );
+        assert_eq!(request.body_json["delivery_id"], delivery_id);
+        assert_eq!(request.body_json["event"], "session.closed");
+        assert_eq!(request.body_json["fields"]["close_reason"], "***REDACTED***");
+        assert!(
+            request.body_json["report"]["agents"]["coder.default"]["input_preview"].is_null()
+        );
+        assert!(
+            request.body_json["report"]["agents"]["coder.default"]["output_preview"].is_null()
+        );
+        assert!(
+            request.body_json["report"]["agents"]["coder.default"]["approvals"][0]["reason"]
+                .is_null()
+        );
+
+        let delivery = store
+            .get_hook_delivery(&delivery_id, "session.closed", "http.callback")
+            .unwrap()
+            .expect("delivery row");
+        assert_eq!(delivery.status, "delivered");
+        assert_eq!(delivery.attempt_count, 1);
+        assert!(delivery.last_error.is_none());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_http_callback_retries_and_records_attempt_count() {
+        let _secret = ScopedEnv::set("AUTONOETIC_HOOK_SECRET", "retry-secret");
+        let _loopback = ScopedEnv::set("AUTONOETIC_TEST_ALLOW_LOOPBACK_HTTP_CALLBACK", "1");
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        write_session_report(&gateway_dir);
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/hooks", post(flaky_handler))
+            .with_state(FlakyState {
+                attempts: attempts.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{addr}/hooks");
+        let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+        let executor = HookExecutor::new(
+            vec![http_callback_hook(&url, "AUTONOETIC_HOOK_SECRET")],
+            Some(store.clone()),
+            4000,
+            60,
+        );
+        let ctx = session_closed_ctx(&gateway_dir);
+        let delivery_id = build_http_callback_delivery_id(
+            &ctx,
+            &Url::parse(&url).unwrap(),
+            &http_callback_hook(&url, "AUTONOETIC_HOOK_SECRET"),
+        );
+
+        executor.dispatch_async(ctx);
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if attempts.load(Ordering::SeqCst) >= 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("delivery should retry three times");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        let delivery = store
+            .get_hook_delivery(&delivery_id, "session.closed", "http.callback")
+            .unwrap()
+            .expect("delivery row");
+        assert_eq!(delivery.status, "delivered");
+        assert_eq!(delivery.attempt_count, 3);
+
+        handle.abort();
+    }
+
+    #[test]
+    #[serial]
+    fn test_http_callback_rejects_internal_hosts_without_test_override() {
+        // Ensure the loopback-allow override is not set from a concurrent test.
+        let _guard = ScopedEnv::set("AUTONOETIC_TEST_ALLOW_LOOPBACK_HTTP_CALLBACK", "0");
+        let err = validate_callback_url(
+            "http://127.0.0.1:8080/hooks",
+            &[GrantTarget::UrlPrefix("http://127.0.0.1:8080/".to_string())],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not allowed"));
+    }
 }

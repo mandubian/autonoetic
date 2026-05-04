@@ -838,7 +838,7 @@ hooks:
 | `publish_report` | Reads session report, writes to content store, registers in catalog |
 | `deliver_signal` | Delivers a signal to a waiting session (approval, workflow join) |
 | `agent_spawn` | *(reserved)* Spawns an agent in response to an event |
-| `http.callback` | *(reserved)* Sends an HTTP POST to an external URL |
+| `http.callback` | Sends an HMAC-signed HTTP POST to an allowlisted external URL |
 
 ### Hook Dispatch
 
