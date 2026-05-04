@@ -247,7 +247,7 @@ Per-session registries in `runtime/session_budget.rs`,
 | R-6.2 | `max_llm_rounds` gates before each LLM call; incremented after a real provider call. | session-budget.md | `session_budget.rs::check_pre_llm` | ENFORCED |
 | R-6.3 | `max_tool_invocations` gates before each tool batch; all calls in a batch reserve together. | session-budget.md | `reserve_tool_invocations` | ENFORCED |
 | R-6.4 | `max_wall_clock_secs` checked at LLM pre-check. | session-budget.md | `check_pre_llm` | ENFORCED |
-| R-6.5 | `max_session_price_usd` enforced via OpenRouter catalog estimates. | budget-management.md | `record_llm_completion` + catalog + R++10 fail-mode enforcement | ENFORCED (catalog-unavailable now refuses LLM completion when price limit is set, per R++10 fail-mode table) |
+| R-6.5 | `max_session_price_usd` enforced via OpenRouter catalog estimates. When catalog is unavailable and a price cap is active, LLM completions are refused (no silent-disable). | budget-management.md | `record_llm_completion` + catalog + R++10 fail-mode enforcement (`session_budget.rs`, `root_session_budget.rs`) | ENFORCED (catalog-unavailable refuses LLM completion when price limit is set, per R++10 fail-mode table) |
 | R-6.6 | OpenRouter catalog fetches with ~1h TTL; disabled by env. | budget-management.md | `openrouter_catalog.rs::refresh_if_needed` | ENFORCED |
 | R-6.7 | Prompt-budget breakdown is logged before every LLM call. | prompt-budget.md | `prompt_budget.rs` | ENFORCED |
 | R-6.8 | `system_prompt` and `tool_definitions` max-tokens enforced independently. | prompt-budget.md | section caps in prompt-budget | ENFORCED |

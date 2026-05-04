@@ -110,13 +110,19 @@ impl SessionBudgetRegistry {
             if c.is_finite() && c >= 0.0 {
                 st.session_cost_usd += c;
             }
-        } else if self.limits.max_session_price_usd.is_some() {
-            anyhow::bail!(
-                "Session cost-budget enforcement requires price estimation but \
-                 catalog is unavailable (R-6.5, R++10: fail-mode=refuse-session-start). \
-                 Refusing untracked LLM completion (scope: {})",
-                scope
-            );
+        } else if let Some(max_price) = self.limits.max_session_price_usd {
+            if max_price >= 0.0 {
+                let mode = crate::fail_mode::lookup_fail_mode("R-6.5")
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "refuse-session-start".to_string());
+                anyhow::bail!(
+                    "Session cost-budget enforcement requires price estimation but \
+                     catalog is unavailable (R-6.5, R++10: fail-mode={}). \
+                     Refusing untracked LLM completion (scope: {})",
+                    mode,
+                    scope
+                );
+            }
         }
 
         if let Some(max_tok) = self.limits.max_llm_tokens {

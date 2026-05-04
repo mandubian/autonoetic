@@ -6,15 +6,14 @@
 //! | Mode | Meaning |
 //! |---|---|
 //! | `RefuseBoot` | Gateway refuses to start. |
-//! | `RefuseSessionStart` | Gateway refuses to create / resume a session. |
+//! | `RefuseSessionStart` | Gateway refuses to create / resume / continue a session. Applies at session creation and at any mid-session enforcement point where the invariant cannot be verified (e.g. cost-budget catalog unavailable). |
 //! | `Degrade` | Session enters degraded mode (R-7.18). |
 //! | `EmergencyStop` | Session is killed immediately. |
 //! | `LogOnly` | No enforcement action; event is logged for audit. |
 
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FailMode {
     RefuseBoot,
     RefuseSessionStart,

@@ -10,8 +10,6 @@
 //!    is refuse-session-start, not log-only).
 //! 4. R-6.5 cost-budget catalog unavailability is enforced (no silent-disable).
 
-mod support;
-
 use autonoetic_gateway::fail_mode::{
     all_entries, entries_by_fail_mode, lookup_fail_mode, FailMode,
 };
@@ -192,6 +190,20 @@ fn r_plus_plus_10_no_price_limit_allows_none_cost() {
 #[test]
 fn r_plus_plus_10_lookup_returns_none_for_unknown_rule() {
     assert!(lookup_fail_mode("R-999").is_none());
+}
+
+#[test]
+fn r_plus_plus_10_negative_price_limit_allows_none_cost() {
+    let registry = SessionBudgetRegistry::new(SessionBudgetConfig {
+        max_session_price_usd: Some(-1.0),
+        ..Default::default()
+    });
+
+    let result = registry.record_llm_completion("scope-neg", 100, 50, None);
+    assert!(
+        result.is_ok(),
+        "negative max_session_price_usd must not trigger catalog-unavailable enforcement"
+    );
 }
 
 #[test]
