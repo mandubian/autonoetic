@@ -249,7 +249,9 @@ fn test_claim_and_advance_atomic() -> anyhow::Result<()> {
     assert!(claimed.is_some());
 
     let job = store.get_scheduled_job("sj-atomic-001")?;
-    assert_eq!(job.unwrap().next_run_at, future);
+    let job = job.unwrap();
+    assert_eq!(job.next_run_at, future);
+    assert_eq!(job.last_run_at, Some(now.to_rfc3339()));
 
     let claimed2 = store.claim_and_advance_due_job("sj-atomic-001", &now.to_rfc3339(), &future)?;
     assert!(claimed2.is_none());

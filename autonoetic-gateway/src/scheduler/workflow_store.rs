@@ -454,6 +454,50 @@ pub fn append_workflow_event(
     Ok(())
 }
 
+/// Append a primary-workflow event when a cron job is cancelled so the chat TUI can show it.
+///
+/// Uses the root session's indexed primary workflow (`workflow_index` / file fallback). If no
+/// workflow is registered yet, logs at debug and returns Ok.
+pub fn append_scheduled_job_cancelled_workflow_event(
+    config: &GatewayConfig,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    root_session_id: &str,
+    job_id: &str,
+    owner_agent_id: &str,
+    target_agent_id: &str,
+    cron_expr: &str,
+    cancel_reason: &str,
+) -> anyhow::Result<()> {
+    let Some(primary_wf) = resolve_workflow_id_for_root_session(config, root_session_id)? else {
+        tracing::debug!(
+            target: "scheduler",
+            root_session_id = %root_session_id,
+            job_id = %job_id,
+            "No primary workflow index for root session; skipping scheduled_job.cancelled event"
+        );
+        return Ok(());
+    };
+    let occurred_at = chrono::Utc::now().to_rfc3339();
+    let suffix = &uuid::Uuid::new_v4().to_string()[..8];
+    let event = autonoetic_types::workflow::WorkflowEventRecord {
+        event_id: format!("wevt-sjcancel-{job_id}-{suffix}"),
+        workflow_id: primary_wf,
+        task_id: None,
+        event_type: "scheduled_job.cancelled".to_string(),
+        agent_id: Some(target_agent_id.to_string()),
+        payload: serde_json::json!({
+            "job_id": job_id,
+            "owner_agent_id": owner_agent_id,
+            "target_agent_id": target_agent_id,
+            "cron_expr": cron_expr,
+            "root_session_id": root_session_id,
+            "cancel_reason": cancel_reason,
+        }),
+        occurred_at,
+    };
+    append_workflow_event(config, Some(store), &event)
+}
+
 /// Write or replace a task record and refresh `workflow.active_task_ids`.
 pub fn save_task_run(
     config: &GatewayConfig,

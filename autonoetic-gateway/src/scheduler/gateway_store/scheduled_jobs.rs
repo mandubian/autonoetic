@@ -123,11 +123,15 @@ pub fn claim_and_advance_due_job(
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
+    let wall = chrono::Utc::now().to_rfc3339();
     let updated = conn.execute(
         "UPDATE scheduled_jobs
-         SET next_run_at = ?1, generation = generation + 1, updated_at = ?1
-         WHERE job_id = ?2 AND status = 'active' AND generation = ?3",
-        params![new_next_run_at, job_id, current_gen],
+         SET next_run_at = ?1,
+             last_run_at = ?2,
+             updated_at = ?3,
+             generation = generation + 1
+         WHERE job_id = ?4 AND status = 'active' AND generation = ?5",
+        params![new_next_run_at, now_rfc3339, wall, job_id, current_gen],
     )?;
     if updated == 0 {
         return Ok(None);

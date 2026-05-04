@@ -820,6 +820,34 @@ fn format_workflow_event_card(
             format!("⏱ [{}] Scheduled job triggered: {}", ts_short, agent_id),
             MessageRole::AgentOutput,
         )),
+        "scheduled_job.cancelled" => {
+            let job_id = event
+                .payload
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let reason = event
+                .payload
+                .get("cancel_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let cron = event
+                .payload
+                .get("cron_expr")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let mut line = format!(
+                "🚫 [{}] Scheduled job cancelled: {} (target {})",
+                ts_short, job_id, agent_id
+            );
+            if !cron.is_empty() {
+                line.push_str(&format!(" [{}]", cron));
+            }
+            if !reason.is_empty() {
+                line.push_str(&format!(" — {}", reason));
+            }
+            Some((line, MessageRole::Signal))
+        }
         "task.updated" if status == "runnable" => Some((
             format!("🔁 [{}] Resumed after approval: {}{}", ts_short, task, agent_suffix),
             MessageRole::Signal,
