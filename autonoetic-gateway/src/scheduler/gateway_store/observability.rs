@@ -158,6 +158,89 @@ impl GatewayStore {
         Ok(())
     }
 
+    pub fn emit_vault_key_probe_event(
+        &self,
+        result: &crate::vault::KeyProbeResult,
+    ) -> anyhow::Result<()> {
+        let now = chrono::Utc::now();
+        let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
+        rules.push("R+8".to_string());
+        let (status, source_str, payload) = match result {
+            crate::vault::KeyProbeResult::Present { source } => (
+                autonoetic_types::causal_chain::EntryStatus::Success.to_string(),
+                match source {
+                    crate::vault::KeySource::EnvVar => "AUTONOETIC_VAULT_KEY",
+                    crate::vault::KeySource::FilePath => "AUTONOETIC_VAULT_KEY_PATH",
+                },
+                serde_json::json!({ "source": match source {
+                    crate::vault::KeySource::EnvVar => "env_var",
+                    crate::vault::KeySource::FilePath => "file_path",
+                }}),
+            ),
+            crate::vault::KeyProbeResult::Missing { source, path } => (
+                "MISSING".to_string(),
+                match source {
+                    crate::vault::KeySource::EnvVar => "AUTONOETIC_VAULT_KEY",
+                    crate::vault::KeySource::FilePath => "AUTONOETIC_VAULT_KEY_PATH",
+                },
+                serde_json::json!({
+                    "source": match source {
+                        crate::vault::KeySource::EnvVar => "env_var",
+                        crate::vault::KeySource::FilePath => "file_path",
+                    },
+                    "path": path,
+                }),
+            ),
+            crate::vault::KeyProbeResult::Invalid { source, reason } => (
+                "ERROR".to_string(),
+                match source {
+                    crate::vault::KeySource::EnvVar => "AUTONOETIC_VAULT_KEY",
+                    crate::vault::KeySource::FilePath => "AUTONOETIC_VAULT_KEY_PATH",
+                },
+                serde_json::json!({
+                    "source": match source {
+                        crate::vault::KeySource::EnvVar => "env_var",
+                        crate::vault::KeySource::FilePath => "file_path",
+                    },
+                    "reason": reason,
+                }),
+            ),
+            crate::vault::KeyProbeResult::NotConfigured => (
+                "NOT_CONFIGURED".to_string(),
+                "none",
+                serde_json::json!({ "source": "none" }),
+            ),
+        };
+
+        if let Err(e) = self.create_causal_event(
+            &autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: uuid::Uuid::new_v4().to_string(),
+                agent_id: "gateway".to_string(),
+                session_id: "system".to_string(),
+                turn_id: None,
+                event_seq: now.timestamp_millis().max(0) as u64,
+                timestamp: now.to_rfc3339(),
+                category: "vault".to_string(),
+                action: "key_probe".to_string(),
+                status,
+                enforced_rules: rules,
+                target: None,
+                payload: serde_json::to_string(&payload).ok(),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: Some(format!("Vault key source: {source_str}")),
+            },
+        ) {
+            tracing::warn!(
+                target: "gateway_store",
+                error = %e,
+                "Failed to record vault.key_probe causal event"
+            );
+        }
+
+        Ok(())
+    }
+
     pub fn create_causal_event(
         &self,
         event: &autonoetic_types::causal_chain::CausalEventRecord,

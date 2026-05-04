@@ -213,6 +213,75 @@ pub fn ensure_default_key(agents_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Probe whether a vault master key is available without creating one.
+///
+/// Returns a [`KeyProbeResult`] describing which source (if any) is configured.
+/// Unlike [`ensure_default_key`], this function is read-only and has no side effects.
+pub fn probe_master_key() -> KeyProbeResult {
+    if let Ok(key_hex) = std::env::var(VAULT_KEY_ENV) {
+        if hex_to_key(&key_hex).is_some() {
+            return KeyProbeResult::Present {
+                source: KeySource::EnvVar,
+            };
+        }
+        return KeyProbeResult::Invalid {
+            source: KeySource::EnvVar,
+            reason: "AUTONOETIC_VAULT_KEY is set but not a valid 64-char hex string".to_string(),
+        };
+    }
+    if let Ok(key_path) = std::env::var(VAULT_KEY_PATH_ENV) {
+        let path = PathBuf::from(&key_path);
+        if !path.exists() {
+            return KeyProbeResult::Missing {
+                source: KeySource::FilePath,
+                path: key_path,
+            };
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(key_hex) if hex_to_key(key_hex.trim()).is_some() => {
+                return KeyProbeResult::Present {
+                    source: KeySource::FilePath,
+                };
+            }
+            Ok(_) => {
+                return KeyProbeResult::Invalid {
+                    source: KeySource::FilePath,
+                    reason: format!(
+                        "AUTONOETIC_VAULT_KEY_PATH points to file with invalid key content"
+                    ),
+                };
+            }
+            Err(e) => {
+                return KeyProbeResult::Invalid {
+                    source: KeySource::FilePath,
+                    reason: format!("Failed to read vault key file: {e}"),
+                };
+            }
+        }
+    }
+    KeyProbeResult::NotConfigured
+}
+
+#[derive(Debug, Clone)]
+pub enum KeySource {
+    EnvVar,
+    FilePath,
+}
+
+#[derive(Debug, Clone)]
+pub enum KeyProbeResult {
+    Present { source: KeySource },
+    Missing { source: KeySource, path: String },
+    Invalid { source: KeySource, reason: String },
+    NotConfigured,
+}
+
+impl KeyProbeResult {
+    pub fn is_present(&self) -> bool {
+        matches!(self, KeyProbeResult::Present { .. })
+    }
+}
+
 /// Return the default vault file path: `{agents_dir}/.gateway/vault.enc.json`.
 pub fn default_vault_path(agents_dir: &Path) -> PathBuf {
     agents_dir.join(".gateway").join("vault.enc.json")

@@ -1,0 +1,213 @@
+//! Constitution R+8: Vault master-key presence probe at gateway startup.
+//!
+//! The gateway must probe the vault master key at boot and emit a
+//! `vault.key_probe` causal event. This ensures misconfiguration is
+//! caught early rather than failing on first secret access at runtime.
+
+mod support;
+
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use autonoetic_gateway::vault::{probe_master_key, KeyProbeResult, KeySource};
+use serial_test::serial;
+
+fn clear_vault_env() {
+    std::env::remove_var("AUTONOETIC_VAULT_KEY");
+    std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+}
+
+#[test]
+#[serial]
+fn r_plus_8_probe_key_present_via_env() {
+    clear_vault_env();
+    let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    std::env::set_var("AUTONOETIC_VAULT_KEY", key_hex);
+
+    let result = probe_master_key();
+    assert!(result.is_present());
+    assert!(matches!(
+        result,
+        KeyProbeResult::Present {
+            source: KeySource::EnvVar
+        }
+    ));
+
+    clear_vault_env();
+}
+
+#[test]
+#[serial]
+fn r_plus_8_probe_key_present_via_file() {
+    clear_vault_env();
+    let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let temp = tempfile::tempdir().unwrap();
+    let key_path = temp.path().join("vault.key");
+    std::fs::write(&key_path, key_hex).unwrap();
+    std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", &key_path);
+
+    let result = probe_master_key();
+    assert!(result.is_present());
+    assert!(matches!(
+        result,
+        KeyProbeResult::Present {
+            source: KeySource::FilePath
+        }
+    ));
+
+    clear_vault_env();
+}
+
+#[test]
+#[serial]
+fn r_plus_8_probe_not_configured() {
+    clear_vault_env();
+    let result = probe_master_key();
+    assert!(!result.is_present());
+    assert!(matches!(result, KeyProbeResult::NotConfigured));
+}
+
+#[test]
+#[serial]
+fn r_plus_8_probe_file_missing() {
+    clear_vault_env();
+    std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", "/nonexistent/vault.key");
+
+    let result = probe_master_key();
+    assert!(!result.is_present());
+    assert!(matches!(
+        result,
+        KeyProbeResult::Missing {
+            source: KeySource::FilePath,
+            ..
+        }
+    ));
+
+    clear_vault_env();
+}
+
+#[test]
+#[serial]
+fn r_plus_8_probe_invalid_env_key() {
+    clear_vault_env();
+    std::env::set_var("AUTONOETIC_VAULT_KEY", "not-valid-hex");
+
+    let result = probe_master_key();
+    assert!(!result.is_present());
+    assert!(matches!(
+        result,
+        KeyProbeResult::Invalid {
+            source: KeySource::EnvVar,
+            ..
+        }
+    ));
+
+    clear_vault_env();
+}
+
+#[test]
+#[serial]
+fn r_plus_8_probe_invalid_file_content() {
+    clear_vault_env();
+    let temp = tempfile::tempdir().unwrap();
+    let key_path = temp.path().join("vault.key");
+    std::fs::write(&key_path, "garbage").unwrap();
+    std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", &key_path);
+
+    let result = probe_master_key();
+    assert!(!result.is_present());
+    assert!(matches!(
+        result,
+        KeyProbeResult::Invalid {
+            source: KeySource::FilePath,
+            ..
+        }
+    ));
+
+    clear_vault_env();
+}
+
+#[test]
+#[serial]
+fn r_plus_8_causal_event_emitted_on_present_key() -> anyhow::Result<()> {
+    clear_vault_env();
+    let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    std::env::set_var("AUTONOETIC_VAULT_KEY", key_hex);
+
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let result = probe_master_key();
+    store.emit_vault_key_probe_event(&result)?;
+
+    let events = store.search_causal_events(None, None, 50)?;
+    let probe = events
+        .iter()
+        .find(|e| e.category == "vault" && e.action == "key_probe")
+        .expect("vault.key_probe event must be emitted");
+
+    assert_eq!(probe.agent_id, "gateway");
+    assert_eq!(probe.session_id, "system");
+    assert_eq!(probe.status, "SUCCESS");
+    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    let payload: serde_json::Value =
+        serde_json::from_str(probe.payload.as_deref().expect("payload present"))?;
+    assert_eq!(payload["source"], "env_var");
+
+    clear_vault_env();
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn r_plus_8_causal_event_emitted_on_not_configured() -> anyhow::Result<()> {
+    clear_vault_env();
+
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let result = probe_master_key();
+    store.emit_vault_key_probe_event(&result)?;
+
+    let events = store.search_causal_events(None, None, 50)?;
+    let probe = events
+        .iter()
+        .find(|e| e.category == "vault" && e.action == "key_probe")
+        .expect("vault.key_probe event must be emitted");
+
+    assert_eq!(probe.status, "NOT_CONFIGURED");
+    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    assert!(probe.reason.is_some());
+
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn r_plus_8_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
+    clear_vault_env();
+    std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", "/nonexistent/vault.key");
+
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let result = probe_master_key();
+    store.emit_vault_key_probe_event(&result)?;
+
+    let events = store.search_causal_events(None, None, 50)?;
+    let probe = events
+        .iter()
+        .find(|e| e.category == "vault" && e.action == "key_probe")
+        .expect("vault.key_probe event must be emitted");
+
+    assert_eq!(probe.status, "MISSING");
+    assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
+    let payload: serde_json::Value =
+        serde_json::from_str(probe.payload.as_deref().expect("payload present"))?;
+    assert_eq!(payload["source"], "file_path");
+    assert_eq!(payload["path"], "/nonexistent/vault.key");
+
+    clear_vault_env();
+    Ok(())
+}

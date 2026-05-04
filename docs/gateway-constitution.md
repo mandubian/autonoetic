@@ -386,7 +386,7 @@ before it moves into its category.
 | R+5 | Approval flood cap per root session; further requests reject `approval_flood`. | ENFORCED (R-7.17) |
 | R+6 | Causal-chain fsync ordering invariant — state transitions gated on event durability. | ENFORCED (R-8.16) |
 | R+7 | Runtime-lock drift check at session start. | ENFORCED (R-8.12) |
-| R+8 | Vault master-key presence probe at gateway startup. | P2 |
+| R+8 | Vault master-key presence probe at gateway startup. | ENFORCED (`vault.rs:probe_master_key`, `observability.rs:emit_vault_key_probe_event`, `constitution_vault_startup_probe.rs`) |
 | R+9 | Redaction-before-write ordering invariant. | ENFORCED |
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | ENFORCED (`sandbox.rs:76`, `constitution_abuse_sdk_bridge.rs`) |
 | R+11 | Bundle signature verification at `agent_revision_create` and `agent_revision_create_from_intent`. Ed25519 signature over canonical content digest, verified against gateway identity public key. | ENFORCED (`agent_revision.rs`, `crypto.rs`, `constitution_install_signature.rs`) |
