@@ -1195,7 +1195,13 @@ impl AgentExecutor {
         if let Some(gw) = self.gateway_dir.as_ref() {
             if self.live_digest.is_none() {
                 let agent_id = &self.manifest.agent.id;
-                match crate::runtime::live_digest::LiveDigestWriter::open(gw, &session_id, agent_id)
+                match crate::runtime::live_digest::LiveDigestWriter::open(
+                    gw,
+                    &session_id,
+                    agent_id,
+                    self.task_id.as_deref(),
+                    self.workflow_id.as_deref(),
+                )
                 {
                     Ok(w) => {
                         self.live_digest = Some(Arc::new(std::sync::Mutex::new(w)));

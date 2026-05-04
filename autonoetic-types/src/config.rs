@@ -669,12 +669,11 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub allow_runtime_lock_drift: bool,
 
-    /// When true, accept unsigned agent bundle revisions at
-    /// `agent_revision_create` and `agent_revision_create_from_intent`
-    /// (R+11 / R-9.13). Intended for local development only. In production,
-    /// every revision must carry a valid Ed25519 signature over the canonical
-    /// content digest, verified against the gateway identity public key.
-    /// Default: false (signatures required).
+    /// When true, allow revision creation to proceed without a gateway signature
+    /// when the gateway identity key is unavailable (e.g. first boot on a read-only
+    /// filesystem, permission errors). In normal operation the gateway auto-signs every
+    /// revision — this flag is only an escape hatch for environments where the key
+    /// cannot be loaded or generated. Default: false.
     #[serde(default)]
     pub trust_unsigned_bundles: bool,
 

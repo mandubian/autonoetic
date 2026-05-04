@@ -771,6 +771,9 @@ pub(crate) struct SandboxExecArgs {
     pub approval_ref: Option<String>,
     #[serde(default)]
     pub artifact_id: Option<String>,
+    /// Resolved server-side to the canonical `art_*` bundle id (same lookup as `artifact_exec`).
+    #[serde(default)]
+    pub artifact_ref: Option<String>,
     #[serde(default)]
     pub capture_paths: Option<Vec<CapturePath>>,
     #[serde(default)]
@@ -1077,6 +1080,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(args.intent.as_deref(), Some("Run unit tests"));
+    }
+
+    #[test]
+    fn test_sandbox_exec_args_optional_artifact_ref() {
+        let args: SandboxExecArgs = serde_json::from_str(
+            r#"{"command": "python3 /tmp/main.py", "artifact_ref": "ar.demo"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.artifact_ref.as_deref(), Some("ar.demo"));
+        assert!(args.artifact_id.is_none());
     }
 
     #[test]

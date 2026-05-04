@@ -637,7 +637,7 @@ impl NativeTool for SchedulerCronCancelTool {
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
@@ -676,6 +676,29 @@ impl NativeTool for SchedulerCronCancelTool {
                     .to_error_response());
                 }
                 let cancelled = store.cancel_scheduled_job(&args.job_id)?;
+                if cancelled {
+                    if let Some(cfg) = config {
+                        if let Err(e) =
+                            crate::scheduler::workflow_store::append_scheduled_job_cancelled_workflow_event(
+                                cfg,
+                                store.as_ref(),
+                                &j.root_session_id,
+                                &j.job_id,
+                                &j.owner_agent_id,
+                                &j.target_agent_id,
+                                &j.cron_expr,
+                                "scheduler.cron.cancel",
+                            )
+                        {
+                            tracing::warn!(
+                                target: "scheduler",
+                                error = %e,
+                                job_id = %args.job_id,
+                                "Failed to append scheduled_job.cancelled workflow event"
+                            );
+                        }
+                    }
+                }
                 Ok(serde_json::to_string(&serde_json::json!({
                     "ok": cancelled,
                     "job_id": args.job_id,

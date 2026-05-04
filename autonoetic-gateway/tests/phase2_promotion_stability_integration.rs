@@ -68,6 +68,8 @@ fn make_revision(agent_id: &str, suffix: &str) -> AgentRevisionRecord {
         status: AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: format!("sid{}", &suffix[..8]),
+        signature: None,
+        signer_id: None,
     }
 }
 
@@ -256,6 +258,7 @@ fn test_rollback_restores_previous_alias_target() {
 
     // Materialize SKILL.md for both revisions so the promotion gate can read capabilities.
     let gateway_dir = tmp.path().join(".gateway");
+    materialize_revision_skill(&gateway_dir, agent_id, &rev1.revision_id);
     materialize_revision_skill(&gateway_dir, agent_id, &rev2.revision_id);
 
     let registry = default_registry();

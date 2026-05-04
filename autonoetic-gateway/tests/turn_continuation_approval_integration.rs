@@ -109,6 +109,8 @@ fn seed_present_test_agents(
             status: AgentRevisionStatus::Ready,
             metadata_json: serde_json::json!({}),
             short_id: String::new(),
+            signature: None,
+            signer_id: None,
         };
         let _ = store.insert_agent_revision(&rec)?;
         store.upsert_agent_alias(&AgentAliasRecord {

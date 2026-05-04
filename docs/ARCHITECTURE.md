@@ -830,6 +830,7 @@ hooks:
 | `artifact.created` | A new artifact is built |
 | `agent.promoted` | An agent revision is promoted |
 | `emergency_stop` | Emergency stop is triggered |
+| `policy.decision` | After a `causal_events` row insert matching hook filters (DENIED/ERROR, or SUCCESS with a non-baseline rule such as not only `R+++3`) — observer-only |
 
 ### Available Actions
 
@@ -845,6 +846,42 @@ hooks:
 - **Async hooks** return immediately; the action runs in a background tokio task
 - **Sync hooks** block the triggering operation until the action completes
 - Failed hooks log a warning but do not fail the triggering operation
+
+### Constitutional observability (`policy.decision`)
+
+Hooks with `on: "policy.decision"` run **after** a matching row is inserted into `causal_events`. They are **observer-only**: they cannot change allow/deny outcomes; the gateway has already persisted the audit row.
+
+**When this event is emitted**
+
+| Causal `status` | `enforced_rules` | Emit? |
+|-----------------|------------------|--------|
+| `DENIED` or `ERROR` (any casing) | any | yes |
+| `SUCCESS` | contains at least one rule **other than** `R+++3` | yes |
+| `SUCCESS` | only `R+++3` | no (avoids noise on routine successes) |
+| other (e.g. `active`) | — | no |
+
+**`message_template` placeholders** (also present on `HookContext` where applicable): `{{event}}` → `policy.decision`; plus `{{root_session_id}}`, `{{session_id}}`, `{{agent_id}}`, `{{event_id}}`, `{{rule_ids}}`, `{{primary_rule_id}}`, `{{decision}}`, `{{status}}`, `{{category}}`, `{{action}}`, `{{target}}`, `{{reason}}`, `{{turn_id}}`, `{{source}}`.
+
+**Example: spawn a dedicated observer agent** when a policy-relevant causal row is written. The target agent must exist under `agents_dir`. `agent.spawn` hooks **must** use `async: true`. Use `allowed_agents` so only your observer can be spawned from this hook.
+
+```yaml
+hooks:
+  - on: "policy.decision"
+    action: "agent.spawn"
+    async: true
+    params:
+      agent_id: "constitutional-observer.default"
+      message_template: |
+        Causal policy event: {{event}}
+        root={{root_session_id}} session={{session_id}} agent={{agent_id}}
+        status={{status}} decision={{decision}} primary_rule={{primary_rule_id}} rules={{rule_ids}}
+        category={{category}} action={{action}} target={{target}} event_id={{event_id}} turn={{turn_id}}
+        reason={{reason}}
+    allowed_agents:
+      - constitutional-observer.default
+```
+
+The spawned run uses a dedicated session id (`hook-spawn-…`) under the same **root** session as the triggering context so tree-wide limits and emergency stop still apply.
 
 ---
 

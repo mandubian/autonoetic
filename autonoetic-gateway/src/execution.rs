@@ -389,6 +389,10 @@ impl GatewayExecutionService {
         hook_exec.set_spawn_tx(spawn_tx);
         let hook_executor = Arc::new(hook_exec);
 
+        if let Some(ref store) = gateway_store {
+            store.set_policy_hook_executor(&hook_executor);
+        }
+
         let svc = Self {
             execution_semaphore: Arc::new(Semaphore::new(config.max_concurrent_spawns.max(1))),
             agent_admission: Arc::new(Mutex::new(HashMap::new())),
@@ -717,6 +721,17 @@ impl GatewayExecutionService {
             );
         }
 
+        let active_jobs_before_cancel: Vec<_> = store
+            .list_scheduled_jobs_for_root(root_session_id)?
+            .into_iter()
+            .filter(|j| {
+                matches!(
+                    j.status,
+                    autonoetic_types::scheduled_job::ScheduledJobStatus::Active
+                )
+            })
+            .collect();
+
         match store.cancel_scheduled_jobs_for_root(root_session_id) {
             Ok(count) => {
                 details["scheduled_jobs_cancelled"] = serde_json::json!(count);
@@ -726,6 +741,27 @@ impl GatewayExecutionService {
                     jobs_cancelled = count,
                     "Cancelled scheduled jobs during emergency stop"
                 );
+                for j in active_jobs_before_cancel {
+                    if let Err(e) =
+                        crate::scheduler::workflow_store::append_scheduled_job_cancelled_workflow_event(
+                            self.config.as_ref(),
+                            store.as_ref(),
+                            &j.root_session_id,
+                            &j.job_id,
+                            &j.owner_agent_id,
+                            &j.target_agent_id,
+                            &j.cron_expr,
+                            &format!("emergency_stop:{stop_id}"),
+                        )
+                    {
+                        tracing::warn!(
+                            target: "emergency_stop",
+                            error = %e,
+                            job_id = %j.job_id,
+                            "Failed to append scheduled_job.cancelled workflow event"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(

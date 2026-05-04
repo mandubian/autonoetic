@@ -1,12 +1,18 @@
-//! Constitution R+11 / R-9.13: Bundle signature verification at revision create.
+//! Constitution R+11: Gateway auto-signing of agent revision bundles.
 //!
-//! When `trust_unsigned_bundles` is false (the default), every revision must
-//! carry a valid Ed25519 signature over the canonical content digest, verified
-//! against the gateway identity public key.
+//! The gateway automatically signs every revision with its Ed25519 identity key
+//! at creation time. The signature covers the full canonical content digest
+//! (all files: SKILL.md + runtime.lock + artifact files). The signer_id field
+//! records which key produced the signature, enabling key-agnostic verification
+//! for future federation/external signer support.
+//!
+//! `trust_unsigned_bundles: true` is an escape hatch for environments where
+//! the gateway identity key cannot be loaded (e.g. permission errors on the
+//! private key file). In normal operation, the gateway always auto-signs.
 
 mod support;
 
-use autonoetic_gateway::runtime::crypto::{ManifestSigner, ManifestVerifier};
+use autonoetic_gateway::runtime::crypto::GatewayIdentityKey;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
@@ -63,28 +69,72 @@ fn config_strict() -> GatewayConfig {
     c
 }
 
-fn config_trust() -> GatewayConfig {
-    let mut c = GatewayConfig::default();
-    c.trust_unsigned_bundles = true;
-    c
+fn build_test_artifact(gw_dir: &std::path::Path) -> String {
+    let artifact_store = autonoetic_gateway::ArtifactStore::new(gw_dir).unwrap();
+    let skill_md = "---\nname: test\ndescription: test agent\nmetadata:\n  autonoetic:\n    version: \"1.0\"\n    runtime:\n      engine: autonoetic\n      gateway_version: \"0.1.0\"\n      sdk_version: \"0.1.0\"\n      type: stateful\n      sandbox: bubblewrap\n      runtime_lock: runtime.lock\n    agent:\n      id: revision.tester\n      name: revision.tester\n      description: test\n    capabilities:\n      - type: AgentRevision\n        patterns: [\"*\"]\n    execution_mode: reasoning\n---\n\nTest instructions.\n";
+    let runtime_lock = r#"{"gateway":{"artifact":"marketplace://gateway/autonoetic-gateway","version":"0.1.0","sha256":"replace-me"},"sdk":{"version":"0.1.0"},"sandbox":{"backend":"bubblewrap"},"dependencies":[],"artifacts":[],"layers":[]}"#;
+
+    let session_id = "test-session-signature";
+    let content_store =
+        autonoetic_gateway::runtime::content_store::ContentStore::new(gw_dir).unwrap();
+    let h1 = content_store.write(skill_md.as_bytes()).unwrap();
+    content_store.register_name(session_id, "SKILL.md", &h1).unwrap();
+    let h2 = content_store.write(runtime_lock.as_bytes()).unwrap();
+    content_store
+        .register_name(session_id, "runtime.lock", &h2)
+        .unwrap();
+
+    let bundle = artifact_store
+        .build_with_kind(
+            &["SKILL.md".to_string(), "runtime.lock".to_string()],
+            None,
+            None,
+            autonoetic_types::artifact::ArtifactKind::AgentBundle,
+            session_id,
+        )
+        .unwrap();
+    bundle.artifact_id
 }
 
-#[test]
-fn r11_sign_and_verify_roundtrip() {
-    let secret = [42u8; 32];
-    let signer = ManifestSigner::new(&secret);
-    let content = "test bundle content digest hex";
-    let sig = signer.sign(content);
+fn create_test_revision(
+    temp: &tempfile::TempDir,
+    gw_dir: &std::path::Path,
+    store: &Arc<GatewayStore>,
+) -> (String, autonoetic_types::agent_revision::AgentRevisionRecord) {
+    let manifest = test_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let config = config_strict();
+    let artifact_id = build_test_artifact(gw_dir);
 
-    let public_bytes = signer.public_key_bytes();
-    assert!(
-        ManifestVerifier::verify(&public_bytes, content, &sig).unwrap(),
-        "signature should verify"
+    let args = serde_json::json!({
+        "agent_id": "revision.tester",
+        "artifact_id": artifact_id,
+    });
+
+    let result = registry.execute(
+        "agent_revision_create",
+        &manifest,
+        &policy,
+        temp.path(),
+        Some(gw_dir),
+        &args.to_string(),
+        None,
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
     );
-    assert!(
-        !ManifestVerifier::verify(&public_bytes, "tampered content", &sig).unwrap(),
-        "tampered content should not verify"
-    );
+
+    let output = result.expect("revision create should succeed");
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(parsed["ok"].as_bool().unwrap());
+    let revision_id = parsed["revision_id"].as_str().unwrap().to_string();
+    let rev = store
+        .get_agent_revision(&revision_id)
+        .unwrap()
+        .expect("revision should exist");
+    (revision_id, rev)
 }
 
 #[test]
@@ -92,22 +142,111 @@ fn r11_config_default_is_strict() {
     let config = GatewayConfig::default();
     assert!(
         !config.trust_unsigned_bundles,
-        "default should require signatures"
+        "default should not trust unsigned bundles"
     );
 }
 
 #[test]
-fn r11_revision_create_rejects_unsigned_when_strict() {
+fn r11_auto_signs_revision_on_create() {
+    let temp = tempdir().unwrap();
+    let (gw_dir, store) = setup_gateway(temp.path());
+    let (_revision_id, rev) = create_test_revision(&temp, &gw_dir, &store);
+
+    assert!(rev.signature.is_some(), "revision should have a signature");
+    assert!(rev.signer_id.is_some(), "revision should have a signer_id");
+    assert!(
+        rev.signer_id.as_ref().unwrap().starts_with("gateway:"),
+        "signer_id should start with 'gateway:'"
+    );
+}
+
+#[test]
+fn r11_auto_signature_verifies_against_gateway_key() {
+    let temp = tempdir().unwrap();
+    let (gw_dir, store) = setup_gateway(temp.path());
+    let key = GatewayIdentityKey::load_or_generate(&gw_dir).unwrap();
+    let pub_bytes = key.public_key_bytes();
+
+    let (revision_id, rev) = create_test_revision(&temp, &gw_dir, &store);
+    let sig_b64 = rev.signature.as_ref().expect("should have signature");
+    let digest_hex = revision_id.strip_prefix("rev_sha256:").unwrap();
+
+    assert!(
+        autonoetic_gateway::runtime::crypto::ManifestVerifier::verify(
+            &pub_bytes,
+            digest_hex,
+            sig_b64,
+        )
+        .unwrap(),
+        "auto-generated signature should verify against gateway public key"
+    );
+    assert_eq!(
+        rev.signer_id.as_ref().unwrap(),
+        &format!("gateway:{}", key.fingerprint())
+    );
+}
+
+#[test]
+fn r11_tampered_digest_does_not_verify() {
+    let temp = tempdir().unwrap();
+    let (gw_dir, store) = setup_gateway(temp.path());
+    let key = GatewayIdentityKey::load_or_generate(&gw_dir).unwrap();
+    let pub_bytes = key.public_key_bytes();
+
+    let (_revision_id, rev) = create_test_revision(&temp, &gw_dir, &store);
+    let sig_b64 = rev.signature.as_ref().unwrap();
+
+    let tampered_digest = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    assert!(
+        !autonoetic_gateway::runtime::crypto::ManifestVerifier::verify(
+            &pub_bytes,
+            tampered_digest,
+            sig_b64,
+        )
+        .unwrap(),
+        "tampered digest should not verify"
+    );
+}
+
+#[test]
+fn r11_wrong_key_does_not_verify() {
+    let temp = tempdir().unwrap();
+    let (gw_dir, store) = setup_gateway(temp.path());
+
+    let (_revision_id, rev) = create_test_revision(&temp, &gw_dir, &store);
+    let sig_b64 = rev.signature.as_ref().unwrap();
+    let digest_hex = rev.revision_id.strip_prefix("rev_sha256:").unwrap();
+
+    let temp2 = tempdir().unwrap();
+    let gw_dir2 = temp2.path().join(".gateway");
+    std::fs::create_dir_all(&gw_dir2).unwrap();
+    let key2 = GatewayIdentityKey::load_or_generate(&gw_dir2).unwrap();
+    let wrong_pub = key2.public_key_bytes();
+
+    assert!(
+        !autonoetic_gateway::runtime::crypto::ManifestVerifier::verify(
+            &wrong_pub,
+            digest_hex,
+            sig_b64,
+        )
+        .unwrap(),
+        "signature should not verify against a different gateway key"
+    );
+}
+
+#[test]
+fn r11_response_includes_signed_by_when_signed() {
     let temp = tempdir().unwrap();
     let (gw_dir, store) = setup_gateway(temp.path());
     let manifest = test_manifest();
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
     let registry = default_registry();
     let config = config_strict();
+    let artifact_id = build_test_artifact(&gw_dir);
 
     let args = serde_json::json!({
         "agent_id": "revision.tester",
-        "artifact_id": "art_000000000000",
+        "artifact_id": artifact_id,
     });
 
     let result = registry.execute(
@@ -124,93 +263,15 @@ fn r11_revision_create_rejects_unsigned_when_strict() {
         None,
     );
 
-    let err = result.expect_err("should reject unsigned bundle");
+    let output = result.expect("should succeed");
+    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert!(
-        err.to_string().contains("R+11"),
-        "error should reference R+11: {}",
-        err
+        parsed.get("signed_by").is_some(),
+        "response should include signed_by field when signed"
     );
-}
-
-#[test]
-fn r11_revision_create_rejects_invalid_signature() {
-    let temp = tempdir().unwrap();
-    let (gw_dir, store) = setup_gateway(temp.path());
-    let manifest = test_manifest();
-    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
-    let registry = default_registry();
-    let config = config_trust();
-
-    let args = serde_json::json!({
-        "agent_id": "revision.tester",
-        "artifact_id": "art_000000000000",
-        "signature": "invalid_base64_not_a_real_sig!!!"
-    });
-
-    let result = registry.execute(
-        "agent_revision_create",
-        &manifest,
-        &policy,
-        temp.path(),
-        Some(&gw_dir),
-        &args.to_string(),
-        None,
-        None,
-        Some(&config),
-        Some(store),
-        None,
+    let signed_by = parsed["signed_by"].as_str().unwrap();
+    assert!(
+        signed_by.starts_with("gateway:"),
+        "signed_by should start with 'gateway:'"
     );
-
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("R+11") {
-                panic!(
-                    "invalid signature should NOT trigger R+11 gate when trust_unsigned_bundles is true: {}",
-                    msg
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn r11_revision_create_allows_unsigned_when_trusted() {
-    let temp = tempdir().unwrap();
-    let (gw_dir, store) = setup_gateway(temp.path());
-    let manifest = test_manifest();
-    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
-    let registry = default_registry();
-    let config = config_trust();
-
-    let args = serde_json::json!({
-        "agent_id": "revision.tester",
-        "artifact_id": "art_000000000000",
-    });
-
-    let result = registry.execute(
-        "agent_revision_create",
-        &manifest,
-        &policy,
-        temp.path(),
-        Some(&gw_dir),
-        &args.to_string(),
-        None,
-        None,
-        Some(&config),
-        Some(store),
-        None,
-    );
-
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            assert!(
-                !e.to_string().contains("R+11"),
-                "should not fail with R+11 signature gate when trust_unsigned_bundles is true: {}",
-                e
-            );
-        }
-    }
 }

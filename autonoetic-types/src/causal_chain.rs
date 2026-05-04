@@ -74,6 +74,24 @@ pub struct CausalEventRecord {
     pub reason: Option<String>,
 }
 
+/// Whether this causal row should drive policy-decision notifications (hooks, chat TUI policy pane).
+///
+/// Semantics: `DENIED` / `ERROR` always; `SUCCESS` only when any enforced rule is not the baseline
+/// attribution rule ([`RULE_ID_EVENT_ATTRIBUTION`]).
+pub fn causal_event_notifies_policy_decision(event: &CausalEventRecord) -> bool {
+    let s = event.status.as_str();
+    if s.eq_ignore_ascii_case("DENIED") || s.eq_ignore_ascii_case("ERROR") {
+        return true;
+    }
+    if s.eq_ignore_ascii_case("SUCCESS") {
+        return event
+            .enforced_rules
+            .iter()
+            .any(|r| r.as_str() != RULE_ID_EVENT_ATTRIBUTION);
+    }
+    false
+}
+
 /// Execution trace record for storage in gateway.db execution_traces table.
 /// Stores structured tool execution results for agent learning.
 #[derive(Debug, Clone, Serialize, Deserialize)]

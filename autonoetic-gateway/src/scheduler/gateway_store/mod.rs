@@ -24,6 +24,7 @@ use autonoetic_types::notification::NotificationStatus;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::{Arc, Mutex, Weak};
 
 pub use messages::AgentMessageRecord;
 pub(crate) use row_decode::memory_object_from_row;
@@ -97,6 +98,9 @@ pub fn default_gateway_host_id() -> String {
 pub struct GatewayStore {
     conn: std::sync::Mutex<Connection>,
     approval_flood_cap: std::sync::atomic::AtomicUsize,
+    /// Weak ref avoids an `Arc` cycle with [`crate::scheduler::hooks::HookExecutor`], which may
+    /// hold an `Arc<GatewayStore>` for other hooks.
+    policy_hook_executor: Mutex<Option<Weak<crate::scheduler::hooks::HookExecutor>>>,
 }
 
 impl GatewayStore {
@@ -118,6 +122,7 @@ impl GatewayStore {
         let store = Self {
             conn: std::sync::Mutex::new(conn),
             approval_flood_cap: std::sync::atomic::AtomicUsize::new(0),
+            policy_hook_executor: Mutex::new(None),
         };
         {
             let mut conn = store.conn.lock().unwrap();
@@ -138,6 +143,13 @@ impl GatewayStore {
             migrate::backfill_workflow_index(&conn, gateway_dir)?;
         }
         Ok(store)
+    }
+
+    /// Wire the gateway hook executor for [`autonoetic_types::hooks::HookEvent::PolicyDecision`].
+    /// Safe to call once at daemon startup; tests that open the store directly leave this unset.
+    pub fn set_policy_hook_executor(&self, exec: &Arc<crate::scheduler::hooks::HookExecutor>) {
+        let mut g = self.policy_hook_executor.lock().expect("policy_hook_executor mutex poisoned");
+        *g = Some(Arc::downgrade(exec));
     }
 
     pub fn migrate(&self) -> Result<()> {

@@ -2484,6 +2484,8 @@ Use tools when needed.
             status: AgentRevisionStatus::Ready,
             metadata_json: serde_json::json!({}),
             short_id: "abc12345".to_string(),
+            signature: None,
+            signer_id: None,
         };
         store
             .insert_agent_revision(&revision)
@@ -2572,6 +2574,8 @@ Use tools when needed.
                 status: AgentRevisionStatus::Ready,
                 metadata_json: serde_json::json!({}),
                 short_id: "list1234".to_string(),
+                signature: None,
+                signer_id: None,
             })
             .expect("revision insert should succeed");
         store
@@ -2630,6 +2634,8 @@ Use tools when needed.
             status: AgentRevisionStatus::Candidate,
             metadata_json: serde_json::json!({}),
             short_id: "seed1234".to_string(),
+            signature: None,
+            signer_id: None,
         };
         store
             .insert_agent_revision(&revision)

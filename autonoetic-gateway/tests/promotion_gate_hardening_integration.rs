@@ -692,6 +692,8 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
             "detected_external_imports": ["requests"],
         }),
         short_id: String::new(),
+        signature: None,
+        signer_id: None,
     };
     store.insert_agent_revision(&rev).unwrap();
 
@@ -828,6 +830,8 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
         status: AgentRevisionStatus::Candidate,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        signature: None,
+        signer_id: None,
     };
     store.insert_agent_revision(&rev).unwrap();
 

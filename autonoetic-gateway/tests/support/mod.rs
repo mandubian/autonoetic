@@ -345,6 +345,8 @@ pub fn seed_agent_revision(
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        signature: None,
+        signer_id: None,
     };
     store.insert_agent_revision(&rec)?;
     let alias = AgentAliasRecord {

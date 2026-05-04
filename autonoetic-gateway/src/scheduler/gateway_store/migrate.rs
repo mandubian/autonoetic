@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 23;
+const SCHEMA_VERSION_LATEST: i64 = 24;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -507,6 +507,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_causal_event_enforced_rules_v21(conn)?;
     apply_constitutional_proposals_v22(conn)?;
     apply_approval_hardening_v23(conn)?;
+    apply_revision_signature_v24(conn)?;
 
     Ok(())
 }
@@ -1414,6 +1415,32 @@ fn apply_approval_hardening_v23(conn: &mut Connection) -> Result<()> {
         params![
             23_i64,
             "approval_hardening",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_revision_signature_v24(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 24 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE agent_revisions ADD COLUMN signature TEXT;
+         ALTER TABLE agent_revisions ADD COLUMN signer_id TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            24_i64,
+            "revision_signature",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

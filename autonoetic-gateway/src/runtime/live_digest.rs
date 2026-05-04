@@ -32,6 +32,12 @@ pub struct LiveDigestWriter {
     path: PathBuf,
     /// Agent that owns this writer instance.
     agent_id: String,
+    /// Full session id (e.g. `root/child.default-abc`) for digest cross-links.
+    digest_session_id: String,
+    /// Workflow task id when this run is tied to `workflow.spawn` / `workflow.wait`.
+    workflow_task_id: Option<String>,
+    /// Parent workflow id when known.
+    workflow_id: Option<String>,
     /// Nesting depth (0 = root, 1 = child …).
     depth: usize,
     digest_turn_seq: u32,
@@ -108,7 +114,17 @@ fn format_time_hhmmss(timestamp: &str) -> String {
 }
 
 impl LiveDigestWriter {
-    pub fn open(gateway_dir: &Path, session_id: &str, agent_id: &str) -> anyhow::Result<Self> {
+    /// Open a digest writer for `session_id` / `agent_id`.
+    ///
+    /// When this run is part of a workflow, pass `workflow_task_id` / `workflow_id` so the digest
+    /// can show stable cross-links beside each agent section header.
+    pub fn open(
+        gateway_dir: &Path,
+        session_id: &str,
+        agent_id: &str,
+        workflow_task_id: Option<&str>,
+        workflow_id: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let base = base_session_id(session_id);
         let depth = session_depth(session_id);
         let dir = gateway_dir.join("sessions").join(base);
@@ -133,6 +149,9 @@ impl LiveDigestWriter {
         Ok(Self {
             path,
             agent_id: agent_id.to_string(),
+            digest_session_id: session_id.to_string(),
+            workflow_task_id: workflow_task_id.map(str::to_string),
+            workflow_id: workflow_id.map(str::to_string),
             depth,
             digest_turn_seq,
             tools_in_open_turn: 0,
@@ -254,6 +273,26 @@ impl LiveDigestWriter {
             use std::fmt::Write;
             let _ = writeln!(turn, "\n---");
             let _ = writeln!(turn, "### {}", agent_with_emoji);
+            let show_context = self.workflow_task_id.is_some()
+                || self
+                    .workflow_id
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                || self.depth > 0;
+            if show_context {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(tid) = self.workflow_task_id.as_deref() {
+                    parts.push(format!("task `{}`", cell(tid)));
+                }
+                if let Some(wid) = self.workflow_id.as_deref() {
+                    if !wid.is_empty() {
+                        parts.push(format!("workflow `{}`", cell(wid)));
+                    }
+                }
+                parts.push(format!("session `{}`", cell(&self.digest_session_id)));
+                let _ = writeln!(turn, "*Context:* {}", parts.join(" · "));
+            }
             let _ = writeln!(turn);
         }
 
@@ -896,7 +935,7 @@ mod tests {
     fn digest_creates_file_and_turns() {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
-        let mut w = LiveDigestWriter::open(&gw, "s1", "agent.a").unwrap();
+        let mut w = LiveDigestWriter::open(&gw, "s1", "agent.a", None, None).unwrap();
         w.start_session("agent.a", "hello task").unwrap();
         w.start_turn().unwrap();
         w.record_action("Called `echo`").unwrap();
@@ -915,11 +954,11 @@ mod tests {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
         {
-            let mut w = LiveDigestWriter::open(&gw, "s2", "agent.a").unwrap();
+            let mut w = LiveDigestWriter::open(&gw, "s2", "agent.a", None, None).unwrap();
             w.start_turn().unwrap();
             w.end_turn().unwrap();
         }
-        let mut w2 = LiveDigestWriter::open(&gw, "s2", "agent.a").unwrap();
+        let mut w2 = LiveDigestWriter::open(&gw, "s2", "agent.a", None, None).unwrap();
         w2.start_turn().unwrap();
         w2.end_turn().unwrap();
         let body = std::fs::read_to_string(w2.path()).unwrap();
@@ -933,13 +972,19 @@ mod tests {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
 
-        let mut planner = LiveDigestWriter::open(&gw, "root", "planner.default").unwrap();
+        let mut planner = LiveDigestWriter::open(&gw, "root", "planner.default", None, None).unwrap();
         planner.start_turn().unwrap();
         planner.end_turn().unwrap();
 
         {
-            let mut child =
-                LiveDigestWriter::open(&gw, "root/coder.default-1", "coder.default").unwrap();
+            let mut child = LiveDigestWriter::open(
+                &gw,
+                "root/coder.default-1",
+                "coder.default",
+                Some("task-smoke-1"),
+                Some("wf-smoke"),
+            )
+            .unwrap();
             child.start_turn().unwrap();
             child.end_turn().unwrap();
             child.start_turn().unwrap();
@@ -954,6 +999,10 @@ mod tests {
         assert!(body.contains("**Turn 2**"));
         assert!(body.contains("**Turn 3**"));
         assert!(body.contains("**Turn 4**"));
+        assert!(
+            body.contains("*Context:* task `task-smoke-1` · workflow `wf-smoke` · session `root/coder.default-1`"),
+            "child section should link task, workflow, and session: {body}"
+        );
     }
 
     #[test]
@@ -978,7 +1027,7 @@ mod tests {
     fn digest_redacts_secret_like_annotation() {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
-        let mut w = LiveDigestWriter::open(&gw, "s3", "agent.a").unwrap();
+        let mut w = LiveDigestWriter::open(&gw, "s3", "agent.a", None, None).unwrap();
         w.start_turn().unwrap();
         w.record_annotation("observation", "Authorization: Bearer top-secret-value")
             .unwrap();

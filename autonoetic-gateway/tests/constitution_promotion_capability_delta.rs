@@ -117,6 +117,8 @@ fn make_revision_record(revision_id: &str) -> AgentRevisionRecord {
         status: AgentRevisionStatus::Candidate,
         metadata_json: serde_json::Value::Null,
         short_id: revision_id.chars().take(8).collect(),
+        signature: None,
+        signer_id: None,
     }
 }
 

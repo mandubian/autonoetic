@@ -174,6 +174,16 @@ pub struct AgentRevisionRecord {
     /// Collision-safe short ID for LLM-friendly references (e.g., `abc12345`).
     #[serde(default)]
     pub short_id: String,
+    /// Ed25519 signature over the canonical revision content digest (base64).
+    /// Produced by the gateway at revision creation time (R+11 auto-sign).
+    /// Verified against the signer's public key for integrity attestation.
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// Identity of the signer. Format: `gateway:{fingerprint}` for gateway-auto-signed
+    /// revisions, extensible to `peer:{node_id}`, `ci:{pipeline}`, etc.
+    /// A verifier resolves this to a trusted public key from a trust store.
+    #[serde(default)]
+    pub signer_id: Option<String>,
 }
 
 /// Mutable alias binding from a stable name to a revision.
