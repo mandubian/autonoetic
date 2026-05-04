@@ -78,6 +78,51 @@ async fn run_scheduler_tick_at(
         if let Err(e) = store.prune_expired_grants() {
             tracing::warn!(error = %e, "Failed to prune expired session approval grants");
         }
+
+        // R++8: Check for sessions exceeding sandbox escape thresholds
+        let degrade_threshold = execution.config().escape_attempt_degrade_threshold;
+        let emergency_threshold = execution.config().escape_attempt_emergency_threshold;
+        if emergency_threshold > 0 {
+            if let Ok(sessions) = store.sessions_exceeding_escape_threshold(emergency_threshold) {
+                for (sid, root_sid, count) in sessions {
+                    if !execution.is_session_degraded(&sid).await {
+                        let reason = format!(
+                            "sandbox escape attempts ({}) exceeded emergency threshold ({}) (R++8)",
+                            count, emergency_threshold
+                        );
+                        if let Err(e) = execution
+                            .emergency_stop_from_security_policy(&root_sid, &reason)
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                root_session_id = %root_sid,
+                                "Failed to trigger emergency stop for escape threshold breach"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if degrade_threshold > 0 && (emergency_threshold == 0 || degrade_threshold < emergency_threshold) {
+            if let Ok(sessions) = store.sessions_exceeding_escape_threshold(degrade_threshold) {
+                for (sid, _root_sid, count) in sessions {
+                    if !execution.is_session_degraded(&sid).await {
+                        let reason = format!(
+                            "sandbox escape attempts ({}) exceeded degradation threshold ({}) (R++8)",
+                            count, degrade_threshold
+                        );
+                        if let Err(e) = execution.degrade_session(&sid, &reason).await {
+                            tracing::warn!(
+                                error = %e,
+                                session_id = %sid,
+                                "Failed to degrade session for escape threshold breach"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let config = execution.config();

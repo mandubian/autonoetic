@@ -1029,6 +1029,124 @@ impl GatewayStore {
         }
         Ok(orphans)
     }
+
+    pub fn record_sandbox_escape_attempt(
+        &self,
+        session_id: &str,
+        root_session_id: &str,
+        agent_id: &str,
+        indicator: &str,
+        detail: &str,
+        exit_code: Option<i32>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("gateway_store conn mutex");
+        conn.execute(
+            "INSERT INTO sandbox_escape_attempts
+                (session_id, root_session_id, agent_id, indicator, detail, exit_code, detected_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                session_id,
+                root_session_id,
+                agent_id,
+                indicator,
+                detail,
+                exit_code,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_sandbox_escape_attempts_for_session(&self, session_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("gateway_store conn mutex");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sandbox_escape_attempts WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    pub fn count_sandbox_escape_attempts_for_root(&self, root_session_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("gateway_store conn mutex");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sandbox_escape_attempts WHERE root_session_id = ?1",
+            params![root_session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    pub fn emit_escape_threshold_event(
+        &self,
+        session_id: &str,
+        root_session_id: &str,
+        count: usize,
+        threshold: usize,
+        level: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
+        rules.push("R++8".to_string());
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("escape-threshold-{}", uuid::Uuid::new_v4()),
+            agent_id: "gateway".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: None,
+            event_seq: now.timestamp_millis().max(0) as u64,
+            timestamp: now.to_rfc3339(),
+            category: "security".to_string(),
+            action: format!("sandbox.escape_threshold_{}", level),
+            status: autonoetic_types::causal_chain::EntryStatus::Error.to_string(),
+            enforced_rules: rules,
+            target: Some(root_session_id.to_string()),
+            payload: Some(
+                serde_json::json!({
+                    "session_id": session_id,
+                    "root_session_id": root_session_id,
+                    "count": count,
+                    "threshold": threshold,
+                    "level": level,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some(format!(
+                "session {} has {} escape attempts (threshold: {})",
+                session_id, count, threshold
+            )),
+        };
+        self.create_causal_event(&event)?;
+        Ok(())
+    }
+
+    pub fn sessions_exceeding_escape_threshold(
+        &self,
+        threshold: usize,
+    ) -> Result<Vec<(String, String, usize)>> {
+        if threshold == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().expect("gateway_store conn mutex");
+        let mut stmt = conn.prepare(
+            "SELECT session_id, root_session_id, COUNT(*) as cnt \
+             FROM sandbox_escape_attempts \
+             GROUP BY session_id \
+             HAVING cnt >= ?1",
+        )?;
+        let rows = stmt.query_map(params![threshold as i64], |row| {
+            let session_id: String = row.get(0)?;
+            let root_session_id: String = row.get(1)?;
+            let count: i64 = row.get(2)?;
+            Ok((session_id, root_session_id, count as usize))
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
