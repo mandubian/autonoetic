@@ -5,9 +5,11 @@
 //! functions of agent reasoning content. Test verifies PolicyEngine decisions
 //! are identical regardless of CoT content.
 //!
-//! Ri-0.13b: Reasoning content is recorded to the causal chain so forensic
-//! review is possible. Test verifies reasoning_content survives redaction
-//! in the llm.completion event.
+//! Ri-0.13b: Reasoning content is recorded for forensic review. The causal
+//! event contains `reasoning_sha256` (compact, always present). The full
+//! redacted reasoning is force-captured to the evidence store (survives
+//! even in non-full evidence mode) and referenced via
+//! `reasoning_evidence_ref`. Tests verify both paths.
 
 mod support;
 
@@ -284,6 +286,72 @@ fn ri_0_13b_reasoning_hash_in_causal_event() -> anyhow::Result<()> {
 }
 
 #[test]
+fn ri_0_13b_reasoning_force_captured_even_in_off_mode() -> anyhow::Result<()> {
+    use autonoetic_gateway::runtime::session_tracer::SessionTracer;
+    use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let agent_dir = tempdir.path().join("agents").join("test.agent");
+    std::fs::create_dir_all(&agent_dir)?;
+
+    let mut tracer = SessionTracer::new_with_evidence_mode(
+        &agent_dir, "test.agent", "sess-ri-0-13b-force", "off",
+    )?
+    .with_gateway_store(Some(store.clone()))
+    .with_turn_id("turn-1");
+
+    tracer.log_llm_completion(
+        "test-model",
+        "EndTurn",
+        "Hello",
+        0,
+        50,
+        25,
+        &[],
+        None,
+        None,
+        Some("My reasoning content here."),
+    )?;
+
+    let events = store.search_causal_events(Some("sess-ri-0-13b-force"), Some("test.agent"), 50)?;
+    let completion_event = events
+        .iter()
+        .find(|e| e.category == "llm" && e.action == "completion")
+        .expect("llm.completion event must exist");
+
+    let payload: serde_json::Value = serde_json::from_str(
+        completion_event.payload.as_deref().expect("payload present"),
+    )?;
+    let evidence_ref = payload
+        .get("reasoning_evidence_ref")
+        .expect("reasoning_evidence_ref must be present even in off mode")
+        .as_str()
+        .unwrap();
+
+    let evidence_path = agent_dir.join(evidence_ref);
+    assert!(
+        evidence_path.exists(),
+        "reasoning evidence file must exist on disk: {:?}",
+        evidence_path
+    );
+    let evidence: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&evidence_path)?)?;
+    assert!(
+        evidence.get("reasoning_content").is_some(),
+        "evidence file must contain reasoning_content"
+    );
+    assert!(
+        evidence.get("reasoning_sha256").is_some(),
+        "evidence file must contain reasoning_sha256"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn ri_0_13b_no_reasoning_hash_when_absent() -> anyhow::Result<()> {
     use autonoetic_gateway::runtime::session_tracer::SessionTracer;
     use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -326,6 +394,11 @@ fn ri_0_13b_no_reasoning_hash_when_absent() -> anyhow::Result<()> {
     assert!(
         payload.get("reasoning_sha256").is_none(),
         "causal event must NOT contain reasoning_sha256 when no reasoning was provided: {:?}",
+        payload
+    );
+    assert!(
+        payload.get("reasoning_evidence_ref").is_none(),
+        "causal event must NOT contain reasoning_evidence_ref when no reasoning was provided: {:?}",
         payload
     );
 

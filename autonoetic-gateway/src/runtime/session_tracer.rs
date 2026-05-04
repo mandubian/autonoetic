@@ -575,6 +575,20 @@ impl SessionTracer {
         )? {
             llm_payload["evidence_ref"] = serde_json::json!(evidence_ref);
         }
+        if let Some(rc) = &reasoning_content {
+            let reasoning_evidence = serde_json::json!({
+                "reasoning_content": redact_text_for_logs(rc),
+                "reasoning_sha256": sha256_hex(rc),
+            });
+            if let Some(ref_) = self.evidence_store.capture_json_force(
+                self.turn_id.as_deref(),
+                "llm",
+                "reasoning",
+                &reasoning_evidence,
+            )? {
+                llm_payload["reasoning_evidence_ref"] = serde_json::json!(ref_);
+            }
+        }
         self.log_event("llm", "completion", EntryStatus::Success, Some(llm_payload))?;
         Ok(())
     }

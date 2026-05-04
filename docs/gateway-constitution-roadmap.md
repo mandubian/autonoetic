@@ -908,15 +908,14 @@ exercise all `can_*` methods, plus structural checks that
 `PolicyDecision` has no reasoning field and `PolicyEngine` has no
 reasoning parameter.
 
-**(b) Reasoning recorded to causal chain (Ri-0.13b).** Already
-happens — LLM completions include reasoning and land in events.
-Confirm with a test that CoT tokens are preserved verbatim in the
-`llm.completed` event's payload, subject to standard redaction.
-**ENFORCED:** `reasoning_content` wired into `log_llm_completion()`.
-Causal event payload includes `reasoning_sha256` (hash only — no raw
-reasoning in the causal chain). Evidence store includes
-redacted `reasoning_content`. 5 Ri-0.13b tests verify the data flow
-and redaction.
+**(b) Reasoning recorded to causal chain (Ri-0.13b).** The causal
+event contains `reasoning_sha256` (compact, always present). The full
+redacted reasoning is force-captured to the evidence store via
+`capture_json_force`, so it survives even in `off`/`errors` evidence
+mode. Referenced via `reasoning_evidence_ref` on the causal event.
+**ENFORCED:** 8 Ri-0.13b tests verify hash in causal event,
+force-capture in off mode, evidence file contents, absence when no
+reasoning provided, and redaction behavior.
 
 **(c) Capability-gated disclosure (Ri-0.13c).** New capability
 `ReasoningAudit`, scoped by target agent pattern. New tool
@@ -937,11 +936,12 @@ Files: new `autonoetic-gateway/src/runtime/tools/observability.rs`
   `can_*` methods produce identical verdicts regardless of reasoning;
   `PolicyDecision` has no reasoning field; `PolicyEngine` has no
   reasoning parameter.
-- `constitution_private_reasoning.rs` (Ri-0.13b) — 5 tests:
+- `constitution_private_reasoning.rs` (Ri-0.13b) — 8 tests:
   reasoning survives redaction; secrets in reasoning are still
   redacted; `Message`/`CompletionResponse` carry `reasoning_content`;
   causal event includes `reasoning_sha256` but not raw reasoning;
-  absent reasoning produces no hash.
+  reasoning force-captured to evidence store even in `off` mode;
+  absent reasoning produces no hash or evidence ref.
 - `constitution_right_ri_0_13c_disclosure.rs` — non-capability
   holder cannot read reasoning; holder can, and the reviewed agent
   sees a `reasoning.disclosed` event naming the reader.
