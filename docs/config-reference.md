@@ -432,6 +432,7 @@ Reactive bindings from gateway events to actions. When an event fires (e.g., ses
 | `hooks[].action` | string | required | Action: `publish_report`, `deliver_signal`, `agent_spawn`, `http.callback` |
 | `hooks[].async` | bool | `false` | If true, the hook runs in a background task without blocking the event |
 | `hooks[].params` | object | `{}` | Action-specific parameters |
+| `hooks[].callback_allowlist` | list | `[]` | Required for `http.callback`. Allowlist entries use grant-target shapes such as `{ kind: "url_prefix", value: "https://hooks.example.com/autonoetic/" }` |
 
 Example:
 
@@ -448,6 +449,16 @@ hooks:
   - on: "workflow.join.satisfied"
     action: "deliver_signal"
     async: true
+
+  - on: "session.closed"
+    action: "http.callback"
+    async: true
+    callback_allowlist:
+      - kind: "url_prefix"
+        value: "https://webhook.example.com/autonoetic/"
+    params:
+      url: "https://webhook.example.com/autonoetic/session-closed"
+      secret_env: "AUTONOETIC_HOOK_SECRET"
 ```
 
 ---

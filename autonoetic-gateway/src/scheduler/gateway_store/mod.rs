@@ -5,6 +5,7 @@ mod artifacts;
 pub mod constitutional_proposals;
 mod credentials;
 mod evaluations;
+mod hook_deliveries;
 mod memory;
 mod messages;
 mod migrate;

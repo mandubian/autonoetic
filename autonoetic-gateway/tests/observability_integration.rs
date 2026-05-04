@@ -323,6 +323,8 @@ fn test_hook_dispatch_publishes_report() -> anyhow::Result<()> {
         action: HookAction::PublishReport,
         r#async: false,
         params: Default::default(),
+        callback_allowlist: Vec::new(),
+        allowed_agents: Vec::new(),
     }];
     let executor = HookExecutor::new(hooks, Some(store.clone()), 4000, 60);
 
@@ -382,6 +384,8 @@ fn test_observability_search_after_publish() -> anyhow::Result<()> {
         action: HookAction::PublishReport,
         r#async: false,
         params: Default::default(),
+        callback_allowlist: Vec::new(),
+        allowed_agents: Vec::new(),
     }];
     let executor = HookExecutor::new(hooks, Some(store.clone()), 4000, 60);
 

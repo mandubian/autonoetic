@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::background::GrantTarget;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum HookEvent {
     #[serde(rename = "session.closed")]
@@ -56,6 +58,11 @@ pub struct HookConfig {
     pub r#async: bool,
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
+    /// Allowlist for `http.callback` destinations. Entries may match the full
+    /// URL (`UrlPrefix`) or the parsed authority (`ExactHost`, `HostSuffix`,
+    /// `HostAndPort`). Empty means `http.callback` is disabled for this hook.
+    #[serde(default)]
+    pub callback_allowlist: Vec<GrantTarget>,
     /// Allowlist of agent IDs that may be spawned by an `agent.spawn` hook.
     /// When non-empty the gateway enforces that `params.agent_id` is in this
     /// list before dispatching. An empty list means any agent is allowed.
