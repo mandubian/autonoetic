@@ -549,6 +549,14 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_pending_approvals_per_root")]
     pub max_pending_approvals_per_root: usize,
 
+    /// Default TTL in seconds for auto-generated session approval grants.
+    /// When an approval is resolved and a grant is auto-inserted without an
+    /// explicit `--ttl`/`--until` override, `expires_at` is set to
+    /// `now + default_grant_ttl_secs`. Set to 0 to disable auto-expiry
+    /// (grants live until revoked or emergency stop). Default: 86400 (24h).
+    #[serde(default = "default_grant_ttl_secs")]
+    pub default_grant_ttl_secs: u64,
+
     /// HMAC-SHA256 key for signing turn continuation files.
     /// This value should be a secret, high-entropy key provided from a secret
     /// source (environment secret or vault); do not derive it from `node_id`
@@ -1079,6 +1087,10 @@ fn default_max_pending_approvals_per_root() -> usize {
     50
 }
 
+fn default_grant_ttl_secs() -> u64 {
+    86400
+}
+
 fn default_workflow_task_heartbeat_secs_val() -> Option<u64> {
     None
 }
@@ -1262,6 +1274,7 @@ impl Default for GatewayConfig {
             root_session_budget: RootSessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
             max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
+            default_grant_ttl_secs: default_grant_ttl_secs(),
             continuation_key: None,
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
