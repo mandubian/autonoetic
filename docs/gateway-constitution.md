@@ -391,7 +391,7 @@ before it moves into its category.
 | R+10 | sandbox→gateway SDK-bridge rate and payload-size limits. | ENFORCED (`sandbox.rs:76`, `constitution_abuse_sdk_bridge.rs`) |
 | R+11 | Bundle signature verification at `agent_revision_create` and `agent_revision_create_from_intent`. Ed25519 signature over canonical content digest, verified against gateway identity public key. | ENFORCED (`agent_revision.rs`, `crypto.rs`, `constitution_install_signature.rs`) |
 | R+12 | Orphan-child reaper on parent session termination. | ENFORCED (R-7.16) |
-| R+13 | Approval grant TTL. | P2 |
+| R+13 | Approval grant TTL. | ENFORCED (`approval.rs:1114`, `scheduler.rs:78`, `constitution_approval_grant_ttl.rs`) |
 | R+14 | `can_invoke_tool` denies unknown tool names explicitly. | P2 |
 | R+15 | Constant-time comparison for JSON-RPC shared-secret auth. | ENFORCED (R-10.8) |
 | R+16 | Promotion-gate execution is denied network access. `autonoetic-gateway/src/sandbox.rs` (`BwrapIsolationOverrides::force_network_off`), `autonoetic-gateway/src/runtime/tools/sandbox.rs` (Evaluation-cap override), `autonoetic-gateway/src/execution.rs` (`execute_script_in_sandbox` override), `agents/specialists/evaluator.default/SKILL.md` + `agents/specialists/auditor.default/SKILL.md` (`Evaluation` capability). | ENFORCED |

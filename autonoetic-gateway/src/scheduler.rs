@@ -75,6 +75,9 @@ async fn run_scheduler_tick_at(
         }
         // Cleanup stale notifications (e.g., older than 24h)
         let _ = store.cleanup_stale_notifications(24);
+        if let Err(e) = store.prune_expired_grants() {
+            tracing::warn!(error = %e, "Failed to prune expired session approval grants");
+        }
     }
 
     let config = execution.config();

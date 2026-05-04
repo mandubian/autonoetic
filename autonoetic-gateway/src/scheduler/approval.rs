@@ -1102,6 +1102,23 @@ fn decide_request_with_options(
                             options.grant_targets.clone()
                         };
                         let session_id = decision.session_id.as_str();
+                        let computed_expiry = if options.grant_expires_at.is_none()
+                            && config.default_grant_ttl_secs > 0
+                        {
+                            let ttl_secs = i64::try_from(config.default_grant_ttl_secs)
+                                .unwrap_or(i64::MAX);
+                            let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
+                                .map(|dt| dt.with_timezone(&chrono::Utc))
+                                .unwrap_or_else(|_| chrono::Utc::now());
+                            let t = base + chrono::Duration::seconds(ttl_secs);
+                            Some(t.to_rfc3339())
+                        } else {
+                            None
+                        };
+                        let expires_at = options
+                            .grant_expires_at
+                            .as_deref()
+                            .or(computed_expiry.as_deref());
                         if let Err(e) = store.insert_session_grant(
                             root_sid,
                             session_id,
@@ -1111,7 +1128,7 @@ fn decide_request_with_options(
                             &decision.decided_by,
                             &decision.decided_at,
                             Some(&decision.request_id),
-                            options.grant_expires_at.as_deref(),
+                            expires_at,
                         ) {
                             tracing::warn!(
                                 target: "approval",
