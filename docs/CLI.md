@@ -106,12 +106,53 @@ autonoetic gateway approvals interactive
 | `a` | Approve selected request |
 | `r` | Reject selected request |
 | `R` | Refresh approval list |
-| `q` / `Esc` | Quit |
+| `?` | Ask a question about the selected approval |
+| `q` / `Esc` | Quit (also cancels a question in progress) |
 
 The TUI displays:
 - **Top**: List of pending approvals with request ID, agent, kind, and details (command for sandbox_exec, revision_id for revision_promote)
-- **Middle**: Detail panel showing the selected approval's full information (session, reason, command, dependencies, capabilities, detected hosts)
-- **Bottom**: Status bar showing the result of the last action
+- **Middle**: Detail panel showing the selected approval's full information (session, reason, command, dependencies, capabilities, detected hosts). In Q&A mode, shows the answer to your question.
+- **Bottom**: Status bar (or question input prompt when `?` is pressed)
+
+**Q&A mode**: Press `?` to ask a question about the selected approval. The detail panel switches to show the answer. Press `Esc` to return to normal navigation. Example questions: `what URL?`, `show me the code`, `what dependencies?`, `why does this need approval?`
+
+### `autonoetic gateway approvals ask`
+
+Ask a natural-language question about a specific approval request from the command line.
+
+```bash
+autonoetic gateway approvals ask <request_id> "<question>"
+```
+
+Answers common questions about any approval request (pending or decided) by inspecting its stored fields:
+
+| Question topic | Example questions |
+|---|---|
+| URLs / hosts | `"what URL?"`, `"which hosts?"`, `"what endpoint?"` |
+| Code / command | `"what code will run?"`, `"show me the command"` |
+| Dependencies | `"what packages?"`, `"what dependencies?"` |
+| Agent / session | `"which agent?"`, `"what session?"` |
+| Reason | `"why does this need approval?"`, `"what is the purpose?"` |
+| Capabilities | `"what capabilities?"`, `"what permissions?"` |
+| History | `"is this similar to a previous approval?"` |
+
+**Examples:**
+
+```bash
+# What URL will the code access?
+autonoetic gateway approvals ask apr-9e6420c1 "what URL will it access?"
+
+# Show the full command
+autonoetic gateway approvals ask apr-9e6420c1 "show me the code"
+
+# Why is this waiting for approval?
+autonoetic gateway approvals ask apr-9e6420c1 "why does this need approval?"
+
+# What new capabilities are being added?
+autonoetic gateway approvals ask apr-3458926a "what capabilities are being added?"
+```
+
+The answer is extracted directly from the stored approval record — no LLM is required.
 
 ```bash
 autonoetic gateway approvals list [--json]
@@ -347,8 +388,13 @@ Requires `AUTONOETIC_SHARED_SECRET` in the environment so chat requests can auth
 **Session persistence:** `--session-id` enables multi-turn conversations with context retention.
 
 **Commands during chat:**
-- `/exit` or `/quit` — Exit chat
+- `/session` — Show known sessions in the TUI and open the session picker
+- `/session new [name]` — Create a new session, optionally naming it explicitly
+- `/session switch <id>` — Switch to an existing session
 - `/status` — Show current session info
+- `/cancel` — Leave the current session picker/prompt
+- `/exit` or `/quit` — Exit chat
+- `/help` — Show available chat commands
 
 ---
 

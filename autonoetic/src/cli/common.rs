@@ -355,6 +355,16 @@ pub enum GatewayApprovalCommands {
         /// Approval request identifier.
         request_id: String,
     },
+    /// Ask a natural-language question about a specific approval request.
+    ///
+    /// Answers questions like "what URL will it access?", "what code will run?",
+    /// "why does this need approval?", "what dependencies does it install?", etc.
+    Ask {
+        /// Approval request identifier.
+        request_id: String,
+        /// The question to ask about this approval (e.g. "what URL?", "show me the code").
+        question: String,
+    },
     /// Show approval statistics and analytics.
     Stats {
         /// Filter by agent ID.

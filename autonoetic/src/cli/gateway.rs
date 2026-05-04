@@ -438,6 +438,23 @@ pub async fn handle_gateway_approvals(
                 }
             }
         }
+        super::common::GatewayApprovalCommands::Ask {
+            request_id,
+            question,
+        } => {
+            let approval = gateway_store.get_approval(request_id)?;
+            match approval {
+                None => println!("Approval '{}' not found.", request_id),
+                Some(a) => {
+                    println!("Q: {}", question);
+                    println!();
+                    match ask_approval_question_llm(&a, question, &config).await {
+                        Ok(answer) => println!("{}", answer),
+                        Err(e) => eprintln!("Error: {e}"),
+                    }
+                }
+            }
+        }
         super::common::GatewayApprovalCommands::Stats { agent, session, since } => {
             let since_ts = since.as_ref().map(|s| {
                 let secs = if s.ends_with('h') {
@@ -613,6 +630,16 @@ async fn run_interactive_approvals(
     let mut status_msg = String::new();
     let mut done = false;
 
+    // Q&A mode state
+    #[derive(PartialEq)]
+    enum TuiMode {
+        Navigate,
+        AskQuestion,
+    }
+    let mut tui_mode = TuiMode::Navigate;
+    let mut question_input = String::new();
+    let mut question_answer = String::new();
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -640,7 +667,7 @@ async fn run_interactive_approvals(
                 .split(area);
 
             let title = format!(
-                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  q: quit ",
+                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  ?: ask  q: quit ",
                 items.len()
             );
             let title_bar = Paragraph::new(Line::from(Span::styled(
@@ -731,7 +758,28 @@ async fn run_interactive_approvals(
             f.render_stateful_widget(list, chunks[1], &mut state);
 
             let selected = state.selected();
-            let detail_lines = if let Some(idx) = selected {
+
+            // In Q&A mode, the detail panel shows the answer (or a prompt).
+            let detail_lines = if tui_mode == TuiMode::AskQuestion {
+                if question_answer.is_empty() {
+                    vec![Line::from(Span::styled(
+                        " Type your question about this approval and press Enter…",
+                        Style::default().fg(Color::DarkGray),
+                    ))]
+                } else {
+                    let mut lines = vec![Line::from(vec![
+                        Span::styled(" Q: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled(question_input.clone(), Style::default().fg(Color::White)),
+                    ])];
+                    for answer_line in question_answer.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!(" {}", answer_line),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                    lines
+                }
+            } else if let Some(idx) = selected {
                 let req = &items[idx];
                 let mut lines = Vec::new();
                 lines.push(Line::from(vec![
@@ -881,9 +929,17 @@ async fn run_interactive_approvals(
                 .wrap(Wrap { trim: false });
             f.render_widget(detail, chunks[2]);
 
-            let status = if status_msg.is_empty() {
+            let status = if tui_mode == TuiMode::AskQuestion {
+                // Show the question input prompt in the status bar
+                let cursor_input = format!("{}_", question_input);
+                Line::from(vec![
+                    Span::styled(" ? Ask: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(cursor_input, Style::default().fg(Color::White)),
+                    Span::styled("  [Enter: submit  Esc: cancel]", Style::default().fg(Color::DarkGray)),
+                ])
+            } else if status_msg.is_empty() {
                 Line::from(Span::styled(
-                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  q: quit",
+                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  ?: ask  q: quit",
                     Style::default().fg(Color::DarkGray),
                 ))
             } else {
@@ -901,9 +957,50 @@ async fn run_interactive_approvals(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+
+                // Q&A mode intercepts all keys for text input
+                if tui_mode == TuiMode::AskQuestion {
+                    match key.code {
+                        KeyCode::Esc => {
+                            tui_mode = TuiMode::Navigate;
+                            question_input.clear();
+                            question_answer.clear();
+                        }
+                        KeyCode::Enter => {
+                            let q = question_input.trim().to_string();
+                            if !q.is_empty() {
+                                if let Some(idx) = state.selected() {
+                                    question_answer =
+                                        ask_approval_question_llm(&items[idx], &q, config)
+                                            .await
+                                            .unwrap_or_else(|e| format!("\u{26a0} {e}"));
+                                }
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            question_input.pop();
+                            question_answer.clear();
+                        }
+                        KeyCode::Char(c) => {
+                            question_input.push(c);
+                            question_answer.clear();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
                         done = true;
+                    }
+                    KeyCode::Char('?') => {
+                        if state.selected().is_some() {
+                            tui_mode = TuiMode::AskQuestion;
+                            question_input.clear();
+                            question_answer.clear();
+                            status_msg.clear();
+                        }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let selected = state.selected().unwrap_or(0);
@@ -1094,6 +1191,69 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len.saturating_sub(3)])
     }
+}
+
+/// Ask a natural-language question about an approval request using the configured LLM.
+///
+/// Serialises the full [`ApprovalRequest`] as JSON context and sends it to the
+/// LLM together with the operator's question.  The LLM preset is resolved from
+/// the gateway config (preference order: "fast" → "default" → first fixed preset).
+async fn ask_approval_question_llm(
+    req: &autonoetic_types::background::ApprovalRequest,
+    question: &str,
+    config: &autonoetic_types::config::GatewayConfig,
+) -> anyhow::Result<String> {
+    use autonoetic_gateway::llm::{build_driver, CompletionRequest, Message};
+    use autonoetic_gateway::runtime::llm_preset_resolver::resolve_fixed_preset;
+
+    // Resolve a fixed LLM preset (preference: "fast" → "default" → first available).
+    let llm_config = ["fast", "default"]
+        .iter()
+        .find_map(|name| {
+            config
+                .llm_presets
+                .get(*name)
+                .and_then(|p| resolve_fixed_preset(p))
+        })
+        .or_else(|| {
+            config
+                .llm_presets
+                .values()
+                .find_map(|p| resolve_fixed_preset(p))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No LLM preset configured. Add a 'fast' or 'default' preset to \
+                 config.yaml to enable approval Q&A."
+            )
+        })?;
+
+    let model = llm_config.model.clone();
+    let client = reqwest::Client::new();
+    let driver = build_driver(llm_config, client)?;
+
+    let approval_json = serde_json::to_string_pretty(req)?;
+    let request = CompletionRequest::simple(
+        model,
+        vec![
+            Message::system(
+                "You are a security assistant helping an operator review pending agent \
+                 approval requests before deciding whether to approve or reject them. \
+                 Answer questions concisely and factually based only on the provided \
+                 approval data. Do not invent or infer information that is not present.",
+            ),
+            Message::user(format!(
+                "Approval request data:\n```json\n{}\n```\n\nQuestion: {}",
+                approval_json, question
+            )),
+        ],
+    );
+
+    let response = driver.complete(&request).await?;
+    if response.text.is_empty() {
+        anyhow::bail!("LLM returned an empty response");
+    }
+    Ok(response.text)
 }
 
 pub async fn handle_gateway_interactions(
