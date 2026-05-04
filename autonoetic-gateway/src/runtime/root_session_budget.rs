@@ -114,6 +114,13 @@ impl RootSessionBudgetRegistry {
             if c.is_finite() && c >= 0.0 {
                 st.session_cost_usd += c;
             }
+        } else if self.limits.max_session_price_usd.is_some() {
+            anyhow::bail!(
+                "Root session cost-budget enforcement requires price estimation but \
+                 catalog is unavailable (R-6.5, R++10: fail-mode=refuse-session-start). \
+                 Refusing untracked LLM completion (root: {})",
+                root_session_id
+            );
         }
 
         if let Some(max_tok) = self.limits.max_llm_tokens {

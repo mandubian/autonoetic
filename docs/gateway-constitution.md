@@ -247,7 +247,7 @@ Per-session registries in `runtime/session_budget.rs`,
 | R-6.2 | `max_llm_rounds` gates before each LLM call; incremented after a real provider call. | session-budget.md | `session_budget.rs::check_pre_llm` | ENFORCED |
 | R-6.3 | `max_tool_invocations` gates before each tool batch; all calls in a batch reserve together. | session-budget.md | `reserve_tool_invocations` | ENFORCED |
 | R-6.4 | `max_wall_clock_secs` checked at LLM pre-check. | session-budget.md | `check_pre_llm` | ENFORCED |
-| R-6.5 | `max_session_price_usd` enforced via OpenRouter catalog estimates. | budget-management.md | `record_llm_completion` + catalog | PARTIAL (silent-disable if catalog unavailable — see §12) |
+| R-6.5 | `max_session_price_usd` enforced via OpenRouter catalog estimates. | budget-management.md | `record_llm_completion` + catalog + R++10 fail-mode enforcement | ENFORCED (catalog-unavailable now refuses LLM completion when price limit is set, per R++10 fail-mode table) |
 | R-6.6 | OpenRouter catalog fetches with ~1h TTL; disabled by env. | budget-management.md | `openrouter_catalog.rs::refresh_if_needed` | ENFORCED |
 | R-6.7 | Prompt-budget breakdown is logged before every LLM call. | prompt-budget.md | `prompt_budget.rs` | ENFORCED |
 | R-6.8 | `system_prompt` and `tool_definitions` max-tokens enforced independently. | prompt-budget.md | section caps in prompt-budget | ENFORCED |
@@ -413,7 +413,7 @@ item will move into its numbered category once ENFORCED.
 | R++7 | Cross-gateway causal continuity: cross-gateway events carry a `peer_event_ref` pointing to the corresponding remote chain entry; gateways periodically exchange signed `chain_attestation` digests allowing end-to-end federated trace verification. | P1 | §10 Federation + §8 Audit |
 | R++8 | Sandbox-escape attempts are counted. Kernel-denied syscalls (seccomp), denied mount attempts, ptrace calls, and equivalents on docker/microvm drivers increment a per-session counter. Threshold crossings trigger R-7.18 degraded mode; further escalation triggers emergency stop. | ENFORCED (`sandbox.rs:detect_sandbox_escape_indicators`, `observability.rs:record_sandbox_escape_attempt`, `scheduler.rs:run_scheduler_tick_at`, `constitution_sandbox_escape_accounting.rs`) | §3 Sandbox + §7 Abuse |
 | R++9 | A property test pins gateway determinism: for random valid inputs, the gateway's decision for `(capability-set, tool-call, recorded-state) → verdict` is a pure function — no LLM call, no network fetch with undeclared fallback, no hidden branch. Any future change that adds nondeterminism fails the test. Prevents principle erosion. | P2 | §13 (cross-cutting) |
-| R++10 | Unified fail-mode table: every constitutional invariant has a declared failure action in one place — `refuse-boot`, `refuse-session-start`, `degrade`, `emergency-stop`, or `log-only`. Eliminates silent-disable (R-6.5 OpenRouter-catalog-down default is the archetype to fix). | P1 | §13 (cross-cutting) |
+| R++10 | Unified fail-mode table: every constitutional invariant has a declared failure action in one place — `refuse-boot`, `refuse-session-start`, `degrade`, `emergency-stop`, or `log-only`. Eliminates silent-disable (R-6.5 OpenRouter-catalog-down default is the archetype to fix). | ENFORCED (`fail_mode.rs`, `session_budget.rs` (R-6.5 catalog-unavailable enforcement), `constitution_fail_mode_table.rs`) | §13 (cross-cutting) |
 
 ### Constitutional additions (`R+++`)
 
