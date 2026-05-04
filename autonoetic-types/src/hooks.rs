@@ -21,6 +21,10 @@ pub enum HookEvent {
     AgentPromoted,
     #[serde(rename = "emergency_stop")]
     EmergencyStop,
+    /// Fired after a row is inserted into `causal_events` when the event matches
+    /// gateway policy-hook filters (observer-only).
+    #[serde(rename = "policy.decision")]
+    PolicyDecision,
 }
 
 impl HookEvent {
@@ -34,6 +38,7 @@ impl HookEvent {
             Self::ArtifactCreated => "artifact.created",
             Self::AgentPromoted => "agent.promoted",
             Self::EmergencyStop => "emergency_stop",
+            Self::PolicyDecision => "policy.decision",
         }
     }
 }
@@ -135,6 +140,80 @@ impl HookContext {
             root_session_id: root_session_id.to_string(),
             session_id: None,
             agent_id: None,
+            gateway_dir: None,
+            fields,
+        }
+    }
+
+    /// Context for [`HookEvent::PolicyDecision`] after a causal event row is persisted.
+    ///
+    /// `fields` keys are stable for `message_template` substitution (same names are also on
+    /// `root_session_id` / `session_id` / `agent_id` for structured consumers):
+    /// `root_session_id`, `session_id`, `agent_id`, `event_id`, `rule_ids`, `primary_rule_id`,
+    /// `decision`, `status`, `category`, `action`, `target`, `reason`, `turn_id`, `source`
+    /// (`causal_events`).
+    pub fn for_policy_decision(
+        root_session_id: &str,
+        event: &crate::causal_chain::CausalEventRecord,
+    ) -> Self {
+        use crate::causal_chain::RULE_ID_EVENT_ATTRIBUTION;
+
+        let rule_ids = event.enforced_rules.join(",");
+        let primary_rule_id = event
+            .enforced_rules
+            .iter()
+            .find(|r| r.as_str() != RULE_ID_EVENT_ATTRIBUTION)
+            .cloned()
+            .or_else(|| event.enforced_rules.first().cloned())
+            .unwrap_or_default();
+
+        let status_u = event.status.to_ascii_uppercase();
+        let decision = match status_u.as_str() {
+            "DENIED" | "ERROR" => "denied",
+            "SUCCESS" => "allowed",
+            _ => "unknown",
+        };
+
+        let reason = event
+            .reason
+            .as_deref()
+            .map(|s| {
+                const MAX: usize = 2048;
+                if s.chars().count() <= MAX {
+                    s.to_string()
+                } else {
+                    s.chars().take(MAX).collect::<String>()
+                }
+            })
+            .unwrap_or_default();
+
+        let mut fields = HashMap::new();
+        fields.insert("root_session_id".to_string(), root_session_id.to_string());
+        fields.insert("session_id".to_string(), event.session_id.clone());
+        fields.insert("agent_id".to_string(), event.agent_id.clone());
+        fields.insert("event_id".to_string(), event.event_id.clone());
+        fields.insert("rule_ids".to_string(), rule_ids);
+        fields.insert("primary_rule_id".to_string(), primary_rule_id);
+        fields.insert("decision".to_string(), decision.to_string());
+        fields.insert("status".to_string(), event.status.clone());
+        fields.insert("category".to_string(), event.category.clone());
+        fields.insert("action".to_string(), event.action.clone());
+        fields.insert(
+            "target".to_string(),
+            event.target.clone().unwrap_or_default(),
+        );
+        fields.insert("reason".to_string(), reason);
+        fields.insert(
+            "turn_id".to_string(),
+            event.turn_id.clone().unwrap_or_default(),
+        );
+        fields.insert("source".to_string(), "causal_events".to_string());
+
+        Self {
+            event: HookEvent::PolicyDecision,
+            root_session_id: root_session_id.to_string(),
+            session_id: Some(event.session_id.clone()),
+            agent_id: Some(event.agent_id.clone()),
             gateway_dir: None,
             fields,
         }

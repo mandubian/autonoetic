@@ -162,30 +162,39 @@ impl GatewayStore {
         &self,
         event: &autonoetic_types::causal_chain::CausalEventRecord,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO causal_events (
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO causal_events (
                 event_id, agent_id, session_id, turn_id, event_seq, timestamp,
                 category, action, status, enforced_rules, target, payload, payload_ref, evidence_ref, reason
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
-                &event.event_id,
-                &event.agent_id,
-                &event.session_id,
-                event.turn_id.as_deref(),
-                event.event_seq as i64,
-                &event.timestamp,
-                &event.category,
-                &event.action,
-                &event.status,
-                serde_json::to_string(&event.enforced_rules)?,
-                event.target.as_deref(),
-                event.payload.as_deref(),
-                event.payload_ref.as_deref(),
-                event.evidence_ref.as_deref(),
-                event.reason.as_deref(),
-            ],
-        )?;
+                params![
+                    &event.event_id,
+                    &event.agent_id,
+                    &event.session_id,
+                    event.turn_id.as_deref(),
+                    event.event_seq as i64,
+                    &event.timestamp,
+                    &event.category,
+                    &event.action,
+                    &event.status,
+                    serde_json::to_string(&event.enforced_rules)?,
+                    event.target.as_deref(),
+                    event.payload.as_deref(),
+                    event.payload_ref.as_deref(),
+                    event.evidence_ref.as_deref(),
+                    event.reason.as_deref(),
+                ],
+            )?;
+        }
+        if let Ok(guard) = self.policy_hook_executor.lock() {
+            if let Some(w) = guard.as_ref() {
+                if let Some(exec) = w.upgrade() {
+                    exec.maybe_dispatch_policy_decision_hook(event);
+                }
+            }
+        }
         Ok(())
     }
 

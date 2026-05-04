@@ -70,7 +70,7 @@ approval_timeout_secs: 600
 # Reactive bindings from gateway events to actions.
 # Available events: session.closed, session.suspended, approval.resolved,
 #   approval.requested, workflow.join.satisfied, artifact.created,
-#   agent.promoted, emergency_stop
+#   agent.promoted, emergency_stop, policy.decision
 # Available actions: publish_report, deliver_signal, agent.spawn, http.callback
 #
 # hooks:
@@ -91,6 +91,9 @@ approval_timeout_secs: 600
 #   #   approval.resolved: request_id, decision
 #   #   session.closed:    close_reason, turn_count
 #   #   workflow.join.satisfied: workflow_id, task_ids
+#   #   policy.decision:   root_session_id, session_id, agent_id, event_id, rule_ids,
+#   #                      primary_rule_id, decision, status, category, action, target,
+#   #                      reason, turn_id, source, plus {{event}} -> policy.decision
 #   # allowed_agents restricts which agent IDs the hook may spawn (ACL).
 #   - on: "approval.resolved"
 #     action: "agent.spawn"
@@ -100,6 +103,20 @@ approval_timeout_secs: 600
 #       message_template: "Evaluate approval {{request_id}} (decision: {{decision}})"
 #     allowed_agents:
 #       - evaluator.default       # ACL: only this agent may be spawned by this hook
+#
+#   # Observer-only: after selected causal_events rows (denials/errors, or success with
+#   # non-baseline rule ids). See docs/ARCHITECTURE.md § Constitutional observability.
+#   - on: "policy.decision"
+#     action: "agent.spawn"
+#     async: true
+#     params:
+#       agent_id: "constitutional-observer.default"
+#       message_template: |
+#         {{event}} root={{root_session_id}} session={{session_id}} agent={{agent_id}}
+#         status={{status}} decision={{decision}} rules={{rule_ids}} event_id={{event_id}}
+#         category={{category}} action={{action}} target={{target}} reason={{reason}}
+#     allowed_agents:
+#       - constitutional-observer.default
 
 # ── Chat TUI ──────────────────────────────────────────────────────────
 # Inline approval from the chat interface (Ctrl+A).

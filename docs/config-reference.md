@@ -428,7 +428,7 @@ Reactive bindings from gateway events to actions. When an event fires (e.g., ses
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `hooks[].on` | string | required | Event name: `session.closed`, `session.suspended`, `approval.resolved`, `approval.requested`, `workflow.join.satisfied`, `artifact.created`, `agent.promoted`, `emergency_stop` |
+| `hooks[].on` | string | required | Event name: `session.closed`, `session.suspended`, `approval.resolved`, `approval.requested`, `workflow.join.satisfied`, `artifact.created`, `agent.promoted`, `emergency_stop`, `policy.decision` |
 | `hooks[].action` | string | required | Action: `publish_report`, `deliver_signal`, `agent_spawn`, `http.callback` |
 | `hooks[].async` | bool | `false` | If true, the hook runs in a background task without blocking the event |
 | `hooks[].params` | object | `{}` | Action-specific parameters |
@@ -459,6 +459,23 @@ hooks:
     params:
       url: "https://webhook.example.com/autonoetic/session-closed"
       secret_env: "AUTONOETIC_HOOK_SECRET"
+```
+
+`policy.decision` fires after selected `causal_events` inserts; see **Constitutional observability (`policy.decision`)** under [Hook System](ARCHITECTURE.md#hook-system) in `ARCHITECTURE.md`. Example: spawn an observer agent on denials and other policy-tagged outcomes:
+
+```yaml
+hooks:
+  - on: "policy.decision"
+    action: "agent.spawn"
+    async: true
+    params:
+      agent_id: "constitutional-observer.default"
+      message_template: |
+        {{event}} root={{root_session_id}} session={{session_id}} agent={{agent_id}}
+        status={{status}} decision={{decision}} rules={{rule_ids}} event_id={{event_id}}
+        category={{category}} action={{action}} target={{target}} reason={{reason}}
+    allowed_agents:
+      - constitutional-observer.default
 ```
 
 ---

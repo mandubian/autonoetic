@@ -57,6 +57,29 @@ impl HookExecutor {
         self.spawn_tx = Some(tx);
     }
 
+    pub fn wants_policy_decision_hooks(&self) -> bool {
+        self.hooks
+            .iter()
+            .any(|h| h.event == HookEvent::PolicyDecision)
+    }
+
+    /// Called by `GatewayStore::create_causal_event` after the row is committed.
+    /// Observer-only: never affects allow/deny.
+    pub fn maybe_dispatch_policy_decision_hook(
+        &self,
+        event: &autonoetic_types::causal_chain::CausalEventRecord,
+    ) {
+        if !self.wants_policy_decision_hooks() {
+            return;
+        }
+        if !autonoetic_types::causal_chain::causal_event_notifies_policy_decision(event) {
+            return;
+        }
+        let root = crate::runtime::content_store::root_session_id(&event.session_id);
+        let ctx = HookContext::for_policy_decision(&root, event);
+        self.dispatch_async(ctx);
+    }
+
     pub fn dispatch(&self, ctx: &HookContext) {
         for hook in &self.hooks {
             if hook.event != ctx.event {
@@ -721,18 +744,9 @@ fn validate_callback_url(
     Ok(parsed)
 }
 
-/// Resolve the URL's hostname and check every returned address against the
-/// same disallow-list used for literal IP validation. This blocks the common
-/// case of a public hostname pointing at RFC-1918 / loopback space.
-///
-/// Limitation: this cannot prevent DNS rebinding (the resolution may change
-/// between this check and the actual TCP connection), but it raises the bar
-/// significantly compared to no check at all.
 async fn check_resolved_ips_not_internal(url: &Url) -> anyhow::Result<()> {
     let host = match url.host() {
         Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
-            // IP literals are already validated by validate_callback_url via
-            // is_disallowed_callback_host; no DNS resolution needed.
             return Ok(());
         }
         Some(url::Host::Domain(d)) => d.to_string(),
@@ -819,8 +833,6 @@ fn build_http_callback_delivery_id(ctx: &HookContext, url: &Url, hook: &HookConf
         hasher.update(b"=");
         hasher.update(value.as_bytes());
     }
-    // Include the hook params so that two hooks sharing the same event+URL
-    // but differing in params (e.g. different secret_env) get distinct IDs.
     hasher.update(b"\nhook_params:");
     let mut param_pairs: Vec<_> = hook.params.iter().collect();
     param_pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -870,8 +882,6 @@ fn load_sanitized_session_report(ctx: &HookContext) -> anyhow::Result<Option<ser
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(_) => {
-            // For child sessions the report may live under the root session
-            // directory; try the root path as a fallback.
             if session_id != ctx.root_session_id {
                 let root_path = std::path::Path::new(gateway_dir)
                     .join("sessions")
@@ -935,6 +945,52 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
+#[cfg(test)]
+mod policy_decision_hook_tests {
+    use autonoetic_types::causal_chain::{
+        causal_event_notifies_policy_decision, default_enforced_rules, CausalEventRecord,
+    };
+
+    fn sample_record(status: &str, enforced_rules: Vec<String>) -> CausalEventRecord {
+        CausalEventRecord {
+            event_id: "e1".into(),
+            agent_id: "a".into(),
+            session_id: "s".into(),
+            turn_id: None,
+            event_seq: 1,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            category: "tool_invoke".into(),
+            action: "completed".into(),
+            status: status.into(),
+            enforced_rules,
+            target: None,
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn emits_denied_even_if_only_baseline_rule() {
+        let ev = sample_record("DENIED", default_enforced_rules());
+        assert!(causal_event_notifies_policy_decision(&ev));
+    }
+
+    #[test]
+    fn emits_success_when_non_baseline_rule_present() {
+        let mut rules = default_enforced_rules();
+        rules.push("R+16".into());
+        let ev = sample_record("SUCCESS", rules);
+        assert!(causal_event_notifies_policy_decision(&ev));
+    }
+
+    #[test]
+    fn skips_success_when_only_baseline_rule() {
+        let ev = sample_record("SUCCESS", default_enforced_rules());
+        assert!(!causal_event_notifies_policy_decision(&ev));
+    }
+}
 fn sanitize_report_for_publishing(report_json: &str) -> String {
     let mut parsed: serde_json::Value = match serde_json::from_str(report_json) {
         Ok(v) => v,

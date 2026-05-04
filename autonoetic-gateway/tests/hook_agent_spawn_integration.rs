@@ -245,4 +245,8 @@ fn test_hook_event_serde_dotted_names() {
 
     let wj: HookEvent = serde_json::from_str("\"workflow.join.satisfied\"").unwrap();
     assert_eq!(wj, HookEvent::WorkflowJoinSatisfied);
+
+    let pd: HookEvent = serde_json::from_str("\"policy.decision\"").unwrap();
+    assert_eq!(pd, HookEvent::PolicyDecision);
+    assert_eq!(serde_json::to_string(&HookEvent::PolicyDecision).unwrap(), "\"policy.decision\"");
 }
