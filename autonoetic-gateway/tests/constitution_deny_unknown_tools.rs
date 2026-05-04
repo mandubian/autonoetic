@@ -3,6 +3,10 @@
 //! R+14: Unknown tool names must deny by default, not silent-allow.
 //! The policy engine already implements this — these tests pin the
 //! behavior so any regression is caught.
+//!
+//! Note: `can_invoke_tool` attributes decisions to R-1.1 (the tool invocation
+//! rule), which is the enforcement mechanism for R-1.11 (deny-by-default).
+//! All tests assert R-1.1 as the enforced rule ID.
 
 mod support;
 
@@ -140,7 +144,19 @@ fn r_plus_14_wildcard_allows_all() {
 }
 
 #[test]
-fn r_plus_14_empty_tool_name_denied() {
+fn r_plus_14_empty_tool_name_denied_without_wildcard() {
+    let manifest = manifest_with_sandbox(vec!["web."]);
+    let policy = PolicyEngine::new(manifest);
+
+    let empty = policy.can_invoke_tool("");
+    assert!(
+        !empty.is_allowed(),
+        "empty tool name must be denied without wildcard"
+    );
+}
+
+#[test]
+fn r_plus_14_wildcard_allows_empty_tool_name() {
     let manifest = manifest_with_sandbox(vec!["*"]);
     let policy = PolicyEngine::new(manifest);
 

@@ -31,6 +31,14 @@ impl GatewayStore {
             return Ok(0);
         }
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        self.prune_execution_traces_with_cutoff(&Some(cutoff))
+    }
+
+    /// Prune execution_traces older than cutoff. None = no pruning.
+    pub fn prune_execution_traces_with_cutoff(&self, cutoff: &Option<String>) -> Result<u64> {
+        let Some(cutoff) = cutoff else {
+            return Ok(0);
+        };
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "DELETE FROM execution_traces WHERE timestamp < ?1",
@@ -45,6 +53,14 @@ impl GatewayStore {
             return Ok(0);
         }
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        self.prune_causal_events_with_cutoff(&Some(cutoff))
+    }
+
+    /// Prune causal_events older than cutoff. None = no pruning.
+    pub fn prune_causal_events_with_cutoff(&self, cutoff: &Option<String>) -> Result<u64> {
+        let Some(cutoff) = cutoff else {
+            return Ok(0);
+        };
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "DELETE FROM causal_events WHERE timestamp < ?1",
@@ -56,10 +72,11 @@ impl GatewayStore {
     /// Apply retention policy from config. Call once on gateway startup.
     /// Emits a `retention.pruned` causal event with counts of pruned rows.
     pub fn apply_retention_policy(&self, retention: &RetentionConfig) -> Result<()> {
+        let now = chrono::Utc::now();
+
         let traces_cutoff = if retention.execution_traces_days > 0 {
             Some(
-                (chrono::Utc::now()
-                    - chrono::Duration::days(retention.execution_traces_days as i64))
+                (now - chrono::Duration::days(retention.execution_traces_days as i64))
                     .to_rfc3339(),
             )
         } else {
@@ -67,15 +84,14 @@ impl GatewayStore {
         };
         let events_cutoff = if retention.causal_events_days > 0 {
             Some(
-                (chrono::Utc::now()
-                    - chrono::Duration::days(retention.causal_events_days as i64))
+                (now - chrono::Duration::days(retention.causal_events_days as i64))
                     .to_rfc3339(),
             )
         } else {
             None
         };
 
-        let traces_pruned = match self.prune_execution_traces(retention.execution_traces_days) {
+        let traces_pruned = match self.prune_execution_traces_with_cutoff(&traces_cutoff) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(
@@ -86,7 +102,7 @@ impl GatewayStore {
                 0
             }
         };
-        let events_pruned = match self.prune_causal_events(retention.causal_events_days) {
+        let events_pruned = match self.prune_causal_events_with_cutoff(&events_cutoff) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(
@@ -99,6 +115,9 @@ impl GatewayStore {
         };
 
         if traces_pruned > 0 || events_pruned > 0 {
+            let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
+            rules.push("R-8.17".to_string());
+
             let payload = serde_json::json!({
                 "execution_traces_pruned": traces_pruned,
                 "causal_events_pruned": events_pruned,
@@ -109,25 +128,31 @@ impl GatewayStore {
                     "causal_events_days": retention.causal_events_days,
                 },
             });
-            let _ = self.create_causal_event(
+            if let Err(e) = self.create_causal_event(
                 &autonoetic_types::causal_chain::CausalEventRecord {
                     event_id: uuid::Uuid::new_v4().to_string(),
                     agent_id: "gateway".to_string(),
                     session_id: "system".to_string(),
                     turn_id: None,
-                    event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    event_seq: now.timestamp_millis().max(0) as u64,
+                    timestamp: now.to_rfc3339(),
                     category: "retention".to_string(),
                     action: "pruned".to_string(),
                     status: autonoetic_types::causal_chain::EntryStatus::Success.to_string(),
-                    enforced_rules: vec![],
+                    enforced_rules: rules,
                     target: None,
                     payload: serde_json::to_string(&payload).ok(),
                     payload_ref: None,
                     evidence_ref: None,
                     reason: None,
                 },
-            );
+            ) {
+                tracing::warn!(
+                    target: "gateway_store",
+                    error = %e,
+                    "Failed to record retention.pruned causal event"
+                );
+            }
         }
 
         Ok(())

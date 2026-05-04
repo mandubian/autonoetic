@@ -8,6 +8,7 @@
 mod support;
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use autonoetic_types::causal_chain::default_enforced_rules;
 use autonoetic_types::config::RetentionConfig;
 
 #[test]
@@ -50,7 +51,7 @@ fn r_plus_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
         category: "test".to_string(),
         action: "old_event".to_string(),
         status: "success".to_string(),
-        enforced_rules: vec![],
+        enforced_rules: default_enforced_rules(),
         target: None,
         payload: None,
         payload_ref: None,
@@ -92,6 +93,11 @@ fn r_plus_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
     );
     assert_eq!(payload["retention_config"]["causal_events_days"], 1);
 
+    assert!(
+        pruned.enforced_rules.iter().any(|r| r == "R-8.17"),
+        "retention.pruned event must cite R-8.17 in enforced_rules"
+    );
+
     Ok(())
 }
 
@@ -111,7 +117,7 @@ fn r_plus_17_retention_pruned_event_actor_is_gateway() -> anyhow::Result<()> {
         category: "test".to_string(),
         action: "old".to_string(),
         status: "success".to_string(),
-        enforced_rules: vec![],
+        enforced_rules: default_enforced_rules(),
         target: None,
         payload: None,
         payload_ref: None,
@@ -159,7 +165,7 @@ fn r_plus_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
         category: "test".to_string(),
         action: "event".to_string(),
         status: "success".to_string(),
-        enforced_rules: vec![],
+        enforced_rules: default_enforced_rules(),
         target: None,
         payload: None,
         payload_ref: None,
