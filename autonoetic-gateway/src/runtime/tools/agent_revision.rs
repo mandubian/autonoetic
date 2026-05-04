@@ -680,9 +680,10 @@ fn create_revision_from_files(
     });
 
     if let Some(obj) = response_obj.as_object_mut() {
-        if let Some(sig) = &rev.signature {
-            obj.insert("signed_by".to_string(), serde_json::json!(rev.signer_id));
-            let _ = sig;
+        if rev.signature.is_some() {
+            if let Some(ref signer_id) = rev.signer_id {
+                obj.insert("signed_by".to_string(), serde_json::json!(signer_id));
+            }
         }
     }
 

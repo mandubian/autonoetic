@@ -429,7 +429,7 @@ Reactive bindings from gateway events to actions. When an event fires (e.g., ses
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `hooks[].on` | string | required | Event name: `session.closed`, `session.suspended`, `approval.resolved`, `approval.requested`, `workflow.join.satisfied`, `artifact.created`, `agent.promoted`, `emergency_stop`, `policy.decision` |
-| `hooks[].action` | string | required | Action: `publish_report`, `deliver_signal`, `agent_spawn`, `http.callback` |
+| `hooks[].action` | string | required | Action: `publish_report`, `deliver_signal`, `agent.spawn`, `http.callback` |
 | `hooks[].async` | bool | `false` | If true, the hook runs in a background task without blocking the event |
 | `hooks[].params` | object | `{}` | Action-specific parameters |
 | `hooks[].callback_allowlist` | list | `[]` | Required for `http.callback`. Allowlist entries use grant-target shapes such as `{ kind: "url_prefix", value: "https://hooks.example.com/autonoetic/" }` |

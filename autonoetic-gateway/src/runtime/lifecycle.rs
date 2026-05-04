@@ -3020,7 +3020,7 @@ fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
 ///
 /// Manifest-declared tiers always take precedence over runtime inference — if an
 /// agent explicitly restricts itself, the restriction is honoured.
-fn determine_tool_tier_filter(
+pub fn determine_tool_tier_filter(
     manifest: &AgentManifest,
     session_id: Option<&str>,
     has_pending_approvals: bool,

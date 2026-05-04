@@ -389,6 +389,10 @@ impl GatewayExecutionService {
         hook_exec.set_spawn_tx(spawn_tx);
         let hook_executor = Arc::new(hook_exec);
 
+        if let Some(ref store) = gateway_store {
+            store.set_policy_hook_executor(&hook_executor);
+        }
+
         let svc = Self {
             execution_semaphore: Arc::new(Semaphore::new(config.max_concurrent_spawns.max(1))),
             agent_admission: Arc::new(Mutex::new(HashMap::new())),
