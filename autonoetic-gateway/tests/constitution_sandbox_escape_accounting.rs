@@ -147,3 +147,94 @@ fn r_plus_plus_8_counts_are_session_scoped() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn r_plus_plus_8_threshold_zero_means_disabled() {
+    let config = autonoetic_types::config::GatewayConfig {
+        escape_attempt_degrade_threshold: 0,
+        escape_attempt_emergency_threshold: 0,
+        ..Default::default()
+    };
+    assert_eq!(config.escape_attempt_degrade_threshold, 0);
+    assert_eq!(config.escape_attempt_emergency_threshold, 0);
+}
+
+#[test]
+fn r_plus_plus_8_sessions_exceeding_threshold_returns_matching_sessions() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    for i in 0..6 {
+        store.record_sandbox_escape_attempt(
+            "sess-degrade",
+            "root-degrade",
+            "agent-1",
+            "SIGSYS",
+            &format!("attempt {}", i),
+            Some(159),
+        )?;
+    }
+    for i in 0..3 {
+        store.record_sandbox_escape_attempt(
+            "sess-ok",
+            "root-ok",
+            "agent-1",
+            "ESCAPE_SYSCALL",
+            &format!("attempt {}", i),
+            None,
+        )?;
+    }
+
+    let above5 = store.sessions_exceeding_escape_threshold(5)?;
+    assert_eq!(above5.len(), 1);
+    assert_eq!(above5[0].0, "sess-degrade");
+    assert!(above5[0].2 >= 5);
+
+    let above2 = store.sessions_exceeding_escape_threshold(2)?;
+    assert_eq!(above2.len(), 2);
+
+    let above10 = store.sessions_exceeding_escape_threshold(10)?;
+    assert!(above10.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn r_plus_plus_8_sessions_exceeding_threshold_zero_returns_empty() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    for i in 0..50 {
+        store.record_sandbox_escape_attempt(
+            "sess-many",
+            "root-many",
+            "agent-1",
+            "SIGSYS",
+            &format!("attempt {}", i),
+            Some(159),
+        )?;
+    }
+
+    let result = store.sessions_exceeding_escape_threshold(0)?;
+    assert!(result.is_empty(), "threshold=0 must disable matching");
+
+    Ok(())
+}
+
+#[test]
+fn r_plus_plus_8_emit_escape_threshold_event_creates_causal_event() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    store.emit_escape_threshold_event("sess-1", "root-1", 7, 5, "degradation")?;
+
+    let events = store.search_causal_events(Some("sess-1"), None, 10)?;
+    assert_eq!(events.len(), 1);
+    assert!(events[0].action.contains("escape_threshold_degradation"));
+    assert_eq!(events[0].category, "security");
+
+    Ok(())
+}

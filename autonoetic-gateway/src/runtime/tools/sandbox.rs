@@ -2239,7 +2239,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         let (degrade_threshold, emergency_threshold) = config
                             .map(|c| (c.escape_attempt_degrade_threshold, c.escape_attempt_emergency_threshold))
                             .unwrap_or((5, 20));
-                        if count >= emergency_threshold {
+                        if emergency_threshold > 0 && count >= emergency_threshold {
                             tracing::error!(
                                 target: "sandbox_exec",
                                 session_id = %sid,
@@ -2247,7 +2247,20 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                                 threshold = emergency_threshold,
                                 "Sandbox escape attempts exceeded emergency threshold (R++8)"
                             );
-                        } else if count >= degrade_threshold {
+                            if let Err(e) = store.emit_escape_threshold_event(
+                                sid,
+                                root_sid,
+                                count,
+                                emergency_threshold,
+                                "emergency",
+                            ) {
+                                tracing::warn!(
+                                    target: "sandbox_exec",
+                                    error = %e,
+                                    "Failed to emit escape threshold causal event"
+                                );
+                            }
+                        } else if degrade_threshold > 0 && count >= degrade_threshold {
                             tracing::warn!(
                                 target: "sandbox_exec",
                                 session_id = %sid,
@@ -2255,6 +2268,19 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                                 threshold = degrade_threshold,
                                 "Sandbox escape attempts exceeded degradation threshold (R++8)"
                             );
+                            if let Err(e) = store.emit_escape_threshold_event(
+                                sid,
+                                root_sid,
+                                count,
+                                degrade_threshold,
+                                "degradation",
+                            ) {
+                                tracing::warn!(
+                                    target: "sandbox_exec",
+                                    error = %e,
+                                    "Failed to emit escape threshold causal event"
+                                );
+                            }
                         }
                         body["escape_attempt_count"] = serde_json::json!(count);
                     }
