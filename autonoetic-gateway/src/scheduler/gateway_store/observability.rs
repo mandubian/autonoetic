@@ -1021,6 +1021,53 @@ impl GatewayStore {
         }
         Ok(orphans)
     }
+
+    pub fn record_sandbox_escape_attempt(
+        &self,
+        session_id: &str,
+        root_session_id: &str,
+        agent_id: &str,
+        indicator: &str,
+        detail: &str,
+        exit_code: Option<i32>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("gateway_store conn mutex");
+        conn.execute(
+            "INSERT INTO sandbox_escape_attempts
+                (session_id, root_session_id, agent_id, indicator, detail, exit_code, detected_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                session_id,
+                root_session_id,
+                agent_id,
+                indicator,
+                detail,
+                exit_code,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_sandbox_escape_attempts_for_session(&self, session_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("gateway_store conn mutex");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sandbox_escape_attempts WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    pub fn count_sandbox_escape_attempts_for_root(&self, root_session_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("gateway_store conn mutex");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sandbox_escape_attempts WHERE root_session_id = ?1",
+            params![root_session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
 }
 
 #[cfg(test)]

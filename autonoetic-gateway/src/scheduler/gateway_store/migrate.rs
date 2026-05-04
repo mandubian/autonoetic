@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 24;
+const SCHEMA_VERSION_LATEST: i64 = 25;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -508,6 +508,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_constitutional_proposals_v22(conn)?;
     apply_approval_hardening_v23(conn)?;
     apply_revision_signature_v24(conn)?;
+    apply_sandbox_escape_attempts_v25(conn)?;
 
     Ok(())
 }
@@ -1441,6 +1442,44 @@ fn apply_revision_signature_v24(conn: &mut Connection) -> Result<()> {
         params![
             24_i64,
             "revision_signature",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_sandbox_escape_attempts_v25(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 25 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sandbox_escape_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            root_session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            indicator TEXT NOT NULL,
+            detail TEXT,
+            exit_code INTEGER,
+            detected_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_escape_attempts_session
+            ON sandbox_escape_attempts(session_id);
+        CREATE INDEX IF NOT EXISTS idx_escape_attempts_root_session
+            ON sandbox_escape_attempts(root_session_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            25_i64,
+            "sandbox_escape_attempts",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

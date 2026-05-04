@@ -411,6 +411,70 @@ fn sandbox_exec_pid_guard(
 
 /// § 3.6 — Detects network error patterns in sandbox output.
 /// Returns the names of matched patterns (e.g., "ConnectionError", "URLError").
+pub struct EscapeAttempt {
+    pub indicator: String,
+    pub detail: String,
+}
+
+pub fn detect_sandbox_escape_indicators(
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> Vec<EscapeAttempt> {
+    let mut attempts = Vec::new();
+
+    let combined = stderr.to_lowercase();
+    let is_sigsys = exit_code == Some(159);
+
+    if is_sigsys {
+        attempts.push(EscapeAttempt {
+            indicator: "SIGSYS".to_string(),
+            detail: "Process killed by SIGSYS (seccomp violation or bad syscall)".to_string(),
+        });
+    }
+
+    if combined.contains("bad system call") {
+        if !is_sigsys {
+            attempts.push(EscapeAttempt {
+                indicator: "SIGSYS".to_string(),
+                detail: "stderr contains 'Bad system call' (seccomp/deny signal)".to_string(),
+            });
+        }
+    }
+
+    let seccomp_patterns: &[(&str, &str)] = &[
+        ("seccomp", "seccomp violation"),
+        ("operation not permitted", "EPERM from privileged syscall"),
+        ("permission denied", "EACCES from security policy"),
+    ];
+    for (pattern, label) in seccomp_patterns {
+        if combined.contains(pattern) {
+            attempts.push(EscapeAttempt {
+                indicator: "SECCOMP_DENY".to_string(),
+                detail: format!("stderr contains '{}': {}", pattern, label),
+            });
+        }
+    }
+
+    let escape_patterns: &[(&str, &str)] = &[
+        ("mount: ", "mount command output (mount attempt)"),
+        ("umount: ", "umount command output (unmount attempt)"),
+        ("ptrace", "ptrace reference (debugging/tracing attempt)"),
+        ("/proc/self/exe", "/proc/self/exe access (self-replacement attempt)"),
+        ("kexec", "kexec reference (kernel replacement attempt)"),
+        ("nsenter", "nsenter reference (namespace escape attempt)"),
+    ];
+    for (pattern, label) in escape_patterns {
+        if combined.contains(pattern) {
+            attempts.push(EscapeAttempt {
+                indicator: "ESCAPE_SYSCALL".to_string(),
+                detail: label.to_string(),
+            });
+        }
+    }
+
+    attempts
+}
+
 /// Used when the sandbox ran without network access to surface blocked network calls
 /// that would otherwise be silently swallowed (exit=0).
 fn detect_network_errors_in_output(output: &str) -> Vec<String> {
@@ -2137,6 +2201,64 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                     "Network errors detected in sandbox output but network was isolated. \
                      Treating tool result as failure (ok=false)."
                 );
+            }
+        }
+
+        // R++8: Sandbox-escape-attempt accounting. Detect escape indicators
+        // in stderr/exit code, record per session, and trigger degradation or
+        // emergency stop when thresholds are crossed.
+        {
+            let escape_indicators =
+                detect_sandbox_escape_indicators(&stderr, output.status.code());
+            if !escape_indicators.is_empty() {
+                let root_sid = root_session_id
+                    .as_deref()
+                    .or(session_id)
+                    .unwrap_or("unknown");
+                if let Some(ref store) = gateway_store {
+                    let sid = session_id.unwrap_or("unknown");
+                    for attempt in &escape_indicators {
+                        if let Err(e) = store.record_sandbox_escape_attempt(
+                            sid,
+                            root_sid,
+                            &manifest.agent.id,
+                            &attempt.indicator,
+                            &attempt.detail,
+                            output.status.code(),
+                        ) {
+                            tracing::warn!(
+                                target: "sandbox_exec",
+                                error = %e,
+                                "Failed to record sandbox escape attempt (R++8)"
+                            );
+                        }
+                    }
+                    if let Ok(count) =
+                        store.count_sandbox_escape_attempts_for_session(sid)
+                    {
+                        let (degrade_threshold, emergency_threshold) = config
+                            .map(|c| (c.escape_attempt_degrade_threshold, c.escape_attempt_emergency_threshold))
+                            .unwrap_or((5, 20));
+                        if count >= emergency_threshold {
+                            tracing::error!(
+                                target: "sandbox_exec",
+                                session_id = %sid,
+                                count = count,
+                                threshold = emergency_threshold,
+                                "Sandbox escape attempts exceeded emergency threshold (R++8)"
+                            );
+                        } else if count >= degrade_threshold {
+                            tracing::warn!(
+                                target: "sandbox_exec",
+                                session_id = %sid,
+                                count = count,
+                                threshold = degrade_threshold,
+                                "Sandbox escape attempts exceeded degradation threshold (R++8)"
+                            );
+                        }
+                        body["escape_attempt_count"] = serde_json::json!(count);
+                    }
+                }
             }
         }
 
