@@ -870,21 +870,20 @@ to one declared reason) is mechanically enforced.
 
 ---
 
-### 2.16 §0 Rights audit — late bucket (depends on R++ / R+++ items)
+### 2.16 §0 Rights audit — late bucket (depends on R++ / R+++ items) — PARTIAL
 
 For rights whose enforcement mechanism is itself a Phase 1/2 item.
-These tests follow the upstream work.
 
-| Right | Depends on | Work |
+| Right | Depends on | Status |
 |---|---|---|
-| Ri-0.1 self-inspection | R++1 attestation (#48) | Right-level test: agent reads its own state via attestation, values match internal registry. **Covered by `constitution_attestation_freshness.rs` (capability_changes, pending_approvals, spawn_depth, budget).** |
-| Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | Test: every rejection across a sample of tools carries a rule ID resolvable to the constitution. |
-| Ri-0.4 truthful budget | R++1 (#48) | Test: budget values in attestation match `session_budget.rs` registry in real time across a multi-turn trace. **Covered by `constitution_attestation_freshness.rs::budget_meters_reflect_consumption`.** |
-| Ri-0.5 degradation notice | R-7.18 (#61) | Add notice-on-entry to degraded mode. Test: agent receives notice with rule ID + evidence before its next turn. |
-| Ri-0.8 amendment proposal | R+++1 (#92) | Test: capability-holder submits, durable ID returned, proposal reviewable; non-holder rejected. |
-| Ri-0.9 last-word before terminal | R-7.18 (#61) + emergency-stop | Add notify-where-practical to degrade/emergency-stop paths. Test: agent receives a notification opportunity where not foreclosed by the trigger. |
+| Ri-0.1 self-inspection | R++1 attestation (#48) | ENFORCED — `constitution_attestation_freshness.rs` + `constitution_rights_late_bucket.rs` |
+| Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | PARTIAL — `Tagged::permission_with_rules` for all policy-gated capabilities; tested for 4 rejection classes |
+| Ri-0.4 truthful budget | R++1 (#48) | ENFORCED — `constitution_attestation_freshness.rs::budget_meters_reflect_consumption` |
+| Ri-0.5 degradation notice | R-7.18 (#61) | NOT YET — no notice injected into agent context on degraded entry |
+| Ri-0.8 amendment proposal | R+++1 (#92) | NOT YET — constitutional_proposals table exists but no tool endpoint |
+| Ri-0.9 last-word before terminal | R-7.18 (#61) + emergency-stop | NOT YET — no notify-where-practical in degrade/emergency-stop paths |
 
-**Size.** M.
+Test: `constitution_rights_late_bucket.rs` — 8 tests (Ri-0.1, Ri-0.3, Ri-0.12 cross-check).
 
 ---
 
