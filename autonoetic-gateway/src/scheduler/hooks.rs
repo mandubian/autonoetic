@@ -113,6 +113,9 @@ impl HookExecutor {
                     self.agent_spawn(&ctx, hook);
                 }
                 HookAction::HttpCallback => {
+                    // dispatch_async always fires hooks in background tasks;
+                    // the hook.async flag is only honored by the blocking
+                    // dispatch() path (used in tests / non-tokio callers).
                     let store = self.store.clone();
                     let ctx = ctx.clone();
                     let hook = hook.clone();
@@ -446,7 +449,13 @@ impl HookExecutor {
         let callback_url = required_string_param(hook, "url")?;
         let secret_env = required_string_param(hook, "secret_env")?;
         let parsed_url = validate_callback_url(&callback_url, &hook.callback_allowlist)?;
-        let delivery_id = build_http_callback_delivery_id(ctx, &parsed_url);
+        // Resolve the hostname *before* connecting and reject if any returned
+        // address is internal. This catches the common case of a hostname
+        // pointing at RFC-1918/loopback space without requiring a custom
+        // connector. Note: this does not fully prevent DNS-rebinding (TOCTOU),
+        // but it raises the bar significantly.
+        check_resolved_ips_not_internal(&parsed_url).await?;
+        let delivery_id = build_http_callback_delivery_id(ctx, &parsed_url, hook);
         let event_name = ctx.event.as_str();
         let action_name = "http.callback";
 
@@ -474,8 +483,11 @@ impl HookExecutor {
             secret_env
         );
         let signature = compute_hmac_sha256_hex(secret.as_bytes(), &body)?;
+        // Disable all redirects: a 30x to an internal address would bypass the
+        // allowlist/SSRF check that ran against the original URL.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
         let mut last_error: Option<String> = None;
@@ -709,6 +721,39 @@ fn validate_callback_url(
     Ok(parsed)
 }
 
+/// Resolve the URL's hostname and check every returned address against the
+/// same disallow-list used for literal IP validation. This blocks the common
+/// case of a public hostname pointing at RFC-1918 / loopback space.
+///
+/// Limitation: this cannot prevent DNS rebinding (the resolution may change
+/// between this check and the actual TCP connection), but it raises the bar
+/// significantly compared to no check at all.
+async fn check_resolved_ips_not_internal(url: &Url) -> anyhow::Result<()> {
+    let host = match url.host() {
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
+            // IP literals are already validated by validate_callback_url via
+            // is_disallowed_callback_host; no DNS resolution needed.
+            return Ok(());
+        }
+        Some(url::Host::Domain(d)) => d.to_string(),
+        None => return Ok(()),
+    };
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .with_context(|| format!("http.callback: failed to resolve host '{}'", host))?;
+    for addr in addrs {
+        if is_disallowed_callback_host(&addr.ip().to_string()) {
+            anyhow::bail!(
+                "http.callback URL resolves to a disallowed address '{}' for host '{}'",
+                addr.ip(),
+                host
+            );
+        }
+    }
+    Ok(())
+}
+
 fn is_disallowed_callback_host(host: &str) -> bool {
     if cfg!(test)
         && std::env::var("AUTONOETIC_TEST_ALLOW_LOOPBACK_HTTP_CALLBACK")
@@ -751,7 +796,7 @@ fn is_disallowed_callback_host(host: &str) -> bool {
     false
 }
 
-fn build_http_callback_delivery_id(ctx: &HookContext, url: &Url) -> String {
+fn build_http_callback_delivery_id(ctx: &HookContext, url: &Url, hook: &HookConfig) -> String {
     let mut hasher = Sha256::new();
     hasher.update(ctx.event.as_str().as_bytes());
     hasher.update(b"\n");
@@ -773,6 +818,17 @@ fn build_http_callback_delivery_id(ctx: &HookContext, url: &Url) -> String {
         hasher.update(key.as_bytes());
         hasher.update(b"=");
         hasher.update(value.as_bytes());
+    }
+    // Include the hook params so that two hooks sharing the same event+URL
+    // but differing in params (e.g. different secret_env) get distinct IDs.
+    hasher.update(b"\nhook_params:");
+    let mut param_pairs: Vec<_> = hook.params.iter().collect();
+    param_pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (key, val) in param_pairs {
+        hasher.update(b"\n");
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(val.to_string().as_bytes());
     }
     format!("hook-{}", hex::encode(hasher.finalize()))
 }
@@ -813,7 +869,22 @@ fn load_sanitized_session_report(ctx: &HookContext) -> anyhow::Result<Option<ser
         .join("session_report.json");
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            // For child sessions the report may live under the root session
+            // directory; try the root path as a fallback.
+            if session_id != ctx.root_session_id {
+                let root_path = std::path::Path::new(gateway_dir)
+                    .join("sessions")
+                    .join(&ctx.root_session_id)
+                    .join("session_report.json");
+                match std::fs::read_to_string(&root_path) {
+                    Ok(raw) => raw,
+                    Err(_) => return Ok(None),
+                }
+            } else {
+                return Ok(None);
+            }
+        }
     };
     let sanitized = sanitize_report_for_publishing(&raw);
     let parsed = serde_json::from_str(&sanitized)
@@ -1097,7 +1168,11 @@ mod tests {
             60,
         );
         let ctx = session_closed_ctx(&gateway_dir);
-        let delivery_id = build_http_callback_delivery_id(&ctx, &Url::parse(&url).unwrap());
+        let delivery_id = build_http_callback_delivery_id(
+            &ctx,
+            &Url::parse(&url).unwrap(),
+            &http_callback_hook(&url, "AUTONOETIC_HOOK_SECRET"),
+        );
 
         executor.dispatch_async(ctx);
 
@@ -1193,7 +1268,11 @@ mod tests {
             60,
         );
         let ctx = session_closed_ctx(&gateway_dir);
-        let delivery_id = build_http_callback_delivery_id(&ctx, &Url::parse(&url).unwrap());
+        let delivery_id = build_http_callback_delivery_id(
+            &ctx,
+            &Url::parse(&url).unwrap(),
+            &http_callback_hook(&url, "AUTONOETIC_HOOK_SECRET"),
+        );
 
         executor.dispatch_async(ctx);
 
