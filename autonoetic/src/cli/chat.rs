@@ -1,6 +1,6 @@
 //! TUI Chat interface using ratatui + crossterm.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,6 +47,10 @@ const STATUS_BAR_EVENT_PREVIEW_CHARS: usize = 160;
 const RECONNECT_NOTICE_BASE_ATTEMPTS: u32 = 3;
 const RIGHT_PANE_WIDTH: u16 = 44;
 const MIN_MAIN_MESSAGES_WIDTH: u16 = 60;
+const HINTS_PANE_WIDTH: u16 = 44;
+const FOOTER_INPUT_MIN_WIDTH: u16 = 28;
+const POLICY_CAUSAL_POLL_LIMIT: i64 = 48;
+const POLICY_CAUSAL_PANE_MAX: usize = 8;
 /// Max lines kept for input-line recall (↑/↓ in chat TUI).
 const PROMPT_HISTORY_MAX: usize = 500;
 
@@ -176,6 +180,33 @@ struct LiveTaskSummary {
     status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KnownSessionEntry {
+    session_id: String,
+    primary_agent_id: Option<String>,
+    agent_ids: Vec<String>,
+    first_timestamp: Option<String>,
+    last_timestamp: Option<String>,
+    event_count: usize,
+}
+
+#[derive(Debug, Clone)]
+enum PendingPrompt {
+    SessionSelection { sessions: Vec<KnownSessionEntry> },
+    NewSessionName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SlashCommand {
+    Help,
+    Quit,
+    Status,
+    Session,
+    SessionNew(Option<String>),
+    SessionSwitch(String),
+    Cancel,
+}
+
 struct App {
     messages: Vec<ChatMessage>,
     input: String,
@@ -190,6 +221,8 @@ struct App {
     esc_cancel_armed_until: Option<Instant>,
     session_id: String,
     target_hint: String,
+    sender_id: String,
+    channel_id: String,
     // Mouse selection - stored as CONTENT positions (row, col), not screen positions
     selecting: bool,
     sel_start: Option<(usize, usize)>, // (content_row, content_col)
@@ -213,16 +246,24 @@ struct App {
     inline_approvals_enabled: bool,
     /// Store-derived approval IDs we already announced (avoid repeating every poll).
     announced_store_approval_ids: HashSet<String>,
+    /// Gateway TCP JSON-RPC connection state.
+    gateway_connected: bool,
+    /// Causal events already surfaced in the policy pane.
+    seen_causal_policy_event_ids: HashSet<String>,
+    /// Newest-first policy decision lines for the right pane.
+    policy_causal_pane: Vec<String>,
     /// Submitted user lines, newest last — for ↑/↓ recall in the prompt.
     prompt_history: Vec<String>,
     /// When set, the input shows `prompt_history[len - 1 - k]` (`k == 0` is the most recent submission).
     prompt_history_scroll_back: Option<usize>,
     /// Draft in the input before the first ↑ during this browse; restored when ↓ passes the newest recall.
     prompt_history_draft: Option<String>,
+    /// If set, the next submitted line is handled as structured input instead of chat.
+    pending_prompt: Option<PendingPrompt>,
 }
 
 impl App {
-    fn new(session_id: String, target_hint: String) -> Self {
+    fn new(session_id: String, target_hint: String, sender_id: String, channel_id: String) -> Self {
         Self {
             messages: Vec::new(),
             input: String::new(),
@@ -237,6 +278,8 @@ impl App {
             esc_cancel_armed_until: None,
             session_id,
             target_hint,
+            sender_id,
+            channel_id,
             selecting: false,
             sel_start: None,
             sel_end: None,
@@ -253,9 +296,21 @@ impl App {
             pending_approval_ids: Vec::new(),
             inline_approvals_enabled: false,
             announced_store_approval_ids: HashSet::new(),
+            gateway_connected: false,
+            seen_causal_policy_event_ids: HashSet::new(),
+            policy_causal_pane: Vec::new(),
             prompt_history: Vec::new(),
             prompt_history_scroll_back: None,
             prompt_history_draft: None,
+            pending_prompt: None,
+        }
+    }
+
+    fn input_prefix(&self) -> &'static str {
+        match self.pending_prompt {
+            Some(PendingPrompt::SessionSelection { .. }) => "session> ",
+            Some(PendingPrompt::NewSessionName) => "session name> ",
+            None => "> ",
         }
     }
 
@@ -490,6 +545,173 @@ impl App {
     }
 }
 
+fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
+    let trimmed = input.trim();
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    match command {
+        "/help" => Ok(SlashCommand::Help),
+        "/quit" | "/exit" => Ok(SlashCommand::Quit),
+        "/status" => Ok(SlashCommand::Status),
+        "/cancel" => Ok(SlashCommand::Cancel),
+        "/session" => match parts.next() {
+            None => Ok(SlashCommand::Session),
+            Some("new") => {
+                let rest = parts.collect::<Vec<_>>().join(" ");
+                if rest.trim().is_empty() {
+                    Ok(SlashCommand::SessionNew(None))
+                } else {
+                    Ok(SlashCommand::SessionNew(Some(rest.trim().to_string())))
+                }
+            }
+            Some("switch") => {
+                let rest = parts.collect::<Vec<_>>().join(" ");
+                if rest.trim().is_empty() {
+                    Err("Usage: /session switch <session-id>".to_string())
+                } else {
+                    Ok(SlashCommand::SessionSwitch(rest.trim().to_string()))
+                }
+            }
+            Some(other) => Err(format!(
+                "Unknown /session subcommand '{}'. Try /session, /session new, or /session switch <session-id>.",
+                other
+            )),
+        },
+        _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
+    }
+}
+
+fn format_help_card() -> String {
+    [
+        "Chat commands:",
+        "  /session               Show known sessions and open the session picker",
+        "  /session new [name]    Create and switch to a new session",
+        "  /session switch <id>   Switch to an existing session",
+        "  /status                Show current session details",
+        "  /cancel                Leave the current picker/prompt",
+        "  /quit                  Exit chat",
+    ]
+    .join("\n")
+}
+
+fn format_session_status(app: &App) -> String {
+    let workflow_id = app
+        .session_overview
+        .workflow
+        .workflow_id
+        .as_deref()
+        .unwrap_or("n/a");
+    let root_session_id = if app.session_overview.root_session_id.is_empty() {
+        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id).to_string()
+    } else {
+        app.session_overview.root_session_id.clone()
+    };
+    format!(
+        "Session: {}\nRoot: {}\nTarget: {}\nWorkflow: {}\nPending approvals: {}\nPending questions: {}\nGateway: {}",
+        app.session_id,
+        root_session_id,
+        app.target_hint,
+        workflow_id,
+        app.pending_approval_ids.len(),
+        app.session_overview.pending_user_interactions,
+        if app.gateway_connected { "connected" } else { "disconnected" },
+    )
+}
+
+fn generate_session_id() -> String {
+    format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8])
+}
+
+fn load_known_sessions(
+    config_path: &Path,
+    current_session_id: &str,
+    current_target_hint: &str,
+) -> Vec<KnownSessionEntry> {
+    let mut by_session: BTreeMap<String, KnownSessionEntry> = BTreeMap::new();
+    if let Ok(traces) = super::trace::load_agent_traces(config_path, None) {
+        for summary in super::common::collect_session_summaries(&traces) {
+            let entry = by_session
+                .entry(summary.session_id.clone())
+                .or_insert_with(|| KnownSessionEntry {
+                    session_id: summary.session_id.clone(),
+                    primary_agent_id: Some(summary.agent_id.clone()),
+                    agent_ids: vec![summary.agent_id.clone()],
+                    first_timestamp: Some(summary.first_timestamp.clone()),
+                    last_timestamp: Some(summary.last_timestamp.clone()),
+                    event_count: 0,
+                });
+            if !entry.agent_ids.contains(&summary.agent_id) {
+                entry.agent_ids.push(summary.agent_id.clone());
+                entry.agent_ids.sort();
+            }
+            entry.event_count = entry.event_count.saturating_add(summary.event_count);
+            if entry.first_timestamp.as_ref().is_none_or(|ts| summary.first_timestamp < *ts) {
+                entry.first_timestamp = Some(summary.first_timestamp.clone());
+            }
+            if entry.last_timestamp.as_ref().is_none_or(|ts| summary.last_timestamp > *ts) {
+                entry.last_timestamp = Some(summary.last_timestamp.clone());
+                entry.primary_agent_id = Some(summary.agent_id.clone());
+            }
+        }
+    }
+
+    by_session
+        .entry(current_session_id.to_string())
+        .or_insert_with(|| KnownSessionEntry {
+            session_id: current_session_id.to_string(),
+            primary_agent_id: Some(current_target_hint.to_string()),
+            agent_ids: vec![current_target_hint.to_string()],
+            first_timestamp: None,
+            last_timestamp: None,
+            event_count: 0,
+        });
+
+    let mut sessions: Vec<KnownSessionEntry> = by_session.into_values().collect();
+    sessions.sort_by(|a, b| {
+        b.last_timestamp
+            .cmp(&a.last_timestamp)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    sessions
+}
+
+fn format_known_sessions_card(app: &App, sessions: &[KnownSessionEntry]) -> String {
+    let mut lines = vec![
+        format!("Current session: {}", app.session_id),
+        String::new(),
+        "Known sessions:".to_string(),
+    ];
+
+    for (idx, session) in sessions.iter().enumerate() {
+        let marker = if session.session_id == app.session_id {
+            "*"
+        } else {
+            " "
+        };
+        let agents = if session.agent_ids.is_empty() {
+            "-".to_string()
+        } else {
+            session.agent_ids.join(", ")
+        };
+        let last_seen = session.last_timestamp.as_deref().unwrap_or("new");
+        lines.push(format!(
+            "  {} {}. {} | agents: {} | last: {} | events: {}",
+            marker,
+            idx + 1,
+            session.session_id,
+            agents,
+            last_seen,
+            session.event_count
+        ));
+    }
+
+    lines.push(String::new());
+    lines.push("Reply with a number, an exact session id, or `new`.".to_string());
+    lines.push("You can also use `/session switch <id>` or `/session new [name]`.".to_string());
+    lines.push("Use `/cancel` to close the picker.".to_string());
+    lines.join("\n")
+}
+
 fn hydrate_session_history(
     app: &mut App,
     config: &autonoetic_types::config::GatewayConfig,
@@ -534,6 +756,273 @@ fn hydrate_session_history(
     }
 
     Ok(restored)
+}
+
+fn add_session_banner(
+    app: &mut App,
+    config: &autonoetic_types::config::GatewayConfig,
+    session_id: &str,
+) {
+    let root_session = autonoetic_gateway::runtime::content_store::root_session_id(session_id);
+    let wf_hint =
+        autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(config, root_session)
+            .ok()
+            .flatten()
+            .map(|wf_id| format!(" · wf:{}", &wf_id[..8.min(wf_id.len())]))
+            .unwrap_or_default();
+    app.add_message(
+        MessageRole::System,
+        format!("{}{}", &session_id[..20.min(session_id.len())], wf_hint),
+    );
+}
+
+fn refresh_session_snapshot(
+    app: &mut App,
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_store: Option<&GatewayStore>,
+) {
+    let active_session_id = app.session_id.clone();
+    if let Some(store) = gateway_store {
+        if let Ok(snapshot) = poll_session_snapshot(
+            config,
+            Some(store),
+            &active_session_id,
+            app.session_overview.latest_signal.clone(),
+        ) {
+            app.session_overview = snapshot.overview.clone();
+            let _ = append_new_pending_user_interaction_prompts(app, &snapshot.pending_interactions);
+        }
+        let _ = merge_gateway_store_pending_approvals(app, config, store, &active_session_id);
+    }
+}
+
+fn reset_for_session_switch(
+    app: &mut App,
+    new_session_id: String,
+    new_target_hint: Option<String>,
+) {
+    app.messages.clear();
+    app.pending.clear();
+    app.scroll_offset = 0;
+    app.last_max_scroll_offset = 0;
+    app.follow_output = true;
+    app.session_paused = false;
+    app.disarm_cancel_window();
+    app.session_id = new_session_id;
+    if let Some(target_hint) = new_target_hint {
+        app.target_hint = target_hint;
+    }
+    app.selecting = false;
+    app.sel_start = None;
+    app.sel_end = None;
+    app.signal_resume_by_internal_id.clear();
+    app.signal_resume_inflight.clear();
+    app.seen_workflow_event_ids.clear();
+    app.bootstrapped_workflow_ids.clear();
+    app.current_workflow_id = None;
+    app.session_overview = SessionOverview::default();
+    app.live_tasks.clear();
+    app.seen_user_interaction_prompts.clear();
+    app.pending_approval_ids.clear();
+    app.announced_store_approval_ids.clear();
+    app.seen_causal_policy_event_ids.clear();
+    app.policy_causal_pane.clear();
+    app.pending_prompt = None;
+}
+
+fn switch_session(
+    app: &mut App,
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_store: Option<&GatewayStore>,
+    pending_map: &mut HashMap<String, u64>,
+    new_session_id: String,
+    new_target_hint: Option<String>,
+    reason: &str,
+) {
+    let switched_target = new_target_hint.clone().unwrap_or_else(|| app.target_hint.clone());
+    reset_for_session_switch(app, new_session_id.clone(), new_target_hint);
+    pending_map.clear();
+    add_session_banner(app, config, &new_session_id);
+    if let Ok(restored) = hydrate_session_history(app, config, &new_session_id) {
+        if restored > 0 {
+            app.add_message(
+                MessageRole::System,
+                format!("Restored {} message(s) from previous session history", restored),
+            );
+        }
+    }
+    app.add_message(
+        MessageRole::System,
+        format!(
+            "Switched to session {} ({}, target: {}).",
+            new_session_id, reason, switched_target
+        ),
+    );
+    refresh_session_snapshot(app, config, gateway_store);
+}
+
+fn begin_session_picker(app: &mut App, config_path: &Path) {
+    let sessions = load_known_sessions(config_path, &app.session_id, &app.target_hint);
+    let card = format_known_sessions_card(app, &sessions);
+    app.pending_prompt = Some(PendingPrompt::SessionSelection { sessions });
+    app.add_message(MessageRole::System, card);
+}
+
+fn create_named_or_generated_session(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        generate_session_id()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn handle_prompt_submission(
+    app: &mut App,
+    config_path: &Path,
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_store: Option<&GatewayStore>,
+    pending_map: &mut HashMap<String, u64>,
+    submitted: &str,
+) -> bool {
+    let Some(prompt) = app.pending_prompt.clone() else {
+        return false;
+    };
+
+    match prompt {
+        PendingPrompt::SessionSelection { sessions } => {
+            let trimmed = submitted.trim();
+            if trimmed.eq_ignore_ascii_case("new") {
+                app.pending_prompt = Some(PendingPrompt::NewSessionName);
+                app.add_message(
+                    MessageRole::System,
+                    "Enter a new session name. Leave it blank to auto-generate one, or use /cancel."
+                        .to_string(),
+                );
+                return true;
+            }
+
+            let selected = trimmed
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| sessions.get(index.saturating_sub(1)).cloned())
+                .or_else(|| {
+                    sessions
+                        .iter()
+                        .find(|session| session.session_id == trimmed)
+                        .cloned()
+                });
+
+            if let Some(session) = selected {
+                switch_session(
+                    app,
+                    config,
+                    gateway_store,
+                    pending_map,
+                    session.session_id,
+                    session.primary_agent_id,
+                    "picker",
+                );
+            } else {
+                app.add_message(
+                    MessageRole::System,
+                    format!(
+                        "Unknown session selection '{}'. Reply with a number, an exact session id, `new`, or /cancel.",
+                        trimmed
+                    ),
+                );
+                app.pending_prompt = Some(PendingPrompt::SessionSelection { sessions });
+            }
+            true
+        }
+        PendingPrompt::NewSessionName => {
+            let session_id = create_named_or_generated_session(submitted);
+            switch_session(
+                app,
+                config,
+                gateway_store,
+                pending_map,
+                session_id,
+                None,
+                "new session",
+            );
+            let _ = config_path;
+            true
+        }
+    }
+}
+
+fn handle_slash_command_submission(
+    app: &mut App,
+    config_path: &Path,
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_store: Option<&GatewayStore>,
+    pending_map: &mut HashMap<String, u64>,
+    command: SlashCommand,
+) -> bool {
+    match command {
+        SlashCommand::Help => {
+            app.add_message(MessageRole::System, format_help_card());
+            true
+        }
+        SlashCommand::Quit => false,
+        SlashCommand::Status => {
+            app.add_message(MessageRole::System, format_session_status(app));
+            true
+        }
+        SlashCommand::Session => {
+            begin_session_picker(app, config_path);
+            true
+        }
+        SlashCommand::SessionNew(name) => {
+            if let Some(name) = name {
+                switch_session(
+                    app,
+                    config,
+                    gateway_store,
+                    pending_map,
+                    create_named_or_generated_session(&name),
+                    None,
+                    "new session",
+                );
+            } else {
+                app.pending_prompt = Some(PendingPrompt::NewSessionName);
+                app.add_message(
+                    MessageRole::System,
+                    "Enter a new session name. Leave it blank to auto-generate one, or use /cancel."
+                        .to_string(),
+                );
+            }
+            true
+        }
+        SlashCommand::SessionSwitch(session_id) => {
+            let target_hint = load_known_sessions(config_path, &app.session_id, &app.target_hint)
+                .into_iter()
+                .find(|session| session.session_id == session_id)
+                .and_then(|session| session.primary_agent_id);
+            switch_session(
+                app,
+                config,
+                gateway_store,
+                pending_map,
+                session_id,
+                target_hint,
+                "command",
+            );
+            true
+        }
+        SlashCommand::Cancel => {
+            if app.pending_prompt.take().is_some() {
+                app.add_message(MessageRole::System, "Prompt cancelled.".to_string());
+            } else {
+                app.add_message(
+                    MessageRole::System,
+                    "No active prompt. Try /session or /help.".to_string(),
+                );
+            }
+            true
+        }
+    }
 }
 
 /// Pending `user.ask` rows for this terminal session: exact session plus any under the same root
@@ -1185,6 +1674,7 @@ struct ChatLayout {
     messages: Rect,
     right_pane: Option<Rect>,
     input: Rect,
+    hints: Option<Rect>,
 }
 
 fn compute_chat_layout(area: Rect) -> ChatLayout {
@@ -1214,14 +1704,36 @@ fn compute_chat_layout(area: Rect) -> ChatLayout {
             messages: body_cols[0],
             right_pane: Some(body_cols[1]),
             input: rows[3],
+            hints: None,
         }
     } else {
-        ChatLayout {
-            status: rows[0],
-            separator: rows[1],
-            messages: body,
-            right_pane: None,
-            input: rows[3],
+        let footer = rows[3];
+        let show_hints = footer.width > HINTS_PANE_WIDTH + FOOTER_INPUT_MIN_WIDTH;
+        if show_hints {
+            let footer_cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Min(FOOTER_INPUT_MIN_WIDTH),
+                    Constraint::Length(HINTS_PANE_WIDTH),
+                ])
+                .split(footer);
+            ChatLayout {
+                status: rows[0],
+                separator: rows[1],
+                messages: body,
+                right_pane: None,
+                input: footer_cols[0],
+                hints: Some(footer_cols[1]),
+            }
+        } else {
+            ChatLayout {
+                status: rows[0],
+                separator: rows[1],
+                messages: body,
+                right_pane: None,
+                input: footer,
+                hints: None,
+            }
         }
     }
 }
@@ -1253,10 +1765,15 @@ fn draw(f: &mut Frame, app: &App) {
     }
 
     draw_input(f, app, layout.input);
+    if let Some(hints) = layout.hints {
+        draw_hints_pane(f, app, hints);
+    }
 
     let before_cursor_display_width =
         UnicodeWidthStr::width(&app.input[..app.cursor_pos]).min(usize::from(u16::MAX)) as u16;
-    let cursor_x = (layout.input.x + 2 + before_cursor_display_width)
+    let prefix_width =
+        UnicodeWidthStr::width(app.input_prefix()).min(usize::from(u16::MAX)) as u16;
+    let cursor_x = (layout.input.x + 1 + prefix_width + before_cursor_display_width)
         .min(layout.input.x + layout.input.width.saturating_sub(1));
     let cursor_y = layout.input.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
@@ -1332,6 +1849,18 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::raw(format!("- {}", apr)));
         }
     }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Policy Decisions",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if app.policy_causal_pane.is_empty() {
+        lines.push(Line::raw("none"));
+    } else {
+        for line in app.policy_causal_pane.iter().take(POLICY_CAUSAL_PANE_MAX) {
+            lines.push(Line::raw(line.clone()));
+        }
+    }
 
     let paragraph = Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: true })
@@ -1339,6 +1868,38 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title("Workflow")
                 .borders(Borders::LEFT)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+    f.render_widget(paragraph, area);
+}
+
+fn draw_hints_pane(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        "Keys",
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(Line::raw("Enter send"));
+    lines.push(Line::raw("Esc pause/cancel"));
+    lines.push(Line::raw("Ctrl+C quit"));
+    lines.push(Line::raw("↑↓ history"));
+    lines.push(Line::raw("Shift+↑↓ scroll"));
+    lines.push(Line::raw("Ctrl+F jump live"));
+    lines.push(Line::raw("/session picker"));
+    if app.inline_approvals_enabled {
+        if app.pending_approval_ids.is_empty() {
+            lines.push(Line::raw("Ctrl+A approve: none"));
+        } else {
+            lines.push(Line::raw(format!(
+                "Ctrl+A approve: {}",
+                app.pending_approval_ids.len()
+            )));
+        }
+    }
+    let paragraph = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .borders(Borders::LEFT | Borders::TOP)
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
     f.render_widget(paragraph, area);
@@ -1539,10 +2100,10 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let workflow = app.session_overview.status_line();
-    let approve_hint = if app.inline_approvals_enabled && !app.pending_approval_ids.is_empty() {
-        " | Approve: Ctrl+A"
+    let gateway = if app.gateway_connected {
+        "Gateway: connected"
     } else {
-        ""
+        "Gateway: reconnecting"
     };
     let pause_hint = if app.session_paused {
         "Paused: ON"
@@ -1557,29 +2118,29 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let follow_hint = if app.follow_output {
         "Follow: ON"
     } else {
-        "Follow: OFF (Ctrl+F to jump live)"
+        "Follow: OFF"
     };
     let text = if !app.pending.is_empty() {
         format!(
-            "{} {} pending | {} | {} | {} | {} | Enter: send | History: ↑↓ | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
+            "{} {} pending | {} | {} | {} | {} | {}",
             app.spinner(),
             app.pending.len(),
+            gateway,
             workflow,
             pause_hint,
             esc_hint,
             follow_hint,
-            approve_hint,
         )
     } else {
         format!(
-            "Session: {} | Target: {} | {} | {} | {} | {} | Enter: send | History: ↑↓ | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
+            "Session: {} | Target: {} | {} | {} | {} | {} | {}",
             &app.session_id[..20.min(app.session_id.len())],
             app.target_hint,
+            gateway,
             workflow,
             pause_hint,
             esc_hint,
             follow_hint,
-            approve_hint,
         )
     };
 
@@ -1588,7 +2149,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![Span::styled("> ", Style::default().fg(Color::Green))];
+    let mut spans = vec![Span::styled(
+        app.input_prefix(),
+        Style::default().fg(Color::Green),
+    )];
 
     if app.input.is_empty() {
         spans.push(Span::styled(" ", Style::default().bg(Color::White)));
@@ -1646,6 +2210,123 @@ async fn wait_with_cancel(
     false
 }
 
+async fn handle_chat_test_mode(
+    config_path: &Path,
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_addr: &str,
+    jsonrpc_auth_token: &str,
+    initial_session_id: String,
+    initial_target_hint: String,
+    sender_id: String,
+    channel_id: String,
+) -> anyhow::Result<()> {
+    let mut current_session_id = initial_session_id;
+    let mut current_target_hint = initial_target_hint;
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    let mut request_counter = 1u64;
+
+    while let Some(line) = lines.next_line().await? {
+        let trimmed = line.trim_end().to_string();
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+
+        if trimmed.trim_start().starts_with('/') {
+            match parse_slash_command(&trimmed) {
+                Ok(SlashCommand::Quit) => break,
+                Ok(SlashCommand::Help) => {
+                    println!("{}", format_help_card());
+                }
+                Ok(SlashCommand::Status) => {
+                    println!("Session: {}\nTarget: {}", current_session_id, current_target_hint);
+                }
+                Ok(SlashCommand::Session) => {
+                    let sessions =
+                        load_known_sessions(config_path, &current_session_id, &current_target_hint);
+                    let mut probe_app = App::new(
+                        current_session_id.clone(),
+                        current_target_hint.clone(),
+                        sender_id.clone(),
+                        channel_id.clone(),
+                    );
+                    println!("{}", format_known_sessions_card(&probe_app, &sessions));
+                    probe_app.pending_prompt = None;
+                }
+                Ok(SlashCommand::SessionNew(name)) => {
+                    current_session_id = create_named_or_generated_session(
+                        name.as_deref().unwrap_or(""),
+                    );
+                    println!("Switched to new session {}", current_session_id);
+                }
+                Ok(SlashCommand::SessionSwitch(session_id)) => {
+                    if let Some(target_hint) =
+                        load_known_sessions(config_path, &current_session_id, &current_target_hint)
+                            .into_iter()
+                            .find(|session| session.session_id == session_id)
+                            .and_then(|session| session.primary_agent_id)
+                    {
+                        current_target_hint = target_hint;
+                    }
+                    current_session_id = session_id;
+                    println!("Switched to session {}", current_session_id);
+                }
+                Ok(SlashCommand::Cancel) => {
+                    println!("No active prompt in test mode.");
+                }
+                Err(error) => {
+                    println!("{}", error);
+                }
+            }
+            continue;
+        }
+
+        let mut stream = TcpStream::connect(gateway_addr).await?;
+        let request_id = format!("test-{}", request_counter);
+        request_counter = request_counter.saturating_add(1);
+        let request = GatewayJsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: request_id,
+            method: "event.ingest".to_string(),
+            params: serde_json::json!({
+                "event_type": "chat",
+                "message": trimmed,
+                "session_id": current_session_id,
+                "target_agent_id": current_target_hint,
+                "metadata": terminal_channel_envelope(&channel_id, &sender_id, &current_session_id),
+            }),
+            auth_token: Some(jsonrpc_auth_token.to_string()),
+        };
+        let encoded = serde_json::to_string(&request)?;
+        stream.write_all(encoded.as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        stream.flush().await?;
+
+        let mut response_line = String::new();
+        let mut reader = BufReader::new(stream);
+        let read = reader.read_line(&mut response_line).await?;
+        if read == 0 {
+            println!("[No response]");
+            continue;
+        }
+
+        let response: GatewayJsonRpcResponse = serde_json::from_str(response_line.trim_end())?;
+        if let Some(error) = response.error {
+            println!("Error: {}", error.message);
+            continue;
+        }
+        let reply = response
+            .result
+            .as_ref()
+            .and_then(|v| v.get("assistant_reply"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("[No response]");
+        println!("{}", reply);
+    }
+
+    Ok(())
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -1656,7 +2337,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     let session_id = args
         .session_id
         .clone()
-        .unwrap_or_else(|| format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+        .unwrap_or_else(generate_session_id);
     let sender_id = args
         .sender_id
         .clone()
@@ -1668,14 +2349,31 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     let gateway_addr = format!("127.0.0.1:{}", config.port);
 
     // Connect handling is mostly inside the loop.
-    let envelope = terminal_channel_envelope(&channel_id, &sender_id, &session_id);
     let config = Arc::new(config);
 
-    let jsonrpc_auth_token = std::env::var("AUTONOETIC_SHARED_SECRET").map_err(|_| {
-        anyhow::anyhow!(
-            "Missing required environment variable AUTONOETIC_SHARED_SECRET for chat JSON-RPC ingress authentication"
+    let jsonrpc_auth_token = match std::env::var("AUTONOETIC_SHARED_SECRET") {
+        Ok(value) => value,
+        Err(_) if args.test_mode => "test-secret".to_string(),
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Missing required environment variable AUTONOETIC_SHARED_SECRET for chat JSON-RPC ingress authentication"
+            ))
+        }
+    };
+
+    if args.test_mode {
+        return handle_chat_test_mode(
+            config_path,
+            config.as_ref(),
+            &gateway_addr,
+            &jsonrpc_auth_token,
+            session_id,
+            target_hint.to_string(),
+            sender_id,
+            channel_id,
         )
-    })?;
+        .await;
+    }
 
     // Setup terminal (only after prerequisites—early `?` must not leave raw mode / alt screen on)
     enable_raw_mode()?;
@@ -1686,7 +2384,12 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     terminal.clear()?;
     let _terminal_restore = ChatTerminalRestore;
 
-    let mut app = App::new(session_id.clone(), target_hint.to_string());
+    let mut app = App::new(
+        session_id.clone(),
+        target_hint.to_string(),
+        sender_id.clone(),
+        channel_id.clone(),
+    );
     app.inline_approvals_enabled = config.chat.inline_approvals;
     if let Ok(restored) = hydrate_session_history(&mut app, config.as_ref(), &session_id) {
         if restored > 0 {
@@ -1699,19 +2402,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             );
         }
     }
-
-    // Show compact session info
-    let root_session = autonoetic_gateway::runtime::content_store::root_session_id(&session_id);
-    let wf_hint =
-        autonoetic_gateway::scheduler::resolve_workflow_id_for_root_session(&config, root_session)
-            .ok()
-            .flatten()
-            .map(|wf_id| format!(" · wf:{}", &wf_id[..8.min(wf_id.len())]))
-            .unwrap_or_default();
-    app.add_message(
-        MessageRole::System,
-        format!("{}{}", &session_id[..20.min(session_id.len())], wf_hint),
-    );
+    add_session_banner(&mut app, config.as_ref(), &session_id);
 
     // Channel for sending messages from TUI to gateway
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
@@ -1747,26 +2438,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     let gateway_log_dir = gateway_dir.join("logs");
     let mut reconnect_attempts: u32 = 0;
 
-    if let Some(ref store) = gateway_store {
-        if let Ok(snapshot) = poll_session_snapshot(
-            config.as_ref(),
-            Some(store),
-            &session_id,
-            app.session_overview.latest_signal.clone(),
-        ) {
-            app.session_overview = snapshot.overview.clone();
-            let _ = append_new_pending_user_interaction_prompts(
-                &mut app,
-                &snapshot.pending_interactions,
-            );
-        }
-        let _ = merge_gateway_store_pending_approvals(
-            &mut app,
-            config.as_ref(),
-            store.as_ref(),
-            &session_id,
-        );
-    }
+    refresh_session_snapshot(&mut app, config.as_ref(), gateway_store.as_deref());
 
     // Main loop
     // Spawn a single Ctrl+C listener that sets the shutdown flag.
@@ -1783,9 +2455,11 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         let stream = match TcpStream::connect(&gateway_addr).await {
             Ok(s) => {
                 reconnect_attempts = 0;
+                app.gateway_connected = true;
                 s
             }
             Err(e) => {
+                app.gateway_connected = false;
                 reconnect_attempts = reconnect_attempts.saturating_add(1);
                 tracing::debug!(target: "chat", error = %e, "Gateway connection failed, reconnecting");
                 if !app.pending.is_empty()
@@ -1821,13 +2495,12 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             &mut app,
             write_half,
             &mut gateway_lines,
+            config_path,
             &config,
             gateway_store
                 .as_ref()
                 .map(|s| s.as_ref()),
             execution_for_interactions.as_ref(),
-            &session_id,
-            &envelope,
             &tx,
             &mut rx,
             &mut pending_map,
@@ -1842,6 +2515,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
         }
 
         reconnect_attempts = reconnect_attempts.saturating_add(1);
+        app.gateway_connected = false;
 
         app.add_message(
             MessageRole::System,
@@ -1879,11 +2553,10 @@ async fn run_loop<B: ratatui::backend::Backend>(
     app: &mut App,
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
     gateway_lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>>,
+    config_path: &Path,
     config: &Arc<autonoetic_types::config::GatewayConfig>,
     gateway_store: Option<&autonoetic_gateway::scheduler::gateway_store::GatewayStore>,
     execution_for_interactions: Option<&std::sync::Arc<autonoetic_gateway::execution::GatewayExecutionService>>,
-    session_id: &str,
-    envelope: &serde_json::Value,
     tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, String)>,
     pending_map: &mut std::collections::HashMap<String, u64>,
@@ -1932,7 +2605,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
             // Signal check always gets priority to avoid starvation
             _ = signal_interval.tick() => {
-                if check_signals(app, config, gateway_store, session_id, tx).await {
+                let active_session_id = app.session_id.clone();
+                if check_signals(app, config, gateway_store, &active_session_id, tx).await {
                     needs_redraw = true;
                 }
             }
@@ -1971,7 +2645,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     let new_user_prompts = if new_user_prompts_from_response.is_some() {
                                         new_user_prompts_from_response.unwrap()
                                     } else if let Some(store) = gateway_store {
-                                        match poll_session_snapshot(config, Some(store), session_id, app.session_overview.latest_signal.clone()) {
+                                        match poll_session_snapshot(config, Some(store), &app.session_id, app.session_overview.latest_signal.clone()) {
                                             Ok(snapshot) => {
                                                 app.session_overview.root_session_id = snapshot.overview.root_session_id.clone();
                                                 app.session_overview.workflow = snapshot.overview.workflow.clone();
@@ -2046,7 +2720,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                     let mut skip_chat_ingest = false;
                     if let (Some(store), Some(exec)) = (gateway_store, execution_for_interactions) {
                         if let Ok(pending) =
-                            list_pending_user_interactions_for_terminal_session(store, session_id)
+                            list_pending_user_interactions_for_terminal_session(store, &app.session_id)
                         {
                             if let Some(interaction) = pending.into_iter().next() {
                                 use autonoetic_gateway::interaction_answer::{
@@ -2097,11 +2771,13 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
                     let req_id = format!("tui-{}", id);
                     pending_map.insert(req_id.clone(), id);
+                    let envelope =
+                        terminal_channel_envelope(&app.channel_id, &app.sender_id, &app.session_id);
 
                     let params = serde_json::json!({
                         "event_type": "chat",
                         "message": message,
-                        "session_id": session_id,
+                        "session_id": app.session_id.clone(),
                         "target_agent_id": app.target_hint.clone(),
                         "metadata": envelope,
                     });
@@ -2130,10 +2806,45 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         Event::Key(key) => {
                             match handle_key(key, app, tx)? {
                                 HandleKeyAction::Quit => return Ok(false),
+                                HandleKeyAction::SubmitInput(input) => {
+                                    if input.trim_start().starts_with('/') {
+                                        match parse_slash_command(&input) {
+                                            Ok(command) => {
+                                                if !handle_slash_command_submission(
+                                                    app,
+                                                    config_path,
+                                                    config,
+                                                    gateway_store,
+                                                    pending_map,
+                                                    command,
+                                                ) {
+                                                    return Ok(false);
+                                                }
+                                            }
+                                            Err(error) => {
+                                                app.add_message(MessageRole::System, error);
+                                            }
+                                        }
+                                    } else if app.pending_prompt.is_some() {
+                                        handle_prompt_submission(
+                                            app,
+                                            config_path,
+                                            config,
+                                            gateway_store,
+                                            pending_map,
+                                            &input,
+                                        );
+                                    } else {
+                                        let id = app.next_id();
+                                        app.add_pending(id);
+                                        app.add_message(MessageRole::User, input.clone());
+                                        let _ = tx.send((id, input));
+                                    }
+                                }
                                 HandleKeyAction::PauseSession => {
                                     app.session_paused = true;
                                     let root_session_id = if app.session_overview.root_session_id.is_empty() {
-                                        autonoetic_gateway::runtime::content_store::root_session_id(session_id)
+                                        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id)
                                             .to_string()
                                     } else {
                                         app.session_overview.root_session_id.clone()
@@ -2188,7 +2899,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                 }
                                 HandleKeyAction::CancelSession => {
                                     let root_session_id = if app.session_overview.root_session_id.is_empty() {
-                                        autonoetic_gateway::runtime::content_store::root_session_id(session_id)
+                                        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id)
                                             .to_string()
                                     } else {
                                         app.session_overview.root_session_id.clone()
@@ -2376,6 +3087,7 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
 enum HandleKeyAction {
     Continue,
     Quit,
+    SubmitInput(String),
     ApproveInline(String),
     PauseSession,
     CancelSession,
@@ -2384,7 +3096,7 @@ enum HandleKeyAction {
 fn handle_key(
     key: crossterm::event::KeyEvent,
     app: &mut App,
-    tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
+    _tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
 ) -> anyhow::Result<HandleKeyAction> {
     match key.code {
         // Quit
@@ -2404,10 +3116,7 @@ fn handle_key(
                 app.cursor_pos = 0;
                 app.clear_prompt_history_browse();
                 app.push_prompt_history(msg.clone());
-                let id = app.next_id();
-                app.add_pending(id);
-                app.add_message(MessageRole::User, msg.clone());
-                let _ = tx.send((id, msg));
+                return Ok(HandleKeyAction::SubmitInput(msg));
             }
         }
 
@@ -2849,6 +3558,49 @@ fn merge_gateway_store_pending_approvals(
     announced
 }
 
+fn refresh_policy_causal_pane(
+    app: &mut App,
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    root_session_id: &str,
+) {
+    let events = match store.search_causal_events(
+        Some(root_session_id),
+        None,
+        POLICY_CAUSAL_POLL_LIMIT,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(target: "chat", error = %e, "Failed to query causal events for policy pane");
+            return;
+        }
+    };
+    for ev in events.into_iter().rev() {
+        if !autonoetic_types::causal_chain::causal_event_notifies_policy_decision(&ev) {
+            continue;
+        }
+        if !app.seen_causal_policy_event_ids.insert(ev.event_id.clone()) {
+            continue;
+        }
+        let ts: String = ev.timestamp.chars().take(19).collect();
+        let agent = if ev.agent_id.is_empty() {
+            "unknown".to_string()
+        } else {
+            ev.agent_id
+        };
+        let mut line = format!("[{}] {} {} ({})", ts, ev.status, ev.action, agent);
+        if let Some(reason) = ev.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let snippet: String = reason.chars().take(48).collect();
+            if reason.chars().count() > 48 {
+                line.push_str(&format!(" — {}…", snippet));
+            } else {
+                line.push_str(&format!(" — {}", snippet));
+            }
+        }
+        app.policy_causal_pane.insert(0, line);
+    }
+    app.policy_causal_pane.truncate(POLICY_CAUSAL_PANE_MAX);
+}
+
 /// Check for signals and inject into app. Returns true if signals were processed.
 async fn check_signals(
     app: &mut App,
@@ -3052,6 +3804,7 @@ async fn check_signals(
     }
 
     if let Some(store) = store {
+        refresh_policy_causal_pane(app, store, &root_session_id);
         if merge_gateway_store_pending_approvals(app, config, store, session_id) {
             processed_any = true;
         }
@@ -3155,7 +3908,7 @@ fn copy_selection_to_clipboard(app: &mut App) {
 mod tests {
     use super::{
         extract_approval_request_id, extract_structured_approval, format_user_interaction_prompt,
-        format_workflow_event_card,
+        format_workflow_event_card, parse_slash_command, SlashCommand,
     };
     use autonoetic_types::background::{
         UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
@@ -3281,6 +4034,26 @@ mod tests {
         );
         let line = format_workflow_event_card(&event).map(|(s, _)| s).expect("event should render");
         assert!(line.contains("Approval rejected: task-42"));
+    }
+
+    #[test]
+    fn test_parse_slash_command_session_new() {
+        assert_eq!(
+            parse_slash_command("/session new branch-a").unwrap(),
+            SlashCommand::SessionNew(Some("branch-a".to_string()))
+        );
+        assert_eq!(
+            parse_slash_command("/session new").unwrap(),
+            SlashCommand::SessionNew(None)
+        );
+    }
+
+    #[test]
+    fn test_parse_slash_command_session_switch() {
+        assert_eq!(
+            parse_slash_command("/session switch alpha").unwrap(),
+            SlashCommand::SessionSwitch("alpha".to_string())
+        );
     }
 
     #[test]
