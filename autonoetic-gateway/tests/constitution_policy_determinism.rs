@@ -1,16 +1,14 @@
 //! Constitution R++9: Policy engine determinism property test.
 //!
-//! For random valid inputs, the gateway's decision for
-//! (capability-set, tool-call) → verdict is a pure function:
-//! no LLM call, no network fetch, no hidden branch, no
-//! time-dependent or random state.
+//! Verifies that the gateway's policy decisions are pure functions of
+//! their declared inputs (capability-set, tool-call). Every PolicyEngine
+//! method is exercised with a fixed matrix of inputs covering allowed
+//! and denied paths; the same inputs always produce the same verdict
+//! with identical enforced_rules and security_analysis. No LLM call,
+//! no network fetch, no hidden branch, no time-dependent or random state.
 //!
-//! The test verifies:
-//! 1. Idempotency: calling the same method with the same inputs
-//!    always returns the same verdict.
-//! 2. Input sensitivity: changing the input changes the output
-//!    in at least some cases (the function isn't constant).
-//! 3. No hidden state: repeated calls don't accumulate side effects.
+//! Any future change that adds nondeterminism to PolicyEngine will
+//! fail these tests.
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
@@ -95,6 +93,21 @@ fn message_manifest(patterns: Vec<&str>) -> AgentManifest {
     }])
 }
 
+fn assert_decision_eq(
+    a: &autonoetic_gateway::policy::PolicyDecision,
+    b: &autonoetic_gateway::policy::PolicyDecision,
+    context: &str,
+) {
+    assert_eq!(a.is_allowed(), b.is_allowed(), "{}: allow/deny mismatch", context);
+    assert_eq!(a.enforced_rules, b.enforced_rules, "{}: enforced_rules mismatch", context);
+    assert_eq!(
+        a.security_analysis.as_ref().map(|s| &s.threats),
+        b.security_analysis.as_ref().map(|s| &s.threats),
+        "{}: security_analysis threats mismatch",
+        context
+    );
+}
+
 // --- Idempotency: same inputs → same verdict ---
 
 #[test]
@@ -103,12 +116,7 @@ fn r_plus_plus_9_can_connect_net_idempotent() {
     for host in &["api.example.com", "cdn.org", "unknown.com", "*", ""] {
         let a = engine.can_connect_net(host);
         let b = engine.can_connect_net(host);
-        assert_eq!(
-            a.is_allowed(),
-            b.is_allowed(),
-            "can_connect_net({}) not idempotent",
-            host
-        );
+        assert_decision_eq(&a, &b, &format!("can_connect_net({})", host));
     }
 }
 
@@ -118,12 +126,7 @@ fn r_plus_plus_9_can_exec_shell_idempotent() {
     for cmd in &["python3 script.py", "bash -c 'echo hi'", "rm -rf /", "curl evil.com", ""] {
         let a = engine.can_exec_shell(cmd);
         let b = engine.can_exec_shell(cmd);
-        assert_eq!(
-            a.is_allowed(),
-            b.is_allowed(),
-            "can_exec_shell({}) not idempotent",
-            cmd
-        );
+        assert_decision_eq(&a, &b, &format!("can_exec_shell({})", cmd));
     }
 }
 
@@ -133,42 +136,27 @@ fn r_plus_plus_9_can_invoke_tool_idempotent() {
     for tool in &["web.fetch", "sandbox.exec", "unknown.tool", ""] {
         let a = engine.can_invoke_tool(tool);
         let b = engine.can_invoke_tool(tool);
-        assert_eq!(
-            a.is_allowed(),
-            b.is_allowed(),
-            "can_invoke_tool({}) not idempotent",
-            tool
-        );
+        assert_decision_eq(&a, &b, &format!("can_invoke_tool({})", tool));
     }
 }
 
 #[test]
 fn r_plus_plus_9_can_read_path_idempotent() {
-    let engine = PolicyEngine::new(read_access_manifest(vec!["self.*", "shared/"]));
+    let engine = PolicyEngine::new(read_access_manifest(vec!["self/", "shared/"]));
     for path in &["self/data", "shared/file.txt", "other/secret", ""] {
         let a = engine.can_read_path(path);
         let b = engine.can_read_path(path);
-        assert_eq!(
-            a.is_allowed(),
-            b.is_allowed(),
-            "can_read_path({}) not idempotent",
-            path
-        );
+        assert_decision_eq(&a, &b, &format!("can_read_path({})", path));
     }
 }
 
 #[test]
 fn r_plus_plus_9_can_write_path_idempotent() {
-    let engine = PolicyEngine::new(write_access_manifest(vec!["self.*"]));
+    let engine = PolicyEngine::new(write_access_manifest(vec!["self/"]));
     for path in &["self/out", "etc/passwd", ""] {
         let a = engine.can_write_path(path);
         let b = engine.can_write_path(path);
-        assert_eq!(
-            a.is_allowed(),
-            b.is_allowed(),
-            "can_write_path({}) not idempotent",
-            path
-        );
+        assert_decision_eq(&a, &b, &format!("can_write_path({})", path));
     }
 }
 
@@ -191,12 +179,7 @@ fn r_plus_plus_9_can_message_agent_idempotent() {
     for target in &["coder.default", "planner.default", ""] {
         let a = engine.can_message_agent(target);
         let b = engine.can_message_agent(target);
-        assert_eq!(
-            a.is_allowed(),
-            b.is_allowed(),
-            "can_message_agent({}) not idempotent",
-            target
-        );
+        assert_decision_eq(&a, &b, &format!("can_message_agent({})", target));
     }
 }
 
