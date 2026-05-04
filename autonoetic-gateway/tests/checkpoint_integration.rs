@@ -45,6 +45,7 @@ fn make_checkpoint(
             Message::assistant("Test response"),
         ],
         turn_counter,
+        session_state: Default::default(),
         loop_guard_state: default_guard_state(),
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),

@@ -249,6 +249,8 @@ fn test_eval_run_persists_with_real_revision() {
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: "test1234".to_string(),
+        signature: None,
+        signer_id: None,
     };
     store.insert_agent_revision(&rev).unwrap();
 
@@ -432,6 +434,8 @@ fn test_agent_revision_diff_reports_modified_files() {
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
             metadata_json: json!({}),
             short_id: "testshort".to_string(),
+            signature: None,
+            signer_id: None,
         };
         store.insert_agent_revision(&rec).unwrap();
     }
@@ -515,6 +519,8 @@ fn test_eval_compare_builds_completed_comparison_report() {
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
             metadata_json: json!({}),
             short_id: "cmp".to_string(),
+            signature: None,
+            signer_id: None,
         };
         store.insert_agent_revision(&rec).unwrap();
     }
@@ -788,6 +794,8 @@ fn test_eval_run_validates_revision_belongs_to_agent() {
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: "test1234".to_string(),
+        signature: None,
+        signer_id: None,
     };
     store.insert_agent_revision(&rev).unwrap();
 
@@ -898,6 +906,8 @@ fn test_promote_rejects_required_eval_run_for_different_revision() {
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: "target111".to_string(),
+        signature: None,
+        signer_id: None,
     };
     let rev_other = autonoetic_types::agent_revision::AgentRevisionRecord {
         revision_id: "rev_sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -918,6 +928,8 @@ fn test_promote_rejects_required_eval_run_for_different_revision() {
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: "other222".to_string(),
+        signature: None,
+        signer_id: None,
     };
     store.insert_agent_revision(&rev_target).unwrap();
     store.insert_agent_revision(&rev_other).unwrap();

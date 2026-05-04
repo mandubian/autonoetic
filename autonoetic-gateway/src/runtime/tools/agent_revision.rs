@@ -369,8 +369,6 @@ fn parse_frontmatter_capabilities(
     summary: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
-    #[serde(default)]
-    signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -404,8 +402,6 @@ struct RevisionCreateFromIntentArgs {
     summary: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
-    #[serde(default)]
-    signature: Option<String>,
 }
 
 #[derive(Debug)]
@@ -417,7 +413,6 @@ struct RevisionCreateCommonArgs {
     metadata: Option<serde_json::Value>,
     source_kind: String,
     source_ref: Option<String>,
-    signature: Option<String>,
 }
 
 #[derive(Debug)]
@@ -534,7 +529,6 @@ fn create_revision_from_files(
     skill_content: &[u8],
     health_report: Option<&crate::runtime::install_contract::BundleHealthReport>,
     script_entry: Option<&str>,
-    artifact_content_digest: Option<&str>,
     config: Option<&GatewayConfig>,
 ) -> anyhow::Result<PersistedRevisionResult> {
     let expected_layers = bundle.map(expected_locked_layers).unwrap_or_default();
@@ -567,30 +561,32 @@ fn create_revision_from_files(
     let runtime_lock_hash = format!("sha256:{}", sha256_hex(&canonical_lock_bytes));
     let revision_digest_hex = compute_revision_content_digest_hex(file_map);
     let revision_id = format!("rev_sha256:{}", revision_digest_hex);
-    let content_digest = artifact_content_digest
-        .map(|d| d.to_string())
-        .unwrap_or_else(|| format!("sha256:{}", revision_digest_hex));
+    let content_digest = format!("sha256:{}", revision_digest_hex);
 
-    if let Some(sig) = &common.signature {
-        let pub_path = gateway_dir.join(crate::runtime::crypto::GatewayIdentityKey::PUBLIC_FILENAME);
-        if pub_path.exists() {
-            let pub_bytes = std::fs::read(&pub_path)?;
-            if pub_bytes.len() == 32 {
-                let mut pk = [0u8; 32];
-                pk.copy_from_slice(&pub_bytes);
-                let valid = crate::runtime::crypto::ManifestVerifier::verify(
-                    &pk,
-                    &revision_digest_hex,
-                    sig,
-                )?;
-                anyhow::ensure!(
-                    valid,
-                    "R+11: Bundle signature verification failed — signature does not match \
-                     the canonical content digest. Tampered or mis-signed bundle."
+    let (signature, signer_id) = match crate::runtime::crypto::GatewayIdentityKey::load_or_generate(gateway_dir) {
+        Ok(key) => {
+            let sig = key.sign(revision_digest_hex.as_bytes());
+            let fp = format!("gateway:{}", key.fingerprint());
+            (Some(sig), Some(fp))
+        }
+        Err(e) => {
+            let trust_unsigned = config.map_or(false, |c| c.trust_unsigned_bundles);
+            if trust_unsigned {
+                tracing::warn!(
+                    target: "revision",
+                    error = %e,
+                    "R+11: Gateway identity key unavailable, proceeding unsigned (trust_unsigned_bundles)"
                 );
+                (None, None)
+            } else {
+                return Err(anyhow::anyhow!(
+                    "R+11: Failed to load gateway identity key for auto-signing: {}. \
+                     Set trust_unsigned_bundles: true in config for local development.",
+                    e
+                ));
             }
         }
-    }
+    };
 
     if let Some(existing_rev) = gateway_store.get_agent_revision(&revision_id)? {
         let _ = materialize_revision_directory(
@@ -657,12 +653,12 @@ fn create_revision_from_files(
             "detected_external_imports": health_report.map(|h| h.detected_external_imports.clone()).unwrap_or_default(),
         }),
         short_id: String::new(),
+        signature,
+        signer_id,
     };
 
     let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
 
-    // If promotion evidence was recorded before revision creation, bind or rotate that evidence
-    // to this canonical revision digest now. Skip for artifact-free reasoning agents.
     if let Some(artifact_id) = &common.artifact_id {
         let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
         let _ =
@@ -682,6 +678,13 @@ fn create_revision_from_files(
         "artifact_id": common.artifact_id,
         "next_step": "Use agent.revision.promote to activate this revision"
     });
+
+    if let Some(obj) = response_obj.as_object_mut() {
+        if let Some(sig) = &rev.signature {
+            obj.insert("signed_by".to_string(), serde_json::json!(rev.signer_id));
+            let _ = sig;
+        }
+    }
 
     if let Some(hr) = health_report {
         if let Some(obj) = response_obj.as_object_mut() {
@@ -813,8 +816,7 @@ impl NativeTool for AgentRevisionCreateTool {
                     "agent_id": { "type": "string", "description": "Logical agent ID for this revision" },
                     "artifact_id": { "type": "string", "description": "Artifact ID containing the agent bundle (SKILL.md + files)" },
                     "base_revision_id": { "type": "string", "description": "Optional: base revision this is derived from" },
-                    "summary": { "type": "string", "description": "Optional: human-readable summary of changes" },
-                    "signature": { "type": "string", "description": "Ed25519 signature over the canonical content digest of the bundle, base64-encoded. Required unless trust_unsigned_bundles is enabled (R+11)." }
+                    "summary": { "type": "string", "description": "Optional: human-readable summary of changes" }
                 },
                 "required": ["agent_id", "artifact_id"],
                 "additionalProperties": false
@@ -866,14 +868,6 @@ impl NativeTool for AgentRevisionCreateTool {
         };
 
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
-
-        let trust_unsigned = _config.map_or(false, |c| c.trust_unsigned_bundles);
-        if !trust_unsigned && args.signature.is_none() {
-            return Err(anyhow::anyhow!(
-                "R+11: Bundle signature required but not provided. \
-                 Set trust_unsigned_bundles: true in config for local development."
-            ));
-        }
 
         let artifact = crate::ArtifactStore::new(gateway_dir)?;
 
@@ -1000,7 +994,6 @@ impl NativeTool for AgentRevisionCreateTool {
             metadata: args.metadata.clone(),
             source_kind: "artifact".to_string(),
             source_ref: Some(args.artifact_id.clone()),
-            signature: args.signature.clone(),
         };
         let persisted = create_revision_from_files(
             &common,
@@ -1012,7 +1005,6 @@ impl NativeTool for AgentRevisionCreateTool {
             &lock_rel_path,
             parsed_lock,
             &skill_content,
-            None,
             None,
             bundle_manifest.script_entry.as_deref(),
             _config,
@@ -1062,8 +1054,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "middleware": { "type": "object" },
                     "response_contract": { "type": "object" },
                     "base_revision_id": { "type": "string" },
-                    "summary": { "type": "string" },
-                    "signature": { "type": "string", "description": "Ed25519 signature over the canonical content digest of the bundle, base64-encoded. Required unless trust_unsigned_bundles is enabled (R+11)." }
+                    "summary": { "type": "string" }
                 },
                 "required": ["agent_id", "instructions", "description", "capabilities"],
                 "additionalProperties": false
@@ -1125,14 +1116,6 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             ));
         };
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
-
-        let trust_unsigned = _config.map_or(false, |c| c.trust_unsigned_bundles);
-        if !trust_unsigned && args.signature.is_none() {
-            return Err(anyhow::anyhow!(
-                "R+11: Bundle signature required but not provided. \
-                 Set trust_unsigned_bundles: true in config for local development."
-            ));
-        }
 
         let resolved_artifact = resolve_revision_artifact_input(
             args.artifact_id.as_deref(),
@@ -1334,13 +1317,6 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         )?;
         let skill_content = canonical_skill.as_bytes().to_vec();
 
-        let artifact_only_digest = if !file_map.is_empty() {
-            let digest_hex = compute_revision_content_digest_hex(&file_map);
-            Some(format!("sha256:{}", digest_hex))
-        } else {
-            None
-        };
-
         file_map.insert("SKILL.md".to_string(), skill_content.clone());
 
         let lock_rel_path = target_manifest.runtime.runtime_lock.clone();
@@ -1362,7 +1338,6 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             metadata: args.metadata.clone(),
             source_kind,
             source_ref,
-            signature: args.signature.clone(),
         };
         let persisted = create_revision_from_files(
             &common,
@@ -1376,7 +1351,6 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             &skill_content,
             health_report.as_ref(),
             resolved_script_entry.as_deref(),
-            artifact_only_digest.as_deref(),
             _config,
         )?;
 

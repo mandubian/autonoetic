@@ -38,8 +38,9 @@ impl GatewayStore {
                 "INSERT INTO agent_revisions (
                     revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
+                    short_id, signature, signer_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     &rev.revision_id,
                     &rev.agent_id,
@@ -58,6 +59,8 @@ impl GatewayStore {
                     &format!("{:?}", rev.status),
                     metadata_json,
                     &short,
+                    rev.signature,
+                    rev.signer_id,
                 ],
             )?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -76,7 +79,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
+                    short_id, signature, signer_id
              FROM agent_revisions WHERE revision_id = ?1",
         )?;
         let rows = stmt.query_map(params![revision_id], |row| {
@@ -110,6 +114,8 @@ impl GatewayStore {
                 status,
                 metadata_json,
                 short_id: short_id.unwrap_or_default(),
+                signature: row.get(17).ok().flatten(),
+                signer_id: row.get(18).ok().flatten(),
             })
         })?;
         let mut results = Vec::new();
@@ -124,7 +130,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
+                    short_id, signature, signer_id
              FROM agent_revisions WHERE agent_id = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![agent_id], |row| {
@@ -158,6 +165,8 @@ impl GatewayStore {
                 status,
                 metadata_json,
                 short_id: short_id.unwrap_or_default(),
+                signature: row.get(17).ok().flatten(),
+                signer_id: row.get(18).ok().flatten(),
             })
         })?;
         let mut results = Vec::new();
@@ -172,7 +181,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json, short_id
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
+                    short_id, signature, signer_id
              FROM agent_revisions ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![], |row| {
@@ -206,6 +216,8 @@ impl GatewayStore {
                 status,
                 metadata_json,
                 short_id: short_id.unwrap_or_default(),
+                signature: row.get(17).ok().flatten(),
+                signer_id: row.get(18).ok().flatten(),
             })
         })?;
         let mut results = Vec::new();

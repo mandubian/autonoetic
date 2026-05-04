@@ -195,6 +195,8 @@ fn bootstrap_agent_inner(
             "summary": "Bootstrapped from reference agent bundle",
         }),
         short_id: String::new(),
+        signature: None,
+        signer_id: None,
     };
 
     store.insert_agent_revision_transactional(&rev)?;

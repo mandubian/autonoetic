@@ -1486,7 +1486,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                     };
                     let sid = session_id.unwrap_or("");
                     let root_session_id = crate::runtime::content_store::root_session_id(sid);
-                    let request = autonoetic_types::background::ApprovalRequest {
+                    let mut request = autonoetic_types::background::ApprovalRequest {
                         request_id: request_id.clone(),
                         agent_id: manifest.agent.id.clone(),
                         session_id: sid.to_string(),
@@ -1519,9 +1519,11 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                         },
                         similar_to_request_id: None,
                         similarity_score: None,
+                        min_dwell_ms: None,
+                        confirm_phrase: None,
                     };
                     if let Some(store) = &gateway_store {
-                        store.create_approval(&request).map_err(|e| {
+                        store.create_approval(&mut request).map_err(|e| {
                             anyhow::anyhow!(
                                 "Failed to persist sandbox approval request '{}': {}",
                                 request_id,
@@ -1776,7 +1778,7 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                                 .collect::<std::collections::BTreeSet<_>>()
                                 .into_iter()
                                 .collect();
-                            let request = autonoetic_types::background::ApprovalRequest {
+                            let mut request = autonoetic_types::background::ApprovalRequest {
                             request_id: request_id.clone(),
                             agent_id: manifest.agent.id.clone(),
                             session_id: sid.to_string(),
@@ -1810,9 +1812,11 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                             },
                             similar_to_request_id: None,
                             similarity_score: None,
+                            min_dwell_ms: None,
+                            confirm_phrase: None,
                         };
                             if let Some(store) = &gateway_store {
-                                store.create_approval(&request).map_err(|e| {
+                                store.create_approval(&mut request).map_err(|e| {
                                     anyhow::anyhow!(
                                         "Failed to persist layer mount approval request '{}': {}",
                                         request_id,
@@ -2517,6 +2521,8 @@ mod approval_binding_tests {
             approval_level: ApprovalLevel::Operator,
             similar_to_request_id: None,
             similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
         };
         assert!(approved_requests_cover_targets(
             &[req.clone()],

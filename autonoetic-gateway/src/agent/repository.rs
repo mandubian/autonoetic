@@ -714,6 +714,8 @@ Test instructions.
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
             metadata_json: serde_json::Value::Null,
             short_id: "abcd1234".to_string(),
+            signature: None,
+            signer_id: None,
         };
         store
             .insert_agent_revision(&rev)

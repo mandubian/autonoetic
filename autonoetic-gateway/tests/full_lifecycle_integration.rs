@@ -294,6 +294,7 @@ fn test_session_snapshot_fork() {
     let cp = SessionCheckpoint {
         history: history.clone(),
         turn_counter: 2,
+        session_state: Default::default(),
         loop_guard_state: LoopGuardState {
             max_loops_without_progress: 10,
             max_tool_failures: 5,

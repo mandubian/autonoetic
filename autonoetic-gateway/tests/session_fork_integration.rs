@@ -26,6 +26,7 @@ fn test_checkpoint(
     SessionCheckpoint {
         history,
         turn_counter,
+        session_state: Default::default(),
         loop_guard_state: LoopGuardState {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
