@@ -85,24 +85,29 @@ fn ri_0_1_registry_provides_knowledge_tools_for_memory_inspection() {
 // Ri-0.3: Named rejection reason (rejections carry rule IDs)
 // ---------------------------------------------------------------------------
 
+fn assert_rules_are_constitutional(label: &str, rules: &[&'static str]) {
+    assert!(
+        !rules.is_empty(),
+        "{} rejection must carry at least one enforced rule (Ri-0.3)",
+        label
+    );
+    for rule in rules {
+        let s = rule.to_string();
+        assert!(
+            s.starts_with('R') || s.starts_with('§'),
+            "{}: enforced rule '{}' must start with R or § (Ri-0.3)",
+            label, s
+        );
+    }
+}
+
 #[test]
 fn ri_0_3_capability_rejection_carries_rule_ids() {
     let manifest = minimal_manifest_with_caps(vec![]);
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest);
     let decision = policy.can_agent_revision("other.agent");
     assert!(!decision.is_allowed());
-    assert!(
-        !decision.enforced_rules.is_empty(),
-        "rejection must carry at least one enforced rule (Ri-0.3)"
-    );
-    for rule in &decision.enforced_rules {
-        let s = rule.to_string();
-        assert!(
-            s.starts_with('R') || s.starts_with('§'),
-            "enforced rule '{}' must start with R or § (Ri-0.3)",
-            s
-        );
-    }
+    assert_rules_are_constitutional("AgentRevision", &decision.enforced_rules);
 }
 
 #[test]
@@ -111,10 +116,7 @@ fn ri_0_3_network_rejection_carries_rule_ids() {
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest);
     let decision = policy.can_connect_net("api.example.com");
     assert!(!decision.is_allowed());
-    assert!(
-        !decision.enforced_rules.is_empty(),
-        "network rejection must carry rule IDs"
-    );
+    assert_rules_are_constitutional("NetworkAccess", &decision.enforced_rules);
 }
 
 #[test]
@@ -123,10 +125,7 @@ fn ri_0_3_exec_rejection_carries_rule_ids() {
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest);
     let decision = policy.can_exec_shell("ls");
     assert!(!decision.is_allowed());
-    assert!(
-        !decision.enforced_rules.is_empty(),
-        "exec rejection must carry rule IDs"
-    );
+    assert_rules_are_constitutional("CodeExecution", &decision.enforced_rules);
 }
 
 #[test]
@@ -135,10 +134,7 @@ fn ri_0_3_spawn_rejection_carries_rule_ids() {
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest);
     let decision = policy.can_spawn_agent();
     assert!(!decision.is_allowed());
-    assert!(
-        !decision.enforced_rules.is_empty(),
-        "spawn rejection must carry rule IDs"
-    );
+    assert_rules_are_constitutional("AgentSpawn", &decision.enforced_rules);
 }
 
 #[test]
