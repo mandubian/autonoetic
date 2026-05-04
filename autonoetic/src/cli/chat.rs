@@ -47,6 +47,8 @@ const STATUS_BAR_EVENT_PREVIEW_CHARS: usize = 160;
 const RECONNECT_NOTICE_BASE_ATTEMPTS: u32 = 3;
 const RIGHT_PANE_WIDTH: u16 = 44;
 const MIN_MAIN_MESSAGES_WIDTH: u16 = 60;
+/// Max lines kept for input-line recall (↑/↓ in chat TUI).
+const PROMPT_HISTORY_MAX: usize = 500;
 
 /// If `handle_chat` enables raw mode / alternate screen then exits early (missing env, I/O error,
 /// `run_loop` failure), the tty stays raw with echo off unless we restore it—keyboard input looks
@@ -211,6 +213,12 @@ struct App {
     inline_approvals_enabled: bool,
     /// Store-derived approval IDs we already announced (avoid repeating every poll).
     announced_store_approval_ids: HashSet<String>,
+    /// Submitted user lines, newest last — for ↑/↓ recall in the prompt.
+    prompt_history: Vec<String>,
+    /// When set, the input shows `prompt_history[len - 1 - k]` (`k == 0` is the most recent submission).
+    prompt_history_scroll_back: Option<usize>,
+    /// Draft in the input before the first ↑ during this browse; restored when ↓ passes the newest recall.
+    prompt_history_draft: Option<String>,
 }
 
 impl App {
@@ -245,6 +253,83 @@ impl App {
             pending_approval_ids: Vec::new(),
             inline_approvals_enabled: false,
             announced_store_approval_ids: HashSet::new(),
+            prompt_history: Vec::new(),
+            prompt_history_scroll_back: None,
+            prompt_history_draft: None,
+        }
+    }
+
+    fn clear_prompt_history_browse(&mut self) {
+        self.prompt_history_scroll_back = None;
+        self.prompt_history_draft = None;
+    }
+
+    fn push_prompt_history(&mut self, line: String) {
+        let line = line.trim_end().to_string();
+        if line.is_empty() {
+            return;
+        }
+        if self.prompt_history.last().map(|s| s.as_str()) == Some(line.as_str()) {
+            return;
+        }
+        self.prompt_history.push(line);
+        while self.prompt_history.len() > PROMPT_HISTORY_MAX {
+            self.prompt_history.remove(0);
+        }
+    }
+
+    fn apply_prompt_history_line(&mut self, scroll_back: usize) {
+        let len = self.prompt_history.len();
+        if len == 0 {
+            return;
+        }
+        let idx = len - 1 - scroll_back;
+        if idx < len {
+            self.input = self.prompt_history[idx].clone();
+            self.cursor_pos = self.input.len();
+        }
+    }
+
+    fn prompt_history_up(&mut self) {
+        let len = self.prompt_history.len();
+        if len == 0 {
+            return;
+        }
+        match self.prompt_history_scroll_back {
+            None => {
+                self.prompt_history_draft = Some(self.input.clone());
+                self.prompt_history_scroll_back = Some(0);
+                self.apply_prompt_history_line(0);
+            }
+            Some(k) if k + 1 < len => {
+                let nk = k + 1;
+                self.prompt_history_scroll_back = Some(nk);
+                self.apply_prompt_history_line(nk);
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn prompt_history_down(&mut self) {
+        match self.prompt_history_scroll_back {
+            None => {}
+            Some(0) => {
+                self.prompt_history_scroll_back = None;
+                self.input = self.prompt_history_draft.take().unwrap_or_default();
+                self.cursor_pos = self.input.len();
+            }
+            Some(k) => {
+                let nk = k.saturating_sub(1);
+                self.prompt_history_scroll_back = Some(nk);
+                self.apply_prompt_history_line(nk);
+            }
+        }
+    }
+
+    /// Leaving recall mode on the first edit after ↑ (draft is discarded).
+    fn end_prompt_history_if_browsing(&mut self) {
+        if self.prompt_history_scroll_back.take().is_some() {
+            self.prompt_history_draft = None;
         }
     }
 
@@ -289,11 +374,13 @@ impl App {
     }
 
     fn insert_char(&mut self, c: char) {
+        self.end_prompt_history_if_browsing();
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
     }
 
     fn delete_char(&mut self) {
+        self.end_prompt_history_if_browsing();
         if self.cursor_pos > 0 {
             let prev = self.input[..self.cursor_pos].chars().last().unwrap();
             let len = prev.len_utf8();
@@ -1474,7 +1561,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
     let text = if !app.pending.is_empty() {
         format!(
-            "{} {} pending | {} | {} | {} | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
+            "{} {} pending | {} | {} | {} | {} | Enter: send | History: ↑↓ | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
             app.spinner(),
             app.pending.len(),
             workflow,
@@ -1485,7 +1572,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         format!(
-            "Session: {} | Target: {} | {} | {} | {} | {} | Enter: send | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
+            "Session: {} | Target: {} | {} | {} | {} | {} | Enter: send | History: ↑↓ | Scroll: Shift+↑↓ | Quit: Ctrl+C{}",
             &app.session_id[..20.min(app.session_id.len())],
             app.target_hint,
             workflow,
@@ -2315,6 +2402,8 @@ fn handle_key(
             } else if !app.input.is_empty() {
                 let msg = std::mem::take(&mut app.input);
                 app.cursor_pos = 0;
+                app.clear_prompt_history_browse();
+                app.push_prompt_history(msg.clone());
                 let id = app.next_id();
                 app.add_pending(id);
                 app.add_message(MessageRole::User, msg.clone());
@@ -2341,6 +2430,7 @@ fn handle_key(
         // Delete
         KeyCode::Backspace => app.delete_char(),
         KeyCode::Delete => {
+            app.end_prompt_history_if_browsing();
             if app.cursor_pos < app.input.len() {
                 app.input.remove(app.cursor_pos);
             }
@@ -2351,18 +2441,25 @@ fn handle_key(
             app.insert_char(c);
         }
 
-        // Scroll (Shift or Ctrl)
-        KeyCode::Up
+        // Recall previous prompts (plain arrows); transcript scroll uses Shift/Ctrl.
+
+        KeyCode::Up => {
             if key.modifiers.contains(KeyModifiers::SHIFT)
-                || key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            app.scroll_messages_up(3);
+                || key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                app.scroll_messages_up(3);
+            } else {
+                app.prompt_history_up();
+            }
         }
-        KeyCode::Down
+        KeyCode::Down => {
             if key.modifiers.contains(KeyModifiers::SHIFT)
-                || key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            app.scroll_messages_down(3);
+                || key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                app.scroll_messages_down(3);
+            } else {
+                app.prompt_history_down();
+            }
         }
 
         // Inline approval: Ctrl+A approves the latest pending approval
