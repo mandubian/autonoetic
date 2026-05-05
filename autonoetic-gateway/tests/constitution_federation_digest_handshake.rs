@@ -173,7 +173,7 @@ async fn mismatched_digest_is_rejected_and_records_both_digests() {
 
     let response = read_framed_message(&mut reader).await.unwrap();
     match response.kind {
-        WireMessageKind::Response(WireResponse::Error { code, message }) => {
+        WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
             assert_eq!(code, 409);
             assert!(message.contains("constitutional_incompatibility"));
         }

@@ -733,31 +733,32 @@ loop guard, attempt `sandbox_exec`, assert reject with
 
 ---
 
-### 2.12 `R++7` Cross-gateway causal continuity
+### 2.12 `R++7` Cross-gateway causal continuity — **ENFORCED**
 
 **Threat.** Federation with independent causal chains means
 reconstructing a cross-gateway interaction requires correlating two
 chains out-of-band. The whole point of federation-plus-causal-chain is
 end-to-end audit; today that property does not hold.
 
-**Sketch.** Two additions to OFP:
+**Implementation.** Two additions landed on OFP:
 
-1. Cross-gateway events (agent-to-agent messages, remote spawns,
-   remote credential requests) embed a `peer_event_ref: { gateway_id,
-   event_id, entry_hash }` in their payload. Both sides log matching
-   `peer_event_ref`s, enabling a bidirectional join.
-2. Gateways periodically exchange signed `chain_attestation` digests:
-   `(gateway_id, chain_prefix_hash_at_event_N, signature)`. A verifier
-   holding two chains and the attestations can confirm that the view
-   each side presents of the other is consistent.
+1. Cross-gateway `agent_message` request/response payloads now carry a
+   `peer_event_ref: { gateway_id, event_id, entry_hash }`.
+   `autonoetic-gateway/src/server/ofp.rs` emits federation causal events
+   containing both local and peer references so traces can be joined
+   bidirectionally.
+2. Gateways exchange signed `chain_attestation` payloads over OFP
+   (`WireRequest::ChainAttestation` / `WireResponse::ChainAttestationAck`).
+   Signatures are generated from gateway identity keys and verified via
+   Ed25519 before federated delivery is accepted.
 
-Files: `autonoetic-ofp/`, `autonoetic-gateway/src/causal_chain.rs`
-(peer ref support), `autonoetic-gateway/src/server/ofp.rs`.
+Files: `autonoetic-ofp/src/wire.rs`,
+`autonoetic-gateway/src/server/ofp.rs`,
+`autonoetic-gateway/src/server/router.rs`.
 
-**Test.** `constitution_federation_causal_continuity.rs` — two local
-OFP endpoints, round-trip a message, assert peer refs present on both
-sides, assert attestation verifies, tamper with one side's chain,
-assert verification fails.
+**Test.** `constitution_federation_causal_continuity.rs` — round-trip
+asserts peer refs on both sides, attestation signature verification, and
+tamper rejection for invalid signatures.
 
 **Size.** L. Touches the federation protocol surface.
 

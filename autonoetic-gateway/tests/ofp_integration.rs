@@ -145,6 +145,7 @@ fn test_wire_compat_error_response_shape() {
         kind: WireMessageKind::Response(WireResponse::Error {
             code: 403,
             message: "HMAC authentication failed".to_string(),
+            peer_event_ref: None,
         }),
     };
     let json: serde_json::Value = serde_json::to_value(&msg).unwrap();
@@ -258,13 +259,17 @@ fn test_encode_decode_all_message_types() {
                 agent: "coder".into(),
                 message: "Hello".into(),
                 sender: Some("orchestrator".into()),
+                peer_event_ref: None,
             }),
         },
         WireMessage {
             id: "5".into(),
             signature: None,
             seq_num: None,
-            kind: WireMessageKind::Response(WireResponse::AgentResponse { text: "Hi".into() }),
+            kind: WireMessageKind::Response(WireResponse::AgentResponse {
+                text: "Hi".into(),
+                peer_event_ref: None,
+            }),
         },
         WireMessage {
             id: "6".into(),
@@ -461,6 +466,7 @@ async fn test_tcp_handshake_bad_hmac_rejected() {
                         kind: WireMessageKind::Response(WireResponse::Error {
                             code: 403,
                             message: "HMAC authentication failed".to_string(),
+                            peer_event_ref: None,
                         }),
                     };
                     write_framed_message(&mut writer, &err).await.unwrap();
@@ -926,7 +932,7 @@ async fn test_handshake_rejects_constitution_mismatch_in_exact_mode() {
 
     let response = read_framed_message(&mut reader).await.unwrap();
     match response.kind {
-        WireMessageKind::Response(WireResponse::Error { code, message }) => {
+        WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
             assert_eq!(code, 409);
             assert!(message.contains("constitutional_incompatibility"));
         }
@@ -1166,7 +1172,7 @@ async fn test_handshake_rejects_non_superset_profile_in_superset_mode() {
 
     let response = read_framed_message(&mut reader).await.unwrap();
     match response.kind {
-        WireMessageKind::Response(WireResponse::Error { code, message }) => {
+        WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
             assert_eq!(code, 409);
             assert!(message.contains("constitutional_incompatibility"));
             assert!(message.contains("peer missing rules entry"));
@@ -1196,48 +1202,9 @@ async fn test_inbound_agent_message() {
     let reg = PeerRegistry::new();
     let shared_secret = "agent-msg-secret".to_string();
 
-    // 1. Setup a temporary agent directory for the router
-    let temp_dir = TempDir::new().unwrap();
-    let agents_dir = temp_dir.path().join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-
+    // 1. Configure Gateway and Router
     let target_agent_id = "test_target_agent";
-    let agent_dir = agents_dir.join(target_agent_id);
-    std::fs::create_dir_all(&agent_dir).unwrap();
-
-    let manifest_yaml = format!(
-        r#"
-name: "{}"
-description: "Integration test agent"
-metadata:
-  autonoetic:
-    version: "1.0"
-    agent:
-      id: "{}"
-      name: "target-agent"
-      description: "mock agent"
-    llm_config:
-      provider: "mock"
-      model: "mock"
-    capabilities: []
-"#,
-        target_agent_id, target_agent_id
-    );
-
-    let skill_md = format!(
-        "---\n{}\n---\n# Instructions\nYou are a mock agent.",
-        manifest_yaml.trim()
-    );
-    std::fs::write(agent_dir.join("SKILL.md"), skill_md).unwrap();
-
-    // 2. Configure Gateway and Router
-    let config = GatewayConfig {
-        port: 0,
-        ofp_port: 0,
-        agents_dir,
-        ..Default::default()
-    };
-    let router = Arc::new(JsonRpcRouter::new(config, None));
+    let router = Arc::new(JsonRpcRouter::new(GatewayConfig::default(), None));
 
     // 3. Start OFP server on a random port
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1309,6 +1276,7 @@ metadata:
             agent: target_agent_id.to_string(),
             message: "Hello from OFP client!".to_string(),
             sender: Some(source_agent_id.to_string()),
+            peer_event_ref: None,
         }),
     };
 
@@ -1329,7 +1297,7 @@ metadata:
     autonoetic_gateway::server::ofp::verify_wire_message(&shared_secret, &resp, 1).unwrap();
 
     match resp.kind {
-        WireMessageKind::Response(WireResponse::Error { code, message }) => {
+        WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
             assert_eq!(code, 500);
             assert!(
                 message.contains("GatewayStore is required")
@@ -1349,44 +1317,8 @@ async fn test_inbound_agent_message_rejects_unadvertised_sender() {
     let reg = PeerRegistry::new();
     let shared_secret = "agent-msg-secret".to_string();
 
-    let temp_dir = TempDir::new().unwrap();
-    let agents_dir = temp_dir.path().join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-
     let target_agent_id = "test_target_agent";
-    let agent_dir = agents_dir.join(target_agent_id);
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let skill_md = format!(
-        "---\n{}\n---\n# Instructions\nYou are a mock agent.",
-        format!(
-            r#"
-name: "{}"
-description: "Integration test agent"
-metadata:
-  autonoetic:
-    version: "1.0"
-    agent:
-      id: "{}"
-      name: "target-agent"
-      description: "mock agent"
-    llm_config:
-      provider: "mock"
-      model: "mock"
-    capabilities: []
-"#,
-            target_agent_id, target_agent_id
-        )
-        .trim()
-    );
-    std::fs::write(agent_dir.join("SKILL.md"), skill_md).unwrap();
-
-    let config = GatewayConfig {
-        port: 0,
-        ofp_port: 0,
-        agents_dir,
-        ..Default::default()
-    };
-    let router = Arc::new(JsonRpcRouter::new(config, None));
+    let router = Arc::new(JsonRpcRouter::new(GatewayConfig::default(), None));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
@@ -1438,6 +1370,7 @@ metadata:
             agent: target_agent_id.to_string(),
             message: "Hello from OFP client!".to_string(),
             sender: Some("spoofed_sender".to_string()),
+            peer_event_ref: None,
         }),
     };
     agent_msg.signature = Some(
@@ -1449,7 +1382,7 @@ metadata:
     autonoetic_gateway::server::ofp::verify_wire_message(&shared_secret, &resp, 1).unwrap();
 
     match resp.kind {
-        WireMessageKind::Response(WireResponse::Error { code, message }) => {
+        WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
             assert_eq!(code, 403);
             assert!(
                 message.contains("not advertised"),

@@ -5,14 +5,15 @@
 
 use crate::server::registry::{PeerEntry, PeerRegistry, PeerState};
 use autonoetic_ofp::wire::{
-    decode_length, decode_message, encode_message, ConstitutionProfile, WireMessage,
-    WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION,
+    decode_length, decode_message, encode_message, ChainAttestation, ConstitutionProfile,
+    PeerEventRef, WireMessage, WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION,
 };
 use autonoetic_types::config::{
     FederationConstitutionConfig, FederationConstitutionMode, GatewayConfig,
 };
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -175,6 +176,234 @@ fn emit_federation_constitution_event(
     }
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn federation_rules_for_message_continuity() -> Vec<String> {
+    let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
+    rules.push("R++7".to_string());
+    rules.push("R-10.6".to_string());
+    rules
+}
+
+fn latest_federation_chain_tip(
+    gateway_store: Option<&Arc<crate::scheduler::gateway_store::GatewayStore>>,
+) -> (String, String) {
+    let genesis = ("genesis".to_string(), sha256_hex(b"genesis"));
+    let Some(store) = gateway_store else {
+        return genesis;
+    };
+    let events = match store.search_causal_events(Some("system"), Some("gateway"), 512) {
+        Ok(events) => events,
+        Err(_) => return genesis,
+    };
+    for event in events {
+        if event.category != "federation" {
+            continue;
+        }
+        let Some(raw_payload) = event.payload else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw_payload) else {
+            continue;
+        };
+        let Some(entry_hash) = payload.get("entry_hash").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if entry_hash.trim().is_empty() {
+            continue;
+        }
+        return (event.event_id, entry_hash.to_string());
+    }
+    genesis
+}
+
+fn canonical_chain_attestation_payload(
+    gateway_id: &str,
+    event_id: &str,
+    chain_prefix_hash: &str,
+    attested_at: &str,
+    key_fingerprint: &str,
+) -> anyhow::Result<Vec<u8>> {
+    #[derive(serde::Serialize)]
+    struct ChainAttestationPayload<'a> {
+        gateway_id: &'a str,
+        event_id: &'a str,
+        chain_prefix_hash: &'a str,
+        attested_at: &'a str,
+        key_fingerprint: &'a str,
+    }
+    Ok(serde_json::to_vec(&ChainAttestationPayload {
+        gateway_id,
+        event_id,
+        chain_prefix_hash,
+        attested_at,
+        key_fingerprint,
+    })?)
+}
+
+/// Compose a signed chain attestation digest for federation continuity checks.
+pub fn compose_chain_attestation(
+    gateway_id: &str,
+    gateway_dir: &Path,
+    event_id: String,
+    chain_prefix_hash: String,
+) -> anyhow::Result<(ChainAttestation, String)> {
+    let key = crate::runtime::crypto::GatewayIdentityKey::load_or_generate(gateway_dir)?;
+    let key_fingerprint = key.fingerprint();
+    let attested_at = chrono::Utc::now().to_rfc3339();
+    let payload = canonical_chain_attestation_payload(
+        gateway_id,
+        &event_id,
+        &chain_prefix_hash,
+        &attested_at,
+        &key_fingerprint,
+    )?;
+    let signature_b64 = key.sign(&payload);
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let public_key_b64 = STANDARD.encode(key.public_key_bytes());
+    Ok((
+        ChainAttestation {
+            gateway_id: gateway_id.to_string(),
+            event_id,
+            chain_prefix_hash,
+            attested_at,
+            key_fingerprint,
+            signature_b64,
+        },
+        public_key_b64,
+    ))
+}
+
+/// Compose an attestation from the latest locally persisted federation chain tip.
+pub fn compose_local_chain_attestation(
+    gateway_id: &str,
+    gateway_dir: &Path,
+    gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+) -> anyhow::Result<(ChainAttestation, String)> {
+    let (event_id, chain_prefix_hash) = latest_federation_chain_tip(gateway_store.as_ref());
+    compose_chain_attestation(gateway_id, gateway_dir, event_id, chain_prefix_hash)
+}
+
+/// Verify signature + key fingerprint on a received chain attestation.
+pub fn verify_chain_attestation(
+    attestation: &ChainAttestation,
+    public_key_b64: &str,
+) -> anyhow::Result<()> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let key_bytes = STANDARD
+        .decode(public_key_b64)
+        .map_err(|e| anyhow::anyhow!("invalid attestation public key: {}", e))?;
+    anyhow::ensure!(
+        key_bytes.len() == 32,
+        "invalid attestation public key length (expected 32, got {})",
+        key_bytes.len()
+    );
+    let mut key_arr = [0u8; 32];
+    key_arr.copy_from_slice(&key_bytes);
+    let expected_fp = hex::encode(&key_arr[..8]);
+    anyhow::ensure!(
+        expected_fp == attestation.key_fingerprint,
+        "attestation fingerprint mismatch (expected {}, got {})",
+        expected_fp,
+        attestation.key_fingerprint
+    );
+    let payload = canonical_chain_attestation_payload(
+        &attestation.gateway_id,
+        &attestation.event_id,
+        &attestation.chain_prefix_hash,
+        &attestation.attested_at,
+        &attestation.key_fingerprint,
+    )?;
+    let valid = crate::runtime::crypto::verify_attestation_signature(
+        &key_arr,
+        &payload,
+        &attestation.signature_b64,
+    )?;
+    anyhow::ensure!(valid, "attestation signature verification failed");
+    Ok(())
+}
+
+/// Emit a federation message event and return the local peer reference.
+pub fn emit_federation_message_event(
+    gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    local_gateway_id: &str,
+    peer_gateway_id: &str,
+    action: &str,
+    status: autonoetic_types::causal_chain::EntryStatus,
+    sender_agent: Option<&str>,
+    target_agent: Option<&str>,
+    message: &str,
+    peer_event_ref: Option<&PeerEventRef>,
+) -> PeerEventRef {
+    let event_id = format!("federation-msg-{}", uuid::Uuid::new_v4());
+    let message_sha256 = sha256_hex(message.as_bytes());
+    let canonical = serde_json::json!({
+        "gateway_id": local_gateway_id,
+        "peer_gateway_id": peer_gateway_id,
+        "event_id": event_id,
+        "action": action,
+        "status": status.to_string(),
+        "sender_agent": sender_agent,
+        "target_agent": target_agent,
+        "message_sha256": message_sha256,
+        "peer_event_ref": peer_event_ref,
+    });
+    let canonical_bytes = serde_json::to_vec(&canonical)
+        .expect("federation continuity canonical payload must serialize");
+    let entry_hash = sha256_hex(&canonical_bytes);
+    let local_ref = PeerEventRef {
+        gateway_id: local_gateway_id.to_string(),
+        event_id: event_id.clone(),
+        entry_hash: entry_hash.clone(),
+    };
+
+    let Some(store) = gateway_store else {
+        return local_ref;
+    };
+
+    let now = chrono::Utc::now();
+    let payload = serde_json::json!({
+        "gateway_id": local_gateway_id,
+        "peer_gateway_id": peer_gateway_id,
+        "sender_agent": sender_agent,
+        "target_agent": target_agent,
+        "message_sha256": message_sha256,
+        "peer_event_ref": peer_event_ref,
+        "entry_hash": entry_hash,
+    });
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id,
+        agent_id: "gateway".to_string(),
+        session_id: "system".to_string(),
+        turn_id: None,
+        event_seq: now.timestamp_millis().max(0) as u64,
+        timestamp: now.to_rfc3339(),
+        category: "federation".to_string(),
+        action: action.to_string(),
+        status: status.to_string(),
+        enforced_rules: federation_rules_for_message_continuity(),
+        target: Some(peer_gateway_id.to_string()),
+        payload: Some(payload.to_string()),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: None,
+    };
+    if let Err(e) = store.create_causal_event(&event) {
+        warn!(
+            target: "federation",
+            error = %e,
+            peer_gateway_id = peer_gateway_id,
+            action = action,
+            "Failed to write federation continuity causal event"
+        );
+    }
+    local_ref
+}
+
 /// Generate HMAC-SHA256 signature for message authentication.
 pub fn hmac_sign(secret: &str, data: &[u8]) -> String {
     let mut mac =
@@ -304,6 +533,7 @@ async fn handle_inbound_connection(
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = stream.into_split();
     let gateway_store = router.execution_service().gateway_store();
+    let gateway_dir = crate::execution::gateway_root_dir(config.as_ref());
 
     // 1. Read the handshake request
     let msg = parse_ofp_response(&mut reader).await?;
@@ -336,6 +566,7 @@ async fn handle_inbound_connection(
                         kind: WireMessageKind::Response(WireResponse::Error {
                             code: 1,
                             message: format!("Version mismatch. Expected {}", PROTOCOL_VERSION),
+                            peer_event_ref: None,
                         }),
                     };
                     write_framed_message(&mut writer, &err).await?;
@@ -352,6 +583,7 @@ async fn handle_inbound_connection(
                         kind: WireMessageKind::Response(WireResponse::Error {
                             code: 403,
                             message: "HMAC authentication failed".into(),
+                            peer_event_ref: None,
                         }),
                     };
                     write_framed_message(&mut writer, &err).await?;
@@ -383,6 +615,7 @@ async fn handle_inbound_connection(
                     kind: WireMessageKind::Response(WireResponse::Error {
                         code: 401,
                         message: "First message must be Handshake".into(),
+                        peer_event_ref: None,
                     }),
                 };
                 write_framed_message(&mut writer, &err).await?;
@@ -421,6 +654,7 @@ async fn handle_inbound_connection(
             kind: WireMessageKind::Response(WireResponse::Error {
                 code: 409,
                 message: format!("constitutional_incompatibility: {}", e),
+                peer_event_ref: None,
             }),
         };
         write_framed_message(&mut writer, &err).await?;
@@ -431,7 +665,7 @@ async fn handle_inbound_connection(
         );
     }
     emit_federation_constitution_event(
-        gateway_store,
+        gateway_store.clone(),
         &peer_node_id,
         peer_addr,
         local_constitution_digest,
@@ -472,8 +706,8 @@ async fn handle_inbound_connection(
         signature: None,
         seq_num: None,
         kind: WireMessageKind::Response(WireResponse::HandshakeAck {
-            node_id: local_node_id,
-            node_name: local_node_name,
+            node_id: local_node_id.clone(),
+            node_name: local_node_name.clone(),
             protocol_version: PROTOCOL_VERSION,
             agents: vec![], // TODO: populate from Gateway state
             nonce: ack_nonce,
@@ -515,6 +749,7 @@ async fn handle_inbound_connection(
                     kind: WireMessageKind::Response(WireResponse::Error {
                         code: 403,
                         message: format!("Invalid msg_hmac envelope: {}", e),
+                        peer_event_ref: None,
                     }),
                 };
                 write_framed_message(&mut writer, &err).await?;
@@ -524,8 +759,8 @@ async fn handle_inbound_connection(
             expected_inbound_seq += 1;
         }
 
-        // Handle Ping, Discover, AgentMessage...
-        match &req.kind {
+        // Handle Ping, ChainAttestation, AgentMessage...
+        match req.kind.clone() {
             WireMessageKind::Request(WireRequest::Ping) => {
                 let mut resp = WireMessage {
                     id: req.id.clone(),
@@ -540,10 +775,71 @@ async fn handle_inbound_connection(
                 }
                 write_framed_message(&mut writer, &resp).await?;
             }
+            WireMessageKind::Request(WireRequest::ChainAttestation {
+                attestation,
+                public_key_b64,
+                request_peer_attestation,
+            }) => {
+                let mut accepted = true;
+                let mut reason: Option<String> = None;
+                if attestation.gateway_id != peer_node_id {
+                    accepted = false;
+                    reason = Some(format!(
+                        "attestation gateway_id mismatch: expected {}, got {}",
+                        peer_node_id, attestation.gateway_id
+                    ));
+                }
+                if accepted {
+                    if let Err(e) = verify_chain_attestation(&attestation, &public_key_b64) {
+                        accepted = false;
+                        reason = Some(e.to_string());
+                    }
+                }
+                let (peer_attestation, peer_public_key_b64) = if accepted && request_peer_attestation
+                {
+                    match compose_local_chain_attestation(
+                        &local_node_id,
+                        &gateway_dir,
+                        gateway_store.clone(),
+                    ) {
+                        Ok((attestation, public_key_b64)) => {
+                            (Some(attestation), Some(public_key_b64))
+                        }
+                        Err(e) => {
+                            accepted = false;
+                            reason = Some(format!(
+                                "cannot compose local chain attestation: {}",
+                                e
+                            ));
+                            (None, None)
+                        }
+                    }
+                } else {
+                    (None, None)
+                };
+                let mut resp = WireMessage {
+                    id: req.id.clone(),
+                    signature: None,
+                    seq_num: None,
+                    kind: WireMessageKind::Response(WireResponse::ChainAttestationAck {
+                        accepted,
+                        reason,
+                        peer_attestation,
+                        peer_public_key_b64,
+                    }),
+                };
+                if use_msg_hmac {
+                    resp.seq_num = Some(outbound_seq);
+                    resp.signature = Some(sign_wire_message(&shared_secret, &resp)?);
+                    outbound_seq += 1;
+                }
+                write_framed_message(&mut writer, &resp).await?;
+            }
             WireMessageKind::Request(WireRequest::AgentMessage {
                 agent,
                 message,
                 sender,
+                peer_event_ref,
             }) => {
                 let session_id = uuid::Uuid::new_v4().to_string();
                 let mut resp = match sender.as_deref() {
@@ -556,12 +852,24 @@ async fn handle_inbound_connection(
                         {
                             Ok(result) => {
                                 let text = result.assistant_reply.unwrap_or_default();
+                                let local_peer_event_ref = emit_federation_message_event(
+                                    gateway_store.clone(),
+                                    &local_node_id,
+                                    &peer_node_id,
+                                    "agent_message_inbound",
+                                    autonoetic_types::causal_chain::EntryStatus::Success,
+                                    Some(sender_agent),
+                                    Some(&agent),
+                                    &message,
+                                    peer_event_ref.as_ref(),
+                                );
                                 WireMessage {
                                     id: req.id.clone(),
                                     signature: None,
                                     seq_num: None,
                                     kind: WireMessageKind::Response(WireResponse::AgentResponse {
                                         text,
+                                        peer_event_ref: Some(local_peer_event_ref),
                                     }),
                                 }
                             }
@@ -572,6 +880,17 @@ async fn handle_inbound_connection(
                                 kind: WireMessageKind::Response(WireResponse::Error {
                                     code: 500,
                                     message: format!("Agent spawn failed: {}", e),
+                                    peer_event_ref: Some(emit_federation_message_event(
+                                        gateway_store.clone(),
+                                        &local_node_id,
+                                        &peer_node_id,
+                                        "agent_message_inbound",
+                                        autonoetic_types::causal_chain::EntryStatus::Error,
+                                        Some(sender_agent),
+                                        Some(&agent),
+                                        &message,
+                                        peer_event_ref.as_ref(),
+                                    )),
                                 }),
                             },
                         }
@@ -586,6 +905,17 @@ async fn handle_inbound_connection(
                                 "Sender '{}' is not advertised by authenticated peer '{}'",
                                 sender_agent, peer_node_id
                             ),
+                            peer_event_ref: Some(emit_federation_message_event(
+                                gateway_store.clone(),
+                                &local_node_id,
+                                &peer_node_id,
+                                "agent_message_inbound",
+                                autonoetic_types::causal_chain::EntryStatus::Denied,
+                                Some(sender_agent),
+                                Some(&agent),
+                                &message,
+                                peer_event_ref.as_ref(),
+                            )),
                         }),
                     },
                     None => WireMessage {
@@ -596,6 +926,17 @@ async fn handle_inbound_connection(
                             code: 400,
                             message: "AgentMessage sender is required for federated delivery"
                                 .into(),
+                            peer_event_ref: Some(emit_federation_message_event(
+                                gateway_store.clone(),
+                                &local_node_id,
+                                &peer_node_id,
+                                "agent_message_inbound",
+                                autonoetic_types::causal_chain::EntryStatus::Denied,
+                                None,
+                                Some(&agent),
+                                &message,
+                                peer_event_ref.as_ref(),
+                            )),
                         }),
                     },
                 };
@@ -616,6 +957,7 @@ async fn handle_inbound_connection(
                     kind: WireMessageKind::Response(WireResponse::Error {
                         code: 501,
                         message: "Not Implemented".into(),
+                        peer_event_ref: None,
                     }),
                 };
                 if use_msg_hmac {

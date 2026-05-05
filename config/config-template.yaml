@@ -30,13 +30,13 @@ constitution:
   lock_path: "docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
-    autonoetic:constitution:v1: "kI739PGXQIakvbb1Oslw+yD7Xe76+TFp8H2sr2GPT7Q="
+    autonoetic:constitution:v1: "CvIfPr9iMiKYJQO3PZFIqdOLVtsCbtlVV45UEXkF6iY="
 # constitution:
 #   source_path: ".gateway/constitution/versions/2026.05.05/constitution.md"
 #   lock_path: ".gateway/constitution/versions/2026.05.05/gateway-constitution.lock.json"
 #   require_signature: true
 #   trusted_signers:
-#     autonoetic:constitution:v1: "kI739PGXQIakvbb1Oslw+yD7Xe76+TFp8H2sr2GPT7Q="
+#     autonoetic:constitution:v1: "CvIfPr9iMiKYJQO3PZFIqdOLVtsCbtlVV45UEXkF6iY="
 
 # ── Sandbox ───────────────────────────────────────────────────────────
 # Bubblewrap isolation overrides.

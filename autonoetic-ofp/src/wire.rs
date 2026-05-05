@@ -92,6 +92,20 @@ pub enum WireRequest {
         message: String,
         /// Optional sender identity.
         sender: Option<String>,
+        /// Optional cross-gateway causal correlation reference.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_event_ref: Option<PeerEventRef>,
+    },
+    /// Exchange signed chain attestation digests.
+    #[serde(rename = "chain_attestation")]
+    ChainAttestation {
+        /// Signed chain attestation from the requester.
+        attestation: ChainAttestation,
+        /// Requester Ed25519 public key (base64, 32 bytes).
+        public_key_b64: String,
+        /// Request that peer includes its own attestation in the ack.
+        #[serde(default)]
+        request_peer_attestation: bool,
     },
     /// Ping to check if the peer is alive.
     #[serde(rename = "ping")]
@@ -134,6 +148,24 @@ pub enum WireResponse {
     AgentResponse {
         /// The agent's response text.
         text: String,
+        /// Optional cross-gateway causal correlation reference.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_event_ref: Option<PeerEventRef>,
+    },
+    /// Acknowledgement for `chain_attestation`.
+    #[serde(rename = "chain_attestation_ack")]
+    ChainAttestationAck {
+        /// Whether attestation verification succeeded.
+        accepted: bool,
+        /// Optional reason when `accepted=false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Optional peer attestation when requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_attestation: Option<ChainAttestation>,
+        /// Optional peer Ed25519 public key (base64, 32 bytes).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_public_key_b64: Option<String>,
     },
     /// Pong response.
     #[serde(rename = "pong")]
@@ -148,6 +180,9 @@ pub enum WireResponse {
         code: i32,
         /// Error message.
         message: String,
+        /// Optional cross-gateway causal correlation reference.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_event_ref: Option<PeerEventRef>,
     },
 }
 
@@ -164,6 +199,34 @@ pub enum WireNotification {
     /// Peer is shutting down.
     #[serde(rename = "shutting_down")]
     ShuttingDown,
+}
+
+/// Reference to the corresponding event on the remote gateway chain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerEventRef {
+    /// Gateway identity that emitted the referenced event.
+    pub gateway_id: String,
+    /// Event identifier on that gateway.
+    pub event_id: String,
+    /// Hash of the referenced chain entry.
+    pub entry_hash: String,
+}
+
+/// Signed digest of a gateway's current chain prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChainAttestation {
+    /// Gateway identity that signed this attestation.
+    pub gateway_id: String,
+    /// Event ID at the attested prefix tip.
+    pub event_id: String,
+    /// Hash of chain prefix at `event_id`.
+    pub chain_prefix_hash: String,
+    /// RFC3339 timestamp when this digest was signed.
+    pub attested_at: String,
+    /// First 8 bytes of signing public key (hex).
+    pub key_fingerprint: String,
+    /// Base64 Ed25519 signature over canonical attestation payload.
+    pub signature_b64: String,
 }
 
 /// Information about a remote agent.

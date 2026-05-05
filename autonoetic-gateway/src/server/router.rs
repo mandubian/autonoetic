@@ -4,13 +4,16 @@
 //! locally or transparently over OFP federation.
 
 use crate::server::ofp::{
-    evaluate_constitution_compatibility, hmac_sign, hmac_verify, parse_ofp_response,
-    sign_wire_message, verify_wire_message, write_framed_message,
+    compose_local_chain_attestation, emit_federation_message_event, evaluate_constitution_compatibility,
+    hmac_sign, hmac_verify, parse_ofp_response, sign_wire_message, verify_chain_attestation,
+    verify_wire_message, write_framed_message,
 };
 use crate::server::registry::PeerRegistry;
 use autonoetic_ofp::wire::{
-    WireMessage, WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION,
+    RemoteAgentInfo, WireMessage, WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION,
 };
+use std::path::PathBuf;
+use std::sync::Arc;
 use autonoetic_types::config::FederationConstitutionConfig;
 use tokio::net::TcpStream;
 use tracing::{debug, info};
@@ -20,6 +23,8 @@ pub struct MessageRouter {
     node_id: String,
     shared_secret: String,
     federation_constitution: FederationConstitutionConfig,
+    gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    gateway_dir: PathBuf,
 }
 
 impl MessageRouter {
@@ -34,7 +39,22 @@ impl MessageRouter {
             node_id,
             shared_secret,
             federation_constitution,
+            gateway_store: None,
+            gateway_dir: PathBuf::from(".gateway"),
         }
+    }
+
+    pub fn with_gateway_store(
+        mut self,
+        gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> Self {
+        self.gateway_store = gateway_store;
+        self
+    }
+
+    pub fn with_gateway_dir(mut self, gateway_dir: PathBuf) -> Self {
+        self.gateway_dir = gateway_dir;
+        self
     }
 
     /// Route an `ecosystem.send_message` outgoing call from a local agent.
@@ -99,7 +119,14 @@ impl MessageRouter {
                 node_id: self.node_id.clone(),
                 node_name: "autonoetic-router".into(), // TODO: use actual node name
                 protocol_version: PROTOCOL_VERSION,
-                agents: vec![], // Router connection doesn't strictly need to advertise here
+                agents: vec![RemoteAgentInfo {
+                    id: sender_agent.to_string(),
+                    name: sender_agent.to_string(),
+                    description: "federation sender identity".to_string(),
+                    tags: vec!["federation".to_string()],
+                    tools: vec![],
+                    state: "active".to_string(),
+                }],
                 nonce,
                 auth_hmac,
                 constitution_digest: Some(crate::constitution_digest::constitution_digest().to_string()),
@@ -139,7 +166,7 @@ impl MessageRouter {
                     constitution_profile,
                     extensions,
                 ),
-                WireMessageKind::Response(WireResponse::Error { code, message }) => {
+                WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
                     anyhow::bail!("Handshake failed: [{}]: {}", code, message);
                 }
                 _ => anyhow::bail!("Expected HandshakeAck"),
@@ -178,7 +205,93 @@ impl MessageRouter {
             .iter()
             .any(|ext| ext.eq_ignore_ascii_case("msg_hmac"));
 
-        // 2. Send AgentMessage
+        // 2. Exchange signed chain attestations (R++7)
+        let (local_attestation, local_public_key_b64) = compose_local_chain_attestation(
+            &self.node_id,
+            &self.gateway_dir,
+            self.gateway_store.clone(),
+        )?;
+        let mut outbound_seq: u64 = 1;
+        let mut expected_inbound_seq: u64 = 1;
+        let mut attestation_req = WireMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            signature: None,
+            seq_num: None,
+            kind: WireMessageKind::Request(WireRequest::ChainAttestation {
+                attestation: local_attestation,
+                public_key_b64: local_public_key_b64,
+                request_peer_attestation: true,
+            }),
+        };
+        if use_msg_hmac {
+            attestation_req.seq_num = Some(outbound_seq);
+            attestation_req.signature = Some(sign_wire_message(&self.shared_secret, &attestation_req)?);
+            outbound_seq += 1;
+        }
+        write_framed_message(&mut writer, &attestation_req).await?;
+
+        let attestation_resp = parse_ofp_response(&mut reader).await?;
+        if use_msg_hmac {
+            verify_wire_message(&self.shared_secret, &attestation_resp, expected_inbound_seq)?;
+            expected_inbound_seq += 1;
+        }
+        match attestation_resp.kind {
+            WireMessageKind::Response(WireResponse::ChainAttestationAck {
+                accepted,
+                reason,
+                peer_attestation,
+                peer_public_key_b64,
+            }) => {
+                if !accepted {
+                    anyhow::bail!(
+                        "chain attestation rejected by peer {}: {}",
+                        peer_node_id,
+                        reason.unwrap_or_else(|| "unknown reason".to_string())
+                    );
+                }
+                let peer_attestation = peer_attestation.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "peer {} accepted chain attestation but omitted peer_attestation payload",
+                        peer_node_id
+                    )
+                })?;
+                let peer_public_key_b64 = peer_public_key_b64.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "peer {} accepted chain attestation but omitted peer_public_key_b64",
+                        peer_node_id
+                    )
+                })?;
+                verify_chain_attestation(&peer_attestation, &peer_public_key_b64).map_err(|e| {
+                    anyhow::anyhow!(
+                        "peer {} returned invalid chain attestation: {}",
+                        peer_node_id,
+                        e
+                    )
+                })?;
+            }
+            WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
+                anyhow::bail!(
+                    "chain attestation exchange failed [{}] from peer {}: {}",
+                    code,
+                    peer_node_id,
+                    message
+                );
+            }
+            other => anyhow::bail!("Expected ChainAttestationAck, got {:?}", other),
+        }
+
+        // 3. Send AgentMessage with peer_event_ref.
+        let local_peer_event_ref = emit_federation_message_event(
+            self.gateway_store.clone(),
+            &self.node_id,
+            peer_node_id,
+            "agent_message_outbound",
+            autonoetic_types::causal_chain::EntryStatus::Success,
+            Some(sender_agent),
+            Some(target_agent),
+            message,
+            None,
+        );
         let mut agent_msg = WireMessage {
             id: uuid::Uuid::new_v4().to_string(),
             signature: None,
@@ -187,23 +300,55 @@ impl MessageRouter {
                 agent: target_agent.to_string(),
                 message: message.to_string(),
                 sender: Some(sender_agent.to_string()),
+                peer_event_ref: Some(local_peer_event_ref),
             }),
         };
         if use_msg_hmac {
-            agent_msg.seq_num = Some(1);
+            agent_msg.seq_num = Some(outbound_seq);
             agent_msg.signature = Some(sign_wire_message(&self.shared_secret, &agent_msg)?);
         }
         write_framed_message(&mut writer, &agent_msg).await?;
 
-        // 3. Wait for AgentResponse
+        // 4. Wait for AgentResponse / Error and correlate peer refs.
         let resp = parse_ofp_response(&mut reader).await?;
         if use_msg_hmac {
-            verify_wire_message(&self.shared_secret, &resp, 1)?;
+            verify_wire_message(&self.shared_secret, &resp, expected_inbound_seq)?;
         }
         match resp.kind {
-            WireMessageKind::Response(WireResponse::AgentResponse { text }) => Ok(text),
-            WireMessageKind::Response(WireResponse::Error { code, message }) => {
-                anyhow::bail!("Agent error [{}]: {}", code, message);
+            WireMessageKind::Response(WireResponse::AgentResponse {
+                text,
+                peer_event_ref,
+            }) => {
+                let _ = emit_federation_message_event(
+                    self.gateway_store.clone(),
+                    &self.node_id,
+                    peer_node_id,
+                    "agent_message_response",
+                    autonoetic_types::causal_chain::EntryStatus::Success,
+                    Some(sender_agent),
+                    Some(target_agent),
+                    message,
+                    peer_event_ref.as_ref(),
+                );
+                Ok(text)
+            }
+            WireMessageKind::Response(WireResponse::Error {
+                code,
+                message: error_message,
+                peer_event_ref,
+            }) => {
+                let _ = emit_federation_message_event(
+                    self.gateway_store.clone(),
+                    &self.node_id,
+                    peer_node_id,
+                    "agent_message_response",
+                    autonoetic_types::causal_chain::EntryStatus::Error,
+                    Some(sender_agent),
+                    Some(target_agent),
+                    message,
+                    peer_event_ref.as_ref(),
+                );
+                anyhow::bail!("Agent error [{}]: {}", code, error_message);
             }
             _ => anyhow::bail!("Expected AgentResponse"),
         }
