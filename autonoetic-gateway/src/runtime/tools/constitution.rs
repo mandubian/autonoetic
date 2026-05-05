@@ -13,32 +13,16 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
+use crate::constitution_digest::{
+    constitution_digest, constitution_format_version, constitution_text, constitution_version,
+};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::notification::{NotificationRecord, NotificationType};
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::sync::OnceLock;
-
-/// The full constitution text, embedded at compile time so the digest is a
-/// property of the gateway binary itself.
-const CONSTITUTION_TEXT: &str = include_str!("../../../../docs/gateway-constitution.md");
-
-/// Constitution version is the gateway crate version. When the constitution
-/// changes the crate's patch version (or higher) is expected to bump.
-const CONSTITUTION_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-fn constitution_digest() -> &'static str {
-    static DIGEST: OnceLock<String> = OnceLock::new();
-    DIGEST.get_or_init(|| {
-        let mut hasher = Sha256::new();
-        hasher.update(CONSTITUTION_TEXT.as_bytes());
-        hex::encode(hasher.finalize())
-    })
-}
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(ConstitutionReadTool));
@@ -130,9 +114,9 @@ impl NativeTool for ConstitutionReadTool {
 
         let selector = args.section.as_deref().map(str::trim).unwrap_or("");
         let (text, matched_selector) = if selector.is_empty() {
-            (CONSTITUTION_TEXT.to_string(), None)
+            (constitution_text().to_string(), None)
         } else {
-            match extract_section(CONSTITUTION_TEXT, selector) {
+            match extract_section(constitution_text(), selector) {
                 Some(extract) => (extract, Some(selector.to_string())),
                 None => {
                     return Ok(ToolError::validation(
@@ -148,7 +132,8 @@ impl NativeTool for ConstitutionReadTool {
             "ok": true,
             "text": text,
             "digest": constitution_digest(),
-            "version": CONSTITUTION_VERSION,
+            "version": constitution_version(),
+            "format_version": constitution_format_version(),
             "section": matched_selector,
             "retrieved_at": chrono::Utc::now().to_rfc3339(),
         }))?)
@@ -474,7 +459,7 @@ mod tests {
 
     #[test]
     fn extract_right_ri_0_10() {
-        let extract = extract_section(CONSTITUTION_TEXT, "Ri-0.10")
+        let extract = extract_section(constitution_text(), "Ri-0.10")
             .expect("Ri-0.10 must exist in the constitution");
         assert!(extract.contains("Ri-0.10"));
         assert!(extract.contains("constitution"));
@@ -483,7 +468,7 @@ mod tests {
     #[test]
     fn extract_section_zero() {
         let extract =
-            extract_section(CONSTITUTION_TEXT, "§0").expect("section 0 (Rights) must exist");
+            extract_section(constitution_text(), "§0").expect("section 0 (Rights) must exist");
         assert!(extract.starts_with("## 0. "));
         // Should include the Ri-0.10 row but stop before the next `## ` section.
         assert!(extract.contains("Ri-0.10"));
@@ -492,14 +477,14 @@ mod tests {
 
     #[test]
     fn extract_unknown_returns_none() {
-        assert!(extract_section(CONSTITUTION_TEXT, "Ri-9.99").is_none());
-        assert!(extract_section(CONSTITUTION_TEXT, "§999").is_none());
+        assert!(extract_section(constitution_text(), "Ri-9.99").is_none());
+        assert!(extract_section(constitution_text(), "§999").is_none());
     }
 
     #[test]
     fn extract_pending_rule() {
         // R+++3 is in the constitution as a pending constitutional rule.
-        let extract = extract_section(CONSTITUTION_TEXT, "R+++3").expect("R+++3 must exist");
+        let extract = extract_section(constitution_text(), "R+++3").expect("R+++3 must exist");
         assert!(extract.contains("R+++3"));
     }
 

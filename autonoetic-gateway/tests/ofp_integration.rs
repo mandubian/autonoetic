@@ -57,6 +57,8 @@ fn test_wire_compat_handshake_json_shape() {
             }],
             nonce: "nonce-123".to_string(),
             auth_hmac: "hmac-abc".to_string(),
+            constitution_digest: None,
+            constitution_profile: None,
             extensions: None, // No extensions → vanilla OpenFang compat
         }),
     };
@@ -88,6 +90,8 @@ fn test_wire_compat_extensions_graceful_degradation() {
             agents: vec![],
             nonce: "nonce".to_string(),
             auth_hmac: "hmac".to_string(),
+            constitution_digest: Some("abc123".to_string()),
+            constitution_profile: None,
             extensions: Some(vec!["msg_hmac".to_string()]),
         }),
     };
@@ -96,6 +100,7 @@ fn test_wire_compat_extensions_graceful_degradation() {
     // Extensions are in the JSON
     assert!(json_str.contains("\"signature\":\"sig-xyz\""));
     assert!(json_str.contains("\"seq_num\":42"));
+    assert!(json_str.contains("\"constitution_digest\":\"abc123\""));
     assert!(json_str.contains("\"extensions\":[\"msg_hmac\"]"));
 
     // A vanilla OpenFang node would parse this with default serde (no deny_unknown_fields).
@@ -325,6 +330,8 @@ async fn test_tcp_handshake_success() {
                             agents: vec![],
                             nonce: ack_nonce,
                             auth_hmac: ack_hmac,
+                            constitution_digest: None,
+                            constitution_profile: None,
                             extensions: None,
                         }),
                     };
@@ -372,6 +379,8 @@ async fn test_tcp_handshake_success() {
             agents: vec![],
             nonce,
             auth_hmac,
+            constitution_digest: None,
+            constitution_profile: None,
             extensions: None,
         }),
     };
@@ -481,6 +490,8 @@ async fn test_tcp_handshake_bad_hmac_rejected() {
             agents: vec![],
             nonce,
             auth_hmac,
+            constitution_digest: None,
+            constitution_profile: None,
             extensions: None,
         }),
     };
@@ -551,6 +562,8 @@ async fn test_tcp_extension_negotiation() {
                             agents: vec![],
                             nonce: ack_nonce,
                             auth_hmac: ack_hmac_val,
+                            constitution_digest: None,
+                            constitution_profile: None,
                             extensions: if agreed.is_empty() {
                                 None
                             } else {
@@ -585,6 +598,8 @@ async fn test_tcp_extension_negotiation() {
             agents: vec![],
             nonce,
             auth_hmac,
+            constitution_digest: None,
+            constitution_profile: None,
             extensions: Some(vec!["msg_hmac".to_string(), "resilience".to_string()]),
         }),
     };
@@ -783,6 +798,7 @@ async fn test_registry_lifecycle_via_real_ofp_server() {
         server_addr,
         "server-node".to_string(),
         "registry-server".to_string(),
+        Arc::new(GatewayConfig::default()),
         shared_secret.clone(),
         reg.clone(),
         router,
@@ -810,6 +826,8 @@ async fn test_registry_lifecycle_via_real_ofp_server() {
             agents: vec![],
             nonce,
             auth_hmac,
+            constitution_digest: None,
+            constitution_profile: None,
             extensions: Some(vec!["msg_hmac".to_string()]),
         }),
     };
@@ -843,12 +861,333 @@ async fn test_registry_lifecycle_via_real_ofp_server() {
     server.abort();
 }
 
+#[tokio::test]
+async fn test_handshake_rejects_constitution_mismatch_in_exact_mode() {
+    let reg = PeerRegistry::new();
+    let shared_secret = "constitution-mismatch-secret".to_string();
+    let gateway_store_dir = TempDir::new().unwrap();
+    let gateway_store = Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(gateway_store_dir.path())
+            .unwrap(),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let ofp_config = GatewayConfig {
+        federation_constitution: FederationConstitutionConfig {
+            mode: FederationConstitutionMode::Exact,
+            known_compatible_digests: vec![],
+            allow_missing_peer_digest: false,
+        },
+        ..GatewayConfig::default()
+    };
+    let router = Arc::new(JsonRpcRouter::new(
+        GatewayConfig::default(),
+        Some(gateway_store.clone()),
+    ));
+
+    let server = tokio::spawn(start_ofp_server(
+        server_addr,
+        "server-node".to_string(),
+        "strict-server".to_string(),
+        Arc::new(ofp_config),
+        shared_secret.clone(),
+        reg,
+        router,
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+    let (mut reader, mut writer) = stream.into_split();
+
+    let nonce = "client-nonce".to_string();
+    let node_id = "client-node".to_string();
+    let auth_data = format!("{}{}", nonce, node_id);
+    let auth_hmac = hmac_sign(&shared_secret, auth_data.as_bytes());
+    let handshake = WireMessage {
+        id: "hs-mismatch".to_string(),
+        signature: None,
+        seq_num: None,
+        kind: WireMessageKind::Request(WireRequest::Handshake {
+            node_id,
+            node_name: "mismatch-client".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            agents: vec![],
+            nonce,
+            auth_hmac,
+            constitution_digest: Some("mismatched-digest".to_string()),
+            constitution_profile: None,
+            extensions: None,
+        }),
+    };
+    write_framed_message(&mut writer, &handshake).await.unwrap();
+
+    let response = read_framed_message(&mut reader).await.unwrap();
+    match response.kind {
+        WireMessageKind::Response(WireResponse::Error { code, message }) => {
+            assert_eq!(code, 409);
+            assert!(message.contains("constitutional_incompatibility"));
+        }
+        other => panic!("Expected constitutional incompatibility error, got {:?}", other),
+    }
+
+    let events = gateway_store
+        .search_causal_events(Some("system"), Some("gateway"), 50)
+        .unwrap();
+    let constitution_event = events
+        .into_iter()
+        .find(|event| event.category == "federation" && event.action == "constitution_check")
+        .expect("expected federation constitution_check event");
+    assert_eq!(
+        constitution_event.status,
+        autonoetic_types::causal_chain::EntryStatus::Error.to_string()
+    );
+    let payload_raw = constitution_event
+        .payload
+        .expect("constitution event payload should be present");
+    let payload: serde_json::Value = serde_json::from_str(&payload_raw).unwrap();
+    assert_eq!(
+        payload["local_constitution_digest"],
+        autonoetic_gateway::constitution_digest::constitution_digest()
+    );
+    assert_eq!(payload["peer_constitution_digest"], "mismatched-digest");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_handshake_accepts_known_compatible_digest() {
+    let reg = PeerRegistry::new();
+    let shared_secret = "constitution-known-compatible-secret".to_string();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let allowlisted_digest = "peer-allowlisted-digest".to_string();
+    let ofp_config = GatewayConfig {
+        federation_constitution: FederationConstitutionConfig {
+            mode: FederationConstitutionMode::KnownCompatible,
+            known_compatible_digests: vec![allowlisted_digest.clone()],
+            allow_missing_peer_digest: false,
+        },
+        ..GatewayConfig::default()
+    };
+    let router = Arc::new(JsonRpcRouter::new(GatewayConfig::default(), None));
+
+    let server = tokio::spawn(start_ofp_server(
+        server_addr,
+        "server-node".to_string(),
+        "known-compatible-server".to_string(),
+        Arc::new(ofp_config),
+        shared_secret.clone(),
+        reg,
+        router,
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+    let (mut reader, mut writer) = stream.into_split();
+
+    let nonce = "known-client-nonce".to_string();
+    let node_id = "known-client-node".to_string();
+    let auth_data = format!("{}{}", nonce, node_id);
+    let auth_hmac = hmac_sign(&shared_secret, auth_data.as_bytes());
+    let handshake = WireMessage {
+        id: "hs-known-compatible".to_string(),
+        signature: None,
+        seq_num: None,
+        kind: WireMessageKind::Request(WireRequest::Handshake {
+            node_id,
+            node_name: "known-client".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            agents: vec![],
+            nonce,
+            auth_hmac,
+            constitution_digest: Some(allowlisted_digest),
+            constitution_profile: None,
+            extensions: None,
+        }),
+    };
+    write_framed_message(&mut writer, &handshake).await.unwrap();
+
+    let response = read_framed_message(&mut reader).await.unwrap();
+    match response.kind {
+        WireMessageKind::Response(WireResponse::HandshakeAck { .. }) => {}
+        other => panic!("Expected HandshakeAck for allowlisted digest, got {:?}", other),
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_handshake_accepts_superset_profile_in_superset_mode() {
+    let reg = PeerRegistry::new();
+    let shared_secret = "constitution-superset-secret".to_string();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let ofp_config = GatewayConfig {
+        federation_constitution: FederationConstitutionConfig {
+            mode: FederationConstitutionMode::Superset,
+            known_compatible_digests: vec![],
+            allow_missing_peer_digest: false,
+        },
+        ..GatewayConfig::default()
+    };
+    let router = Arc::new(JsonRpcRouter::new(GatewayConfig::default(), None));
+    let server = tokio::spawn(start_ofp_server(
+        server_addr,
+        "server-node".to_string(),
+        "superset-server".to_string(),
+        Arc::new(ofp_config),
+        shared_secret.clone(),
+        reg,
+        router,
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut peer_rules = autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table();
+    peer_rules.insert("R-99.1".to_string(), "peer_extra_rule_enforcement".to_string());
+    let mut peer_rights =
+        autonoetic_gateway::constitution_digest::canonical_right_enforcement_table();
+    peer_rights.insert(
+        "Ri-99.1".to_string(),
+        "peer_extra_right_enforcement".to_string(),
+    );
+
+    let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+    let (mut reader, mut writer) = stream.into_split();
+    let nonce = "superset-client-nonce".to_string();
+    let node_id = "superset-client-node".to_string();
+    let auth_data = format!("{}{}", nonce, node_id);
+    let auth_hmac = hmac_sign(&shared_secret, auth_data.as_bytes());
+    let handshake = WireMessage {
+        id: "hs-superset-accept".to_string(),
+        signature: None,
+        seq_num: None,
+        kind: WireMessageKind::Request(WireRequest::Handshake {
+            node_id,
+            node_name: "superset-client".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            agents: vec![],
+            nonce,
+            auth_hmac,
+            constitution_digest: Some("peer-superset-digest".to_string()),
+            constitution_profile: Some(ConstitutionProfile {
+                rules_enforcement: peer_rules,
+                rights_enforcement: peer_rights,
+            }),
+            extensions: None,
+        }),
+    };
+    write_framed_message(&mut writer, &handshake).await.unwrap();
+
+    let response = read_framed_message(&mut reader).await.unwrap();
+    match response.kind {
+        WireMessageKind::Response(WireResponse::HandshakeAck { .. }) => {}
+        other => panic!(
+            "Expected HandshakeAck for superset-compatible profile, got {:?}",
+            other
+        ),
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_handshake_rejects_non_superset_profile_in_superset_mode() {
+    let reg = PeerRegistry::new();
+    let shared_secret = "constitution-non-superset-secret".to_string();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let ofp_config = GatewayConfig {
+        federation_constitution: FederationConstitutionConfig {
+            mode: FederationConstitutionMode::Superset,
+            known_compatible_digests: vec![],
+            allow_missing_peer_digest: false,
+        },
+        ..GatewayConfig::default()
+    };
+    let router = Arc::new(JsonRpcRouter::new(GatewayConfig::default(), None));
+    let server = tokio::spawn(start_ofp_server(
+        server_addr,
+        "server-node".to_string(),
+        "superset-server".to_string(),
+        Arc::new(ofp_config),
+        shared_secret.clone(),
+        reg,
+        router,
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut peer_rules = autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table();
+    let removed_rule = peer_rules
+        .keys()
+        .next()
+        .cloned()
+        .expect("canonical rules table must not be empty");
+    peer_rules.remove(&removed_rule);
+    let peer_rights = autonoetic_gateway::constitution_digest::canonical_right_enforcement_table();
+
+    let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+    let (mut reader, mut writer) = stream.into_split();
+    let nonce = "non-superset-client-nonce".to_string();
+    let node_id = "non-superset-client-node".to_string();
+    let auth_data = format!("{}{}", nonce, node_id);
+    let auth_hmac = hmac_sign(&shared_secret, auth_data.as_bytes());
+    let handshake = WireMessage {
+        id: "hs-superset-reject".to_string(),
+        signature: None,
+        seq_num: None,
+        kind: WireMessageKind::Request(WireRequest::Handshake {
+            node_id,
+            node_name: "non-superset-client".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            agents: vec![],
+            nonce,
+            auth_hmac,
+            constitution_digest: Some("peer-non-superset-digest".to_string()),
+            constitution_profile: Some(ConstitutionProfile {
+                rules_enforcement: peer_rules,
+                rights_enforcement: peer_rights,
+            }),
+            extensions: None,
+        }),
+    };
+    write_framed_message(&mut writer, &handshake).await.unwrap();
+
+    let response = read_framed_message(&mut reader).await.unwrap();
+    match response.kind {
+        WireMessageKind::Response(WireResponse::Error { code, message }) => {
+            assert_eq!(code, 409);
+            assert!(message.contains("constitutional_incompatibility"));
+            assert!(message.contains("peer missing rules entry"));
+        }
+        other => panic!(
+            "Expected constitutional incompatibility error for non-superset profile, got {:?}",
+            other
+        ),
+    }
+
+    server.abort();
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // 7. Inbound AgentMessage Handling tests
 // ═══════════════════════════════════════════════════════════════════════
 
 use autonoetic_gateway::router::JsonRpcRouter;
-use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::config::{
+    FederationConstitutionConfig, FederationConstitutionMode, GatewayConfig,
+};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -910,6 +1249,7 @@ metadata:
         server_addr,
         server_node_id.clone(),
         "server-node-name".to_string(),
+        Arc::new(GatewayConfig::default()),
         shared_secret.clone(),
         reg.clone(),
         router,
@@ -945,6 +1285,8 @@ metadata:
             }],
             nonce,
             auth_hmac,
+            constitution_digest: None,
+            constitution_profile: None,
             extensions: Some(vec!["msg_hmac".to_string()]),
         }),
     };
@@ -1054,6 +1396,7 @@ metadata:
         server_addr,
         "server-node-id".to_string(),
         "server-node-name".to_string(),
+        Arc::new(GatewayConfig::default()),
         shared_secret.clone(),
         reg,
         router,
@@ -1079,6 +1422,8 @@ metadata:
             agents: vec![],
             nonce,
             auth_hmac,
+            constitution_digest: None,
+            constitution_profile: None,
             extensions: Some(vec!["msg_hmac".to_string()]),
         }),
     };

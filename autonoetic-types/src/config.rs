@@ -443,6 +443,49 @@ pub struct LlmRoutingConfig {
     pub approval_gates: ApprovalGatesConfig,
 }
 
+/// Compatibility policy for federated constitution checks (R+++2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FederationConstitutionMode {
+    /// Require exact digest match.
+    #[default]
+    Exact,
+    /// Accept exact match or configured known-compatible digests.
+    KnownCompatible,
+    /// Superset mode is reserved for rule/right table exchange.
+    /// Until table exchange is enabled, behaves like known-compatible.
+    Superset,
+}
+
+/// Federation constitution compatibility settings (R+++2 scaffolding).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationConstitutionConfig {
+    /// Compatibility mode.
+    #[serde(default)]
+    pub mode: FederationConstitutionMode,
+    /// Additional digests accepted as compatible in non-exact modes.
+    #[serde(default)]
+    pub known_compatible_digests: Vec<String>,
+    /// When true, peers that do not advertise a digest are accepted
+    /// (legacy interop mode). Default: true.
+    #[serde(default = "default_allow_missing_peer_constitution_digest")]
+    pub allow_missing_peer_digest: bool,
+}
+
+impl Default for FederationConstitutionConfig {
+    fn default() -> Self {
+        Self {
+            mode: FederationConstitutionMode::Exact,
+            known_compatible_digests: Vec::new(),
+            allow_missing_peer_digest: default_allow_missing_peer_constitution_digest(),
+        }
+    }
+}
+
+fn default_allow_missing_peer_constitution_digest() -> bool {
+    true
+}
+
 /// Top-level Gateway daemon configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -472,6 +515,10 @@ pub struct GatewayConfig {
     /// Overridable by AUTONOETIC_NODE_NAME env var.
     #[serde(default = "default_node_name")]
     pub node_name: String,
+
+    /// Constitution compatibility policy for federated peers (R+++2).
+    #[serde(default)]
+    pub federation_constitution: FederationConstitutionConfig,
 
     /// Maximum number of agent runtime executions allowed concurrently.
     #[serde(default = "default_max_concurrent_spawns")]
@@ -1276,6 +1323,7 @@ impl Default for GatewayConfig {
             tls: false,
             node_id: default_node_id(),
             node_name: default_node_name(),
+            federation_constitution: FederationConstitutionConfig::default(),
             max_concurrent_spawns: default_max_concurrent_spawns(),
             max_pending_spawns_per_agent: default_max_pending_spawns_per_agent(),
             max_spawn_depth: default_max_spawn_depth(),

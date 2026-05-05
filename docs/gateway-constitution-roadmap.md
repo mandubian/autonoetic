@@ -763,7 +763,7 @@ assert verification fails.
 
 ---
 
-### 2.13 `R+++2` Constitution digest + compatibility handshake
+### 2.13 `R+++2` Constitution digest + compatibility handshake — **ENFORCED**
 
 **Threat (structural).** For federation to deliver "cooperation under
 shared law," gateways must verify they are operating under
@@ -772,50 +772,37 @@ Without this, federation is a hope rather than a mechanism: gateway
 A might enforce rules gateway B does not, and a cross-gateway agent
 interaction silently lands in the weaker regime.
 
-**Sketch.** Each gateway publishes a `constitution_digest`:
+**Implementation.**
 
-```
-digest = SHA256(
-  canonical_text(constitution.md)
-  || canonical_json(rule_id_to_enforcement_citation_table)
-  || canonical_json(right_id_to_enforcement_citation_table)
-)
-```
+- Canonical digest/profile extraction is centralized in
+  `autonoetic-gateway/src/constitution_digest.rs` and surfaced via
+  `gateway.info` + `constitution_read`; pinned by
+  `docs/constitution/versions/2026.05.05/gateway-constitution.lock.json`
+  with startup integrity checks.
+- OFP wire now carries `constitution_digest` and optional
+  `constitution_profile` (rule/right enforcement tables) in
+  handshake/ack messages (`autonoetic-ofp/src/wire.rs`).
+- Receiver-side policy supports all compatibility modes:
+  1. exact match,
+  2. known-compatible allowlist,
+  3. constitutional superset (rule/right table superset check).
+- Incompatible peers are rejected with
+  `constitutional_incompatibility`.
+- Federation constitution checks emit causal events with both local
+  and peer digests (`autonoetic-gateway/src/server/ofp.rs`).
 
-The digest is computed at build time (reproducible: same constitution
-→ same digest) and exposed via `gateway.info`. Cross-gateway
-requests (OFP messages, remote spawns, remote credential requests)
-include the sender's digest.
+**Files.** `autonoetic-gateway/src/constitution_digest.rs`,
+`autonoetic-gateway/src/server/ofp.rs`,
+`autonoetic-gateway/src/server/router.rs`,
+`autonoetic-ofp/src/wire.rs`,
+`autonoetic-types/src/config.rs`.
 
-Compatibility check on the receiving gateway:
+**Test.** `autonoetic-gateway/tests/constitution_federation_digest_handshake.rs`
+pins accept/reject behavior and asserts digest audit payload; additional
+wire and compatibility coverage is in
+`autonoetic-gateway/tests/ofp_integration.rs`.
 
-1. **Exact match** → trusted peer, proceed.
-2. **Known-compatible set** → the receiving gateway has a declared
-   list of digests it considers equivalent (e.g., minor-version
-   bumps that only added rules). Proceed.
-3. **Constitutional superset** → a policy declaring "I accept peers
-   whose constitution is a strict superset of mine" (the receiving
-   gateway enforces strictly less; the peer enforces everything I
-   do and more). Requires rule-ID-level comparison, not just digest.
-4. **Otherwise** → reject with `constitutional_incompatibility`.
-
-Both digests are embedded in the causal event for the interaction,
-so audit is end-to-end verifiable.
-
-Files: new `autonoetic-gateway/src/constitution_digest.rs`,
-`build.rs` (compute at build time),
-`autonoetic-gateway/src/server/ofp.rs` (attach digest to
-cross-gateway requests), `autonoetic-ofp/` (protocol extension),
-causal event schema.
-
-**Test.** `constitution_federation_digest_handshake.rs` — two
-in-process OFP endpoints with matching digests round-trip
-successfully; mutate one endpoint's digest, assert subsequent
-cross-gateway requests reject with `constitutional_incompatibility`
-and both digests are recorded on both sides.
-
-**Size.** L. Federation protocol extension; needs careful handling
-of the reproducible-digest computation.
+**Size.** L.
 
 ---
 
@@ -880,14 +867,14 @@ For rights whose enforcement mechanism is itself a Phase 1/2 item.
 | Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | PARTIAL — `Tagged::permission_with_rules` for all policy-gated capabilities; tested for 4 rejection classes |
 | Ri-0.4 truthful budget | R++1 (#48) | ENFORCED — `constitution_attestation_freshness.rs::budget_meters_reflect_consumption` |
 | Ri-0.5 degradation notice | R-7.18 (#61) | NOT YET — no notice injected into agent context on degraded entry |
-| Ri-0.8 amendment proposal | R+++1 (#92) | NOT YET — constitutional_proposals table exists but no tool endpoint |
+| Ri-0.8 amendment proposal | R+++1 (#92) | ENFORCED — `constitution_propose_amendment` endpoint + `constitutional_proposals` persistence; covered by `constitution_rights_amendment_proposal.rs` |
 | Ri-0.9 last-word before terminal | R-7.18 (#61) + emergency-stop | NOT YET — no notify-where-practical in degrade/emergency-stop paths |
 
 Test: `constitution_rights_late_bucket.rs` — 8 tests (Ri-0.1, Ri-0.3, Ri-0.12 cross-check).
 
 ---
 
-### 2.17 `Ri-0.13` Private-under-law reasoning + `ReasoningAudit` capability
+### 2.17 `Ri-0.13` Private-under-law reasoning + `ReasoningAudit` capability — **ENFORCED**
 
 **Threat.** Without this right, the gateway's relationship to agent
 reasoning is undefined — and an implementation that quietly starts
@@ -957,15 +944,23 @@ Files: `autonoetic-gateway/src/runtime/tools/observability.rs`
 
 ## Phase 3 — P2 polish
 
-### 3.1 `R+8` Vault master-key presence probe at startup
+Current state on `main`: **nearly complete**. Enforced: R+13, R+14, R+17, R++8, R++10.
+Partial: R+8. Remaining open batch: 3.7 (`#69`).
 
-Fail fast at gateway boot rather than on first secret access. S.
-`autonoetic-gateway/src/vault.rs` + `bootstrap.rs`.
+### 3.1 `R+8` Vault master-key presence probe at startup — **PARTIAL**
 
-### 3.2 `R+13` Approval grant TTL
+Boot-time probe exists and is tested (`vault.rs::probe_master_key`,
+`observability.rs::emit_vault_key_probe_event`,
+`constitution_vault_startup_probe.rs`), but startup still does not
+fail-shut on missing key. This keeps #63 open against its stricter
+acceptance criteria.
 
-Default 24h per grant. Expiry re-opens the approval gate.
-`session_approval_grants` schema + cleanup tick. M.
+### 3.2 `R+13` Approval grant TTL — **ENFORCED**
+
+Default grant TTL is enforced; expiry re-opens the approval gate and
+scheduler cleanup prunes expired grants.
+Enforcement: `approval.rs`, `scheduler.rs`.
+Test: `constitution_approval_grant_ttl.rs`.
 
 ### 3.3 `R+14` Deny-by-default on unknown tool names
 
@@ -985,66 +980,44 @@ agent `gateway`, session `system`) with counts, cutoffs, and config.
 4 tests in `constitution_retention_pruned.rs` verify event emission,
 payload structure, actor attribution, and zero-days behavior.
 
-### 3.5 `R++8` Sandbox-escape-attempt accounting
+### 3.5 `R++8` Sandbox-escape-attempt accounting — **ENFORCED**
 
 **Threat.** Seccomp denies syscalls at the kernel; the gateway never
 sees them. A misbehaving agent that probes for an escape looks
 identical from the outside to a healthy agent.
 
-**Sketch.** Configure seccomp profiles in bubblewrap with `SCMP_ACT_LOG`
-(or `SCMP_ACT_ERRNO` + audit subsystem) for high-value syscalls:
-mount, ptrace, kexec, unshare reuse, `/proc/self/exe` writes. Parse
-audit log per session, maintain a counter. Crossing a threshold
-(default N=5) triggers R-7.18 degraded mode; a second threshold
-(default N=20) triggers emergency stop. Docker/microvm paths parse the
-equivalent runtime-level security events.
+**Implementation.** Landed with runtime-level escape-indicator
+accounting and threshold enforcement:
+`sandbox.rs::detect_sandbox_escape_indicators`,
+`observability.rs::record_sandbox_escape_attempt`,
+`scheduler.rs::run_scheduler_tick_at` (degrade/escalation path).
 
-Files: new
-`autonoetic-gateway/src/sandbox/seccomp_audit.rs`,
-`autonoetic-gateway/src/sandbox.rs` (profile wiring),
-`autonoetic-gateway/src/runtime/lifecycle.rs` (threshold → degrade).
+**Test.** `constitution_sandbox_escape_accounting.rs`.
 
-**Test.** `constitution_sandbox_escape_accounting.rs` — run a
-sandboxed script that issues denied `mount()` calls; assert the
-counter increments; at threshold assert the session transitions to
-degraded.
-
-**Size.** L. Seccomp profile engineering is delicate and platform-
-specific.
+**Note.** The original seccomp-audit-module sketch is no longer the
+exact implementation shape; the enforced invariant is still met.
 
 ---
 
-### 3.6 `R++10` Unified fail-mode table
+### 3.6 `R++10` Unified fail-mode table — **ENFORCED**
 
 **Threat.** Per-invariant failure handling is ad-hoc. Vault key
 missing → ? fsync fails → ? causal-chain hash mismatch mid-session
 → ? OpenRouter catalog down → silently disabled (R-6.5, the archetype
 to fix). The silent-disable pattern is how invariants die.
 
-**Sketch.** One new module
-`autonoetic-gateway/src/invariant_failures.rs` with an enum of actions
-(`RefuseBoot`, `RefuseSessionStart`, `Degrade`, `EmergencyStop`,
-`LogOnly`) and a static table mapping every constitutional rule ID to
-its declared failure action. A central `on_invariant_failure(rule,
-context)` helper reads the table and performs the declared action.
-Existing silent-disable sites are refactored to call it.
+**Implementation.** Landed as `fail_mode.rs` with a central fail-mode
+table (`RefuseBoot`, `RefuseSessionStart`, `Degrade`, `EmergencyStop`,
+`LogOnly`) and shared lookup helpers. R-6.5 catalog-unavailable behavior
+is wired through this model in both `session_budget.rs` and
+`root_session_budget.rs`.
 
-A contract test asserts the table has an entry for every rule ID in
-`gateway-constitution.md` — drift between docs and code becomes a
-test failure.
-
-Files: new `invariant_failures.rs`, refactor
-`runtime/openrouter_catalog.rs` (R-6.5) as the reference conversion,
-plus the handful of sites identified in §12 of the audit.
-
-**Test.** `constitution_fail_mode_table_complete.rs` — parse the
-constitution rule list, assert table coverage.
-
-**Size.** M.
+**Test.** `constitution_fail_mode_table.rs` asserts constitutional table
+coverage and fail-mode mapping behavior.
 
 ---
 
-### 3.7 Test-pin partial rules
+### 3.7 Test-pin partial rules — **NOT YET**
 
 Several rules are marked `PARTIAL` because enforcement exists but no
 test pins the invariant. Add tests for:
@@ -1066,6 +1039,10 @@ Total size for the batch: M. Each individual test is S.
 
 These require RFCs before implementation. Each item here is a policy
 question, not just a code change.
+
+Current state: items **4.1–4.8 remain open**. A narrower policy-only
+determinism suite exists (see 4.9 note), but the original full capstone
+scope is still pending.
 
 ### 4.1 Response repair loop (`execution.rs:1965`)
 
@@ -1140,7 +1117,7 @@ per-tool constants.
 
 Size: M.
 
-### 4.8 Cost-budget silent-disable on catalog failure
+### 4.8 Cost-budget silent-disable on catalog failure — **PARTIAL**
 
 **Decision required.** Change default to fail-shut?
 
@@ -1148,14 +1125,25 @@ Recommendation: yes. Sessions with `max_session_price_usd` set refuse
 to start if the OpenRouter catalog is unavailable. An agent with a
 `budget.no_price_available.allow` capability can override.
 
+**Current state.** Core fail-shut behavior for price-capped sessions is
+already enforced via R-6.5 + R++10 (`session_budget.rs`,
+`root_session_budget.rs`, `fail_mode.rs`). Remaining scope in #76 is the
+explicit override capability semantics and dedicated test pin described in
+that issue.
+
 Size: S.
 
-### 4.9 `R++9` Gateway determinism property test (capstone)
+### 4.9 `R++9` Gateway determinism property test (capstone) — **OPEN (policy-level precursor landed)**
 
 **Decision required.** Pin the dumb-gateway principle structurally, not
 just by convention.
 
-**Recommendation.** Once items 4.1–4.8 land, add a property test that
+**Current state.** A policy-engine determinism suite exists today in
+`autonoetic-gateway/tests/constitution_policy_determinism.rs`. It pins
+determinism of `PolicyEngine` decisions, but it does not yet satisfy the
+full post-4.8 gateway-wide capstone scope defined in #77.
+
+**Remaining capstone scope.** Once items 4.1–4.8 land, add a property test that
 asserts: for random valid inputs
 `(capability-set, tool-call, recorded-state)`, the gateway's decision
 is a pure function — no LLM call, no uninstrumented network fetch, no
@@ -1166,7 +1154,7 @@ This is the long-term mechanism that keeps principle and code aligned
 across contributors. Without it, the §12 cleanup is a one-time victory
 that erodes.
 
-Files: new
+Files (planned): new
 `autonoetic-gateway/tests/constitution_gateway_determinism.rs`,
 possible trait refactor so policy + tool_call_processor accept mock
 injected dependencies cleanly.

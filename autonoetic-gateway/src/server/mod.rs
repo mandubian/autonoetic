@@ -39,6 +39,15 @@ impl GatewayServer {
         // are ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true).
         crate::sandbox::init_sandbox_config(&self.config.sandbox);
 
+        // Constitution lock is an immutable contract artifact.
+        // Refuse boot if lock metadata does not match canonical digest/profile extraction.
+        crate::constitution_digest::verify_constitution_lock_integrity().map_err(|e| {
+            anyhow::anyhow!(
+                "Constitution lock integrity verification failed; refusing to start: {}",
+                e
+            )
+        })?;
+
         let shared_secret = std::env::var("AUTONOETIC_SHARED_SECRET").map_err(|_| {
             anyhow::anyhow!("Missing required environment variable AUTONOETIC_SHARED_SECRET")
         })?;
@@ -148,6 +157,7 @@ impl GatewayServer {
                 ofp_addr,
                 node_id,
                 node_name,
+                self.config.clone(),
                 shared_secret.clone(),
                 self.registry.clone(),
                 jsonrpc_router.clone(),

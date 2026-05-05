@@ -312,6 +312,15 @@ impl JsonRpcRouter {
 
         match req.method.as_str() {
             "ping" => JsonRpcResponse::success(req.id, serde_json::json!("pong")),
+            "gateway.info" => JsonRpcResponse::success(
+                req.id,
+                serde_json::json!({
+                    "gateway_version": env!("CARGO_PKG_VERSION"),
+                    "constitution_digest": crate::constitution_digest::constitution_digest(),
+                    "constitution_version": crate::constitution_digest::constitution_version(),
+                    "constitution_format_version": crate::constitution_digest::constitution_format_version(),
+                }),
+            ),
             "interaction.answer" => {
                 let params: crate::interaction_answer::InteractionAnswerParams =
                     match serde_json::from_value(req.params) {
@@ -1088,6 +1097,28 @@ mod tests {
         let resp = router.dispatch(req).await;
         assert_eq!(resp.result, Some(serde_json::json!("pong")));
         assert!(resp.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_gateway_info() {
+        let (_temp, router) = test_router();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "1b".to_string(),
+            method: "gateway.info".to_string(),
+            params: serde_json::json!({}),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        let result = resp.result.expect("gateway.info should return payload");
+        let digest = result["constitution_digest"]
+            .as_str()
+            .expect("constitution_digest should be a string");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(result["gateway_version"].is_string());
+        assert!(result["constitution_version"].is_string());
+        assert!(result["constitution_format_version"].is_u64());
     }
 
     #[tokio::test]

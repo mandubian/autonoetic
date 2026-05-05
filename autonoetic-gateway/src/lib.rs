@@ -9,6 +9,7 @@ pub mod artifact_store;
 pub mod bootstrap;
 pub mod causal_chain;
 pub mod config;
+pub mod constitution_digest;
 pub mod execution;
 pub mod fail_mode;
 pub mod interaction_answer;

@@ -10,6 +10,9 @@
 > *mechanically* — no agent, parameter, or trust-me flag can bypass
 > it.
 >
+> Version index (human-readable): `docs/constitution/` (`CURRENT` +
+> `versions/<version>/` tree).
+>
 > Amendments require: (1) a PR that updates this file, (2) a test
 > under `autonoetic-gateway/tests/constitution_*` pinning the
 > invariant, (3) human review. Agents themselves may propose
@@ -392,10 +395,10 @@ before it moves into its category.
 | R+11 | Bundle signature verification at `agent_revision_create` and `agent_revision_create_from_intent`. Ed25519 signature over canonical content digest, verified against gateway identity public key. | ENFORCED (`agent_revision.rs`, `crypto.rs`, `constitution_install_signature.rs`) |
 | R+12 | Orphan-child reaper on parent session termination. | ENFORCED (R-7.16) |
 | R+13 | Approval grant TTL. | ENFORCED (`approval.rs:1114`, `scheduler.rs:78`, `constitution_approval_grant_ttl.rs`) |
-| R+14 | `can_invoke_tool` denies unknown tool names explicitly. | P2 |
+| R+14 | `can_invoke_tool` denies unknown tool names explicitly. | ENFORCED (`policy.rs`, `constitution_deny_unknown_tools.rs`) |
 | R+15 | Constant-time comparison for JSON-RPC shared-secret auth. | ENFORCED (R-10.8) |
 | R+16 | Promotion-gate execution is denied network access. `autonoetic-gateway/src/sandbox.rs` (`BwrapIsolationOverrides::force_network_off`), `autonoetic-gateway/src/runtime/tools/sandbox.rs` (Evaluation-cap override), `autonoetic-gateway/src/execution.rs` (`execute_script_in_sandbox` override), `agents/specialists/evaluator.default/SKILL.md` + `agents/specialists/auditor.default/SKILL.md` (`Evaluation` capability). | ENFORCED |
-| R+17 | Retention pruning emits `retention.pruned` causal event. | P2 |
+| R+17 | Retention pruning emits `retention.pruned` causal event. | ENFORCED (`observability.rs`, `constitution_retention_pruned.rs`) |
 | R+18 | Gateway refuses to start if a session's runtime-lock disagrees with the current binary SHA. | merged with R+7 |
 
 ### Structural additions (`R++`)
@@ -412,7 +415,7 @@ item will move into its numbered category once ENFORCED.
 | R++4 | Operator approval hardening: (a) dwell time (minimum-visible seconds) on high-risk approvals before the confirm action enables; (b) typed confirmation string required for destructive approval classes (bundle promotion, credential register); (c) structural-similarity dedup (similarity scoring on approval creation, displayed in CLI/TUI). | ENFORCED (`approval_hardening.rs`, `approval.rs`, `constitution_approval_hardening.rs`) | §2 Approval |
 | R++7 | Cross-gateway causal continuity: cross-gateway events carry a `peer_event_ref` pointing to the corresponding remote chain entry; gateways periodically exchange signed `chain_attestation` digests allowing end-to-end federated trace verification. | P1 | §10 Federation + §8 Audit |
 | R++8 | Sandbox-escape attempts are counted. Kernel-denied syscalls (seccomp), denied mount attempts, ptrace calls, and equivalents on docker/microvm drivers increment a per-session counter. Threshold crossings trigger R-7.18 degraded mode; further escalation triggers emergency stop. | ENFORCED (`sandbox.rs:detect_sandbox_escape_indicators`, `observability.rs:record_sandbox_escape_attempt`, `scheduler.rs:run_scheduler_tick_at`, `constitution_sandbox_escape_accounting.rs`) | §3 Sandbox + §7 Abuse |
-| R++9 | A test suite pins policy engine determinism: for every `PolicyEngine` decision method, the verdict (allow/deny, enforced rules, security analysis) is a pure function of the declared capability set and the tool-call input — no LLM call, no network fetch, no hidden branch. The test exercises both allowed and denied paths across all methods, verifies idempotency and input sensitivity, and catches any future nondeterminism. Prevents principle erosion. | ENFORCED (`policy.rs`, `constitution_policy_determinism.rs`) | §13 (cross-cutting) |
+| R++9 | A test suite pins policy engine determinism: for every `PolicyEngine` decision method, the verdict (allow/deny, enforced rules, security analysis) is a pure function of the declared capability set and the tool-call input — no LLM call, no network fetch, no hidden branch. The test exercises both allowed and denied paths across all methods, verifies idempotency and input sensitivity, and catches any future nondeterminism. Prevents principle erosion. | PARTIAL — policy-level precursor ENFORCED (`policy.rs`, `constitution_policy_determinism.rs`); full gateway-wide capstone scope remains tracked in #77 (Phase 4). | §13 (cross-cutting) |
 | R++10 | Unified fail-mode table: every constitutional invariant has a declared failure action in one place — `refuse-boot`, `refuse-session-start`, `degrade`, `emergency-stop`, or `log-only`. Eliminates silent-disable (R-6.5 OpenRouter-catalog-down default is the archetype to fix). | ENFORCED (`fail_mode.rs`, `session_budget.rs` (R-6.5 catalog-unavailable enforcement), `constitution_fail_mode_table.rs`) | §13 (cross-cutting) |
 
 ### Constitutional additions (`R+++`)
@@ -430,7 +433,7 @@ half-built.
 | ID | Rule | Priority | Target category |
 |---|---|---|---|
 | R+++1 | Agents holding the `ConstitutionalProposal` capability may submit amendment proposals through a declared channel (`constitution_propose_amendment`). Proposals are persisted with a durable ID, enter a review queue, carry evidence (causal events or execution traces that motivated them), and cannot be silently dropped. Operator decisions (approve / reject / defer) are recorded with reason. Accepted proposals move into the next constitutional release. ENFORCED — `autonoetic-gateway/src/runtime/tools/constitution.rs` (tool); `autonoetic-gateway/src/scheduler/gateway_store/constitutional_proposals.rs` (persistence); `autonoetic gateway constitution proposals \| release` (operator CLI). | P0 | §2 Approval + §0 Rights (Ri-0.8) |
-| R+++2 | Every gateway publishes a `constitution_digest` — SHA-256 over the canonical constitution text plus its rule-ID-to-enforcement-citation table. Cross-gateway requests carry the digest; the receiving gateway verifies compatibility (exact match, known-compatible set, or constitutional superset) before accepting the interaction. Incompatible peers are rejected with `constitutional_incompatibility`. Both digests are recorded in the causal event. | P1 | §10 Federation |
+| R+++2 | Every gateway publishes a `constitution_digest` — SHA-256 over the canonical constitution text plus its rule-ID-to-enforcement-citation table. Cross-gateway requests carry the digest; the receiving gateway verifies compatibility (exact match, known-compatible set, or constitutional superset) before accepting the interaction. Incompatible peers are rejected with `constitutional_incompatibility`. Both digests are recorded in the causal event. ENFORCED — `autonoetic-gateway/src/constitution_digest.rs`; `autonoetic-gateway/src/server/ofp.rs`; `autonoetic-gateway/src/server/router.rs`; `autonoetic-gateway/tests/constitution_federation_digest_handshake.rs`; `autonoetic-gateway/tests/ofp_integration.rs`. | P1 | §10 Federation |
 | R+++3 | Every gateway decision (tool accept, tool reject, capability check, approval gate, budget check, schema validation) records the rule ID(s) it enforced in the corresponding causal event. Enables real-time compliance reporting, dead-rule detection (rules never referenced), and gap detection (tool calls accepted without any rule reference — a code path not covered by the constitution, by construction). | P0 | §8 Audit + §0 Rights (Ri-0.3) |
 
 ---
@@ -514,9 +517,13 @@ A rule or right is added, changed, or removed only when:
 No rule is retired without an explicit decision recorded in this
 file's history. Silent erosion is the failure mode to guard against.
 
-The `constitution_digest` (R+++2) is recomputed on every merge. A
-change to the digest is the mechanical signal that the law has
-changed; federated peers observe it through the interop handshake.
+With R+++2 enforced, `constitution_digest` changes whenever this file's
+canonical content changes. A digest change is the mechanical signal that
+the law changed, and federated peers observe it through the OFP handshake.
+The digest is pinned in
+`docs/constitution/versions/2026.05.05/gateway-constitution.lock.json`
+(versioned manifest). Gateway startup verifies this lock against canonical
+extraction and refuses to boot on mismatch.
 
 ### The constitution is self-referential
 

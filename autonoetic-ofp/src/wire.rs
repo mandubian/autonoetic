@@ -8,6 +8,7 @@
 //! because OpenFang uses default serde parsing (which drops unknown fields).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A wire protocol message (envelope).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +66,13 @@ pub enum WireRequest {
         /// HMAC-SHA256(shared_secret, nonce + node_id).
         #[serde(default)]
         auth_hmac: String,
+        /// Autonoetic extension: canonical constitution digest advertised by sender.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constitution_digest: Option<String>,
+        /// Autonoetic extension: canonical constitution profile (rule/right tables)
+        /// used for superset compatibility checks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constitution_profile: Option<ConstitutionProfile>,
         /// Autonoetic extension: list of supported protocol extensions (e.g., ["msg_hmac", "resilience"]).
         #[serde(skip_serializing_if = "Option::is_none")]
         extensions: Option<Vec<String>>,
@@ -107,6 +115,13 @@ pub enum WireResponse {
         /// HMAC-SHA256(shared_secret, nonce + node_id).
         #[serde(default)]
         auth_hmac: String,
+        /// Autonoetic extension: canonical constitution digest advertised by sender.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constitution_digest: Option<String>,
+        /// Autonoetic extension: canonical constitution profile (rule/right tables)
+        /// used for superset compatibility checks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constitution_profile: Option<ConstitutionProfile>,
         /// Autonoetic extension: the extensions this peer agreed to enable.
         #[serde(skip_serializing_if = "Option::is_none")]
         extensions: Option<Vec<String>>,
@@ -166,6 +181,15 @@ pub struct RemoteAgentInfo {
     pub tools: Vec<String>,
     /// Current state.
     pub state: String,
+}
+
+/// Canonical constitutional enforcement tables used for compatibility checks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConstitutionProfile {
+    /// Canonical rule ID -> enforcement citation table.
+    pub rules_enforcement: BTreeMap<String, String>,
+    /// Canonical right ID -> enforcement citation table.
+    pub rights_enforcement: BTreeMap<String, String>,
 }
 
 /// Current protocol version. OpenFang expects 1.
@@ -231,18 +255,39 @@ mod tests {
                 }],
                 nonce: "test-nonce".to_string(),
                 auth_hmac: "test-hmac".to_string(),
+                constitution_digest: Some("abc123".to_string()),
+                constitution_profile: Some(ConstitutionProfile {
+                    rules_enforcement: BTreeMap::from([(
+                        "R-1.1".to_string(),
+                        "tool_call_processor".to_string(),
+                    )]),
+                    rights_enforcement: BTreeMap::from([(
+                        "Ri-0.10".to_string(),
+                        "constitution_read".to_string(),
+                    )]),
+                }),
                 extensions: Some(vec!["msg_hmac".to_string(), "resilience".to_string()]),
             }),
         };
         let json = serde_json::to_string_pretty(&msg).unwrap();
         assert!(json.contains("handshake"));
         assert!(json.contains("coder"));
+        assert!(json.contains("constitution_digest"));
+        assert!(json.contains("constitution_profile"));
         assert!(json.contains("msg_hmac")); // Extension is serialized
 
         let decoded: WireMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.id, "hs-1");
 
-        if let WireMessageKind::Request(WireRequest::Handshake { extensions, .. }) = decoded.kind {
+        if let WireMessageKind::Request(WireRequest::Handshake {
+            constitution_digest,
+            constitution_profile,
+            extensions,
+            ..
+        }) = decoded.kind
+        {
+            assert_eq!(constitution_digest.as_deref(), Some("abc123"));
+            assert!(constitution_profile.is_some());
             assert!(extensions.is_some());
             assert_eq!(extensions.unwrap().len(), 2);
         } else {

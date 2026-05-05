@@ -5,7 +5,7 @@
 //!   - is available to every agent regardless of declared capabilities
 //!   - returns the full document with no args
 //!   - supports section selectors for rule IDs and §N forms
-//!   - returns a SHA-256 digest matching the source markdown
+//!   - returns a SHA-256 digest matching the canonical digest payload
 //!   - rejects unknown selectors with a structured validation error.
 
 mod support;
@@ -178,24 +178,24 @@ fn unknown_selector_returns_validation_error() {
 
 #[test]
 fn digest_matches_sha256_of_source_markdown() {
-    // The digest returned by the tool must equal SHA-256 of the constitution
-    // markdown file shipped with the gateway crate. This is the property
-    // R+++2 (federation digest handshake) will rely on.
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let source_path = std::path::Path::new(manifest_dir)
-        .parent()
-        .expect("workspace root")
-        .join("docs/gateway-constitution.md");
-    let source = std::fs::read(&source_path).expect("read constitution source");
+    // The digest returned by the tool must equal the canonical digest payload
+    // used for federation compatibility checks.
+    let payload = serde_json::json!({
+        "constitution_text": autonoetic_gateway::constitution_digest::constitution_text(),
+        "rights_enforcement": autonoetic_gateway::constitution_digest::canonical_right_enforcement_table(),
+        "rules_enforcement": autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table(),
+    });
+    let payload_bytes =
+        serde_json::to_vec(&payload).expect("canonical constitution payload should serialize");
     let mut hasher = Sha256::new();
-    hasher.update(&source);
+    hasher.update(payload_bytes);
     let expected = hex::encode(hasher.finalize());
 
     let resp = invoke("{}");
     assert_eq!(
         resp["digest"].as_str().expect("digest"),
         expected,
-        "tool digest must match SHA-256 of docs/gateway-constitution.md"
+        "tool digest must match canonical constitution digest payload"
     );
 }
 
