@@ -46,6 +46,8 @@ cargo test -p autonoetic-gateway --test constitution_r_8_6_retention_policy_star
 ```
 
 Canonicalization details are documented in `docs/constitution-signing.md`.
+Operational key handling for multi-machine deterministic signing is in
+`docs/constitution/key-management.md`.
 
 ## Workspace Structure
 

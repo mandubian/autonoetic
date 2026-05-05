@@ -40,6 +40,7 @@ Lock signatures:
 Precise signature payload and verification rules are specified in:
 
 - `docs/constitution-signing.md`
+- `docs/constitution/key-management.md`
 
 Each constitutional release should:
 

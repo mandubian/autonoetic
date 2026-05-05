@@ -487,7 +487,7 @@ fn default_constitution_trusted_signers() -> HashMap<String, String> {
     let mut out = HashMap::new();
     out.insert(
         "autonoetic:constitution:v1".to_string(),
-        "CvIfPr9iMiKYJQO3PZFIqdOLVtsCbtlVV45UEXkF6iY=".to_string(),
+        "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=".to_string(),
     );
     out
 }
