@@ -112,6 +112,10 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 1. Service registration / credential onboarding ("register with X", "connect to X", "set up credentials for X")
    → researcher.default (discover skill_url if unknown)
    → registration.default (spawn with skill_url; it handles credential_setup + user_ask loop)
+   → Parse registration output as JSON and require keys: `service`, `credential_id`, `env_var`, `ready_for_execution`, `public_data`, `next_action`, `summary`
+   → Do not proceed to execution until registration returns an execution-ready handoff (`service`, `credential_id`, `env_var`, `ready_for_execution: true`)
+   → If output is not valid JSON or required keys are missing, ask registration.default to restate output in the required JSON contract before continuing.
+   → If registration reports user-input/verification still pending or `ready_for_execution: false`, keep the flow in registration; do not spawn executor yet.
 
 2. New persistent agent needed
   → agent-factory.default (give it: agent_id, purpose, intended_capabilities)
@@ -125,9 +129,10 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
     → executor.default
 
 4a. Execution requiring credentials (API keys, tokens)
-    → executor.default with delegation message including: credential_id (from credential_check) and env_var name
+    → executor.default with delegation message including: credential_id + env_var from registration output (source of truth; do not invent/guess)
     → executor uses `artifact_prepare` for one-pass credential resolution + approval, then `artifact_exec` with deployment_ticket
     → Script reads the secret from os.environ at runtime — secret never reaches LLM context
+    → If executor reports `credential reference not found in store`, route back to registration.default for credential readiness check instead of retrying execution loops
 
 5. Durable implementation work (code that should be reviewed, reused, handed off, or installed)
    → coder.default

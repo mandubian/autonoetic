@@ -96,6 +96,11 @@ artifact_prepare({
 
 This returns a `deployment_ticket`. If credentials are missing, it fails immediately with a clear error. If remote access approval is needed, it creates a single approval covering all domains + credential injection.
 
+If `artifact_prepare` fails with `credential reference not found in store` (or any credential-resolution error):
+- Stop and report that exact error to planner.
+- Do **not** bypass the failure by switching to ad-hoc retries, random file writes, or repeated `artifact_exec`/`sandbox_exec` attempts.
+- Ask planner to route back to `registration.default` (credential readiness/persistence issue).
+
 Once you have the ticket, execute:
 
 ```json
@@ -145,6 +150,7 @@ Forbidden commands (blocked by policy): `rm`, `rmdir`, `unlink`, `sudo`, `su`, `
 - Do not try to install packages
 - If the task requires non-stdlib imports or external tooling that is not already present, stop and report that `packager.default` or `coder.default` is needed
 - If execution triggers remote-access approval, stop and report the approval request id instead of retrying or working around it
+- If runtime output indicates the expected env var is missing (e.g. `...SECRET not set`), report a credential injection mismatch (`credential_id` vs `env_var` contract) and stop; do not keep re-running equivalent commands.
 
 ## Completion
 
