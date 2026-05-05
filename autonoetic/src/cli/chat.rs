@@ -2719,42 +2719,77 @@ async fn run_loop<B: ratatui::backend::Backend>(
                     // Pending user.ask: gateway-owned answer + resume (workflow Runnable or session checkpoint).
                     let mut skip_chat_ingest = false;
                     if let (Some(store), Some(exec)) = (gateway_store, execution_for_interactions) {
-                        if let Ok(pending) =
+                        if let Ok(mut pending) =
                             list_pending_user_interactions_for_terminal_session(store, &app.session_id)
                         {
-                            if let Some(interaction) = pending.into_iter().next() {
-                                use autonoetic_gateway::interaction_answer::{
-                                    answer_and_orchestrate_resume, InteractionAnswerParams,
-                                };
-                                match answer_and_orchestrate_resume(
-                                    exec,
-                                    InteractionAnswerParams {
-                                        interaction_id: interaction.interaction_id.clone(),
-                                        answer_text: Some(message.clone()),
-                                        answer_option_id: None,
-                                        answered_by: Some("chat-tui".to_string()),
-                                        follow_up_message: Some(message.clone()),
-                                    },
-                                )
-                                .await
-                                {
-                                    Ok(out) => {
-                                        app.add_message(
-                                            MessageRole::System,
-                                            format!(
-                                                "Answered interaction {} (gateway resume: resumed={}, wf_unblocked={})",
-                                                interaction.interaction_id, out.resumed, out.workflow_task_unblocked
-                                            ),
-                                        );
-                                        skip_chat_ingest = true;
-                                    }
-                                    Err(e) => {
-                                        app.add_message(
-                                            MessageRole::System,
-                                            format!("interaction answer orchestration failed: {}", e),
-                                        );
-                                        skip_chat_ingest = true;
-                                    }
+                            if pending.len() > 1 {
+                                let ids = pending
+                                    .iter()
+                                    .map(|i| i.interaction_id.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                app.add_message(
+                                    MessageRole::System,
+                                    format!(
+                                        "Multiple pending user interactions ({ids}). Answer one explicitly with: autonoetic gateway interactions answer --interaction-id <id> --text \"...\""
+                                    ),
+                                );
+                                skip_chat_ingest = true;
+                            } else if let Some(interaction) = pending.pop() {
+                                if !interaction.allow_freeform {
+                                    app.add_message(
+                                        MessageRole::System,
+                                        format!(
+                                            "Interaction {} requires --option; freeform text is not allowed.",
+                                            interaction.interaction_id
+                                        ),
+                                    );
+                                    skip_chat_ingest = true;
+                                } else if autonoetic_gateway::log_redaction::looks_like_secret_value(
+                                    &message,
+                                ) {
+                                    app.add_message(
+                                        MessageRole::System,
+                                        "Secret-like values are not accepted via interaction answers. Use credential setup/prompt flows for secrets.".to_string(),
+                                    );
+                                    skip_chat_ingest = true;
+                                } else {
+                                    use autonoetic_gateway::interaction_answer::{
+                                        answer_and_orchestrate_resume, InteractionAnswerParams,
+                                    };
+                                    let interaction_id = interaction.interaction_id.clone();
+                                    let interaction_id_for_task = interaction.interaction_id.clone();
+                                    let exec = std::sync::Arc::clone(exec);
+                                    let answer_text = message.clone();
+                                    tokio::spawn(async move {
+                                        let result = answer_and_orchestrate_resume(
+                                            &exec,
+                                            InteractionAnswerParams {
+                                                interaction_id: interaction_id_for_task.clone(),
+                                                answer_text: Some(answer_text.clone()),
+                                                answer_option_id: None,
+                                                answered_by: Some("chat-tui".to_string()),
+                                                follow_up_message: Some(answer_text),
+                                            },
+                                        )
+                                        .await;
+                                        if let Err(e) = result {
+                                            tracing::warn!(
+                                                target: "chat",
+                                                interaction_id = %interaction_id_for_task,
+                                                error = %e,
+                                                "Background interaction answer orchestration failed"
+                                            );
+                                        }
+                                    });
+                                    app.add_message(
+                                        MessageRole::System,
+                                        format!(
+                                            "Answered interaction {}. Resume is running in background.",
+                                            interaction_id
+                                        ),
+                                    );
+                                    skip_chat_ingest = true;
                                 }
                             }
                         }
