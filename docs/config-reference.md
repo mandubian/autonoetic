@@ -91,7 +91,7 @@ constitution:
   lock_path: "docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
-    autonoetic:constitution:v1: "K9fMtYj6nlkiLPC04TaGmBvzhOgXVZdQt0imium3klE="
+    autonoetic:constitution:v1: "kI739PGXQIakvbb1Oslw+yD7Xe76+TFp8H2sr2GPT7Q="
 ```
 
 To enforce the bootstrapped runtime snapshot instead of the repo docs copy:
@@ -102,7 +102,7 @@ constitution:
   lock_path: ".gateway/constitution/versions/2026.05.05/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
-    autonoetic:constitution:v1: "K9fMtYj6nlkiLPC04TaGmBvzhOgXVZdQt0imium3klE="
+    autonoetic:constitution:v1: "kI739PGXQIakvbb1Oslw+yD7Xe76+TFp8H2sr2GPT7Q="
 ```
 
 ---
@@ -610,7 +610,7 @@ constitution:
   lock_path: "docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
-    autonoetic:constitution:v1: "K9fMtYj6nlkiLPC04TaGmBvzhOgXVZdQt0imium3klE="
+    autonoetic:constitution:v1: "kI739PGXQIakvbb1Oslw+yD7Xe76+TFp8H2sr2GPT7Q="
 max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4
 approval_timeout_secs: 600

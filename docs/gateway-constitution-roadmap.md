@@ -944,8 +944,8 @@ Files: `autonoetic-gateway/src/runtime/tools/observability.rs`
 
 ## Phase 3 — P2 polish
 
-Current state on `main`: **nearly complete**. Enforced: R+8, R+13, R+14, R+17, R++8, R++10.
-Remaining open batch: 3.7 (`#69`).
+Current state on `main`: **complete** for planned Phase 3 polish items.
+Enforced: R+8, R+13, R+14, R+17, R++8, R++10, plus the 3.7 rule-pin batch.
 
 ### 3.1 `R+8` Vault master-key presence probe at startup — **ENFORCED**
 
@@ -1019,21 +1019,21 @@ coverage and fail-mode mapping behavior.
 
 ---
 
-### 3.7 Test-pin partial rules — **NOT YET**
+### 3.7 Test-pin partial rules — **ENFORCED**
 
-Several rules are marked `PARTIAL` because enforcement exists but no
-test pins the invariant. Add tests for:
+The Phase 3.7 batch is now landed with dedicated rule-pin tests:
 
-- R-2.11 approval timeout
-- R-2.14 `user_ask` blocked during pending approvals
-- R-3.7 sandbox resource limits (docker/microvm paths)
-- R-5.11 uniform error envelope (shared helper + contract test)
-- R-6.14 `EmergencyStop` never auto-resumes
-- R-6.17 checkpoint retention pruning
-- R-8.6 retention policy application
-- R-10.7 cross-gateway approval bypass prevention
+- `constitution_r_2_11_approval_timeout.rs`
+- `constitution_r_2_14_user_ask_pending_approvals.rs`
+- `constitution_r_3_7_sandbox_resource_limits.rs`
+- `constitution_r_5_11_uniform_error_envelope.rs`
+- `constitution_r_6_14_emergency_stop_no_auto_resume.rs`
+- `constitution_r_6_17_checkpoint_retention_pruning.rs`
+- `constitution_r_8_6_retention_policy_startup.rs`
+- `constitution_r_10_7_cross_gateway_approval_bypass.rs`
 
-Total size for the batch: M. Each individual test is S.
+Constitution rows for all eight rules were flipped from `PARTIAL` to
+`ENFORCED`.
 
 ---
 

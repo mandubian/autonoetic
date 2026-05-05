@@ -3,7 +3,7 @@
   "constitution_id": "autonoetic-gateway-constitution",
   "constitution_version": "2026.05.05",
   "constitution_source": "docs/constitution/versions/2026.05.05/constitution.md",
-  "constitution_digest": "61a2fbbba3954cbc43938deaf350cc9a3c3b69ecc3afe8a1e438100378f2b4b4",
+  "constitution_digest": "9355f8f9940f20e43658df24aef985f0adca993e8f50e17928554cb5d2a04c6d",
   "rule_enforcement_count": 153,
   "right_enforcement_count": 13,
   "canonicalization": {
@@ -15,6 +15,6 @@
   "signature": {
     "algorithm": "ed25519",
     "signer_id": "autonoetic:constitution:v1",
-    "signature_b64": "TWosW/B7Fvm5xLUMtVptSFBZYSTxhw0I0j4KfDrqcOzTwb1M+GsuRUw5tVy0N6A++yOzBCga3BVcrviqnLydDQ=="
+    "signature_b64": "fGH4TNxu9Q6fcBpWtS/o6FzyimRi3XkjZq0vxGnUArlyTf43QrFCELvu2uBm3q/EzWPWtob6zBECdrsQeqXuBw=="
   }
 }

@@ -172,10 +172,10 @@ approve via `runtime/continuation.rs`.
 | R-2.8 | High-risk promotion requires evaluator AND auditor pass. | spec-install-pipeline-hardening.md §3.1 | `runtime/tools/agent_revision.rs::promote` | ENFORCED |
 | R-2.9 | `promotion_record` with `pass=true` rejects on error/critical findings, and on warning findings lacking evidence. | approval-system.md | `runtime/tools/promotion.rs` | ENFORCED |
 | R-2.10 | Approval-gated turns suspend to a continuation; real tool result replays on approve. | ARCHITECTURE.md | `runtime/continuation.rs:178 execute_approved_action` | ENFORCED |
-| R-2.11 | Suspended turns exceeding timeout mark the task failed and clean the continuation. | ARCHITECTURE.md | scheduler tick | PARTIAL |
+| R-2.11 | Suspended turns exceeding timeout mark the task failed while preserving continuation for explicit operator-driven resume. | ARCHITECTURE.md | `scheduler.rs::check_approval_timeouts`, `constitution_r_2_11_approval_timeout.rs` | ENFORCED |
 | R-2.12 | Operators approve/reject via durable CLI; decisions persist and dispatch signals. | approval-system.md | `gateway approvals approve/reject` | ENFORCED |
 | R-2.13 | `user_ask` checkpoints the session as `YieldReason::UserInputRequired`. | architecture-interaction-mechanisms.md | `runtime/tools/user_interaction.rs` | ENFORCED |
-| R-2.14 | `user_ask` is refused if the workflow has active children or pending approvals. | architecture-interaction-mechanisms.md | runtime guard | PARTIAL |
+| R-2.14 | `user_ask` is refused if the workflow has active children or pending approvals. | architecture-interaction-mechanisms.md | `runtime/tools/user_interaction.rs`, `constitution_r_2_14_user_ask_pending_approvals.rs` | ENFORCED |
 | R-2.15 | Spawn payload is preserved verbatim across approval resume. | approval-system.md | `continuation.rs:332` | ENFORCED |
 | R-2.16 | Promotion of revision N computes `cap_set(N) \ cap_set(N-1)`. A non-empty delta triggers a **separate, differently-shaped approval** (`ScheduledAction::RevisionPromote`) that names each added capability explicitly. The operator must acknowledge every added/broadened capability by name (`--acknowledge-capability`) — silent accretion across approvals is impossible. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs` (gate creation), `autonoetic-gateway/src/scheduler/approval.rs` (acknowledgement check) | ENFORCED |
 | R-2.17 | The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). A single agent recording both evaluator and auditor passes is rejected. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs` `AgentRevisionPromoteTool::execute` (identity comparison in promotion gate) | ENFORCED |
@@ -193,7 +193,7 @@ overrides derived from capabilities in `sandbox.rs:42`.
 | R-3.4 | SDK bridge paths from inside the sandbox are relative-only, no traversal. | — | `sandbox.rs:467 validate_sdk_relative_path` | ENFORCED |
 | R-3.5 | Network errors inside the sandbox (URLError, ConnectionError, DNS) are detected and returned as tool failure. | spec-install-pipeline-hardening.md §3.6 | `sandbox.rs::detect_network_errors_in_output` | ENFORCED |
 | R-3.6 | Layer mounts are read-only. | spec-build-layers-dependency-resolution.md §2.6 | sandbox mount assembly | ENFORCED |
-| R-3.7 | Sandboxes enforce CPU/memory/PID/disk quotas. | ARCHITECTURE.md | docker/microvm yes; bubblewrap relies on OS defaults | PARTIAL |
+| R-3.7 | Sandboxes enforce CPU/memory/PID/disk quotas. | ARCHITECTURE.md | docker/microvm driver-profile fail-shut gate, `constitution_r_3_7_sandbox_resource_limits.rs` | ENFORCED |
 | R-3.8 | Destructive commands (`sudo`, `rm -rf`, `dd`, `mkfs`, shell injection) are blocked before sandbox creation. | approval-system.md | `policy.rs:46 analyze_command` | ENFORCED |
 | R-3.9 | Dependency-manager package names are restricted to safe alphanumerics. | — | `sandbox.rs:1097 validate_dependency_package` | ENFORCED |
 
@@ -235,7 +235,7 @@ Enforcement hook for ingress, response validation gate for egress.
 | R-5.8 | Validation failures trigger a bounded repair loop (`max_validation_loops`, `max_validation_duration_ms`); exhaustion returns error. | response-validation-gate.md | `execution.rs:1965 validate_and_maybe_repair` | ENFORCED — **DUMBNESS VIOLATION** (Phase 4.1: gateway repairs agent output on agent's behalf) |
 | R-5.9 | `min_artifact_builds` is verified via execution traces. | response-validation-gate.md | `response_validation.rs` | ENFORCED |
 | R-5.10 | `artifact_inspect` accepts explicit `art_*` IDs only; implicit `impl_task-*` handles are rejected. | content-store.md | `runtime/tools/artifact.rs` | ENFORCED |
-| R-5.11 | Native tool errors use a uniform `{error_type, message, repair_hint}` envelope. | ARCHITECTURE.md | per-tool response construction | PARTIAL |
+| R-5.11 | Native tool errors use a uniform `{error_type, message, repair_hint}` envelope. | ARCHITECTURE.md | shared `ToolError` shape + tool contract pin, `constitution_r_5_11_uniform_error_envelope.rs` | ENFORCED |
 | R-5.12 | `error_type: fatal` triggers session abort; recoverable types do not. | ARCHITECTURE.md | lifecycle error processing | ENFORCED |
 | R-5.13 | Child → parent tool results validate against `io.returns` on egress. | (R+2) | `runtime/response_validation.rs:68` `execution.rs:1903` | ENFORCED |
 
@@ -259,10 +259,10 @@ Per-session registries in `runtime/session_budget.rs`,
 | R-6.11 | Tool schemas compress after turn 0 (`{}` placeholders). | prompt-budget.md | context assembly | ENFORCED |
 | R-6.12 | Foundation layers included based on agent capabilities. | prompt-budget.md | `compose_foundation` | ENFORCED |
 | R-6.13 | Checkpoints cover every yield reason with `turn_counter`, `loop_guard_state`, and budgets. | ARCHITECTURE.md | `runtime/checkpoint.rs` | ENFORCED |
-| R-6.14 | `EmergencyStop` never auto-resumes; `ApprovalRequired` resumes via continuation. | ARCHITECTURE.md | auto-resume dispatch | PARTIAL (test-pin recommended) |
+| R-6.14 | `EmergencyStop` never auto-resumes; `ApprovalRequired` resumes via continuation. | ARCHITECTURE.md | `execution.rs` checkpoint resume gate, `constitution_r_6_14_emergency_stop_no_auto_resume.rs` | ENFORCED |
 | R-6.15 | Turn continuation atomically replays the pending tool call on approve. | ARCHITECTURE.md | `runtime/continuation.rs` | ENFORCED |
 | R-6.16 | `session.fork` branches from a named checkpoint. | ARCHITECTURE.md | JSON-RPC `session.fork` | ENFORCED |
-| R-6.17 | Checkpoint retention prunes per configuration. | ARCHITECTURE.md | scheduler prune task | PARTIAL |
+| R-6.17 | Checkpoint retention prunes per configuration. | ARCHITECTURE.md | checkpoint prune helpers, `constitution_r_6_17_checkpoint_retention_pruning.rs` | ENFORCED |
 | R-6.18 | Workflow orchestration persists `WorkflowRun` on first `agent_spawn`. | workflow-orchestration.md | `workflow_store.rs` | ENFORCED |
 | R-6.19 | Child task message/metadata is preserved across approval boundaries. | workflow-orchestration.md | `TaskRun` storage | ENFORCED |
 | R-6.20 | User chat addressed to a child `session_id` rewrites to the root session. | workflow-orchestration.md | router `event.ingest` | ENFORCED |
@@ -308,7 +308,7 @@ separate. Runtime-lock in `runtime_lock.rs`.
 | R-8.3 | `event_id` is the universal correlation key across traces, reports, and observability. | ARCHITECTURE.md | join logic in tools | ENFORCED |
 | R-8.4 | Events are mirrored to SQLite (`causal_events`) without payload truncation. | ARCHITECTURE.md | `gateway_store/causal_events.rs` | ENFORCED |
 | R-8.5 | Execution traces record `exit_code`, `stdout`, `stderr`, `duration_ms`, `success`, `error_type` — untruncated. | ARCHITECTURE.md | `execution_traces` table | ENFORCED |
-| R-8.6 | Retention policies apply at gateway startup (0 = keep forever). | ARCHITECTURE.md | scheduler cleanup | PARTIAL |
+| R-8.6 | Retention policies apply at gateway startup (0 = keep forever). | ARCHITECTURE.md | `GatewayServer::run` startup retention call, `constitution_r_8_6_retention_policy_startup.rs` | ENFORCED |
 | R-8.7 | Live digest is updated in real time (`session_digest.md`). | ARCHITECTURE.md | `runtime/live_digest.rs` | ENFORCED |
 | R-8.8 | Published session reports are catalogued in `published_session_reports` and queryable via `observability.*`. | ARCHITECTURE.md | `runtime/tools/observability.rs` | ENFORCED |
 | R-8.9 | Promotion records persist `artifact_id`, `evaluator_pass`, `auditor_pass`, `evidence`, and `content_digest`. | spec-install-pipeline-hardening.md §3.8 | `promotion_store.rs` | ENFORCED |
@@ -357,7 +357,7 @@ HTTP in `server/http.rs`, JSON-RPC in `server/jsonrpc.rs`, OFP in
 | R-10.4 | Remote agents inherit all approval gates. | remote-access-approval.md | sandbox_exec universal logic | ENFORCED |
 | R-10.5 | Layer mounts in remote execution are fetched and cached before sandbox use. | spec-build-layers-dependency-resolution.md §2.6 | HTTP layer download | ENFORCED |
 | R-10.6 | OFP messages preserve session context across gateways. | — | future federation layer | DESIGN DEBT |
-| R-10.7 | Remote agents cannot self-approve network access. | separation-of-powers.md | policy engine + remote validation | PARTIAL |
+| R-10.7 | Remote agents cannot self-approve network access. | separation-of-powers.md | root-session scoped approval grants, `constitution_r_10_7_cross_gateway_approval_bypass.rs` | ENFORCED |
 | R-10.8 | Shared-secret comparison is constant-time. | (R+15) | `server/jsonrpc.rs:37`, `server/http.rs:76` | ENFORCED |
 
 ## 11. Inter-Agent Messaging

@@ -33,6 +33,37 @@ bash examples/quickstart/run.sh                    # Run quickstart example
 cd autonoetic-sdk/typescript && npm run build      # Build TS SDK
 ```
 
+### Recompute Constitution Lock (Digest + Signature)
+When `docs/constitution/versions/<version>/constitution.md` changes, run the
+maintained script (requires PyNaCl: `python3 -m pip install pynacl`):
+
+```bash
+python3 docs/constitution/recompute_lock.py --version 2026.05.05 \
+  --signing-sk-b64 "$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64"
+```
+
+To intentionally rotate signer material:
+
+```bash
+python3 docs/constitution/recompute_lock.py --version 2026.05.05 --generate-key
+```
+
+If signer key rotated, update `trusted_signers` for
+`autonoetic:constitution:v1` in:
+
+- `autonoetic-types/src/config.rs`
+- `config/config-template.yaml`
+- `docs/config-reference.md`
+
+Then validate:
+
+```bash
+cargo test -p autonoetic-gateway constitution_lock_matches_canonical_digest_and_counts
+cargo test -p autonoetic-gateway --test constitution_r_8_6_retention_policy_startup
+```
+
+Canonicalization details are documented in `docs/constitution-signing.md`.
+
 ## Architecture
 
 Autonoetic is a Rust runtime for autonomous agents with durable memory, portable identity, and reproducible execution. It enforces a strict **Separation of Powers**: agents are low-privilege reasoners that propose intents; the Gateway is the high-privilege executor that validates and runs them.
