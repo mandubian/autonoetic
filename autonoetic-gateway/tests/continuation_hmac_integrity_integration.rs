@@ -14,6 +14,7 @@ use autonoetic_gateway::runtime::continuation::{
     TurnContinuation,
 };
 use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_types::agent::SessionState;
 use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::config::GatewayConfig;
 
@@ -73,6 +74,7 @@ fn make_test_continuation(request_id: &str) -> TurnContinuation {
         turn_id: "turn-001".to_string(),
         suspended_at: chrono::Utc::now().to_rfc3339(),
         loop_guard_state: default_guard_state(),
+        session_state: SessionState::default(),
     }
 }
 
