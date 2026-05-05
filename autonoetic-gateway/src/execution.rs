@@ -480,20 +480,136 @@ impl GatewayExecutionService {
         self.active_executions.clone()
     }
 
+    pub fn degraded_sessions(&self) -> Arc<Mutex<std::collections::HashSet<String>>> {
+        self.degraded_sessions.clone()
+    }
+
+    fn queue_gateway_last_word_notice(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+        target_session_id: &str,
+        trigger: &str,
+        reason: &str,
+    ) -> anyhow::Result<String> {
+        let message_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let now = chrono::Utc::now().to_rfc3339();
+        let message = format!(
+            "[Gateway Notice Ri-0.9]\n\
+             Trigger: {}\n\
+             Reason: {}\n\
+             Last-word opportunity is open where practical.",
+            trigger, reason
+        );
+
+        let record = crate::scheduler::gateway_store::AgentMessageRecord {
+            message_id: message_id.clone(),
+            sender_session_id: format!("gateway:{}", trigger),
+            sender_agent_id: "gateway".to_string(),
+            target_pattern: format!("session:{}", target_session_id),
+            message: message.clone(),
+            created_at: now.clone(),
+        };
+        store.save_agent_message(&record)?;
+        store.insert_message_delivery(&message_id, target_session_id)?;
+
+        let signal = crate::scheduler::signal::Signal::AgentMessage {
+            message_id: message_id.clone(),
+            sender_session_id: record.sender_session_id.clone(),
+            sender_agent_id: record.sender_agent_id.clone(),
+            message,
+            timestamp: now,
+        };
+        if let Err(e) = crate::scheduler::signal::write_signal(
+            Some(store),
+            target_session_id,
+            &message_id,
+            &signal,
+        ) {
+            tracing::debug!(
+                target: "ri_0_9",
+                error = %e,
+                target_session_id = %target_session_id,
+                "Failed to enqueue Ri-0.9 wake signal"
+            );
+        }
+
+        Ok(message_id)
+    }
+
+    fn record_last_word_event(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+        session_id: &str,
+        action: &str,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("ri09-{}", uuid::Uuid::new_v4()),
+            agent_id: "gateway".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: None,
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "session".to_string(),
+            action: action.to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec!["Ri-0.9".to_string()],
+            target: None,
+            payload: Some(payload.to_string()),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        })
+    }
+
     pub async fn degrade_session(
         &self,
         session_id: &str,
         reason: &str,
     ) -> anyhow::Result<serde_json::Value> {
+        self.degrade_session_with_options(session_id, reason, true)
+            .await
+    }
+
+    pub async fn degrade_session_with_options(
+        &self,
+        session_id: &str,
+        reason: &str,
+        notify_where_practical: bool,
+    ) -> anyhow::Result<serde_json::Value> {
         let session_id = session_id.trim();
         let reason = reason.trim();
         anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
         anyhow::ensure!(!reason.is_empty(), "reason must not be empty");
-        {
-            let mut set = self.degraded_sessions.lock().await;
-            set.insert(session_id.to_string());
-        }
+        let mut last_word_notice_message_id: Option<String> = None;
+
         if let Some(store) = self.gateway_store.as_ref() {
+            if notify_where_practical {
+                let msg_id =
+                    Self::queue_gateway_last_word_notice(store.as_ref(), session_id, "degrade", reason)?;
+                last_word_notice_message_id = Some(msg_id.clone());
+                Self::record_last_word_event(
+                    store.as_ref(),
+                    session_id,
+                    "session.last_word_notice",
+                    serde_json::json!({
+                        "trigger": "degrade",
+                        "where_practical": true,
+                        "reason": reason,
+                        "notice_message_id": msg_id,
+                    }),
+                )?;
+            } else {
+                Self::record_last_word_event(
+                    store.as_ref(),
+                    session_id,
+                    "session.last_word_foreclosed",
+                    serde_json::json!({
+                        "trigger": "degrade",
+                        "where_practical": false,
+                        "reason": reason,
+                    }),
+                )?;
+            }
+
             let event = autonoetic_types::causal_chain::CausalEventRecord {
                 event_id: format!("degrade-{}", uuid::Uuid::new_v4()),
                 agent_id: String::new(),
@@ -507,7 +623,13 @@ impl GatewayExecutionService {
                 enforced_rules: vec!["R++6".to_string()],
                 target: None,
                 payload: Some(
-                    serde_json::json!({"reason": reason, "source": "operator"}).to_string(),
+                    serde_json::json!({
+                        "reason": reason,
+                        "source": "operator",
+                        "notify_where_practical": notify_where_practical,
+                        "last_word_notice_message_id": last_word_notice_message_id,
+                    })
+                    .to_string(),
                 ),
                 payload_ref: None,
                 evidence_ref: None,
@@ -515,11 +637,17 @@ impl GatewayExecutionService {
             };
             let _ = store.create_causal_event(&event);
         }
+        {
+            let mut set = self.degraded_sessions.lock().await;
+            set.insert(session_id.to_string());
+        }
         Ok(serde_json::json!({
             "ok": true,
             "session_id": session_id,
             "state": "degraded",
-            "reason": reason
+            "reason": reason,
+            "notify_where_practical": notify_where_practical,
+            "last_word_notice_message_id": last_word_notice_message_id,
         }))
     }
 
@@ -574,6 +702,28 @@ impl GatewayExecutionService {
         trigger_kind: &str,
         source_agent_id: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
+        self.emergency_stop_root_session_with_options(
+            root_session_id,
+            reason,
+            requested_by_type,
+            requested_by_id,
+            trigger_kind,
+            source_agent_id,
+            false,
+        )
+        .await
+    }
+
+    pub async fn emergency_stop_root_session_with_options(
+        &self,
+        root_session_id: &str,
+        reason: &str,
+        requested_by_type: &str,
+        requested_by_id: &str,
+        trigger_kind: &str,
+        source_agent_id: Option<&str>,
+        notify_where_practical: bool,
+    ) -> anyhow::Result<serde_json::Value> {
         use crate::runtime::checkpoint::{
             load_latest_checkpoint, save_checkpoint, SessionCheckpoint, YieldReason,
         };
@@ -589,6 +739,41 @@ impl GatewayExecutionService {
             "root_session_id must not be empty"
         );
         anyhow::ensure!(!reason.trim().is_empty(), "reason must not be empty");
+
+        let mut last_word_notice_message_id: Option<String> = None;
+        if notify_where_practical {
+            let msg_id = Self::queue_gateway_last_word_notice(
+                store.as_ref(),
+                root_session_id,
+                "emergency_stop",
+                reason,
+            )?;
+            last_word_notice_message_id = Some(msg_id.clone());
+            Self::record_last_word_event(
+                store.as_ref(),
+                root_session_id,
+                "session.last_word_notice",
+                serde_json::json!({
+                    "trigger": "emergency_stop",
+                    "where_practical": true,
+                    "trigger_kind": trigger_kind,
+                    "reason": reason,
+                    "notice_message_id": msg_id,
+                }),
+            )?;
+        } else {
+            Self::record_last_word_event(
+                store.as_ref(),
+                root_session_id,
+                "session.last_word_foreclosed",
+                serde_json::json!({
+                    "trigger": "emergency_stop",
+                    "where_practical": false,
+                    "trigger_kind": trigger_kind,
+                    "reason": reason,
+                }),
+            )?;
+        }
 
         if let Some(aid) = source_agent_id {
             let repo = AgentRepository::from_config(self.config.as_ref());
@@ -639,6 +824,8 @@ impl GatewayExecutionService {
                     "trigger_kind": trigger_kind,
                     "requested_by_type": requested_by_type,
                     "requested_by_id": requested_by_id,
+                    "notify_where_practical": notify_where_practical,
+                    "last_word_notice_message_id": last_word_notice_message_id,
                 })
                 .to_string(),
             ),
@@ -669,6 +856,8 @@ impl GatewayExecutionService {
             "workflow_tasks_aborted": 0u32,
             "queued_removed": 0u32,
             "scheduled_jobs_cancelled": 0u32,
+            "notify_where_practical": notify_where_practical,
+            "last_word_notice_message_id": last_word_notice_message_id,
         });
 
         let killed_sandbox = self
@@ -860,6 +1049,8 @@ impl GatewayExecutionService {
             "stop_id": stop_id,
             "root_session_id": root_session_id,
             "status": status_final,
+            "notify_where_practical": notify_where_practical,
+            "last_word_notice_message_id": last_word_notice_message_id,
             "details": details,
         }))
     }

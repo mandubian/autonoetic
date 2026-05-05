@@ -743,6 +743,8 @@ impl JsonRpcRouter {
                     trigger_kind: Option<String>,
                     #[serde(default)]
                     source_agent_id: Option<String>,
+                    #[serde(default)]
+                    notify_where_practical: Option<bool>,
                 }
                 let params: EmergencyStopParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
@@ -760,13 +762,14 @@ impl JsonRpcRouter {
                     .unwrap_or_else(|| "manual".to_string());
                 match self
                     .execution
-                    .emergency_stop_root_session(
+                    .emergency_stop_root_session_with_options(
                         &params.root_session_id,
                         &params.reason,
                         &params.requested_by_type,
                         &params.requested_by_id,
                         &trigger,
                         params.source_agent_id.as_deref(),
+                        params.notify_where_practical.unwrap_or(false),
                     )
                     .await
                 {
@@ -780,6 +783,8 @@ impl JsonRpcRouter {
                 struct DegradeParams {
                     session_id: String,
                     reason: String,
+                    #[serde(default)]
+                    notify_where_practical: Option<bool>,
                 }
                 let params: DegradeParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
@@ -791,7 +796,15 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match self.execution.degrade_session(&params.session_id, &params.reason).await {
+                match self
+                    .execution
+                    .degrade_session_with_options(
+                        &params.session_id,
+                        &params.reason,
+                        params.notify_where_practical.unwrap_or(true),
+                    )
+                    .await
+                {
                     Ok(v) => JsonRpcResponse::success(req.id, v),
                     Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
                 }

@@ -867,9 +867,9 @@ For rights whose enforcement mechanism is itself a Phase 1/2 item.
 | Ri-0.1 self-inspection | R++1 attestation (#48) | ENFORCED — `constitution_attestation_freshness.rs` + `constitution_rights_late_bucket.rs` |
 | Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | PARTIAL — `Tagged::permission_with_rules` for all policy-gated capabilities; tested for 4 rejection classes |
 | Ri-0.4 truthful budget | R++1 (#48) | ENFORCED — `constitution_attestation_freshness.rs::budget_meters_reflect_consumption` |
-| Ri-0.5 degradation notice | R-7.18 (#61) | NOT YET — no notice injected into agent context on degraded entry |
+| Ri-0.5 degradation notice | R-7.18 (#61) | ENFORCED — lifecycle injects turn-start degraded-mode notice with rule IDs + causal evidence (`constitution_right_ri_0_5.rs`) |
 | Ri-0.8 amendment proposal | R+++1 (#92) | ENFORCED — `constitution_propose_amendment` endpoint + `constitutional_proposals` persistence; covered by `constitution_rights_amendment_proposal.rs` |
-| Ri-0.9 last-word before terminal | R-7.18 (#61) + emergency-stop | NOT YET — no notify-where-practical in degrade/emergency-stop paths |
+| Ri-0.9 last-word before terminal | R-7.18 (#61) + emergency-stop | ENFORCED — explicit `notify_where_practical` on degrade/emergency-stop; `session.last_word_notice` / `session.last_word_foreclosed`; queued Ri-0.9 notice messages; `session.last_word_response` after notice delivery + completing turn (`constitution_right_ri_0_9.rs`) |
 
 Test: `constitution_rights_late_bucket.rs` — 8 tests (Ri-0.1, Ri-0.3, Ri-0.12 cross-check).
 

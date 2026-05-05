@@ -11,7 +11,7 @@
 //! - startup refuses boot if lock integrity checks fail.
 
 use autonoetic_types::config::GatewayConfig;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -64,8 +64,7 @@ struct ConstitutionRuntime {
 impl ConstitutionRuntime {
     fn load(config: &GatewayConfig) -> anyhow::Result<Self> {
         let configured_source_label = normalize_config_path_label(&config.constitution.source_path);
-        let source_path = resolve_constitution_path(config, &config.constitution.source_path);
-        let lock_path = resolve_constitution_path(config, &config.constitution.lock_path);
+        let (source_path, lock_path) = resolve_constitution_artifact_paths(config)?;
 
         let text = std::fs::read_to_string(&source_path).map_err(|e| {
             anyhow::anyhow!(
@@ -202,9 +201,15 @@ pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
     );
     anyhow::ensure!(
         lock.constitution_digest == rt.digest,
-        "constitution lock digest mismatch (lock={}, computed={})",
+        "constitution lock digest mismatch (lock={}, computed={}). \
+         The markdown and lock file are out of sync: if you edited `constitution.md`, run \
+         `python3 docs/constitution/recompute_lock.py --version {}` with the project signing key \
+         (see AGENTS.md / docs/constitution-signing.md). \
+         Also ensure `constitution.source_path` and `constitution.lock_path` resolve under the same directory \
+         so the gateway does not pair a markdown file from one tree with a lock from another.",
         lock.constitution_digest,
-        rt.digest
+        rt.digest,
+        lock.constitution_version
     );
     anyhow::ensure!(
         lock.rule_enforcement_count == rt.rules_enforcement.len(),
@@ -246,11 +251,21 @@ pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
             &payload,
             &signature.signature_b64,
         )?;
-        anyhow::ensure!(
-            verified,
-            "constitution lock signature verification failed for signer '{}'",
-            signature.signer_id
-        );
+        if !verified {
+            let mut hasher = Sha256::new();
+            hasher.update(&payload);
+            let payload_sha256 = hex::encode(hasher.finalize());
+            anyhow::bail!(
+                "constitution lock signature verification failed for signer '{}' \
+                 (canonical signed payload sha256={}, {} bytes). \
+                 Rebuild the gateway from current sources (`cargo build`); older binaries hashed the payload with the wrong JSON key order. \
+                 If you re-signed the lock, set `constitution.trusted_signers['{}']` to the base64 public key printed by `docs/constitution/recompute_lock.py` for the same private key that produced `signature_b64`.",
+                signature.signer_id,
+                payload_sha256,
+                payload.len(),
+                signature.signer_id
+            );
+        }
     } else {
         anyhow::ensure!(
             !rt.require_signature,
@@ -258,6 +273,30 @@ pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Recursive key sort to match `docs/constitution/recompute_lock.py` `compact_json_bytes`
+/// (`json.dumps(..., sort_keys=True, separators=(",", ":"))`).
+fn sort_json_keys_for_constitution_signature(v: Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, sort_json_keys_for_constitution_signature(v)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(sort_json_keys_for_constitution_signature)
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 pub fn constitution_lock_signature_payload(lock: &ConstitutionLock) -> anyhow::Result<Vec<u8>> {
@@ -271,7 +310,8 @@ pub fn constitution_lock_signature_payload(lock: &ConstitutionLock) -> anyhow::R
         "right_enforcement_count": lock.right_enforcement_count,
         "canonicalization": lock.canonicalization,
     });
-    serde_json::to_vec(&payload)
+    let sorted = sort_json_keys_for_constitution_signature(payload);
+    serde_json::to_vec(&sorted)
         .map_err(|e| anyhow::anyhow!("failed to serialize constitution signature payload: {}", e))
 }
 
@@ -374,36 +414,68 @@ fn extract_enforcement_table(text: &str, id_prefix: &str) -> BTreeMap<String, St
     out
 }
 
-fn resolve_constitution_path(config: &GatewayConfig, configured_path: &Path) -> PathBuf {
-    if configured_path.is_absolute() {
-        return configured_path.to_path_buf();
+/// Resolve constitution markdown and lock paths from the **same** search root.
+///
+/// Per-path resolution would pick the first filesystem location where each file exists,
+/// which can pair a `constitution.md` from one tree with a `gateway-constitution.lock.json`
+/// from another (digest mismatch at startup). We only accept a root when both paths exist
+/// there as regular files.
+fn resolve_constitution_artifact_paths(config: &GatewayConfig) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let source_configured = &config.constitution.source_path;
+    let lock_configured = &config.constitution.lock_path;
+    let source_abs = source_configured.is_absolute();
+    let lock_abs = lock_configured.is_absolute();
+    if source_abs || lock_abs {
+        anyhow::ensure!(
+            source_abs && lock_abs,
+            "constitution source_path and lock_path must both be absolute or both be relative (source='{}', lock='{}')",
+            source_configured.display(),
+            lock_configured.display(),
+        );
+        return Ok((source_configured.to_path_buf(), lock_configured.to_path_buf()));
     }
-    let in_agents_dir = config.agents_dir.join(configured_path);
-    if in_agents_dir.exists() {
-        return in_agents_dir;
-    }
-    let primary_base = config
-        .agents_dir
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    let primary = primary_base.join(configured_path);
-    if primary.exists() {
-        return primary;
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let secondary = cwd.join(configured_path);
-        if secondary.exists() {
-            return secondary;
-        }
-    }
+
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
-    let tertiary = workspace_root.join(configured_path);
-    if tertiary.exists() {
-        return tertiary;
+
+    let mut bases: Vec<PathBuf> = Vec::new();
+    bases.push(config.agents_dir.clone());
+    bases.push(
+        config
+            .agents_dir
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    );
+    if let Ok(cwd) = std::env::current_dir() {
+        bases.push(cwd);
     }
-    primary
+    bases.push(workspace_root.to_path_buf());
+
+    let mut tried: Vec<String> = Vec::new();
+    for base in &bases {
+        let source_path = base.join(source_configured);
+        let lock_path = base.join(lock_configured);
+        tried.push(format!(
+            "  base='{}' -> source='{}', lock='{}'",
+            base.display(),
+            source_path.display(),
+            lock_path.display()
+        ));
+        if source_path.is_file() && lock_path.is_file() {
+            return Ok((source_path, lock_path));
+        }
+    }
+
+    anyhow::bail!(
+        "constitution source_path and lock_path must exist together under the same search root \
+         (agents_dir, agents_dir parent, current working directory, or workspace). \
+         Configured source='{}', lock='{}'. Tried:\n{}",
+        source_configured.display(),
+        lock_configured.display(),
+        tried.join("\n")
+    );
 }
 
 fn normalize_config_path_label(path: &Path) -> String {
@@ -454,6 +526,46 @@ mod tests {
     fn constitution_lock_matches_canonical_digest_and_counts() {
         init_default_constitution();
         verify_constitution_lock_integrity().expect("constitution lock integrity should hold");
+    }
+
+    #[test]
+    fn constitution_artifacts_resolve_from_same_root_when_parent_has_only_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        let rel = Path::new("docs/constitution/versions/2026.05.05");
+        let parent_docs = tmp.path().join(rel);
+        std::fs::create_dir_all(&parent_docs).unwrap();
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("CARGO_MANIFEST_DIR parent");
+        let canonical_md = workspace_root.join(rel).join("constitution.md");
+        let canonical_lock = workspace_root.join(rel).join("gateway-constitution.lock.json");
+        std::fs::copy(&canonical_md, parent_docs.join("constitution.md")).unwrap();
+
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = agents_dir;
+        let (source_path, lock_path) =
+            resolve_constitution_artifact_paths(&cfg).expect("paired resolution");
+        assert_eq!(
+            source_path, canonical_md,
+            "must not use constitution.md from parent without a lock beside it"
+        );
+        assert_eq!(lock_path, canonical_lock);
+    }
+
+    #[test]
+    fn constitution_mixed_absolute_relative_paths_rejected() {
+        let mut cfg = GatewayConfig::default();
+        cfg.constitution.source_path = PathBuf::from("/nonexistent/absolute/constitution.md");
+        cfg.constitution.lock_path =
+            PathBuf::from("docs/constitution/versions/2026.05.05/gateway-constitution.lock.json");
+        let err = initialize_constitution(&cfg).expect_err("mixed abs/rel should be rejected");
+        assert!(
+            err.to_string().contains("both be absolute or both be relative"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

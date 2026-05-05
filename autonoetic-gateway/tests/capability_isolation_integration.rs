@@ -78,7 +78,10 @@ fn test_overrides_from_capabilities_multiple_hosts() {
 
 #[test]
 fn test_append_bwrap_isolation_flags_with_override_share_net() {
-    let overrides = BwrapIsolationOverrides { share_net: true };
+    let overrides = BwrapIsolationOverrides {
+        share_net: true,
+        force_network_off: false,
+    };
     let mut argv = vec![];
     append_bwrap_isolation_flags(&mut argv, Some(&overrides));
     assert!(
@@ -93,7 +96,10 @@ fn test_append_bwrap_isolation_flags_with_override_share_net() {
 
 #[test]
 fn test_append_bwrap_isolation_flags_with_override_no_share_net() {
-    let overrides = BwrapIsolationOverrides { share_net: false };
+    let overrides = BwrapIsolationOverrides {
+        share_net: false,
+        force_network_off: false,
+    };
     let mut argv = vec![];
     append_bwrap_isolation_flags(&mut argv, Some(&overrides));
     assert!(

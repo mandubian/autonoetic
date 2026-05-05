@@ -1083,6 +1083,137 @@ impl AgentExecutor {
             .map(crate::runtime::content_store::root_session_id)
     }
 
+    /// Build Ri-0.5 degraded-mode notice text injected into the system prompt
+    /// before the next turn executes.
+    ///
+    /// Constitutional requirement:
+    /// - agent is told it is degraded,
+    /// - rule IDs are explicit,
+    /// - trigger evidence is explicit.
+    fn build_degradation_notice_tail(&self, session_id: &str) -> anyhow::Result<Option<String>> {
+        if self.session_state != autonoetic_types::agent::SessionState::Degraded {
+            return Ok(None);
+        }
+
+        let store = self.gateway_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Ri-0.5 violation: degraded session '{}' has no gateway store for evidence lookup",
+                session_id
+            )
+        })?;
+
+        let degraded_event = store
+            .search_causal_events(Some(session_id), None, 128)?
+            .into_iter()
+            .find(|event| event.category == "session" && event.action == "session.degraded")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Ri-0.5 violation: degraded session '{}' missing session.degraded causal event",
+                    session_id
+                )
+            })?;
+
+        anyhow::ensure!(
+            !degraded_event.enforced_rules.is_empty(),
+            "Ri-0.5 violation: session.degraded event '{}' has no enforced rule IDs",
+            degraded_event.event_id
+        );
+
+        let evidence = degraded_event
+            .payload
+            .clone()
+            .or_else(|| {
+                degraded_event
+                    .reason
+                    .clone()
+                    .map(|reason| serde_json::json!({ "reason": reason }).to_string())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Ri-0.5 violation: session.degraded event '{}' has no evidence payload",
+                    degraded_event.event_id
+                )
+            })?;
+
+        let rules = degraded_event.enforced_rules.join(", ");
+        Ok(Some(format!(
+            "---\n\nDegradation Notice (Ri-0.5)\n\n\
+             This session is in degraded mode before this turn executes.\n\
+             Rule IDs: {}\n\
+             Evidence Event: {}\n\
+             Evidence: {}\n",
+            rules, degraded_event.event_id, evidence
+        )))
+    }
+
+    /// When an Ri-0.9 last-word gateway notice was injected this wake and the
+    /// turn completes, persist `session.last_word_response` referencing the notice
+    /// message IDs plus a disclosure-filtered excerpt of the assistant reply.
+    fn record_ri09_last_word_response_if_applicable(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        notice_message_ids: &[String],
+        assistant_reply: Option<&str>,
+    ) {
+        if notice_message_ids.is_empty() {
+            return;
+        }
+        let Some(store) = self.gateway_store.as_ref() else {
+            tracing::debug!(
+                target: "ri_0_9",
+                session_id = %session_id,
+                "Ri-0.9 last-word response not recorded: no gateway store"
+            );
+            return;
+        };
+        const MAX_PREVIEW: usize = 4096;
+        let trimmed = assistant_reply.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let preview = trimmed.map(|t| {
+            if t.len() <= MAX_PREVIEW {
+                t.to_string()
+            } else {
+                let mut end = MAX_PREVIEW;
+                while end > 0 && !t.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &t[..end])
+            }
+        });
+        let record = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("ri09resp-{}", uuid::Uuid::new_v4()),
+            agent_id: self.manifest.agent.id.clone(),
+            session_id: session_id.to_string(),
+            turn_id: Some(turn_id.to_string()),
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "session".to_string(),
+            action: "session.last_word_response".to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec!["Ri-0.9".to_string()],
+            target: None,
+            payload: Some(
+                serde_json::json!({
+                    "notice_message_ids": notice_message_ids,
+                    "assistant_reply_present": trimmed.is_some(),
+                    "assistant_reply_preview": preview,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        };
+        if let Err(e) = store.as_ref().create_causal_event(&record) {
+            tracing::warn!(
+                target: "ri_0_9",
+                error = %e,
+                session_id = %session_id,
+                "Failed to persist session.last_word_response"
+            );
+        }
+    }
+
     /// Run the agent loop until completion or guard trip.
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let user_context = self.build_user_context_snippet();
@@ -1342,6 +1473,8 @@ impl AgentExecutor {
             self.drift_checked = true;
         }
 
+        let mut ri_0_9_notice_message_ids: Vec<String> = Vec::new();
+
         if !self.session_started {
             let trigger = history
                 .iter()
@@ -1362,6 +1495,10 @@ impl AgentExecutor {
         if let Some(store) = self.gateway_store.as_ref() {
             if let Ok(msgs) = store.fetch_undelivered_messages(&session_id) {
                 for msg in msgs {
+                    if msg.sender_agent_id == "gateway" && msg.message.contains("[Gateway Notice Ri-0.9]")
+                    {
+                        ri_0_9_notice_message_ids.push(msg.message_id.clone());
+                    }
                     let text = format!(
                         "[Direct Message from Agent '{}' (Session: {})]\n{}",
                         msg.sender_agent_id, msg.sender_session_id, msg.message
@@ -1512,6 +1649,10 @@ impl AgentExecutor {
                 self.manifest.response_contract.as_ref(),
                 user_context.as_deref(),
             );
+            if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
+                system_instructions.push_str("\n\n");
+                system_instructions.push_str(&notice);
+            }
             // R++1: re-sign the state-attestation tail every turn so the
             // facts in the block (turn counter, pending approvals, budget)
             // reflect the current state, not last-turn's snapshot.
@@ -2716,6 +2857,13 @@ impl AgentExecutor {
                 Some(t) => Some(format!("{}\n\n{}", t, note)),
             };
         }
+
+        self.record_ri09_last_word_response_if_applicable(
+            &session_id,
+            &turn_id,
+            &ri_0_9_notice_message_ids,
+            reply.as_deref(),
+        );
 
         let outcome = Ok(TurnOutcome::Completed(reply));
         self.last_history = history.clone();
