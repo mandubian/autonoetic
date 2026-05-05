@@ -7,12 +7,28 @@
 mod support;
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use autonoetic_gateway::server::GatewayServer;
 use autonoetic_gateway::vault::{probe_master_key, KeyProbeResult, KeySource};
 use serial_test::serial;
 
 fn clear_vault_env() {
     std::env::remove_var("AUTONOETIC_VAULT_KEY");
     std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+}
+
+fn restore_shared_secret(previous: Option<String>) {
+    match previous {
+        Some(value) => std::env::set_var("AUTONOETIC_SHARED_SECRET", value),
+        None => std::env::remove_var("AUTONOETIC_SHARED_SECRET"),
+    }
+}
+
+struct SharedSecretGuard(Option<String>);
+
+impl Drop for SharedSecretGuard {
+    fn drop(&mut self) {
+        restore_shared_secret(self.0.clone());
+    }
 }
 
 #[test]
@@ -236,6 +252,55 @@ fn r_plus_8_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
         serde_json::from_str(probe.payload.as_deref().expect("payload present"))?;
     assert_eq!(payload["source"], "file_path");
     assert_eq!(payload["path"], "/nonexistent/vault.key");
+
+    clear_vault_env();
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn r_plus_8_gateway_startup_refuses_boot_when_key_missing() -> anyhow::Result<()> {
+    clear_vault_env();
+    let previous_secret = std::env::var("AUTONOETIC_SHARED_SECRET").ok();
+    let _secret_guard = SharedSecretGuard(previous_secret);
+    std::env::set_var("AUTONOETIC_SHARED_SECRET", "test-shared-secret");
+
+    let tempdir = tempfile::tempdir()?;
+    let agents_dir = tempdir.path().join("agents");
+    std::fs::create_dir_all(&agents_dir)?;
+    let gateway_dir = agents_dir.join(".gateway");
+
+    let mut config = autonoetic_types::config::GatewayConfig::default();
+    config.agents_dir = agents_dir.clone();
+    config.port = 0;
+    config.ofp_port = 0;
+
+    let server = GatewayServer::new(config);
+    let err = server
+        .run()
+        .await
+        .expect_err("startup must fail-shut when vault key is missing");
+    let message = err.to_string();
+    assert!(
+        message.contains("Vault master key probe failed (R+8)"),
+        "startup error should reference R+8 fail-shut probe: {message}"
+    );
+
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+    let events = store.search_causal_events(None, None, 50)?;
+    let probe = events
+        .iter()
+        .find(|e| e.category == "vault" && e.action == "key_probe")
+        .expect("vault.key_probe event must be emitted before startup refusal");
+    assert_eq!(probe.status, "ERROR");
+    assert!(
+        probe
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not configured"),
+        "probe reason should explain missing key"
+    );
 
     clear_vault_env();
     Ok(())

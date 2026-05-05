@@ -944,16 +944,18 @@ Files: `autonoetic-gateway/src/runtime/tools/observability.rs`
 
 ## Phase 3 — P2 polish
 
-Current state on `main`: **nearly complete**. Enforced: R+13, R+14, R+17, R++8, R++10.
-Partial: R+8. Remaining open batch: 3.7 (`#69`).
+Current state on `main`: **nearly complete**. Enforced: R+8, R+13, R+14, R+17, R++8, R++10.
+Remaining open batch: 3.7 (`#69`).
 
-### 3.1 `R+8` Vault master-key presence probe at startup — **PARTIAL**
+### 3.1 `R+8` Vault master-key presence probe at startup — **ENFORCED**
 
-Boot-time probe exists and is tested (`vault.rs::probe_master_key`,
-`observability.rs::emit_vault_key_probe_event`,
-`constitution_vault_startup_probe.rs`), but startup still does not
-fail-shut on missing key. This keeps #63 open against its stricter
-acceptance criteria.
+Boot-time probe runs before listeners start, emits `vault.key_probe`, and
+startup now fails shut when the master key is missing/invalid. Enforcement:
+`server/mod.rs` (`GatewayServer::run` R+8 gate),
+`vault.rs::probe_master_key`,
+`observability.rs::emit_vault_key_probe_event`.
+Tests: `constitution_vault_startup_probe.rs` (including
+`r_plus_8_gateway_startup_refuses_boot_when_key_missing`).
 
 ### 3.2 `R+13` Approval grant TTL — **ENFORCED**
 
