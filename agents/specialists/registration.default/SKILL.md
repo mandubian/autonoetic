@@ -29,6 +29,33 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*"]
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required:
+          - service
+          - credential_id
+          - env_var
+          - ready_for_execution
+          - public_data
+          - next_action
+          - summary
+        properties:
+          service:
+            type: string
+          credential_id:
+            type: [string, "null"]
+          env_var:
+            type: [string, "null"]
+          ready_for_execution:
+            type: boolean
+          public_data:
+            type: object
+          next_action:
+            type: [string, "null"]
+          summary:
+            type: string
+        additionalProperties: false
     response_contract:
       max_reply_length_chars: 4000
       output_schema:
