@@ -121,7 +121,7 @@ impl NativeTool for ConstitutionReadTool {
         let (text, matched_selector) = if selector.is_empty() {
             (constitution_text().to_string(), None)
         } else {
-            match extract_section(constitution_text(), selector) {
+            match extract_section(constitution_text().as_ref(), selector) {
                 Some(extract) => (extract, Some(selector.to_string())),
                 None => {
                     return Ok(ToolError::validation(
@@ -136,8 +136,8 @@ impl NativeTool for ConstitutionReadTool {
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
             "text": text,
-            "digest": constitution_digest(),
-            "version": constitution_version(),
+            "digest": constitution_digest().as_ref(),
+            "version": constitution_version().as_ref(),
             "format_version": constitution_format_version(),
             "section": matched_selector,
             "retrieved_at": chrono::Utc::now().to_rfc3339(),
@@ -450,7 +450,7 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
             "ok": true,
             "proposal_id": proposal_id,
             "status": "pending",
-            "constitution_digest": constitution_digest(),
+            "constitution_digest": constitution_digest().as_ref(),
         })
         .to_string())
     }
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn extract_right_ri_0_10() {
         init_default_constitution();
-        let extract = extract_section(constitution_text(), "Ri-0.10")
+        let extract = extract_section(constitution_text().as_ref(), "Ri-0.10")
             .expect("Ri-0.10 must exist in the constitution");
         assert!(extract.contains("Ri-0.10"));
         assert!(extract.contains("constitution"));
@@ -490,7 +490,7 @@ mod tests {
     fn extract_section_zero() {
         init_default_constitution();
         let extract =
-            extract_section(constitution_text(), "§0").expect("section 0 (Rights) must exist");
+            extract_section(constitution_text().as_ref(), "§0").expect("section 0 (Rights) must exist");
         assert!(extract.starts_with("## 0. "));
         // Should include the Ri-0.10 row but stop before the next `## ` section.
         assert!(extract.contains("Ri-0.10"));
@@ -500,15 +500,15 @@ mod tests {
     #[test]
     fn extract_unknown_returns_none() {
         init_default_constitution();
-        assert!(extract_section(constitution_text(), "Ri-9.99").is_none());
-        assert!(extract_section(constitution_text(), "§999").is_none());
+        assert!(extract_section(constitution_text().as_ref(), "Ri-9.99").is_none());
+        assert!(extract_section(constitution_text().as_ref(), "§999").is_none());
     }
 
     #[test]
     fn extract_pending_rule() {
         init_default_constitution();
         // R+++3 is in the constitution as a pending constitutional rule.
-        let extract = extract_section(constitution_text(), "R+++3").expect("R+++3 must exist");
+        let extract = extract_section(constitution_text().as_ref(), "R+++3").expect("R+++3 must exist");
         assert!(extract.contains("R+++3"));
     }
 

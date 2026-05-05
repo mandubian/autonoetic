@@ -632,7 +632,7 @@ async fn handle_inbound_connection(
     let local_constitution_profile = crate::constitution_digest::canonical_constitution_profile();
     if let Err(e) = evaluate_constitution_compatibility(
         &config.federation_constitution,
-        local_constitution_digest,
+        local_constitution_digest.as_ref(),
         peer_constitution_digest.as_deref(),
         &local_constitution_profile,
         peer_constitution_profile.as_ref(),
@@ -641,7 +641,7 @@ async fn handle_inbound_connection(
             gateway_store.clone(),
             &peer_node_id,
             peer_addr,
-            local_constitution_digest,
+            local_constitution_digest.as_ref(),
             peer_constitution_digest.as_deref(),
             config.federation_constitution.mode,
             autonoetic_types::causal_chain::EntryStatus::Error,
@@ -668,7 +668,7 @@ async fn handle_inbound_connection(
         gateway_store.clone(),
         &peer_node_id,
         peer_addr,
-        local_constitution_digest,
+        local_constitution_digest.as_ref(),
         peer_constitution_digest.as_deref(),
         config.federation_constitution.mode,
         autonoetic_types::causal_chain::EntryStatus::Success,

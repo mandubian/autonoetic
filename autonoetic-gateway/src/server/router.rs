@@ -194,7 +194,7 @@ impl MessageRouter {
         let local_constitution_profile = crate::constitution_digest::canonical_constitution_profile();
         evaluate_constitution_compatibility(
             &self.federation_constitution,
-            local_constitution_digest,
+            local_constitution_digest.as_ref(),
             _ack_constitution_digest.as_deref(),
             &local_constitution_profile,
             ack_constitution_profile.as_ref(),

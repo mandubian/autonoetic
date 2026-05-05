@@ -956,7 +956,7 @@ async fn test_handshake_rejects_constitution_mismatch_in_exact_mode() {
     let payload: serde_json::Value = serde_json::from_str(&payload_raw).unwrap();
     assert_eq!(
         payload["local_constitution_digest"],
-        autonoetic_gateway::constitution_digest::constitution_digest()
+        autonoetic_gateway::constitution_digest::constitution_digest().as_ref()
     );
     assert_eq!(payload["peer_constitution_digest"], "mismatched-digest");
 

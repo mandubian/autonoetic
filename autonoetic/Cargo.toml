@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-autonoetic-gateway.workspace = true
+# `test-utils`: `reset_constitution_runtime_for_tests` for CLI unit tests that bootstrap multiple temp workspaces.
+autonoetic-gateway = { workspace = true, features = ["test-utils"] }
 autonoetic-mcp.workspace = true
 autonoetic-types.workspace = true
 clap.workspace = true

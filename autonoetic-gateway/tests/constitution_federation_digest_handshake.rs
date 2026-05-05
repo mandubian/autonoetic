@@ -103,11 +103,11 @@ async fn matching_digest_and_profile_are_accepted_and_audited() {
     let payload: serde_json::Value = serde_json::from_str(&payload_raw).unwrap();
     assert_eq!(
         payload["local_constitution_digest"],
-        autonoetic_gateway::constitution_digest::constitution_digest()
+        autonoetic_gateway::constitution_digest::constitution_digest().as_ref()
     );
     assert_eq!(
         payload["peer_constitution_digest"],
-        autonoetic_gateway::constitution_digest::constitution_digest()
+        autonoetic_gateway::constitution_digest::constitution_digest().as_ref()
     );
 
     server.abort();
@@ -194,7 +194,7 @@ async fn mismatched_digest_is_rejected_and_records_both_digests() {
     let payload: serde_json::Value = serde_json::from_str(&payload_raw).unwrap();
     assert_eq!(
         payload["local_constitution_digest"],
-        autonoetic_gateway::constitution_digest::constitution_digest()
+        autonoetic_gateway::constitution_digest::constitution_digest().as_ref()
     );
     assert_eq!(payload["peer_constitution_digest"], "mismatched-digest");
 

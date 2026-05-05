@@ -324,8 +324,8 @@ impl JsonRpcRouter {
                 req.id,
                 serde_json::json!({
                     "gateway_version": env!("CARGO_PKG_VERSION"),
-                    "constitution_digest": crate::constitution_digest::constitution_digest(),
-                    "constitution_version": crate::constitution_digest::constitution_version(),
+                    "constitution_digest": crate::constitution_digest::constitution_digest().as_ref(),
+                    "constitution_version": crate::constitution_digest::constitution_version().as_ref(),
                     "constitution_format_version": crate::constitution_digest::constitution_format_version(),
                 }),
             ),

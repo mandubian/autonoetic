@@ -271,10 +271,10 @@ pub fn bootstrap_constitution_snapshot(config: &GatewayConfig, gateway_dir: &Pat
 
     std::fs::write(
         version_dir.join("constitution.md"),
-        crate::constitution_digest::constitution_text(),
+        crate::constitution_digest::constitution_text().as_ref(),
     )?;
 
-    let mut lock_snapshot = crate::constitution_digest::constitution_lock().clone();
+    let mut lock_snapshot = crate::constitution_digest::constitution_lock().as_ref().clone();
     lock_snapshot.constitution_source = source_rel.clone();
     let gateway_key = crate::runtime::crypto::GatewayIdentityKey::load_or_generate(gateway_dir)?;
     let lock_signer_id = format!("gateway:{}", gateway_key.fingerprint());

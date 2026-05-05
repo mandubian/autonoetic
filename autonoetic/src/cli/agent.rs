@@ -2419,7 +2419,9 @@ Use tools when needed.
     }
 
     #[test]
+    #[serial]
     fn test_handle_agent_bootstrap_installs_reference_bundles() {
+        autonoetic_gateway::constitution_digest::reset_constitution_runtime_for_tests();
         let temp = tempdir().expect("tempdir should create");
         let reference_root = temp.path().join("reference_agents");
         write_reference_bundle(&reference_root, "lead", "planner.default", "planner");
@@ -2536,7 +2538,9 @@ Use tools when needed.
     }
 
     #[test]
+    #[serial]
     fn test_handle_agent_bootstrap_overwrite_behavior() {
+        autonoetic_gateway::constitution_digest::reset_constitution_runtime_for_tests();
         let temp = tempdir().expect("tempdir should create");
         let reference_root = temp.path().join("reference_agents");
         write_reference_bundle(&reference_root, "lead", "planner.default", "v1");
@@ -2601,7 +2605,9 @@ Use tools when needed.
     }
 
     #[test]
+    #[serial]
     fn test_handle_agent_bootstrap_requires_existing_config_file() {
+        autonoetic_gateway::constitution_digest::reset_constitution_runtime_for_tests();
         let temp = tempdir().expect("tempdir should create");
         let config_path = temp.path().join("missing-config.yaml");
         let reference_root = temp.path().join("reference_agents");

@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Enables `reset_constitution_runtime_for_tests` (dependency crates can enable under `cfg(test)` only).
+test-utils = []
+
 [dependencies]
 autonoetic-types.workspace = true
 serde.workspace = true

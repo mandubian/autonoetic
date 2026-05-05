@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConstitutionCanonicalization {
@@ -52,13 +52,13 @@ struct ConstitutionRuntime {
     lock_path: PathBuf,
     gateway_dir: PathBuf,
     configured_source_label: String,
-    text: String,
-    digest: String,
+    text: Arc<str>,
+    digest: Arc<str>,
     rights_enforcement: BTreeMap<String, String>,
     rules_enforcement: BTreeMap<String, String>,
     require_signature: bool,
     trusted_signers: HashMap<String, String>,
-    lock: ConstitutionLock,
+    lock: Arc<ConstitutionLock>,
 }
 
 impl ConstitutionRuntime {
@@ -95,6 +95,9 @@ impl ConstitutionRuntime {
         hasher.update(payload.as_bytes());
         let digest = hex::encode(hasher.finalize());
         let gateway_dir = config.agents_dir.join(".gateway");
+        let text = Arc::<str>::from(text);
+        let digest = Arc::<str>::from(digest);
+        let lock = Arc::new(lock);
 
         Ok(Self {
             source_path,
@@ -112,23 +115,25 @@ impl ConstitutionRuntime {
     }
 }
 
-static RUNTIME: OnceLock<ConstitutionRuntime> = OnceLock::new();
+static RUNTIME: RwLock<Option<Arc<ConstitutionRuntime>>> = RwLock::new(None);
 
 pub fn initialize_constitution(config: &GatewayConfig) -> anyhow::Result<()> {
-    let loaded = ConstitutionRuntime::load(config)?;
-    if let Some(existing) = RUNTIME.get() {
-        ensure_same_runtime_config(existing, &loaded)?;
-        return Ok(());
-    }
-    match RUNTIME.set(loaded) {
-        Ok(()) => Ok(()),
-        Err(loaded) => {
-            let existing = RUNTIME
-                .get()
-                .ok_or_else(|| anyhow::anyhow!("constitution runtime initialization race"))?;
-            ensure_same_runtime_config(existing, &loaded)
+    let loaded = Arc::new(ConstitutionRuntime::load(config)?);
+    let mut guard = RUNTIME.write().expect("poisoned constitution runtime lock");
+    match guard.as_ref() {
+        None => {
+            *guard = Some(loaded);
+            Ok(())
         }
+        Some(existing) => ensure_same_runtime_config(existing.as_ref(), loaded.as_ref()),
     }
+}
+
+/// Clears process-local constitution state so a different workspace can initialize in the same process.
+/// Only compiled when the `test-utils` feature is enabled (e.g. from `autonoetic` unit tests).
+#[cfg(feature = "test-utils")]
+pub fn reset_constitution_runtime_for_tests() {
+    *RUNTIME.write().expect("poisoned constitution runtime lock") = None;
 }
 
 fn ensure_same_runtime_config(
@@ -149,38 +154,43 @@ fn ensure_same_runtime_config(
     Ok(())
 }
 
-fn runtime() -> &'static ConstitutionRuntime {
-    RUNTIME.get().expect(
-        "constitution runtime not initialized; call initialize_constitution(config) before accessing digest/profile APIs",
-    )
+fn runtime_arc() -> Arc<ConstitutionRuntime> {
+    RUNTIME
+        .read()
+        .expect("poisoned constitution runtime lock")
+        .as_ref()
+        .cloned()
+        .expect(
+            "constitution runtime not initialized; call initialize_constitution(config) before accessing digest/profile APIs",
+        )
 }
 
-pub fn constitution_text() -> &'static str {
-    runtime().text.as_str()
+pub fn constitution_text() -> Arc<str> {
+    runtime_arc().text.clone()
 }
 
-pub fn constitution_lock() -> &'static ConstitutionLock {
-    &runtime().lock
+pub fn constitution_lock() -> Arc<ConstitutionLock> {
+    runtime_arc().lock.clone()
 }
 
-pub fn constitution_version() -> &'static str {
-    constitution_lock().constitution_version.as_str()
+pub fn constitution_version() -> Arc<str> {
+    Arc::from(runtime_arc().lock.constitution_version.as_str())
 }
 
 pub fn constitution_format_version() -> u32 {
-    constitution_lock().format_version
+    runtime_arc().lock.format_version
 }
 
-pub fn constitution_digest() -> &'static str {
-    runtime().digest.as_str()
+pub fn constitution_digest() -> Arc<str> {
+    runtime_arc().digest.clone()
 }
 
 pub fn canonical_right_enforcement_table() -> BTreeMap<String, String> {
-    runtime().rights_enforcement.clone()
+    runtime_arc().rights_enforcement.clone()
 }
 
 pub fn canonical_rule_enforcement_table() -> BTreeMap<String, String> {
-    runtime().rules_enforcement.clone()
+    runtime_arc().rules_enforcement.clone()
 }
 
 pub fn canonical_constitution_profile() -> autonoetic_ofp::wire::ConstitutionProfile {
@@ -191,8 +201,8 @@ pub fn canonical_constitution_profile() -> autonoetic_ofp::wire::ConstitutionPro
 }
 
 pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
-    let rt = runtime();
-    let lock = &rt.lock;
+    let rt = runtime_arc();
+    let lock = rt.lock.as_ref();
     anyhow::ensure!(
         lock.constitution_source == rt.configured_source_label,
         "constitution lock source mismatch (lock='{}', configured='{}')",
@@ -200,7 +210,7 @@ pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
         rt.configured_source_label
     );
     anyhow::ensure!(
-        lock.constitution_digest == rt.digest,
+        lock.constitution_digest.as_str() == rt.digest.as_ref(),
         "constitution lock digest mismatch (lock={}, computed={}). \
          The markdown and lock file are out of sync: if you edited `constitution.md`, run \
          `python3 docs/constitution/recompute_lock.py --version {}` with the project signing key \
@@ -208,7 +218,7 @@ pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
          Also ensure `constitution.source_path` and `constitution.lock_path` resolve under the same directory \
          so the gateway does not pair a markdown file from one tree with a lock from another.",
         lock.constitution_digest,
-        rt.digest,
+        rt.digest.as_ref(),
         lock.constitution_version
     );
     anyhow::ensure!(
@@ -245,7 +255,7 @@ pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
             "constitution lock signature.algorithm must be 'ed25519'"
         );
         let payload = constitution_lock_signature_payload(lock)?;
-        let public_key = resolve_constitution_signer_public_key(rt, &signature.signer_id)?;
+        let public_key = resolve_constitution_signer_public_key(rt.as_ref(), &signature.signer_id)?;
         let verified = crate::runtime::crypto::verify_attestation_signature(
             &public_key,
             &payload,

@@ -186,7 +186,7 @@ fn digest_matches_sha256_of_source_markdown() {
     )
     .expect("default constitution should initialize");
     let payload = serde_json::json!({
-        "constitution_text": autonoetic_gateway::constitution_digest::constitution_text(),
+        "constitution_text": autonoetic_gateway::constitution_digest::constitution_text().as_ref(),
         "rights_enforcement": autonoetic_gateway::constitution_digest::canonical_right_enforcement_table(),
         "rules_enforcement": autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table(),
     });
