@@ -160,6 +160,36 @@ pub enum TurnOutcome {
     Escalated { escalation_request_id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecuteLoopTermination {
+    AgentRequestedExit,
+    SuspendedForApproval,
+    SuspendedForUserInput,
+    SuspendedForHumanEscalation,
+    FatalError,
+}
+
+impl ExecuteLoopTermination {
+    fn close_reason(self) -> &'static str {
+        match self {
+            Self::AgentRequestedExit => "execute_loop_complete",
+            Self::SuspendedForApproval => "execute_loop_suspended",
+            Self::SuspendedForUserInput => "execute_loop_suspended_user_input",
+            Self::SuspendedForHumanEscalation => "execute_loop_escalated",
+            Self::FatalError => "execute_loop_error",
+        }
+    }
+
+    fn from_turn_outcome(outcome: &TurnOutcome) -> Self {
+        match outcome {
+            TurnOutcome::Completed(_) => Self::AgentRequestedExit,
+            TurnOutcome::Suspended { .. } => Self::SuspendedForApproval,
+            TurnOutcome::SuspendedUserInput { .. } => Self::SuspendedForUserInput,
+            TurnOutcome::Escalated { .. } => Self::SuspendedForHumanEscalation,
+        }
+    }
+}
+
 /// Build the system prompt given agent instructions and (optionally) raw agent
 /// metadata (the full `metadata.autonoetic` object from the SKILL.md frontmatter).
 ///
@@ -486,6 +516,50 @@ fn apply_prompt_budget(
     Ok((result.tools, result.history))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ri06CapabilitySnapshot {
+    allowed_tier_names: Vec<String>,
+    session_state: autonoetic_types::agent::SessionState,
+}
+
+impl Ri06CapabilitySnapshot {
+    fn from_filter(
+        filter: &crate::runtime::tools::ToolTierFilter,
+        session_state: autonoetic_types::agent::SessionState,
+    ) -> Self {
+        use autonoetic_types::agent::ToolTier;
+        let mut names: Vec<&'static str> = if filter.allowed_tiers.is_empty() {
+            vec!["core", "workflow", "specialized"]
+        } else {
+            filter
+                .allowed_tiers
+                .iter()
+                .map(|tier| match tier {
+                    ToolTier::Core => "core",
+                    ToolTier::Workflow => "workflow",
+                    ToolTier::Specialized => "specialized",
+                })
+                .collect()
+        };
+        names.sort_unstable();
+        names.dedup();
+        Self {
+            allowed_tier_names: names.into_iter().map(|s| s.to_string()).collect(),
+            session_state,
+        }
+    }
+
+    fn is_subset_of(&self, other: &Self) -> bool {
+        self.allowed_tier_names
+            .iter()
+            .all(|tier| other.allowed_tier_names.contains(tier))
+    }
+
+    fn is_strict_subset_of(&self, other: &Self) -> bool {
+        self.is_subset_of(other) && self.allowed_tier_names != other.allowed_tier_names
+    }
+}
+
 pub struct AgentExecutor {
     pub manifest: AgentManifest,
     pub instructions: String,
@@ -542,6 +616,8 @@ pub struct AgentExecutor {
     /// Set when a parent agent spawns this agent with an artifact reference
     /// (typically for evaluator sessions that need packager's dependency layers).
     pub artifact_id: Option<String>,
+    /// Previous turn's Ri-0.6 capability snapshot for narrowing checks.
+    ri_0_6_previous_snapshot: Option<Ri06CapabilitySnapshot>,
 }
 
 fn tool_result_counts_as_progress(result: &str) -> bool {
@@ -606,6 +682,7 @@ impl AgentExecutor {
             http_client: reqwest::Client::new(),
             user_id: None,
             artifact_id: None,
+            ri_0_6_previous_snapshot: None,
         }
     }
 
@@ -904,6 +981,7 @@ impl AgentExecutor {
         self.session_started = false;
         self.session_id = None;
         self.turn_counter = 0;
+        self.ri_0_6_previous_snapshot = None;
         Ok(())
     }
 
@@ -1083,6 +1161,129 @@ impl AgentExecutor {
             .map(crate::runtime::content_store::root_session_id)
     }
 
+    fn build_ri_0_6_capability_snapshot(&self) -> Ri06CapabilitySnapshot {
+        let filter = determine_tool_tier_filter(
+            &self.manifest,
+            self.session_id.as_deref(),
+            false,
+            self.session_state,
+        );
+        Ri06CapabilitySnapshot::from_filter(&filter, self.session_state)
+    }
+
+    fn resolve_ri_0_6_narrowing_path(&self, session_id: &str) -> anyhow::Result<&'static str> {
+        anyhow::ensure!(
+            self.session_state == autonoetic_types::agent::SessionState::Degraded,
+            "Ri-0.6 violation: capability narrowing requires degraded mode (session='{}')",
+            session_id
+        );
+        let store = self.gateway_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Ri-0.6 violation: capability narrowing requires gateway store evidence (session='{}')",
+                session_id
+            )
+        })?;
+        let degraded_events: Vec<_> = store
+            .search_causal_events(Some(session_id), None, 128)?
+            .into_iter()
+            .filter(|e| e.category == "session" && e.action == "session.degraded")
+            .collect();
+        anyhow::ensure!(
+            !degraded_events.is_empty(),
+            "Ri-0.6 violation: narrowing detected without session.degraded causal event (session='{}')",
+            session_id
+        );
+
+        let mut saw_operator_source = false;
+        for event in degraded_events {
+            anyhow::ensure!(
+                !event.enforced_rules.is_empty(),
+                "Ri-0.6 violation: session.degraded event '{}' has no enforced rules",
+                event.event_id
+            );
+            if let Some(payload_raw) = event.payload.as_deref() {
+                let payload: serde_json::Value = serde_json::from_str(payload_raw).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Ri-0.6 violation: session.degraded event '{}' has invalid JSON payload: {}",
+                        event.event_id,
+                        e
+                    )
+                })?;
+                if payload
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == "operator")
+                    .unwrap_or(false)
+                {
+                    saw_operator_source = true;
+                }
+            }
+        }
+
+        Ok(if saw_operator_source {
+            "operator_command"
+        } else {
+            "degraded_mode"
+        })
+    }
+
+    fn check_ri_0_6_turn_snapshot(&mut self, session_id: &str, turn_id: &str) -> anyhow::Result<()> {
+        let current = self.build_ri_0_6_capability_snapshot();
+        let Some(previous) = self.ri_0_6_previous_snapshot.clone() else {
+            self.ri_0_6_previous_snapshot = Some(current);
+            return Ok(());
+        };
+
+        let current_subset_of_previous = current.is_subset_of(&previous);
+        let previous_subset_of_current = previous.is_subset_of(&current);
+
+        if current.is_strict_subset_of(&previous) {
+            let narrowing_path = self.resolve_ri_0_6_narrowing_path(session_id)?;
+            let store = self.gateway_store.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Ri-0.6 violation: capability narrowing event could not be recorded (gateway store unavailable)"
+                )
+            })?;
+            store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("ri06-{}", uuid::Uuid::new_v4()),
+                agent_id: self.manifest.agent.id.clone(),
+                session_id: session_id.to_string(),
+                turn_id: Some(turn_id.to_string()),
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "session".to_string(),
+                action: "session.capability_narrowed".to_string(),
+                status: "active".to_string(),
+                enforced_rules: vec!["Ri-0.6".to_string()],
+                target: None,
+                payload: Some(
+                    serde_json::json!({
+                        "narrowing_path": narrowing_path,
+                        "previous_allowed_tiers": previous.allowed_tier_names,
+                        "current_allowed_tiers": current.allowed_tier_names,
+                        "previous_session_state": previous.session_state,
+                        "current_session_state": current.session_state,
+                    })
+                    .to_string(),
+                ),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            })?;
+        } else if !current_subset_of_previous && !previous_subset_of_current {
+            anyhow::bail!(
+                "Ri-0.6 violation: capability tier set changed outside subset/superset relation \
+                 (session='{}', previous={:?}, current={:?})",
+                session_id,
+                previous.allowed_tier_names,
+                current.allowed_tier_names
+            );
+        }
+
+        self.ri_0_6_previous_snapshot = Some(current);
+        Ok(())
+    }
+
     /// Build Ri-0.5 degraded-mode notice text injected into the system prompt
     /// before the next turn executes.
     ///
@@ -1231,31 +1432,24 @@ impl AgentExecutor {
             Message::system(system_instructions),
             Message::user(self.initial_user_message.clone()),
         ];
-        match self.execute_with_history(&mut history).await {
-            Ok(TurnOutcome::Completed(_)) => {
-                let _ = self.close_session("execute_loop_complete");
-                Ok(())
-            }
-            Ok(TurnOutcome::Suspended { .. }) => {
-                // Suspension is expected in scheduler context; continuation already saved.
-                // In standalone execute_loop context, just end the session.
-                let _ = self.close_session("execute_loop_suspended");
-                Ok(())
-            }
-            Ok(TurnOutcome::SuspendedUserInput { .. }) => {
-                // User interaction checkpoint already saved. End the session;
-                // resume happens via the interaction answer path.
-                let _ = self.close_session("execute_loop_suspended_user_input");
-                Ok(())
-            }
-            Ok(TurnOutcome::Escalated { .. }) => {
-                // Escalation checkpoint already saved. End the session;
-                // resume happens via approval resolution.
-                let _ = self.close_session("execute_loop_escalated");
+        let outcome = self.execute_with_history(&mut history).await;
+        self.finalize_execute_loop_result(outcome)
+    }
+
+    fn finalize_execute_loop_result(
+        &mut self,
+        outcome: anyhow::Result<TurnOutcome>,
+    ) -> anyhow::Result<()> {
+        match outcome {
+            Ok(outcome) => {
+                // Suspension outcomes already have checkpoints; this helper is the
+                // single exit path for execute_loop-level session termination.
+                let termination = ExecuteLoopTermination::from_turn_outcome(&outcome);
+                let _ = self.close_session(termination.close_reason());
                 Ok(())
             }
             Err(e) => {
-                let _ = self.close_session("execute_loop_error");
+                let _ = self.close_session(ExecuteLoopTermination::FatalError.close_reason());
                 Err(e)
             }
         }
@@ -1558,6 +1752,7 @@ impl AgentExecutor {
         let max_empty_other_retries = max_other_empty_retries();
         let mut empty_other_retries_used = 0usize;
         let mut digest_turn_active = false;
+        let mut ri_0_6_snapshot_checked = false;
         let root_session_id = crate::runtime::content_store::root_session_id(&session_id);
 
         loop {
@@ -1606,6 +1801,20 @@ impl AgentExecutor {
                 } else if !in_set && self.session_state == autonoetic_types::agent::SessionState::Degraded {
                     self.session_state = autonoetic_types::agent::SessionState::Normal;
                 }
+            }
+
+            if !ri_0_6_snapshot_checked {
+                if let Err(e) = self.check_ri_0_6_turn_snapshot(&session_id, &turn_id) {
+                    let cp = self.build_checkpoint(
+                        history,
+                        &turn_id,
+                        YieldReason::Error(e.to_string()),
+                        None,
+                    );
+                    self.save_checkpoint_if_possible(&cp);
+                    return Err(e);
+                }
+                ri_0_6_snapshot_checked = true;
             }
 
             // Budget check — save checkpoint before propagating budget-exhausted error
@@ -4627,6 +4836,51 @@ Hope this helps!"#;
         assert!(
             executor.session_started_at.is_some(),
             "with_session_id must initialize session_started_at"
+        );
+    }
+
+    #[test]
+    fn execute_loop_termination_maps_every_turn_outcome_variant() {
+        let completed = ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::Completed(None));
+        let suspended = ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::Suspended {
+            approval_request_id: "apr-1".to_string(),
+            continuation: None,
+        });
+        let user_input =
+            ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::SuspendedUserInput {
+                interaction_id: "ui-1".to_string(),
+            });
+        let escalated = ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::Escalated {
+            escalation_request_id: "esc-1".to_string(),
+        });
+
+        assert_eq!(completed, ExecuteLoopTermination::AgentRequestedExit);
+        assert_eq!(suspended, ExecuteLoopTermination::SuspendedForApproval);
+        assert_eq!(user_input, ExecuteLoopTermination::SuspendedForUserInput);
+        assert_eq!(
+            escalated,
+            ExecuteLoopTermination::SuspendedForHumanEscalation
+        );
+    }
+
+    #[test]
+    fn execute_loop_termination_reason_tags_are_closed_and_stable() {
+        let reasons = vec![
+            ExecuteLoopTermination::AgentRequestedExit.close_reason(),
+            ExecuteLoopTermination::SuspendedForApproval.close_reason(),
+            ExecuteLoopTermination::SuspendedForUserInput.close_reason(),
+            ExecuteLoopTermination::SuspendedForHumanEscalation.close_reason(),
+            ExecuteLoopTermination::FatalError.close_reason(),
+        ];
+        assert_eq!(
+            reasons,
+            vec![
+                "execute_loop_complete",
+                "execute_loop_suspended",
+                "execute_loop_suspended_user_input",
+                "execute_loop_escalated",
+                "execute_loop_error",
+            ]
         );
     }
 }

@@ -833,13 +833,15 @@ For rights that need one small piece of new code plus a test.
 | Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via R-7.18 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
 | Ri-0.12 continuity — closed list of termination reasons | Audit every `lifecycle.rs` termination path, enumerate, document, refactor so every exit calls a single `terminate(reason, rule_id, evidence)` helper. Test: fuzz inputs, no termination occurs outside the declared set. |
 
-**Implementation.** Ri-0.6: Tests verify that `degrade_session()` emits a
-`session.degraded` causal event with `source: "operator"` and
-`enforced_rules: ["R++6"]`, that `clear_session_degradation()` emits
-`session.degradation_cleared`, that degraded state clamps the tool tier
-filter to `core_only()` (blocking specialized tools), and that the
-declared narrowing paths are enumerated (degraded_mode, operator_command).
-Still needed: per-turn capability snapshot comparison.
+**Implementation.** Ri-0.6: runtime now computes a turn-boundary capability-tier
+snapshot and compares turn N+1 against turn N. Narrowing is allowed only in
+degraded mode with `session.degraded` causal evidence; each narrowing writes
+`session.capability_narrowed` with path attribution (`operator_command` or
+`degraded_mode`). Tests also verify `degrade_session()` emits `session.degraded`
+with `source: "operator"` and `enforced_rules: ["R++6"]`, that
+`clear_session_degradation()` emits `session.degradation_cleared`, that degraded
+state clamps the tool tier filter to `core_only()` (blocking specialized tools),
+and that declared narrowing paths are enforced (`constitution_right_ri_0_6.rs`).
 
 Ri-0.12: `YieldReason` enum in `checkpoint.rs` enumerates all 10 yield
 causes. Tests verify all variants roundtrip through JSON, unknown variants
@@ -847,10 +849,14 @@ are rejected at deserialization, and terminal (6) vs resumable (4)
 categories are correct. The enum also covers resumable suspension states
 (Hibernation, ApprovalRequired, UserInputRequired, HumanEscalation), so
 the documentation should distinguish terminal termination from checkpoint
-suspension. Still needed: refactor lifecycle exit paths to a single
-`terminate()` helper.
+suspension. `execute_loop()` now exits through a single helper
+(`finalize_execute_loop_result`) that maps all `TurnOutcome` variants plus
+fatal errors to a closed termination reason set; unit tests pin that mapping.
+`execution.rs` spawn/respawn close reasons are mapped through a closed enum
+(`SessionCloseReason`) with unit tests, and CLI `agent run`/interactive close
+paths are likewise pinned via `CliSessionCloseReason`.
 
-Test: `constitution_rights_mid_bucket.rs` — 10 tests.
+Tests: `constitution_rights_mid_bucket.rs` (10) + `constitution_right_ri_0_6.rs` (3) + lifecycle/execute-loop termination unit mapping tests.
 
 **Size.** M. Ri-0.12 is the larger piece — requires refactoring
 termination paths — but once done, I-9 (every termination attributed

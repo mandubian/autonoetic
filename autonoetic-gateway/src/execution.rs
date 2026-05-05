@@ -37,8 +37,71 @@ async fn execute_with_history_close_on_error(
     match runtime.execute_with_history(history).await {
         Ok(o) => Ok(o),
         Err(e) => {
-            let _ = runtime.close_session("spawn_execute_error");
+            let _ = runtime.close_session(SessionCloseReason::SpawnExecuteError.as_str());
             Err(e)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionCloseReason {
+    SpawnExecuteError,
+    JsonRpcSpawnSuspendedApproval,
+    JsonRpcSpawnSuspendedUserInput,
+    JsonRpcSpawnComplete,
+    JsonRpcSpawnCompleteEmpty,
+    CheckpointRespawnSuspendedApproval,
+    CheckpointRespawnSuspendedUserInput,
+    CheckpointRespawnComplete,
+    CheckpointRespawnCompleteEmpty,
+}
+
+impl SessionCloseReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnExecuteError => "spawn_execute_error",
+            Self::JsonRpcSpawnSuspendedApproval => "jsonrpc_spawn_suspended_approval",
+            Self::JsonRpcSpawnSuspendedUserInput => "jsonrpc_spawn_suspended_user_input",
+            Self::JsonRpcSpawnComplete => "jsonrpc_spawn_complete",
+            Self::JsonRpcSpawnCompleteEmpty => "jsonrpc_spawn_complete_empty",
+            Self::CheckpointRespawnSuspendedApproval => "checkpoint_respawn_suspended",
+            Self::CheckpointRespawnSuspendedUserInput => {
+                "checkpoint_respawn_suspended_user_input"
+            }
+            Self::CheckpointRespawnComplete => "checkpoint_respawn_complete",
+            Self::CheckpointRespawnCompleteEmpty => "checkpoint_respawn_complete_empty",
+        }
+    }
+
+    fn for_jsonrpc_spawn(
+        suspended_for_approval: bool,
+        suspended_for_user_input: bool,
+        has_assistant_reply: bool,
+    ) -> Self {
+        if suspended_for_approval {
+            Self::JsonRpcSpawnSuspendedApproval
+        } else if suspended_for_user_input {
+            Self::JsonRpcSpawnSuspendedUserInput
+        } else if has_assistant_reply {
+            Self::JsonRpcSpawnComplete
+        } else {
+            Self::JsonRpcSpawnCompleteEmpty
+        }
+    }
+
+    fn for_checkpoint_respawn(
+        suspended_for_approval: bool,
+        suspended_for_user_input: bool,
+        has_assistant_reply: bool,
+    ) -> Self {
+        if suspended_for_approval {
+            Self::CheckpointRespawnSuspendedApproval
+        } else if suspended_for_user_input {
+            Self::CheckpointRespawnSuspendedUserInput
+        } else if has_assistant_reply {
+            Self::CheckpointRespawnComplete
+        } else {
+            Self::CheckpointRespawnCompleteEmpty
         }
     }
 }
@@ -2228,15 +2291,12 @@ impl GatewayExecutionService {
                 &resume_initial_message,
                 assistant_reply.as_deref(),
             );
-            let close_reason = if suspended_for_approval.is_some() {
-                "jsonrpc_spawn_suspended_approval"
-            } else if suspended_for_user_input {
-                "jsonrpc_spawn_suspended_user_input"
-            } else if assistant_reply.is_some() {
-                "jsonrpc_spawn_complete"
-            } else {
-                "jsonrpc_spawn_complete_empty"
-            };
+            let close_reason = SessionCloseReason::for_jsonrpc_spawn(
+                suspended_for_approval.is_some(),
+                suspended_for_user_input,
+                assistant_reply.is_some(),
+            )
+            .as_str();
             let digest_turn_count = runtime.turn_counter;
             runtime.close_session(close_reason)?;
             {
@@ -3039,15 +3099,12 @@ impl GatewayExecutionService {
             &initial_msg,
             assistant_reply.as_deref(),
         );
-        let close_reason = if suspended_for_approval.is_some() {
-            "checkpoint_respawn_suspended"
-        } else if suspended_for_user_input {
-            "checkpoint_respawn_suspended_user_input"
-        } else if assistant_reply.is_some() {
-            "checkpoint_respawn_complete"
-        } else {
-            "checkpoint_respawn_complete_empty"
-        };
+        let close_reason = SessionCloseReason::for_checkpoint_respawn(
+            suspended_for_approval.is_some(),
+            suspended_for_user_input,
+            assistant_reply.is_some(),
+        )
+        .as_str();
         let digest_turn_count = runtime.turn_counter;
         runtime.close_session(close_reason)?;
         {
@@ -4074,6 +4131,46 @@ mod tests {
 
         // Gateway causal chain is no longer used - function is a no-op
         // Relevant data is captured in gateway.db causal_events table via SessionTracer
+    }
+
+    #[test]
+    fn session_close_reason_jsonrpc_mapping_is_closed_and_stable() {
+        assert_eq!(
+            SessionCloseReason::for_jsonrpc_spawn(true, false, false).as_str(),
+            "jsonrpc_spawn_suspended_approval"
+        );
+        assert_eq!(
+            SessionCloseReason::for_jsonrpc_spawn(false, true, false).as_str(),
+            "jsonrpc_spawn_suspended_user_input"
+        );
+        assert_eq!(
+            SessionCloseReason::for_jsonrpc_spawn(false, false, true).as_str(),
+            "jsonrpc_spawn_complete"
+        );
+        assert_eq!(
+            SessionCloseReason::for_jsonrpc_spawn(false, false, false).as_str(),
+            "jsonrpc_spawn_complete_empty"
+        );
+    }
+
+    #[test]
+    fn session_close_reason_checkpoint_mapping_is_closed_and_stable() {
+        assert_eq!(
+            SessionCloseReason::for_checkpoint_respawn(true, false, false).as_str(),
+            "checkpoint_respawn_suspended"
+        );
+        assert_eq!(
+            SessionCloseReason::for_checkpoint_respawn(false, true, false).as_str(),
+            "checkpoint_respawn_suspended_user_input"
+        );
+        assert_eq!(
+            SessionCloseReason::for_checkpoint_respawn(false, false, true).as_str(),
+            "checkpoint_respawn_complete"
+        );
+        assert_eq!(
+            SessionCloseReason::for_checkpoint_respawn(false, false, false).as_str(),
+            "checkpoint_respawn_complete_empty"
+        );
     }
 }
 

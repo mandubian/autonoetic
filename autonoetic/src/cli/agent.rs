@@ -1268,6 +1268,46 @@ pub fn load_agent_runtime_context(
     Ok((loaded.manifest, loaded.instructions, loaded.dir))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliSessionCloseReason {
+    HeadlessComplete,
+    HeadlessCompleteEmpty,
+    HeadlessSuspendedApproval,
+    HeadlessSuspendedUserInput,
+    HeadlessEscalated,
+    HeadlessError,
+    InteractiveError,
+    InteractiveExit,
+}
+
+impl CliSessionCloseReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::HeadlessComplete => "headless_complete",
+            Self::HeadlessCompleteEmpty => "headless_complete_empty",
+            Self::HeadlessSuspendedApproval => "headless_suspended",
+            Self::HeadlessSuspendedUserInput => "headless_suspended_user_input",
+            Self::HeadlessEscalated => "headless_escalated",
+            Self::HeadlessError => "headless_error",
+            Self::InteractiveError => "interactive_error",
+            Self::InteractiveExit => "interactive_exit",
+        }
+    }
+
+    fn for_headless_turn_outcome(
+        outcome: &autonoetic_gateway::runtime::lifecycle::TurnOutcome,
+    ) -> Self {
+        use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
+        match outcome {
+            TurnOutcome::Completed(Some(_)) => Self::HeadlessComplete,
+            TurnOutcome::Completed(None) => Self::HeadlessCompleteEmpty,
+            TurnOutcome::Suspended { .. } => Self::HeadlessSuspendedApproval,
+            TurnOutcome::SuspendedUserInput { .. } => Self::HeadlessSuspendedUserInput,
+            TurnOutcome::Escalated { .. } => Self::HeadlessEscalated,
+        }
+    }
+}
+
 pub async fn run_agent_with_runtime_with_driver(
     manifest: autonoetic_types::agent::AgentManifest,
     instructions: String,
@@ -1321,43 +1361,45 @@ pub async fn run_agent_with_runtime_with_driver(
     ];
     use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
     match runtime.execute_with_history(&mut history).await {
-        Ok(TurnOutcome::Completed(Some(reply))) => {
-            println!("{}", reply);
-            if let Some(u) = format_llm_usage_for_cli(&runtime.take_llm_usage_last_run()) {
-                eprintln!("{}", u);
+        Ok(outcome) => {
+            match &outcome {
+                TurnOutcome::Completed(Some(reply)) => {
+                    println!("{}", reply);
+                    if let Some(u) = format_llm_usage_for_cli(&runtime.take_llm_usage_last_run()) {
+                        eprintln!("{}", u);
+                    }
+                }
+                TurnOutcome::Completed(None) => {
+                    println!("[No assistant text returned]");
+                    if let Some(u) = format_llm_usage_for_cli(&runtime.take_llm_usage_last_run()) {
+                        eprintln!("{}", u);
+                    }
+                }
+                TurnOutcome::Suspended {
+                    approval_request_id,
+                    ..
+                } => {
+                    println!("[Turn suspended pending approval: {}]", approval_request_id);
+                }
+                TurnOutcome::SuspendedUserInput { interaction_id } => {
+                    println!(
+                        "[Turn suspended pending user interaction: {}]",
+                        interaction_id
+                    );
+                }
+                TurnOutcome::Escalated { escalation_request_id } => {
+                    println!(
+                        "[Turn suspended pending human escalation: {}]",
+                        escalation_request_id
+                    );
+                }
             }
-            runtime.close_session("headless_complete")?;
-        }
-        Ok(TurnOutcome::Completed(None)) => {
-            println!("[No assistant text returned]");
-            if let Some(u) = format_llm_usage_for_cli(&runtime.take_llm_usage_last_run()) {
-                eprintln!("{}", u);
-            }
-            runtime.close_session("headless_complete_empty")?;
-        }
-        Ok(TurnOutcome::Suspended {
-            approval_request_id,
-            ..
-        }) => {
-            println!("[Turn suspended pending approval: {}]", approval_request_id);
-            runtime.close_session("headless_suspended")?;
-        }
-        Ok(TurnOutcome::SuspendedUserInput { interaction_id }) => {
-            println!(
-                "[Turn suspended pending user interaction: {}]",
-                interaction_id
-            );
-            runtime.close_session("headless_suspended_user_input")?;
-        }
-        Ok(TurnOutcome::Escalated { escalation_request_id }) => {
-            println!(
-                "[Turn suspended pending human escalation: {}]",
-                escalation_request_id
-            );
-            runtime.close_session("headless_escalated")?;
+            runtime.close_session(
+                CliSessionCloseReason::for_headless_turn_outcome(&outcome).as_str(),
+            )?;
         }
         Err(e) => {
-            let _ = runtime.close_session("headless_error");
+            let _ = runtime.close_session(CliSessionCloseReason::HeadlessError.as_str());
             return Err(e);
         }
     }
@@ -1434,7 +1476,7 @@ pub async fn run_interactive_session(
                 stdout.flush().await?;
             }
             Err(e) => {
-                let _ = runtime.close_session("interactive_error");
+                let _ = runtime.close_session(CliSessionCloseReason::InteractiveError.as_str());
                 return Err(e);
             }
         };
@@ -1510,12 +1552,12 @@ pub async fn run_interactive_session(
                 stdout.flush().await?;
             }
             Err(e) => {
-                let _ = runtime.close_session("interactive_error");
+                let _ = runtime.close_session(CliSessionCloseReason::InteractiveError.as_str());
                 return Err(e);
             }
         };
     }
-    runtime.close_session("interactive_exit")?;
+    runtime.close_session(CliSessionCloseReason::InteractiveExit.as_str())?;
     Ok(())
 }
 
@@ -2152,6 +2194,47 @@ mod tests {
                 usage: TokenUsage::default(),
             })
         }
+    }
+
+    #[test]
+    fn cli_session_close_reason_headless_mapping_is_closed_and_stable() {
+        use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
+
+        let completed = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Completed(
+            Some("ok".to_string()),
+        ));
+        let completed_empty =
+            CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Completed(None));
+        let suspended = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Suspended {
+            approval_request_id: "apr-1".to_string(),
+            continuation: None,
+        });
+        let suspended_user = CliSessionCloseReason::for_headless_turn_outcome(
+            &TurnOutcome::SuspendedUserInput {
+                interaction_id: "ui-1".to_string(),
+            },
+        );
+        let escalated = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Escalated {
+            escalation_request_id: "esc-1".to_string(),
+        });
+
+        assert_eq!(completed.as_str(), "headless_complete");
+        assert_eq!(completed_empty.as_str(), "headless_complete_empty");
+        assert_eq!(suspended.as_str(), "headless_suspended");
+        assert_eq!(suspended_user.as_str(), "headless_suspended_user_input");
+        assert_eq!(escalated.as_str(), "headless_escalated");
+    }
+
+    #[test]
+    fn cli_session_close_reason_interactive_tags_are_stable() {
+        assert_eq!(
+            CliSessionCloseReason::InteractiveError.as_str(),
+            "interactive_error"
+        );
+        assert_eq!(
+            CliSessionCloseReason::InteractiveExit.as_str(),
+            "interactive_exit"
+        );
     }
 
     #[tokio::test]
