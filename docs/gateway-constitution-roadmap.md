@@ -5,7 +5,7 @@
 > Source documents:
 >
 > - `docs/gateway-constitution-audit-2026-04-24.md` — the findings.
-> - `docs/gateway-constitution.md` — the canonical rule list.
+> - `docs/constitution/versions/2026.05.05/constitution.md` — the canonical rule list.
 >
 > Every entry below has a rule ID from the constitution, a threat model,
 > an implementation sketch, a test strategy, and a size estimate
@@ -18,7 +18,7 @@ An item is done when:
 1. The code change lands.
 2. A test at `autonoetic-gateway/tests/constitution_<category>_<rule_id>.rs`
    fails before the change and passes after.
-3. The corresponding row in `gateway-constitution.md` is updated to
+3. The corresponding row in `constitution.md` is updated to
    `ENFORCED` with the new file:line citation.
 4. If the change affects the dumbness invariant (§14), the audit doc's
    §12 list is updated.

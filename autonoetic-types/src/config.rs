@@ -443,6 +443,55 @@ pub struct LlmRoutingConfig {
     pub approval_gates: ApprovalGatesConfig,
 }
 
+/// Active constitution artifacts enforced by the gateway runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstitutionConfig {
+    /// Markdown source file for the active constitution.
+    #[serde(default = "default_constitution_source_path")]
+    pub source_path: PathBuf,
+    /// Lock file pinning digest/metadata for the active constitution.
+    #[serde(default = "default_constitution_lock_path")]
+    pub lock_path: PathBuf,
+    /// Require a valid constitution lock signature at startup.
+    #[serde(default = "default_require_constitution_signature")]
+    pub require_signature: bool,
+    /// Trusted signer registry (signer_id -> base64 32-byte Ed25519 public key).
+    #[serde(default = "default_constitution_trusted_signers")]
+    pub trusted_signers: HashMap<String, String>,
+}
+
+impl Default for ConstitutionConfig {
+    fn default() -> Self {
+        Self {
+            source_path: default_constitution_source_path(),
+            lock_path: default_constitution_lock_path(),
+            require_signature: default_require_constitution_signature(),
+            trusted_signers: default_constitution_trusted_signers(),
+        }
+    }
+}
+
+fn default_constitution_source_path() -> PathBuf {
+    PathBuf::from("docs/constitution/versions/2026.05.05/constitution.md")
+}
+
+fn default_constitution_lock_path() -> PathBuf {
+    PathBuf::from("docs/constitution/versions/2026.05.05/gateway-constitution.lock.json")
+}
+
+fn default_require_constitution_signature() -> bool {
+    true
+}
+
+fn default_constitution_trusted_signers() -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    out.insert(
+        "autonoetic:constitution:v1".to_string(),
+        "K9fMtYj6nlkiLPC04TaGmBvzhOgXVZdQt0imium3klE=".to_string(),
+    );
+    out
+}
+
 /// Compatibility policy for federated constitution checks (R+++2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -515,6 +564,10 @@ pub struct GatewayConfig {
     /// Overridable by AUTONOETIC_NODE_NAME env var.
     #[serde(default = "default_node_name")]
     pub node_name: String,
+
+    /// Constitution artifact paths that define the active constitutional law.
+    #[serde(default)]
+    pub constitution: ConstitutionConfig,
 
     /// Constitution compatibility policy for federated peers (R+++2).
     #[serde(default)]
@@ -1323,6 +1376,7 @@ impl Default for GatewayConfig {
             tls: false,
             node_id: default_node_id(),
             node_name: default_node_name(),
+            constitution: ConstitutionConfig::default(),
             federation_constitution: FederationConstitutionConfig::default(),
             max_concurrent_spawns: default_max_concurrent_spawns(),
             max_pending_spawns_per_agent: default_max_pending_spawns_per_agent(),

@@ -1481,7 +1481,7 @@ pub async fn handle_gateway_system_agents(
             }
         }
 
-        super::common::SystemAgentCommands::Run { agent_id: ref agent_id } => {
+        super::common::SystemAgentCommands::Run { ref agent_id } => {
             let entry = config.system_agents.iter().find(|e| e.agent_id == *agent_id);
             if entry.is_none() {
                 anyhow::bail!("Agent '{}' is not declared as a system agent in config.", agent_id);
@@ -1546,8 +1546,9 @@ pub async fn handle_gateway_constitution(
                     println!("  {}", id);
                 }
                 println!(
-                    "\nNote: edit docs/gateway-constitution.md to apply the proposal text. \
-                     The constitution digest will bump on the next gateway rebuild."
+                    "\nNote: edit {} to apply the proposal text. \
+                     The constitution digest will bump on the next gateway rebuild.",
+                    config.constitution.source_path.display()
                 );
             }
             Ok(())

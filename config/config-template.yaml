@@ -19,6 +19,25 @@ node_id: "gateway"
 node_name: "gateway"
 # NOTE: AUTONOETIC_SHARED_SECRET must be set as an env var (not in config).
 
+# ── Constitution ──────────────────────────────────────────────────────
+# Active constitution artifacts enforced by this gateway instance.
+# To switch constitutional release, point both paths to the same version dir.
+# Gateway startup and `agent bootstrap` also materialize a local snapshot under:
+#   <agents_dir>/.gateway/constitution/
+# You can point source_path/lock_path there for fully runtime-local enforcement.
+constitution:
+  source_path: "docs/constitution/versions/2026.05.05/constitution.md"
+  lock_path: "docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"
+  require_signature: true
+  trusted_signers:
+    autonoetic:constitution:v1: "K9fMtYj6nlkiLPC04TaGmBvzhOgXVZdQt0imium3klE="
+# constitution:
+#   source_path: ".gateway/constitution/versions/2026.05.05/constitution.md"
+#   lock_path: ".gateway/constitution/versions/2026.05.05/gateway-constitution.lock.json"
+#   require_signature: true
+#   trusted_signers:
+#     autonoetic:constitution:v1: "K9fMtYj6nlkiLPC04TaGmBvzhOgXVZdQt0imium3klE="
+
 # ── Sandbox ───────────────────────────────────────────────────────────
 # Bubblewrap isolation overrides.
 # Overridable by AUTONOETIC_BWRAP_SHARE_NET and AUTONOETIC_BWRAP_DEV_MODE env vars.

@@ -5,6 +5,7 @@
 //! whose content hash matches an existing revision (content-addressed dedup). Merges preset-level LLM config into the
 //! agent's `SKILL.md`: always overrides `provider`, `model`, `temperature`;
 //! fills missing `base_url`, `thinking`, `chat_only`, `api_key_env`.
+//! Also materializes constitution snapshots in `.gateway/constitution/`.
 
 use crate::scheduler::gateway_store::GatewayStore;
 use anyhow::Result;
@@ -20,6 +21,7 @@ use std::path::Path;
 /// Returns the number of agents activated.
 pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<usize> {
     write_gateway_identity(gateway_dir)?;
+    bootstrap_constitution_snapshot(config, gateway_dir)?;
 
     let store = GatewayStore::open(gateway_dir)?;
     let mut activated = 0usize;
@@ -55,6 +57,8 @@ pub fn bootstrap_single_agent(
     gateway_dir: &Path,
     agent_id: &str,
 ) -> Result<bool> {
+    write_gateway_identity(gateway_dir)?;
+    bootstrap_constitution_snapshot(config, gateway_dir)?;
     let store = GatewayStore::open(gateway_dir)?;
     bootstrap_agent_inner(config, gateway_dir, &store, agent_id)
 }
@@ -236,6 +240,79 @@ fn collect_files(base: &Path, current: &Path, out: &mut BTreeMap<String, Vec<u8>
         out.insert(rel, bytes);
     }
     Ok(())
+}
+
+/// Materialize the active constitution into `.gateway/constitution/` so the
+/// runtime directory carries an immutable local snapshot plus active pointers.
+pub fn bootstrap_constitution_snapshot(config: &GatewayConfig, gateway_dir: &Path) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct ActiveConstitutionSnapshot {
+        constitution_version: String,
+        constitution_digest: String,
+        source_path: String,
+        lock_path: String,
+        lock_signer_id: String,
+        origin_source_path: String,
+        origin_lock_path: String,
+        bootstrapped_at: String,
+    }
+
+    crate::constitution_digest::initialize_constitution(config)?;
+    crate::constitution_digest::verify_constitution_lock_integrity()?;
+
+    let version = crate::constitution_digest::constitution_version().to_string();
+    let digest = crate::constitution_digest::constitution_digest().to_string();
+    let source_rel = format!(".gateway/constitution/versions/{version}/constitution.md");
+    let lock_rel = format!(".gateway/constitution/versions/{version}/gateway-constitution.lock.json");
+
+    let constitution_root = gateway_dir.join("constitution");
+    let version_dir = constitution_root.join("versions").join(&version);
+    std::fs::create_dir_all(&version_dir)?;
+
+    std::fs::write(
+        version_dir.join("constitution.md"),
+        crate::constitution_digest::constitution_text(),
+    )?;
+
+    let mut lock_snapshot = crate::constitution_digest::constitution_lock().clone();
+    lock_snapshot.constitution_source = source_rel.clone();
+    let gateway_key = crate::runtime::crypto::GatewayIdentityKey::load_or_generate(gateway_dir)?;
+    let lock_signer_id = format!("gateway:{}", gateway_key.fingerprint());
+    let signature_payload = crate::constitution_digest::constitution_lock_signature_payload(&lock_snapshot)?;
+    lock_snapshot.signature = Some(crate::constitution_digest::ConstitutionLockSignature {
+        algorithm: "ed25519".to_string(),
+        signer_id: lock_signer_id.clone(),
+        signature_b64: gateway_key.sign(&signature_payload),
+    });
+    let lock_json = serde_json::to_string_pretty(&lock_snapshot)?;
+    std::fs::write(
+        version_dir.join("gateway-constitution.lock.json"),
+        format!("{lock_json}\n"),
+    )?;
+
+    std::fs::write(constitution_root.join("CURRENT"), format!("{version}\n"))?;
+
+    let active = ActiveConstitutionSnapshot {
+        constitution_version: version,
+        constitution_digest: digest,
+        source_path: source_rel,
+        lock_path: lock_rel,
+        lock_signer_id,
+        origin_source_path: normalize_path_label(&config.constitution.source_path),
+        origin_lock_path: normalize_path_label(&config.constitution.lock_path),
+        bootstrapped_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let active_json = serde_json::to_string_pretty(&active)?;
+    std::fs::write(
+        constitution_root.join("ACTIVE.json"),
+        format!("{active_json}\n"),
+    )?;
+
+    Ok(())
+}
+
+fn normalize_path_label(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// Merges preset-level `llm_config` fields into the SKILL.md file,

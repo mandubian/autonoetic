@@ -2365,6 +2365,91 @@ Use tools when needed.
             .join("coder.default")
             .join("runtime.lock")
             .exists());
+
+        let constitution_root = agents_dir.join(".gateway").join("constitution");
+        assert!(
+            constitution_root.join("CURRENT").exists(),
+            "bootstrap should materialize .gateway/constitution/CURRENT"
+        );
+        assert!(
+            constitution_root.join("ACTIVE.json").exists(),
+            "bootstrap should materialize .gateway/constitution/ACTIVE.json"
+        );
+        let active: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(constitution_root.join("ACTIVE.json"))
+                .expect("ACTIVE.json should be readable"),
+        )
+        .expect("ACTIVE.json should decode");
+        let current = std::fs::read_to_string(constitution_root.join("CURRENT"))
+            .expect("CURRENT should be readable")
+            .trim()
+            .to_string();
+        let source_path = active["source_path"]
+            .as_str()
+            .expect("source_path should be present");
+        let lock_path = active["lock_path"]
+            .as_str()
+            .expect("lock_path should be present");
+        assert!(
+            agents_dir.join(source_path).exists(),
+            "bootstrapped constitution source should exist under .gateway"
+        );
+        assert!(
+            agents_dir.join(lock_path).exists(),
+            "bootstrapped constitution lock should exist under .gateway"
+        );
+        let lock_value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(agents_dir.join(lock_path))
+                .expect("bootstrapped lock should be readable"),
+        )
+        .expect("bootstrapped lock should decode");
+        assert_eq!(
+            lock_value["constitution_source"].as_str().unwrap_or_default(),
+            source_path,
+            "bootstrapped lock must point to the bootstrapped source path"
+        );
+        let lock_signer_id = lock_value["signature"]["signer_id"]
+            .as_str()
+            .expect("bootstrapped lock must include a signer_id");
+        let lock_signature_b64 = lock_value["signature"]["signature_b64"]
+            .as_str()
+            .expect("bootstrapped lock must include a signature");
+        assert!(
+            lock_signer_id.starts_with("gateway:"),
+            "bootstrapped lock should be signed by local gateway identity"
+        );
+        let lock_struct: autonoetic_gateway::constitution_digest::ConstitutionLock =
+            serde_json::from_value(lock_value.clone()).expect("bootstrapped lock should decode");
+        let payload = autonoetic_gateway::constitution_digest::constitution_lock_signature_payload(
+            &lock_struct,
+        )
+        .expect("signature payload should serialize");
+        let public_key_path = agents_dir
+            .join(".gateway")
+            .join(autonoetic_gateway::runtime::crypto::GatewayIdentityKey::PUBLIC_FILENAME);
+        let pub_bytes = std::fs::read(&public_key_path).expect("gateway public key should exist");
+        assert_eq!(pub_bytes.len(), 32, "gateway public key must be 32 bytes");
+        let mut public_key = [0u8; 32];
+        public_key.copy_from_slice(&pub_bytes);
+        assert!(
+            autonoetic_gateway::runtime::crypto::verify_attestation_signature(
+                &public_key,
+                &payload,
+                lock_signature_b64,
+            )
+            .expect("signature verification should run"),
+            "bootstrapped lock signature should verify with local gateway public key"
+        );
+        assert_eq!(
+            active["lock_signer_id"].as_str().unwrap_or_default(),
+            lock_signer_id,
+            "ACTIVE lock_signer_id must match lock signature signer"
+        );
+        assert_eq!(
+            active["constitution_version"].as_str().unwrap_or_default(),
+            current,
+            "ACTIVE constitution version must match CURRENT"
+        );
     }
 
     #[test]

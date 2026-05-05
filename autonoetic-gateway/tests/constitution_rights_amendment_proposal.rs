@@ -79,6 +79,7 @@ fn make_harness() -> Harness {
 fn invoke(h: &Harness, manifest: &AgentManifest, args_json: &str) -> serde_json::Value {
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
+    let gateway_config = autonoetic_types::config::GatewayConfig::default();
     let raw = registry
         .execute(
             "constitution_propose_amendment",
@@ -89,7 +90,7 @@ fn invoke(h: &Harness, manifest: &AgentManifest, args_json: &str) -> serde_json:
             args_json,
             Some("test-session"),
             Some("turn-000001"),
-            None,
+            Some(&gateway_config),
             Some(h.store.clone()),
             None,
         )

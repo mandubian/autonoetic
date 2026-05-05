@@ -227,7 +227,7 @@ pub enum GatewayConstitutionCommands {
     },
     /// Apply a release tag to all approved-but-unpublished proposals.
     /// The constitution markdown is *not* edited automatically — the
-    /// operator updates `docs/gateway-constitution.md` by hand and the
+    /// operator updates the configured constitution source file by hand and the
     /// digest bumps on rebuild.
     Release {
         /// Release tag to record (e.g. `2026-Q2`).

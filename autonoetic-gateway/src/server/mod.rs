@@ -39,6 +39,25 @@ impl GatewayServer {
         // are ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true).
         crate::sandbox::init_sandbox_config(&self.config.sandbox);
 
+        let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+        crate::bootstrap::bootstrap_constitution_snapshot(self.config.as_ref(), &gateway_dir)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Constitution bootstrap into gateway dir failed (target='{}'): {}",
+                    gateway_dir.join("constitution").display(),
+                    e
+                )
+            })?;
+
+        crate::constitution_digest::initialize_constitution(self.config.as_ref()).map_err(|e| {
+            anyhow::anyhow!(
+                "Constitution initialization failed (source='{}', lock='{}'): {}",
+                self.config.constitution.source_path.display(),
+                self.config.constitution.lock_path.display(),
+                e
+            )
+        })?;
+
         // Constitution lock is an immutable contract artifact.
         // Refuse boot if lock metadata does not match canonical digest/profile extraction.
         crate::constitution_digest::verify_constitution_lock_integrity().map_err(|e| {
@@ -56,7 +75,6 @@ impl GatewayServer {
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid OFP bind address: {}", e))?;
 
-        let gateway_dir = crate::execution::gateway_root_dir(&self.config);
         let gateway_store = Arc::new(crate::scheduler::gateway_store::GatewayStore::open(
             &gateway_dir,
         )?);

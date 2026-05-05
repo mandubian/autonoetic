@@ -241,6 +241,14 @@ pub async fn start_ofp_server(
     registry: PeerRegistry,
     router: std::sync::Arc<crate::router::JsonRpcRouter>,
 ) -> anyhow::Result<()> {
+    crate::constitution_digest::initialize_constitution(config.as_ref()).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to initialize constitution for OFP server (source='{}', lock='{}'): {}",
+            config.constitution.source_path.display(),
+            config.constitution.lock_path.display(),
+            e
+        )
+    })?;
     let listener = TcpListener::bind(listen_addr).await?;
     info!(
         "OFP Server listening on {} (node_id={})",

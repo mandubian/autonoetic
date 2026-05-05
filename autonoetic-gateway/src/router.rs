@@ -119,6 +119,14 @@ impl JsonRpcRouter {
         config: GatewayConfig,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     ) -> Self {
+        crate::constitution_digest::initialize_constitution(&config).unwrap_or_else(|e| {
+            panic!(
+                "failed to initialize configured constitution artifacts (source='{}', lock='{}'): {}",
+                config.constitution.source_path.display(),
+                config.constitution.lock_path.display(),
+                e
+            )
+        });
         let execution = Arc::new(GatewayExecutionService::new(config.clone(), gateway_store));
         Self {
             config: Arc::new(config),

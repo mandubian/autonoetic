@@ -11,11 +11,40 @@ releases.
 
 ## Active Canonical Source
 
-The active canonical markdown text remains at `docs/gateway-constitution.md`
-for backward compatibility with existing links and tooling.
+The active canonical markdown text is:
+
+- `docs/constitution/versions/<CURRENT>/constitution.md`
+
+The gateway enforces whichever source/lock paths are configured in
+`config.yaml` under:
+
+- `constitution.source_path`
+- `constitution.lock_path`
+
+At runtime, the gateway also bootstraps a local constitution snapshot under
+`<agents_dir>/.gateway/constitution/` with:
+
+- `CURRENT`
+- `ACTIVE.json`
+- `versions/<version>/constitution.md`
+- `versions/<version>/gateway-constitution.lock.json`
+
+Lock signatures:
+
+- release locks are signed by trusted signer IDs from
+  `constitution.trusted_signers` (for example `autonoetic:constitution:v1`),
+- bootstrapped `.gateway` locks are re-signed by the local gateway identity
+  (`gateway:<fingerprint>`), and verified against
+  `<agents_dir>/.gateway/state_attestation.ed25519.pub`.
+
+Precise signature payload and verification rules are specified in:
+
+- `docs/constitution-signing.md`
 
 Each constitutional release should:
 
-1. update `docs/gateway-constitution.md`,
-2. update `docs/constitution/versions/<version>/gateway-constitution.lock.json`,
-3. update `docs/constitution/CURRENT`.
+1. add/update `docs/constitution/versions/<version>/constitution.md`,
+2. add/update `docs/constitution/versions/<version>/gateway-constitution.lock.json`,
+3. ensure the lock signature matches the lock payload (`docs/constitution-signing.md`),
+4. update `docs/constitution/CURRENT`,
+5. update `config/config-template.yaml` defaults when promoting the new release.

@@ -57,6 +57,7 @@ fn invoke(args_json: &str) -> serde_json::Value {
     let manifest = no_capability_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
+    let gateway_config = autonoetic_types::config::GatewayConfig::default();
     let raw = registry
         .execute(
             "constitution_read",
@@ -67,7 +68,7 @@ fn invoke(args_json: &str) -> serde_json::Value {
             args_json,
             None,
             None,
-            None,
+            Some(&gateway_config),
             None,
             None,
         )
@@ -180,6 +181,10 @@ fn unknown_selector_returns_validation_error() {
 fn digest_matches_sha256_of_source_markdown() {
     // The digest returned by the tool must equal the canonical digest payload
     // used for federation compatibility checks.
+    autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    )
+    .expect("default constitution should initialize");
     let payload = serde_json::json!({
         "constitution_text": autonoetic_gateway::constitution_digest::constitution_text(),
         "rights_enforcement": autonoetic_gateway::constitution_digest::canonical_right_enforcement_table(),
@@ -207,6 +212,7 @@ fn invalid_json_args_returns_anyhow_error() {
     let manifest = no_capability_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
+    let gateway_config = autonoetic_types::config::GatewayConfig::default();
     let result = registry.execute(
         "constitution_read",
         &manifest,
@@ -216,7 +222,7 @@ fn invalid_json_args_returns_anyhow_error() {
         "not json",
         None,
         None,
-        None,
+        Some(&gateway_config),
         None,
         None,
     );

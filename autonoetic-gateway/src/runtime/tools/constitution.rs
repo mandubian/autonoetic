@@ -71,7 +71,7 @@ impl NativeTool for ConstitutionReadTool {
                 or any time you need to understand your obligations and rights. \
                 Section selector accepts rule IDs (`Ri-0.10`, `R-7.5`, `R+5`, `R++1`, `R+++3`) \
                 and numbered sections (`§0` … `§14`). The returned digest identifies the exact \
-                document version and is stable for a given gateway binary."
+                configured constitutional release and lock file."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -95,10 +95,15 @@ impl NativeTool for ConstitutionReadTool {
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
+        let config = config.ok_or_else(|| {
+            anyhow::anyhow!("constitution_read requires GatewayConfig to resolve constitution paths")
+        })?;
+        crate::constitution_digest::initialize_constitution(config)?;
+
         #[derive(Deserialize, Default)]
         struct Args {
             #[serde(default)]
@@ -298,10 +303,17 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
+        let config = config.ok_or_else(|| {
+            anyhow::anyhow!(
+                "constitution_propose_amendment requires GatewayConfig to resolve constitution paths"
+            )
+        })?;
+        crate::constitution_digest::initialize_constitution(config)?;
+
         #[derive(Deserialize)]
         struct Args {
             kind: String,
@@ -448,8 +460,16 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
 mod tests {
     use super::*;
 
+    fn init_default_constitution() {
+        crate::constitution_digest::initialize_constitution(
+            &autonoetic_types::config::GatewayConfig::default(),
+        )
+        .expect("default constitution configuration should initialize");
+    }
+
     #[test]
     fn digest_is_stable_hex_sha256() {
+        init_default_constitution();
         let d = constitution_digest();
         assert_eq!(d.len(), 64, "sha256 hex digest is 64 chars");
         assert!(d.chars().all(|c| c.is_ascii_hexdigit()));
@@ -459,6 +479,7 @@ mod tests {
 
     #[test]
     fn extract_right_ri_0_10() {
+        init_default_constitution();
         let extract = extract_section(constitution_text(), "Ri-0.10")
             .expect("Ri-0.10 must exist in the constitution");
         assert!(extract.contains("Ri-0.10"));
@@ -467,6 +488,7 @@ mod tests {
 
     #[test]
     fn extract_section_zero() {
+        init_default_constitution();
         let extract =
             extract_section(constitution_text(), "§0").expect("section 0 (Rights) must exist");
         assert!(extract.starts_with("## 0. "));
@@ -477,12 +499,14 @@ mod tests {
 
     #[test]
     fn extract_unknown_returns_none() {
+        init_default_constitution();
         assert!(extract_section(constitution_text(), "Ri-9.99").is_none());
         assert!(extract_section(constitution_text(), "§999").is_none());
     }
 
     #[test]
     fn extract_pending_rule() {
+        init_default_constitution();
         // R+++3 is in the constitution as a pending constitutional rule.
         let extract = extract_section(constitution_text(), "R+++3").expect("R+++3 must exist");
         assert!(extract.contains("R+++3"));
