@@ -256,6 +256,8 @@ Secrets are stored in an encrypted vault using AES-256-GCM with a random 96-bit 
 
 Without a master key, the vault cannot be persisted or loaded.
 
+If neither env var is set, `autonoetic agent bootstrap` (and gateway bootstrap of agents / single-agent install paths) creates `{agents_dir}/.gateway/vault.key` when that file is missing, using the same logic as `vault::ensure_default_key`.
+
 ## CLI Credential Management
 
 The `autonoetic agent credential` command provides direct vault operations without going through an agent session.

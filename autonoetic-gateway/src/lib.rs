@@ -32,7 +32,7 @@ pub use autonoetic_types::agent::AgentMeta;
 pub use autonoetic_types::config::GatewayConfig;
 pub use autonoetic_types::layer::{ArtifactLayer, CapturedLayer, LayerManifest};
 pub use autonoetic_types::runtime_lock::RuntimeLock;
-pub use bootstrap::bootstrap_agents;
+pub use bootstrap::{bootstrap_agents, ensure_vault_key_for_bootstrap_workspace};
 pub use causal_chain::CausalLogger;
 pub use execution::{GatewayExecutionService, SpawnResult};
 pub use interaction_answer::{

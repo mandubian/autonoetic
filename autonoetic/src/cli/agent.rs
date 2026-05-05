@@ -941,6 +941,13 @@ pub fn handle_agent_bootstrap(
         }
     }
 
+    if autonoetic_gateway::bootstrap::ensure_vault_key_for_bootstrap_workspace(&config)? {
+        println!(
+            "Created vault master key at {} — back it up; without it encrypted credentials cannot be decrypted.",
+            gateway_dir.join("vault.key").display()
+        );
+    }
+
     let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
 
     println!(

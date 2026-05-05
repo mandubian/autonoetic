@@ -17,9 +17,35 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+/// When `AUTONOETIC_VAULT_KEY` / `AUTONOETIC_VAULT_KEY_PATH` are unset, ensures
+/// `{agents_dir}/.gateway/vault.key` exists (see [`crate::vault::ensure_default_key`]).
+///
+/// Returns `true` if this invocation created a new key file.
+pub fn ensure_vault_key_for_bootstrap_workspace(config: &GatewayConfig) -> Result<bool> {
+    let key_path = config.agents_dir.join(".gateway").join("vault.key");
+    let had_file_before = key_path.exists();
+    if std::env::var("AUTONOETIC_VAULT_KEY").is_ok()
+        || std::env::var("AUTONOETIC_VAULT_KEY_PATH").is_ok()
+    {
+        crate::vault::ensure_default_key(&config.agents_dir)?;
+        return Ok(false);
+    }
+    crate::vault::ensure_default_key(&config.agents_dir)?;
+    let created = !had_file_before && key_path.exists();
+    if created {
+        tracing::info!(
+            target: "bootstrap",
+            path = %key_path.display(),
+            "Created default vault master key (no AUTONOETIC_VAULT_KEY / AUTONOETIC_VAULT_KEY_PATH)"
+        );
+    }
+    Ok(created)
+}
+
 /// Bootstrap all agents from `config.agents_dir` into the gateway store.
 /// Returns the number of agents activated.
 pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<usize> {
+    ensure_vault_key_for_bootstrap_workspace(config)?;
     write_gateway_identity(gateway_dir)?;
     bootstrap_constitution_snapshot(config, gateway_dir)?;
 
@@ -57,6 +83,7 @@ pub fn bootstrap_single_agent(
     gateway_dir: &Path,
     agent_id: &str,
 ) -> Result<bool> {
+    ensure_vault_key_for_bootstrap_workspace(config)?;
     write_gateway_identity(gateway_dir)?;
     bootstrap_constitution_snapshot(config, gateway_dir)?;
     let store = GatewayStore::open(gateway_dir)?;
