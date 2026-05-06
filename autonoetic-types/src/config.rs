@@ -953,6 +953,10 @@ pub struct ResponseValidationConfig {
     /// Default: use `enabled` flag for "on" behavior; repair requires explicit opt-in.
     #[serde(default)]
     pub repair_enabled: bool,
+
+    /// Global hard ceiling for auto-repair attempts, regardless of agent request.
+    #[serde(default = "default_response_validation_max_repair_attempts_ceiling")]
+    pub max_repair_attempts_ceiling: u32,
 }
 
 impl Default for ResponseValidationConfig {
@@ -960,8 +964,13 @@ impl Default for ResponseValidationConfig {
         Self {
             enabled: false,
             repair_enabled: false,
+            max_repair_attempts_ceiling: default_response_validation_max_repair_attempts_ceiling(),
         }
     }
+}
+
+fn default_response_validation_max_repair_attempts_ceiling() -> u32 {
+    2
 }
 
 /// Sandbox (bubblewrap) isolation overrides.

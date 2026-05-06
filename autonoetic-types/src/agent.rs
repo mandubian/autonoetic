@@ -395,6 +395,22 @@ pub struct ResponseContract {
     /// Max wall-clock duration for validation retries in milliseconds (0–30000). Default: 500.
     #[serde(default = "default_validation_max_duration_ms")]
     pub validation_max_duration_ms: u64,
+
+    /// Auto-repair policy. Disabled by default; agents must opt in explicitly.
+    #[serde(default)]
+    pub repair: ResponseContractRepairPolicy,
+}
+
+/// Agent-declared policy for gateway-side response auto-repair.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResponseContractRepairPolicy {
+    /// Whether gateway auto-repair is enabled for this agent.
+    #[serde(default)]
+    pub auto: bool,
+    /// Max auto-repair attempts requested by the agent.
+    /// Attempts are additionally capped by gateway-level ceiling.
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
 }
 
 fn default_validation_max_loops() -> u32 {
@@ -410,6 +426,9 @@ impl ResponseContract {
     pub fn normalize(&mut self) {
         self.validation_max_loops = self.validation_max_loops.clamp(1, 8);
         self.validation_max_duration_ms = self.validation_max_duration_ms.clamp(0, 30_000);
+        if let Some(n) = self.repair.max_attempts {
+            self.repair.max_attempts = Some(n.clamp(0, 8));
+        }
         if let Some(n) = self.max_artifacts {
             self.max_artifacts = Some(n.clamp(1, 100));
         }
@@ -427,6 +446,17 @@ impl ResponseContract {
             && self.output_schema.is_none()
             && self.prohibited_text_patterns.is_empty()
             && self.min_artifact_builds.is_none()
+    }
+
+    /// Resolve the declared repair attempts.
+    ///
+    /// New shape uses `repair.max_attempts`; legacy `validation_max_loops` is used
+    /// as fallback during migration (`attempts = max_loops - 1`).
+    pub fn declared_repair_attempts(&self) -> usize {
+        if let Some(max_attempts) = self.repair.max_attempts {
+            return max_attempts as usize;
+        }
+        self.validation_max_loops.saturating_sub(1) as usize
     }
 }
 

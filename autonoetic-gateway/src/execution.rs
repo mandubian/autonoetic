@@ -2655,11 +2655,16 @@ impl GatewayExecutionService {
             violations_to_final_error,
         };
 
-        let max_loops = (contract.validation_max_loops as usize).max(1);
         let max_duration_ms = contract.validation_max_duration_ms;
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(max_duration_ms as u64);
-        let repair_enabled = self.config.response_validation.repair_enabled;
+        let repair_enabled =
+            self.config.response_validation.repair_enabled && contract.repair.auto;
+        let max_repair_rounds = contract.declared_repair_attempts().min(
+            self.config
+                .response_validation
+                .max_repair_attempts_ceiling as usize,
+        );
 
         // Initial validation.
         let gateway_dir = self.config.agents_dir.join(".gateway");
@@ -2691,7 +2696,7 @@ impl GatewayExecutionService {
         // When repair is disabled or only one loop is allowed, fail immediately.
         // Include session context in the error when repair mode is on so the caller
         // can identify the session for higher-level recovery.
-        if !repair_enabled || max_loops <= 1 {
+        if !repair_enabled || max_repair_rounds == 0 {
             return Err(violations_to_final_error(
                 &violations,
                 &result.session_id,
@@ -2699,8 +2704,7 @@ impl GatewayExecutionService {
             ));
         }
 
-        // Repair loop: attempt up to (max_loops - 1) rounds.
-        let max_repair_rounds = max_loops - 1;
+        // Repair loop: attempt up to the agent-declared count, bounded by system ceiling.
         for attempt in 1..=max_repair_rounds {
             if std::time::Instant::now() >= deadline {
                 tracing::warn!(

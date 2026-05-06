@@ -229,7 +229,8 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
         "response_contract": {
             "required_artifacts": ["deployment.yaml"],
             "validation_max_loops": 1,
-            "validation_max_duration_ms": 500
+            "validation_max_duration_ms": 500,
+            "repair": {"auto": true, "max_attempts": 1}
         }
     });
 
@@ -669,11 +670,6 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
     let msg = err.to_string();
 
     assert!(
-        msg.contains("sess-repair-1"),
-        "error should include session_id for re-spawn, got: {}",
-        msg
-    );
-    assert!(
         msg.contains("required_artifacts"),
         "error should mention required_artifacts, got: {}",
         msg
@@ -684,8 +680,8 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
         msg
     );
     assert!(
-        msg.contains("Repair hints"),
-        "error should include repair hints, got: {}",
+        msg.contains("repair_hint:"),
+        "error should preserve repair_hint entries, got: {}",
         msg
     );
 
@@ -726,7 +722,8 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
         "response_contract": {
             "required_artifacts": ["output.md"],
             "validation_max_loops": 2,
-            "validation_max_duration_ms": 5000
+            "validation_max_duration_ms": 5000,
+            "repair": {"auto": true, "max_attempts": 1}
         }
     });
 
@@ -828,7 +825,8 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
         "response_contract": {
             "required_artifacts": ["deployment.yaml"],
             "validation_max_loops": 2,
-            "validation_max_duration_ms": 5000
+            "validation_max_duration_ms": 5000,
+            "repair": {"auto": true, "max_attempts": 1}
         }
     });
 

@@ -34,7 +34,9 @@ metadata:
     response_contract:
       max_reply_length_chars: 2000
       min_artifact_builds: 1
-      validation_max_loops: 2
+      repair:
+        auto: true
+        max_attempts: 1
       validation_max_duration_ms: 60000
 ---
 # Coder

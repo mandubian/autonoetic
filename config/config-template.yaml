@@ -62,10 +62,12 @@ max_background_due_per_tick: 32
 
 # ── Response Validation & Repair ──────────────────────────────────────
 # When enabled, the gateway validates agent outputs against declared constraints.
-# repair_enabled activates bounded retry loops when validation fails.
+# repair_enabled allows auto-repair only for agents that explicitly opt in
+# via response_contract.repair.auto.
 response_validation:
   enabled: true
   repair_enabled: true
+  max_repair_attempts_ceiling: 2
 
 # ── Approval Timeout ──────────────────────────────────────────────────
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.

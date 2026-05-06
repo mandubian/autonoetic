@@ -51,7 +51,9 @@ metadata:
       prohibited_text_patterns:
         - "BEGIN RSA PRIVATE KEY"
         - "-----BEGIN"
-      validation_max_loops: 2
+      repair:
+        auto: true
+        max_attempts: 1
       validation_max_duration_ms: 60000
 ---
 # Evaluator

@@ -2,13 +2,14 @@
 
 Autonoetic can validate an agent's final response after execution and before returning it to the caller. The goal is to enforce durable output constraints at the gateway boundary, not to rely on the agent's free-text claims.
 
-When a response contract is declared, the gateway validates the produced `SpawnResult`. If validation fails and repair is enabled, the gateway gives the same agent a bounded chance to repair the actual outputs and try again.
+When a response contract is declared, the gateway validates the produced `SpawnResult`. If validation fails, repair runs only when both conditions hold: gateway repair is enabled and the agent explicitly opts in with `response_contract.repair.auto: true`.
 
 When no explicit `response_contract.output_schema` is supplied, manifest `io.returns` is treated as the gateway-owned default output schema for the final reply. That keeps output-shape ownership in the gateway instead of leaving it as advisory SKILL prose.
 
 ## What The Gateway Validates
 
-The response contract is declared as `metadata.autonoetic.response_contract` and currently supports these fields:
+The response contract is declared as `metadata.response_contract` (or by
+`response_contract` in agent `SKILL.md`) and currently supports these fields:
 
 ```json
 {
@@ -27,6 +28,7 @@ The response contract is declared as `metadata.autonoetic.response_contract` and
   },
   "prohibited_text_patterns": ["BEGIN RSA PRIVATE KEY", "/home/"],
   "min_artifact_builds": 1,
+  "repair": {"auto": true, "max_attempts": 1},
   "validation_max_loops": 2,
   "validation_max_duration_ms": 2000
 }
@@ -44,18 +46,37 @@ Validation uses authoritative runtime state, not natural-language assertions:
 
 ## Repair Semantics
 
-If response validation fails, the gateway returns a repair prompt to the same agent. That prompt contains:
+If response validation fails and repair is opted in, the gateway returns a repair prompt to the same agent. That prompt contains:
 
 - the list of violations
 - the attempt counter
 - a reminder that the agent must repair real outputs, not merely explain the problem
 
-The repair loop is bounded by two contract fields:
+The repair loop is bounded by:
 
-- `validation_max_loops`: maximum retry count, clamped to `1..8`
+- `repair.max_attempts`: agent-declared retry count (`0..8`, default from legacy `validation_max_loops - 1`)
+- `response_validation.max_repair_attempts_ceiling`: gateway-level hard ceiling
 - `validation_max_duration_ms`: maximum wall-clock repair window, clamped to `0..30000`
 
 If the loop budget is exhausted, the gateway returns a final validation error to the caller.
+
+## Structured Errors vs Auto-Repair
+
+These are complementary but different mechanisms:
+
+- **Structured tool errors (`ok: false`)**: default path. The gateway returns
+  deterministic error details and `repair_hint`; the agent decides what to do next.
+- **Response-contract auto-repair**: optional path. The gateway re-enters the
+  same agent session to try fixing final output contract violations in-place.
+
+In Phase 4.1, auto-repair is no longer implicit behavior. It runs only when:
+
+1. `response_validation.repair_enabled: true` at gateway level.
+2. `response_contract.repair.auto: true` in the contract.
+
+Recommendation: prefer structured errors by default; use auto-repair only for
+agents whose deliverables are repetitive, contract-heavy, and commonly repaired
+in-session.
 
 ## What Agents Must Do During Repair
 
@@ -107,14 +128,15 @@ Concretely, the evaluator SKILL should say that repair prompts are authoritative
 
 ```yaml
 metadata:
-  autonoetic:
-    response_contract:
-      required_artifacts:
-        - main.py
-      min_artifact_builds: 1
-      max_reply_length_chars: 1200
-      validation_max_loops: 2
-      validation_max_duration_ms: 2000
+  response_contract:
+    required_artifacts:
+      - main.py
+    min_artifact_builds: 1
+    repair:
+      auto: true
+      max_attempts: 1
+    max_reply_length_chars: 1200
+    validation_max_duration_ms: 2000
 ```
 
 Effect:
@@ -127,22 +149,23 @@ Effect:
 
 ```yaml
 metadata:
-  autonoetic:
-    response_contract:
-      max_reply_length_chars: 8000
-      output_schema:
-        type: object
-        required: [status, evaluator_pass, summary]
-        properties:
-          status:
-            type: string
-          evaluator_pass:
-            type: boolean
-          summary:
-            type: string
-      prohibited_text_patterns:
-        - BEGIN RSA PRIVATE KEY
-      validation_max_loops: 2
+  response_contract:
+    max_reply_length_chars: 8000
+    repair:
+      auto: true
+      max_attempts: 1
+    output_schema:
+      type: object
+      required: [status, evaluator_pass, summary]
+      properties:
+        status:
+          type: string
+        evaluator_pass:
+          type: boolean
+        summary:
+          type: string
+    prohibited_text_patterns:
+      - BEGIN RSA PRIVATE KEY
 ```
 
 Effect:
