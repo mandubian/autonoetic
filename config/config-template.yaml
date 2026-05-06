@@ -63,7 +63,7 @@ max_background_due_per_tick: 32
 # ── Response Validation & Repair ──────────────────────────────────────
 # When enabled, the gateway validates agent outputs against declared constraints.
 # repair_enabled allows auto-repair only for agents that explicitly opt in
-# via response_contract.repair.auto.
+# via io.output_policy.repair.auto.
 response_validation:
   enabled: true
   repair_enabled: true

@@ -36,9 +36,8 @@ metadata:
       - type: "Evaluation"
         patterns: ["*"]
     validation: "soft"
-    response_contract:
-      max_reply_length_chars: 8000
-      output_schema:
+    io:
+      returns:
         type: object
         required: ["status", "evaluator_pass", "summary"]
         properties:
@@ -48,13 +47,15 @@ metadata:
             type: boolean
           summary:
             type: string
-      prohibited_text_patterns:
-        - "BEGIN RSA PRIVATE KEY"
-        - "-----BEGIN"
-      repair:
-        auto: true
-        max_attempts: 1
-      validation_max_duration_ms: 60000
+      output_policy:
+        max_reply_length_chars: 8000
+        prohibited_text_patterns:
+          - "BEGIN RSA PRIVATE KEY"
+          - "-----BEGIN"
+        repair:
+          auto: true
+          max_attempts: 1
+        validation_max_duration_ms: 60000
 ---
 # Evaluator
 

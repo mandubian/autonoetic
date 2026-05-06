@@ -1125,7 +1125,7 @@ The system prompt is assembled in `lifecycle.rs:584–612` by concatenating seve
 |---|---|---|---|
 | **Foundation instructions** | `foundation_instructions.md` — 135 lines, ~10KB of gateway rules (16 sections: content storage, artifacts, knowledge, sandbox, clarification protocol, digest, etc.) | ~2,500 | Every turn, every agent |
 | **Agent-specific instructions** | SKILL.md body (e.g., auditor.default = 55 lines, ~1,500 tokens) | 500–3,000 | Every turn |
-| **Response contract** | Injected by `compose_system_instructions_with_metadata()` when `response_contract` is declared | 200–500 | Every turn (when declared) |
+| **Output contract** | Injected by `compose_system_instructions_with_metadata()` when `io.returns` / `io.output_policy` are declared | 200–500 | Every turn (when declared) |
 | **Tool definitions** | 38 registered native tools × JSON schema — serialized at line 595–603 | 4,000–6,000 | Every turn, all available tools |
 | **Conversation history** | All prior user/assistant/tool result messages | Grows unbounded | Every turn |
 | **Total (turn 1, before user message)** | | **~7,200–12,000+** | |
@@ -1305,7 +1305,7 @@ MVP: ship observability (`PromptBudgetBreakdown`) + tool tiering (~200 lines). T
 
 | Aspect | Agent Skills (agentskills.io) | Autonoetic SKILL.md |
 |---|---|---|
-| **Frontmatter fields** | `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools` | `metadata.autonoetic.runtime`, `.agent`, `.capabilities`, `.llm_config`, `.limits`, `.background`, `.disclosure`, `.io`, `.response_contract`, `.execution_mode` |
+| **Frontmatter fields** | `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools` | `metadata.autonoetic.runtime`, `.agent`, `.capabilities`, `.llm_config`, `.limits`, `.background`, `.disclosure`, `.io`, `.execution_mode` |
 | **Body content** | Free-form instructions for the LLM | Agent-specific instructions (same purpose) |
 | **Tool access** | `allowed-tools` is advisory — the host decides enforcement | `capabilities` are enforced by the gateway policy engine |
 | **Execution model** | LLM reads instructions, uses host's tools freely | Sandboxed execution, capability-gated tools, approval gates |

@@ -143,13 +143,13 @@ sandbox:
 
 ## Response Validation & Repair
 
-When enabled, the gateway validates agent outputs against declared constraints in agent metadata before returning results to the caller. Repair mode adds bounded retry loops when validation fails, but only for agents that opt in via `response_contract.repair.auto`.
+When enabled, the gateway validates agent outputs against declared constraints in agent metadata before returning results to the caller. Repair mode adds bounded retry loops when validation fails, but only for agents that opt in via `io.output_policy.repair.auto`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `response_validation.enabled` | bool | `false` | Enable response validation. Validates agent spawn results against declared schemas/constraints. |
-| `response_validation.repair_enabled` | bool | `false` | Enable gateway-side auto-repair subsystem. Actual repair still requires per-agent opt-in via `response_contract.repair.auto: true`. Requires `enabled: true`. |
-| `response_validation.max_repair_attempts_ceiling` | u32 | `2` | System hard ceiling for auto-repair attempts. Effective attempts are `min(response_contract.repair.max_attempts, max_repair_attempts_ceiling)`. |
+| `response_validation.repair_enabled` | bool | `false` | Enable gateway-side auto-repair subsystem. Actual repair still requires per-agent opt-in via `io.output_policy.repair.auto: true`. Requires `enabled: true`. |
+| `response_validation.max_repair_attempts_ceiling` | u32 | `2` | System hard ceiling for auto-repair attempts. Effective attempts are `min(io.output_policy.repair.max_attempts, max_repair_attempts_ceiling)`. |
 
 Example:
 

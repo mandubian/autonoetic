@@ -278,7 +278,7 @@ pub fn install_schema_description() -> String {
 
 **Agent-provided (semantic intent):**
 - agent.id, description, execution_mode, script_entry, llm_config, capabilities
-- Optional: io, middleware, response_contract
+- Optional: io (including io.output_policy), middleware
 
 **Gateway-owned (canonicalized):**
 - SKILL.md metadata shape and field types

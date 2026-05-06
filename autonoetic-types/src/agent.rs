@@ -144,11 +144,6 @@ pub struct AgentManifest {
     pub io: Option<AgentIO>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub middleware: Option<Middleware>,
-    /// Response contract declared in the agent's own SKILL.md frontmatter.
-    /// When present, the gateway uses this as the default contract for any
-    /// spawn of this agent (unless the caller supplies an override in spawn metadata).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_contract: Option<serde_json::Value>,
     /// Execution mode: Script (fast path, no LLM) or Reasoning (default, LLM-driven).
     #[serde(default)]
     pub execution_mode: ExecutionMode,
@@ -448,15 +443,18 @@ pub struct AgentIO {
     /// JSON Schema describing produced output.
     #[serde(default)]
     pub returns: Option<serde_json::Value>,
+    /// Gateway-enforced output policy (non-schema runtime constraints).
+    #[serde(default)]
+    pub output_policy: Option<OutputPolicy>,
 }
 
-/// Response contract declared in agent metadata for post-execution validation.
+/// Gateway-enforced output policy declared in manifest metadata.
 ///
 /// When present, the gateway validates the agent's SpawnResult against these
 /// constraints before returning to the caller. Violations trigger a ToolError
 /// with a repair hint; the agent may retry within bounded loop/duration limits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResponseContract {
+pub struct OutputPolicy {
     /// Artifact names the agent must produce (e.g. "main_report.md").
     #[serde(default)]
     pub required_artifacts: Vec<String>,
@@ -472,10 +470,6 @@ pub struct ResponseContract {
     /// Maximum reply length in characters. Default: no limit.
     #[serde(default)]
     pub max_reply_length_chars: Option<usize>,
-
-    /// Optional JSON Schema the reply text must conform to (when the reply is JSON).
-    #[serde(default)]
-    pub output_schema: Option<serde_json::Value>,
 
     /// Regex patterns that must NOT appear in the reply text.
     /// Used for safety scanning (secret leaks, forbidden paths, etc.).
@@ -498,12 +492,12 @@ pub struct ResponseContract {
 
     /// Auto-repair policy. Disabled by default; agents must opt in explicitly.
     #[serde(default)]
-    pub repair: ResponseContractRepairPolicy,
+    pub repair: OutputPolicyRepairPolicy,
 }
 
 /// Agent-declared policy for gateway-side response auto-repair.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResponseContractRepairPolicy {
+pub struct OutputPolicyRepairPolicy {
     /// Whether gateway auto-repair is enabled for this agent.
     #[serde(default)]
     pub auto: bool,
@@ -521,7 +515,7 @@ fn default_validation_max_duration_ms() -> u64 {
     500
 }
 
-impl ResponseContract {
+impl OutputPolicy {
     /// Clamp loop/duration bounds to allowed ranges.
     pub fn normalize(&mut self) {
         self.validation_max_loops = self.validation_max_loops.clamp(1, 8);
@@ -543,15 +537,11 @@ impl ResponseContract {
             && self.max_artifacts.is_none()
             && self.max_total_size_mb.is_none()
             && self.max_reply_length_chars.is_none()
-            && self.output_schema.is_none()
             && self.prohibited_text_patterns.is_empty()
             && self.min_artifact_builds.is_none()
     }
 
     /// Resolve the declared repair attempts.
-    ///
-    /// New shape uses `repair.max_attempts`; legacy `validation_max_loops` is used
-    /// as fallback during migration (`attempts = max_loops - 1`).
     pub fn declared_repair_attempts(&self) -> usize {
         if let Some(max_attempts) = self.repair.max_attempts {
             return max_attempts as usize;

@@ -2,14 +2,14 @@
 
 Autonoetic can validate an agent's final response after execution and before returning it to the caller. The goal is to enforce durable output constraints at the gateway boundary, not to rely on the agent's free-text claims.
 
-When a response contract is declared, the gateway validates the produced `SpawnResult`. If validation fails, repair runs only when both conditions hold: gateway repair is enabled and the agent explicitly opts in with `response_contract.repair.auto: true`.
+When an output policy is declared, the gateway validates the produced `SpawnResult`. If validation fails, repair runs only when both conditions hold: gateway repair is enabled and the agent explicitly opts in with `io.output_policy.repair.auto: true`.
 
-When no explicit `response_contract.output_schema` is supplied, manifest `io.returns` is treated as the gateway-owned default output schema for the final reply. That keeps output-shape ownership in the gateway instead of leaving it as advisory SKILL prose.
+Manifest `io.returns` is the single gateway-owned output schema for the final reply. There is no separate policy schema override path.
 
 ## What The Gateway Validates
 
-The response contract is declared as `metadata.response_contract` (or by
-`response_contract` in agent `SKILL.md`) and currently supports these fields:
+The output policy is declared as `metadata.autonoetic.io.output_policy` in
+agent `SKILL.md` and currently supports these fields:
 
 ```json
 {
@@ -17,15 +17,6 @@ The response contract is declared as `metadata.response_contract` (or by
   "max_artifacts": 4,
   "max_total_size_mb": 10,
   "max_reply_length_chars": 4000,
-  "output_schema": {
-    "type": "object",
-    "required": ["status", "summary"],
-    "properties": {
-      "status": {"type": "string"},
-      "summary": {"type": "string"}
-    },
-    "additionalProperties": true
-  },
   "prohibited_text_patterns": ["BEGIN RSA PRIVATE KEY", "/home/"],
   "min_artifact_builds": 1,
   "repair": {"auto": true, "max_attempts": 1},
@@ -40,7 +31,7 @@ Validation uses authoritative runtime state, not natural-language assertions:
 - `max_artifacts`: limits the number of returned files.
 - `max_total_size_mb`: sums authoritative byte sizes for returned content handles from the content store.
 - `max_reply_length_chars`: validates the final reply string length.
-- `output_schema`: validates the final reply text when it is JSON. This may come from an explicit response contract or from manifest `io.returns` when no explicit output schema overrides it.
+- `io.returns`: validates the final reply text when it is JSON.
 - `prohibited_text_patterns`: rejects replies that match forbidden regex patterns.
 - `min_artifact_builds`: checks durable execution-trace evidence for successful `artifact_build` calls in the current session branch.
 
@@ -72,7 +63,7 @@ These are complementary but different mechanisms:
 In Phase 4.1, auto-repair is no longer implicit behavior. It runs only when:
 
 1. `response_validation.repair_enabled: true` at gateway level.
-2. `response_contract.repair.auto: true` in the contract.
+2. `io.output_policy.repair.auto: true` in the policy.
 
 Recommendation: prefer structured errors by default; use auto-repair only for
 agents whose deliverables are repetitive, contract-heavy, and commonly repaired
@@ -107,14 +98,14 @@ Non-repairs that will still fail:
 4. Do not treat a passed `sandbox_exec` as sufficient evidence when the contract requires durable output artifacts.
 5. When evaluator or auditor feedback arrives, rebuild and return a new artifact instead of claiming the prior artifact was implicitly updated.
 
-Concretely, the coder SKILL should state that response-contract repair has the same priority as tool error repair: the agent must modify files, artifacts, or reply text until the gateway contract passes.
+Concretely, the coder SKILL should state that output-policy repair has the same priority as tool error repair: the agent must modify files, artifacts, or reply text until the gateway contract passes.
 
 ### `evaluator.default`
 
 `evaluator.default` already produces a structured evaluation report and records promotion evidence. For response validation and repair, its operational rules should be:
 
 1. Ensure the final reply remains valid JSON when the evaluation report is expected to be machine-readable.
-2. Treat `promotion_record` as promotion evidence, but not as a substitute for response-contract outputs; if the contract requires files or bounded reply text, those constraints still apply.
+2. Treat `promotion_record` as promotion evidence, but not as a substitute for output-policy constraints; if the contract requires files or bounded reply text, those constraints still apply.
 3. If the gateway issues a repair prompt, repair the evaluation output itself. That can mean rewriting the JSON report, reducing reply size, or returning the required named report artifact.
 4. Keep findings traceable to the reviewed `artifact_ref` in both the report content and promotion record.
 5. If execution is blocked on approval, stop as instructed; do not force a partial report into a shape that looks complete just to satisfy validation.
@@ -128,15 +119,17 @@ Concretely, the evaluator SKILL should say that repair prompts are authoritative
 
 ```yaml
 metadata:
-  response_contract:
-    required_artifacts:
-      - main.py
-    min_artifact_builds: 1
-    repair:
-      auto: true
-      max_attempts: 1
-    max_reply_length_chars: 1200
-    validation_max_duration_ms: 2000
+  autonoetic:
+    io:
+      output_policy:
+        required_artifacts:
+          - main.py
+        min_artifact_builds: 1
+        repair:
+          auto: true
+          max_attempts: 1
+        max_reply_length_chars: 1200
+        validation_max_duration_ms: 2000
 ```
 
 Effect:
@@ -149,23 +142,25 @@ Effect:
 
 ```yaml
 metadata:
-  response_contract:
-    max_reply_length_chars: 8000
-    repair:
-      auto: true
-      max_attempts: 1
-    output_schema:
-      type: object
-      required: [status, evaluator_pass, summary]
-      properties:
-        status:
-          type: string
-        evaluator_pass:
-          type: boolean
-        summary:
-          type: string
-    prohibited_text_patterns:
-      - BEGIN RSA PRIVATE KEY
+  autonoetic:
+    io:
+      returns:
+        type: object
+        required: [status, evaluator_pass, summary]
+        properties:
+          status:
+            type: string
+          evaluator_pass:
+            type: boolean
+          summary:
+            type: string
+      output_policy:
+        max_reply_length_chars: 8000
+        repair:
+          auto: true
+          max_attempts: 1
+        prohibited_text_patterns:
+          - BEGIN RSA PRIVATE KEY
 ```
 
 Effect:
@@ -203,7 +198,7 @@ Mode semantics:
 
 ## Recommended Usage
 
-- Use response validation for agents that must return durable, reviewable outputs.
-- Keep contracts narrow and operational; validate only what the gateway can verify authoritatively.
+- Use output policy validation for agents that must return durable, reviewable outputs.
+- Keep policies narrow and operational; validate only what the gateway can verify authoritatively.
 - Prefer artifact/file requirements for coder-like agents and schema/length requirements for evaluator-like agents.
 - Enable repair mode when the task is realistically repairable in-session.

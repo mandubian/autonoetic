@@ -1,9 +1,9 @@
 //! Response validation gate — validates agent outputs against declared constraints.
 //!
-//! When enabled, gateway checks SpawnResult against the agent's ResponseContract.
+//! When enabled, gateway checks SpawnResult against the agent's output policy.
 //! Returns violations for each failed check.
 
-use autonoetic_types::agent::ResponseContract;
+use autonoetic_types::agent::OutputPolicy;
 use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::path::Path;
@@ -27,23 +27,26 @@ impl std::fmt::Display for ValidationViolation {
     }
 }
 
-/// Parse a `ResponseContract` from spawn metadata.
-pub fn parse_response_contract(
+/// Parse an `OutputPolicy` from metadata.
+pub fn parse_output_policy(
     metadata: Option<&serde_json::Value>,
-) -> anyhow::Result<Option<ResponseContract>> {
+) -> anyhow::Result<Option<OutputPolicy>> {
     let Some(metadata) = metadata else {
         return Ok(None);
     };
-    let Some(contract_value) = metadata.get("response_contract") else {
+    let Some(io_value) = metadata.get("io") else {
+        return Ok(None);
+    };
+    let Some(policy_value) = io_value.get("output_policy") else {
         return Ok(None);
     };
 
-    let mut contract: ResponseContract = serde_json::from_value(contract_value.clone())
-        .map_err(|e| anyhow::anyhow!("invalid response_contract metadata: {}", e))?;
+    let mut policy: OutputPolicy = serde_json::from_value(policy_value.clone())
+        .map_err(|e| anyhow::anyhow!("invalid io.output_policy metadata: {}", e))?;
 
-    contract.normalize();
+    policy.normalize();
 
-    for pattern in &contract.prohibited_text_patterns {
+    for pattern in &policy.prohibited_text_patterns {
         RegexBuilder::new(pattern)
             .case_insensitive(true)
             .build()
@@ -56,24 +59,25 @@ pub fn parse_response_contract(
             })?;
     }
 
-    if contract.is_empty() {
+    if policy.is_empty() {
         return Ok(None);
     }
-    Ok(Some(contract))
+    Ok(Some(policy))
 }
 
-/// Validate a `SpawnResult` against a `ResponseContract`.
+/// Validate a `SpawnResult` against output schema and output policy.
 ///
 /// Returns an empty vector when all checks pass.
 pub fn validate_spawn_response(
     result: &SpawnResult,
-    contract: &ResponseContract,
+    output_schema: Option<&serde_json::Value>,
+    policy: &OutputPolicy,
     gateway_dir: Option<&Path>,
 ) -> Vec<ValidationViolation> {
     let mut violations = Vec::new();
 
     // 1. Required artifacts
-    for required in &contract.required_artifacts {
+    for required in &policy.required_artifacts {
         let found = result.artifacts.iter().any(|a| a.name == *required)
             || result.files.iter().any(|f| f.name == *required);
         if !found {
@@ -89,7 +93,7 @@ pub fn validate_spawn_response(
     }
 
     // 2. Max artifacts
-    if let Some(max) = contract.max_artifacts {
+    if let Some(max) = policy.max_artifacts {
         if result.artifacts.len() > max {
             violations.push(ValidationViolation {
                 rule: "max_artifacts".into(),
@@ -104,7 +108,7 @@ pub fn validate_spawn_response(
     }
 
     // 3. Max total size of unique named outputs.
-    if let Some(max_mb) = contract.max_total_size_mb {
+    if let Some(max_mb) = policy.max_total_size_mb {
         match compute_total_output_size_bytes(result, gateway_dir) {
             Ok(total_bytes) => {
                 let max_bytes = max_mb.saturating_mul(1024 * 1024);
@@ -133,7 +137,7 @@ pub fn validate_spawn_response(
     }
 
     // 4. Max reply length
-    if let Some(max_chars) = contract.max_reply_length_chars {
+    if let Some(max_chars) = policy.max_reply_length_chars {
         if let Some(ref reply) = result.assistant_reply {
             if reply.len() > max_chars {
                 violations.push(ValidationViolation {
@@ -147,8 +151,8 @@ pub fn validate_spawn_response(
 
     // 5. Prohibited text patterns — compile the validated regex and match case-insensitively.
     if let Some(ref reply) = result.assistant_reply {
-        for pattern in &contract.prohibited_text_patterns {
-            // Patterns were validated at parse_response_contract time; compile is safe.
+        for pattern in &policy.prohibited_text_patterns {
+            // Patterns were validated at parse_output_policy time; compile is safe.
             let Ok(re) = RegexBuilder::new(pattern).case_insensitive(true).build() else {
                 continue; // defensive — should never happen after parse validation
             };
@@ -163,7 +167,7 @@ pub fn validate_spawn_response(
     }
 
     // 6. Output schema (JSON only, lightweight validation)
-    if let Some(ref schema) = contract.output_schema {
+    if let Some(schema) = output_schema {
         let schema_is_constrained =
             schema.get("required").is_some() || schema.get("properties").is_some();
         match result.assistant_reply.as_deref() {
@@ -326,11 +330,11 @@ pub fn validate_promotion_record(
 pub fn validate_session_evidence(
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     session_id: &str,
-    contract: &ResponseContract,
+    policy: &OutputPolicy,
 ) -> Vec<ValidationViolation> {
     let mut violations = Vec::new();
 
-    let min_builds = contract.min_artifact_builds.unwrap_or(0);
+    let min_builds = policy.min_artifact_builds.unwrap_or(0);
     if min_builds == 0 {
         return violations;
     }

@@ -1059,7 +1059,7 @@ scope is still pending.
 automatically, or reject and let the agent retry?
 
 Recommendation: make repair opt-in per-agent via manifest
-(`response_contract.repair.auto: bool`, default `false`). When
+(`io.output_policy.repair.auto: bool`, default `false`). When
 disabled, validation failure returns a structured error, the agent
 decides whether to retry. Cap auto-repair attempts at a declared
 value within a system ceiling.

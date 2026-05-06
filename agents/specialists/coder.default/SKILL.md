@@ -31,13 +31,14 @@ metadata:
       - type: "AgentMessage"
         patterns: ["*"]
     validation: "soft"
-    response_contract:
-      max_reply_length_chars: 2000
-      min_artifact_builds: 1
-      repair:
-        auto: true
-        max_attempts: 1
-      validation_max_duration_ms: 60000
+    io:
+      output_policy:
+        max_reply_length_chars: 2000
+        min_artifact_builds: 1
+        repair:
+          auto: true
+          max_attempts: 1
+        validation_max_duration_ms: 60000
 ---
 # Coder
 
@@ -95,7 +96,7 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
     - `script_entry` (required for script mode — the main entry script filename only, e.g. "main.py" or "scripts/joke_ticker.py". NEVER include the interpreter prefix like "python3 main.py")
     - `llm_config` (required for reasoning mode)
     - `capabilities`
-    - optional `io` / `middleware` / `response_contract`
+    - optional `io` / `middleware` (including `io.output_policy`)
   The returned `artifact_ref` is the canonical install handoff. Prefer it over loose `cnt_...` handles for later packaging, validation, or installation.
 7. Suggested handoff text:
   "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full pipeline, or specialized_builder.default only if you are already at the final install step."

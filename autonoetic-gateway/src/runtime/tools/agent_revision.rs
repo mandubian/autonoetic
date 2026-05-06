@@ -394,8 +394,6 @@ struct RevisionCreateFromIntentArgs {
     io: Option<AgentIO>,
     #[serde(default)]
     middleware: Option<Middleware>,
-    #[serde(default)]
-    response_contract: Option<serde_json::Value>,
     #[serde(default, alias = "base_ref")]
     base_revision_id: Option<String>,
     #[serde(default, alias = "change_summary")]
@@ -1050,10 +1048,9 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     },
                     "io": {
                         "type": "object",
-                        "description": "I/O schema contract. For script agents, declare accepts (input JSON schema) and returns (output JSON schema) so callers know how to format messages. Example: {\"accepts\":{\"type\":\"object\",\"required\":[\"task\"],\"properties\":{\"task\":{\"type\":\"string\"}}},\"returns\":{\"type\":\"object\"}}"
+                        "description": "I/O contract. Declare accepts (input JSON schema), returns (output JSON schema), and optional output_policy (runtime output constraints). Example: {\"accepts\":{\"type\":\"object\",\"required\":[\"task\"],\"properties\":{\"task\":{\"type\":\"string\"}}},\"returns\":{\"type\":\"object\"},\"output_policy\":{\"max_reply_length_chars\":2000}}"
                     },
                     "middleware": { "type": "object" },
-                    "response_contract": { "type": "object" },
                     "base_revision_id": { "type": "string" },
                     "summary": { "type": "string" }
                 },
@@ -1301,7 +1298,6 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             disclosure: None,
             io: args.io.clone(),
             middleware: args.middleware.clone(),
-            response_contract: args.response_contract.clone(),
             execution_mode: resolved_mode,
             script_entry: resolved_script_entry.clone(),
             script_input_mode: args.script_input_mode.unwrap_or_default(),

@@ -67,39 +67,13 @@ metadata:
           summary:
             type: string
         additionalProperties: false
-    response_contract:
-      max_reply_length_chars: 4000
-      output_schema:
-        type: object
-        required:
-          - service
-          - credential_id
-          - env_var
-          - ready_for_execution
-          - public_data
-          - next_action
-          - summary
-        properties:
-          service:
-            type: string
-          credential_id:
-            type: [string, "null"]
-          env_var:
-            type: [string, "null"]
-          ready_for_execution:
-            type: boolean
-          public_data:
-            type: object
-          next_action:
-            type: [string, "null"]
-          summary:
-            type: string
-        additionalProperties: false
-      prohibited_text_patterns:
-        - "BEGIN RSA PRIVATE KEY"
-        - "-----BEGIN"
-      validation_max_loops: 2
-      validation_max_duration_ms: 60000
+      output_policy:
+        max_reply_length_chars: 4000
+        prohibited_text_patterns:
+          - "BEGIN RSA PRIVATE KEY"
+          - "-----BEGIN"
+        validation_max_loops: 2
+        validation_max_duration_ms: 60000
 ---
 # Registration
 
@@ -107,7 +81,7 @@ You drive service onboarding via `credential_setup`. All API calls and secret ha
 
 ## CRITICAL: Final Response Must Be Valid JSON
 
-Your final message must be a single JSON object that matches the response contract in frontmatter. Do not end with markdown, prose paragraphs, or code fences.
+Your final message must be a single JSON object that matches the `io.returns` schema in frontmatter. Do not end with markdown, prose paragraphs, or code fences.
 
 ## Input
 

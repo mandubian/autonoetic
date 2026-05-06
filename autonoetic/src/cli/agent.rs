@@ -514,7 +514,6 @@ fn admin_revision_manifest() -> AgentManifest {
         disclosure: None,
         io: None,
         middleware: None,
-        response_contract: None,
         execution_mode: ExecutionMode::Reasoning,
         script_entry: None,
         script_input_mode: Default::default(),
@@ -1744,7 +1743,6 @@ pub fn handle_agent_import_skill(
         script_input_mode: parsed_manifest.script_input_mode,
         gateway_url: None,
         gateway_token: None,
-        response_contract: parsed_manifest.response_contract.clone(),
         allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
         agentskills_import,
         compression: parsed_manifest.compression.clone(),
@@ -1897,6 +1895,12 @@ pub fn handle_agent_import_skill(
                     serde_json::to_string(returns).unwrap_or_default()
                 ));
             }
+            if let Some(ref output_policy) = io.output_policy {
+                lines.push(format!(
+                    "      output_policy: {}",
+                    serde_json::to_string(output_policy).unwrap_or_default()
+                ));
+            }
         }
         if let Some(ref mw) = target_manifest.middleware {
             if mw.pre_process.is_some() || mw.post_process.is_some() {
@@ -1918,12 +1922,6 @@ pub fn handle_agent_import_skill(
         ));
         if let Some(ref se) = target_manifest.script_entry {
             lines.push(format!("    script_entry: \"{}\"", se));
-        }
-        if let Some(ref rc) = target_manifest.response_contract {
-            lines.push(format!(
-                "    response_contract: {}",
-                serde_json::to_string(rc).unwrap_or_default()
-            ));
         }
         if !target_manifest.allowed_tool_tiers.is_empty() {
             lines.push("    allowed_tool_tiers:".to_string());

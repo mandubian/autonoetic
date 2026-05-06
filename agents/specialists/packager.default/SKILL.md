@@ -31,13 +31,14 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*", "scripts/*"]
     validation: "soft"
-    response_contract:
-      max_reply_length_chars: 2000
-      min_artifact_builds: 1
-      repair:
-        auto: true
-        max_attempts: 1
-      validation_max_duration_ms: 120000
+    io:
+      output_policy:
+        max_reply_length_chars: 2000
+        min_artifact_builds: 1
+        repair:
+          auto: true
+          max_attempts: 1
+        validation_max_duration_ms: 120000
     remote_access:
       approval_mode: "preapproved"
       targets:

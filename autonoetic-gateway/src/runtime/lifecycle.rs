@@ -191,24 +191,24 @@ impl ExecuteLoopTermination {
 }
 
 /// Build the system prompt given agent instructions and (optionally) raw agent
-/// metadata (the full `metadata.autonoetic` object from the SKILL.md frontmatter).
+/// output policy metadata from the SKILL.md frontmatter.
 ///
-/// When `metadata` is provided and contains a `response_contract`, a
-/// "Your Response Contract" section is appended so the agent knows upfront what
+/// When output constraints are declared, an
+/// "Your Output Contract" section is appended so the agent knows upfront what
 /// constraints the gateway will validate before returning its output to the caller.
 pub(crate) fn compose_system_instructions_with_metadata(
     agent_instructions: &str,
     manifest: &AgentManifest,
-    metadata: Option<&serde_json::Value>,
+    output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
 ) -> String {
-    compose_system_instructions_with_user_context(agent_instructions, manifest, metadata, None)
+    compose_system_instructions_with_user_context(agent_instructions, manifest, output_policy, None)
 }
 
 /// Full system prompt composition with optional user context injection.
 pub(crate) fn compose_system_instructions_with_user_context(
     agent_instructions: &str,
     manifest: &AgentManifest,
-    metadata: Option<&serde_json::Value>,
+    output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
     user_context_snippet: Option<&str>,
 ) -> String {
     let foundation = compose_foundation(manifest);
@@ -235,62 +235,61 @@ pub(crate) fn compose_system_instructions_with_user_context(
         parts.join("\n\n")
     };
 
-    let contract_section = metadata
-        .and_then(|m| m.get("response_contract"))
-        .and_then(|v| {
-            let mut lines: Vec<String> = Vec::new();
+    let contract_section = {
+        let mut lines: Vec<String> = Vec::new();
 
-            if let Some(arr) = v.get("required_artifacts").and_then(|a| a.as_array()) {
-                if !arr.is_empty() {
-                    let names: Vec<String> = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                    lines.push(format!("- **required_artifacts**: {}", names.join(", ")));
-                }
+        if let Some(schema) = manifest
+            .io
+            .as_ref()
+            .and_then(|io| io.returns.as_ref())
+        {
+            if let Ok(compact) = serde_json::to_string(schema) {
+                lines.push(format!("- **io.returns** (your reply must conform): `{compact}`"));
             }
-            if let Some(n) = v.get("max_artifacts").and_then(|x| x.as_u64()) {
+        }
+
+        if let Some(policy) = output_policy {
+            if !policy.required_artifacts.is_empty() {
+                lines.push(format!(
+                    "- **required_artifacts**: {}",
+                    policy.required_artifacts.join(", ")
+                ));
+            }
+            if let Some(n) = policy.max_artifacts {
                 lines.push(format!("- **max_artifacts**: {n}"));
             }
-            if let Some(n) = v.get("max_total_size_mb").and_then(|x| x.as_u64()) {
+            if let Some(n) = policy.max_total_size_mb {
                 lines.push(format!("- **max_total_size_mb**: {n}"));
             }
-            if let Some(n) = v.get("max_reply_length_chars").and_then(|x| x.as_u64()) {
+            if let Some(n) = policy.max_reply_length_chars {
                 lines.push(format!("- **max_reply_length_chars**: {n}"));
             }
-            if let Some(n) = v.get("min_artifact_builds").and_then(|x| x.as_u64()) {
+            if let Some(n) = policy.min_artifact_builds {
                 lines.push(format!(
                     "- **min_artifact_builds**: {n} (durable `artifact.build` trace required)"
                 ));
             }
-            if let Some(schema) = v.get("output_schema") {
-                // Compact JSON so the token cost is low, but the agent can read it
-                if let Ok(compact) = serde_json::to_string(schema) {
-                    lines.push(format!("- **output_schema** (your reply must conform): `{compact}`"));
-                }
+            if !policy.prohibited_text_patterns.is_empty() {
+                lines.push(format!(
+                    "- **prohibited_text_patterns**: {}",
+                    policy.prohibited_text_patterns.join(", ")
+                ));
             }
-            if let Some(arr) = v.get("prohibited_text_patterns").and_then(|a| a.as_array()) {
-                if !arr.is_empty() {
-                    let pats: Vec<String> = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                    lines.push(format!("- **prohibited_text_patterns**: {}", pats.join(", ")));
-                }
-            }
-            if let Some(n) = v.get("validation_max_loops").and_then(|x| x.as_u64()) {
-                lines.push(format!("- **validation_max_loops**: {n}"));
-            }
+            lines.push(format!(
+                "- **validation_max_loops**: {}",
+                policy.validation_max_loops
+            ));
+        }
 
-            if lines.is_empty() {
-                None
-            } else {
-                Some(format!(
-                    "---\n\nYour Response Contract\n\nThe gateway will validate your final output against these constraints before returning it to the caller. Violating constraints triggers a repair prompt; you have at most `validation_max_loops` attempts to fix the actual outputs.\n\n{}",
-                    lines.join("\n")
-                ))
-            }
-        });
+        if lines.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "---\n\nYour Output Contract\n\nThe gateway will validate your final output against these constraints before returning it to the caller. Violating constraints triggers a repair prompt; repairs are bounded by the declared policy.\n\n{}",
+                lines.join("\n")
+            ))
+        }
+    };
 
     match contract_section {
         Some(section) => format!("{base}\n\n{section}"),
@@ -425,7 +424,6 @@ mod agentskills_bridging_tests {
             script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
-            response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
@@ -1474,7 +1472,10 @@ impl AgentExecutor {
         let mut system_instructions = compose_system_instructions_with_user_context(
             &self.instructions,
             &self.manifest,
-            self.manifest.response_contract.as_ref(),
+            self.manifest
+                .io
+                .as_ref()
+                .and_then(|io| io.output_policy.as_ref()),
             user_context.as_deref(),
         );
         if let Some(tail) = self.build_state_attestation_tail()? {
@@ -1908,7 +1909,10 @@ impl AgentExecutor {
             let mut system_instructions = compose_system_instructions_with_user_context(
                 &self.instructions,
                 &self.manifest,
-                self.manifest.response_contract.as_ref(),
+                self.manifest
+                    .io
+                    .as_ref()
+                    .and_then(|io| io.output_policy.as_ref()),
                 user_context.as_deref(),
             );
             if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
@@ -3584,8 +3588,6 @@ mod tests {
             script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
-
-            response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
@@ -4828,6 +4830,7 @@ Hope this helps!"#;
                 "type": "object",
                 "required": ["result"]
             })),
+            output_policy: None,
         });
 
         let temp = tempdir().expect("tempdir should create");
@@ -5413,7 +5416,6 @@ mod tier_filter_tests {
             script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
-            response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,

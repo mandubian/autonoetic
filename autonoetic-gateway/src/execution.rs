@@ -2377,11 +2377,9 @@ impl GatewayExecutionService {
             );
         }
 
-        // Response validation gate: check the result against the response contract declared
-        // in spawn metadata; run bounded repair loop when repair_enabled is set.
-        // Fallback: when the caller supplies no metadata contract, use the contract declared
-        // in the agent's own SKILL.md frontmatter. If neither provides an output schema,
-        // manifest `io.returns` becomes the default output_schema for the final reply.
+        // Response validation gate:
+        // - output shape is enforced from manifest `io.returns`.
+        // - non-schema runtime constraints are enforced from manifest `io.output_policy`.
         // Validation is skipped for suspended sessions (they haven't finished producing output).
         let gateway_dir = crate::execution::gateway_root_dir(&self.config);
         let manifest_loaded = {
@@ -2394,93 +2392,88 @@ impl GatewayExecutionService {
             .as_ref()
             .and_then(|manifest| manifest.io.as_ref())
             .and_then(|io| io.returns.clone());
-        let metadata_has_output_schema = metadata
-            .and_then(|value| value.get("response_contract"))
-            .and_then(|value| value.get("output_schema"))
-            .is_some();
-        let manifest_contract_has_output_schema = manifest_loaded
+        let manifest_output_policy = manifest_loaded
             .as_ref()
-            .and_then(|manifest| manifest.response_contract.as_ref())
-            .and_then(|value| value.get("output_schema"))
-            .is_some();
-        let enforcing_manifest_returns = manifest_returns_schema.is_some()
-            && !metadata_has_output_schema
-            && !manifest_contract_has_output_schema;
+            .and_then(|manifest| manifest.io.as_ref())
+            .and_then(|io| io.output_policy.clone());
+
+        if let Some(meta) = metadata {
+            if meta.get("response_contract").is_some() {
+                return Err(anyhow::anyhow!(
+                    "response_contract metadata is no longer supported; declare io.output_policy in the target agent manifest"
+                ));
+            }
+            if meta
+                .get("io")
+                .and_then(|io| io.get("returns").or_else(|| io.get("output_policy")))
+                .is_some()
+            {
+                return Err(anyhow::anyhow!(
+                    "spawn metadata may not override io.returns or io.output_policy; declare them in the target agent manifest"
+                ));
+            }
+        }
 
         if result.suspended_for_approval.is_none()
             && !result.suspended_for_user_input
-            && (self.config.response_validation.enabled || enforcing_manifest_returns)
+            && (manifest_returns_schema.is_some()
+                || (self.config.response_validation.enabled && manifest_output_policy.is_some()))
         {
-            let effective_metadata =
-                build_effective_response_contract_metadata(metadata, manifest_loaded.as_ref());
-            let metadata_ref: Option<&serde_json::Value> = effective_metadata.as_ref().or(metadata);
-            match crate::runtime::response_validation::parse_response_contract(metadata_ref) {
-                Ok(Some(contract)) => {
-                    let validation_session_id = result.session_id.clone();
-                    match self
-                        .validate_and_maybe_repair(
+            let mut output_policy = manifest_output_policy.unwrap_or_default();
+            output_policy.normalize();
+            let validation_session_id = result.session_id.clone();
+            match self
+                .validate_and_maybe_repair(
+                    agent_id,
+                    result,
+                    manifest_returns_schema.as_ref(),
+                    &output_policy,
+                    source_agent_id,
+                    workflow_id,
+                    task_id,
+                )
+                .await
+            {
+                Ok(validated) => {
+                    if let Some(expected_schema) = manifest_returns_schema.as_ref() {
+                        log_contract_enforcement_event_to_gateway(
+                            self.gateway_store.as_deref(),
                             agent_id,
-                            result,
-                            &contract,
+                            &validated.session_id,
+                            "io.returns",
+                            EntryStatus::Success,
                             source_agent_id,
-                            workflow_id,
-                            task_id,
-                        )
-                        .await
-                    {
-                        Ok(validated) => {
-                            if enforcing_manifest_returns {
-                                if let Some(expected_schema) = manifest_returns_schema.as_ref() {
-                                    log_contract_enforcement_event_to_gateway(
-                                        self.gateway_store.as_deref(),
-                                        agent_id,
-                                        &validated.session_id,
-                                        "io.returns",
-                                        EntryStatus::Success,
-                                        source_agent_id,
-                                        serde_json::json!({
-                                            "contract": "io.returns",
-                                            "result": "pass",
-                                            "expected_schema": expected_schema,
-                                            "source_agent_id": source_agent_id,
-                                            "enforcer": "response_validation"
-                                        }),
-                                    );
-                                }
-                            }
-                            result = validated;
-                        }
-                        Err(error) => {
-                            if enforcing_manifest_returns {
-                                if let Some(expected_schema) = manifest_returns_schema.as_ref() {
-                                    log_contract_enforcement_event_to_gateway(
-                                        self.gateway_store.as_deref(),
-                                        agent_id,
-                                        &validation_session_id,
-                                        "io.returns",
-                                        EntryStatus::Denied,
-                                        source_agent_id,
-                                        serde_json::json!({
-                                            "contract": "io.returns",
-                                            "result": "rejected",
-                                            "expected_schema": expected_schema,
-                                            "source_agent_id": source_agent_id,
-                                            "reason": error.to_string(),
-                                            "enforcer": "response_validation"
-                                        }),
-                                    );
-                                }
-                            }
-                            return Err(error);
-                        }
+                            serde_json::json!({
+                                "contract": "io.returns",
+                                "result": "pass",
+                                "expected_schema": expected_schema,
+                                "source_agent_id": source_agent_id,
+                                "enforcer": "response_validation"
+                            }),
+                        );
                     }
+                    result = validated;
                 }
-                Ok(None) => {} // no contract in metadata — skip validation
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "invalid response_contract in metadata: {}",
-                        e
-                    ));
+                Err(error) => {
+                    if let Some(expected_schema) = manifest_returns_schema.as_ref() {
+                        log_contract_enforcement_event_to_gateway(
+                            self.gateway_store.as_deref(),
+                            agent_id,
+                            &validation_session_id,
+                            "io.returns",
+                            EntryStatus::Denied,
+                            source_agent_id,
+                            serde_json::json!({
+                                "contract": "io.returns",
+                                "result": "rejected",
+                                "expected_schema": expected_schema,
+                                "source_agent_id": source_agent_id,
+                                "reason": error.to_string(),
+                                "enforcer": "response_validation"
+                            }),
+                        );
+                    }
+                    return Err(error);
                 }
             }
         }
@@ -2628,7 +2621,7 @@ impl GatewayExecutionService {
         Ok(result)
     }
 
-    /// Validate a `SpawnResult` against a `ResponseContract` and, when repair is enabled,
+    /// Validate a `SpawnResult` against output schema/policy and, when repair is enabled,
     /// re-enter the child agent session (via its hibernation checkpoint) to give the agent
     /// a bounded number of repair attempts.
     ///
@@ -2637,15 +2630,16 @@ impl GatewayExecutionService {
     /// repair turn the fresh durable state is re-collected and re-validated.
     ///
     /// Hard guards enforced:
-    /// - `contract.validation_max_loops` — total rounds including the initial execution
+    /// - `output_policy.validation_max_loops` — total rounds including the initial execution
     ///   (repair attempts = max_loops - 1; default: 1, meaning no repair).
-    /// - `contract.validation_max_duration_ms` — wall-clock deadline across all repair rounds.
+    /// - `output_policy.validation_max_duration_ms` — wall-clock deadline across all repair rounds.
     /// - Session suspension during repair (approval gate / user.ask) → repair aborted.
     async fn validate_and_maybe_repair(
         &self,
         agent_id: &str,
         mut result: SpawnResult,
-        contract: &autonoetic_types::agent::ResponseContract,
+        output_schema: Option<&serde_json::Value>,
+        output_policy: &autonoetic_types::agent::OutputPolicy,
         source_agent_id: Option<&str>,
         workflow_id: Option<&str>,
         task_id: Option<&str>,
@@ -2655,12 +2649,12 @@ impl GatewayExecutionService {
             violations_to_final_error,
         };
 
-        let max_duration_ms = contract.validation_max_duration_ms;
+        let max_duration_ms = output_policy.validation_max_duration_ms;
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(max_duration_ms as u64);
         let repair_enabled =
-            self.config.response_validation.repair_enabled && contract.repair.auto;
-        let max_repair_rounds = contract.declared_repair_attempts().min(
+            self.config.response_validation.repair_enabled && output_policy.repair.auto;
+        let max_repair_rounds = output_policy.declared_repair_attempts().min(
             self.config
                 .response_validation
                 .max_repair_attempts_ceiling as usize,
@@ -2669,11 +2663,12 @@ impl GatewayExecutionService {
         // Initial validation.
         let gateway_dir = self.config.agents_dir.join(".gateway");
 
-        let mut violations = validate_spawn_response(&result, contract, Some(&gateway_dir));
+        let mut violations =
+            validate_spawn_response(&result, output_schema, output_policy, Some(&gateway_dir));
         violations.extend(validate_session_evidence(
             self.gateway_store.as_deref(),
             &result.session_id,
-            contract,
+            output_policy,
         ));
         if violations.is_empty() {
             tracing::debug!(
@@ -2812,11 +2807,16 @@ impl GatewayExecutionService {
             // Re-validate against the fresh state returned by respawn_from_checkpoint.
             // Do this BEFORE the deadline check so a successful repair is never discarded
             // just because the LLM took longer than validation_max_duration_ms to respond.
-            violations = validate_spawn_response(&repaired, contract, Some(&gateway_dir));
+            violations = validate_spawn_response(
+                &repaired,
+                output_schema,
+                output_policy,
+                Some(&gateway_dir),
+            );
             violations.extend(validate_session_evidence(
                 self.gateway_store.as_deref(),
                 &repaired.session_id,
-                contract,
+                output_policy,
             ));
             result = repaired;
 
@@ -3369,65 +3369,6 @@ fn log_input_schema_validation_to_gateway(
     Ok(())
 }
 
-fn build_effective_response_contract_metadata(
-    metadata: Option<&serde_json::Value>,
-    manifest: Option<&AgentManifest>,
-) -> Option<serde_json::Value> {
-    // Preserve caller metadata unchanged when response_contract is present but not an object,
-    // so parse_response_contract can surface the invalid contract instead of masking it.
-    if let Some(incoming) = metadata {
-        if let Some(contract_value) = incoming.get("response_contract") {
-            if !contract_value.is_object() {
-                return metadata.cloned();
-            }
-        }
-    }
-
-    let manifest_contract = manifest.and_then(|loaded| loaded.response_contract.clone());
-    let manifest_returns_schema = manifest
-        .and_then(|loaded| loaded.io.as_ref())
-        .and_then(|io| io.returns.clone());
-
-    let mut response_contract = metadata
-        .and_then(|value| value.get("response_contract"))
-        .cloned()
-        .or(manifest_contract)
-        .and_then(|value| match value {
-            serde_json::Value::Object(map) => Some(map),
-            _ => None,
-        });
-
-    match (response_contract.as_mut(), manifest_returns_schema) {
-        (Some(contract), Some(schema)) => {
-            contract
-                .entry("output_schema".to_string())
-                .or_insert(schema);
-        }
-        (Some(_), None) => {}
-        (None, Some(schema)) => {
-            let mut contract = serde_json::Map::new();
-            contract.insert("output_schema".to_string(), schema);
-            response_contract = Some(contract);
-        }
-        (None, None) => return metadata.cloned(),
-    }
-
-    let mut effective = metadata.cloned().unwrap_or_else(|| serde_json::json!({}));
-    if !effective.is_object() {
-        effective = serde_json::json!({});
-    }
-    if let Some(contract) = response_contract {
-        if let Some(object) = effective.as_object_mut() {
-            object.insert(
-                "response_contract".to_string(),
-                serde_json::Value::Object(contract),
-            );
-            return Some(effective);
-        }
-    }
-    None
-}
-
 fn contract_event_seq() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3842,7 +3783,10 @@ fn build_initial_history(
         crate::runtime::lifecycle::compose_system_instructions_with_metadata(
             instructions,
             manifest,
-            manifest.response_contract.as_ref(),
+            manifest
+                .io
+                .as_ref()
+                .and_then(|io| io.output_policy.as_ref()),
         ),
     )];
     match SessionContext::load(agent_dir, session_id).and_then(|context| {

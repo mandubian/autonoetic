@@ -56,8 +56,6 @@ struct AutonoeticMetadata {
     #[serde(default)]
     gateway_token: Option<String>,
     #[serde(default)]
-    response_contract: Option<serde_json::Value>,
-    #[serde(default)]
     allowed_tool_tiers: Option<Vec<autonoetic_types::agent::ToolTier>>,
     #[serde(default)]
     compression: Option<CompressionConfig>,
@@ -77,6 +75,7 @@ impl SkillParser {
         let data: gray_matter::Pod = parsed
             .data
             .ok_or_else(|| anyhow::anyhow!("No YAML frontmatter found in SKILL.md"))?;
+        reject_legacy_response_contract(content)?;
 
         let manifest = match data.deserialize::<AgentManifest>() {
             Ok(v) => v,
@@ -156,11 +155,28 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         script_input_mode: meta.script_input_mode.unwrap_or_default(),
         gateway_url: meta.gateway_url,
         gateway_token: meta.gateway_token,
-        response_contract: meta.response_contract,
         allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
         agentskills_import,
         compression: meta.compression,
     }
+}
+
+fn reject_legacy_response_contract(content: &str) -> anyhow::Result<()> {
+    let mut parts = content.splitn(3, "---");
+    let _ = parts.next();
+    let Some(frontmatter) = parts.next() else {
+        return Ok(());
+    };
+
+    let has_legacy_field = frontmatter
+        .lines()
+        .any(|line| line.trim_start().starts_with("response_contract:"));
+    if has_legacy_field {
+        anyhow::bail!(
+            "response_contract is no longer supported; use metadata.autonoetic.io.output_policy and metadata.autonoetic.io.returns instead"
+        );
+    }
+    Ok(())
 }
 
 /// Infers Autonoetic capabilities from AgentSkills.io `allowed-tools` entries.

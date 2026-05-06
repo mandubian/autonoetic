@@ -141,7 +141,7 @@ print(json.dumps({"result": input_data}))
 **Input schema contract:**
 - The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest. The gateway surfaces these through `agent_list` so callers can shape `message` correctly before calling `agent_spawn`.
 - When `io.accepts` is present, the gateway parses the caller's `message` and validates it against the schema. On mismatch, `agent_spawn` returns `{ "ok": false, "error": "schema_validation_failed", "expected_schema": ..., "fields_with_errors": [...], "hint": ... }` — the calling LLM reads this and retries with a corrected payload. Type coercion (default values, type defaults for required fields) is applied silently.
-- When `io.returns` is present, the gateway validates the child agent's final reply before returning the `SpawnResult` to the caller. If no explicit `response_contract.output_schema` overrides it, `io.returns` becomes the default output schema. Mismatches are rejected at the gateway boundary and recorded as contract events so drift is visible in traces.
+- When `io.returns` is present, the gateway validates the child agent's final reply before returning the `SpawnResult` to the caller. Output-policy checks (reply length, prohibited patterns, artifact constraints, repair policy) are declared separately under `io.output_policy`. Mismatches are rejected at the gateway boundary and recorded as contract events so drift is visible in traces.
 - When `io.accepts` is absent, `message` is passed through unchanged. The script is responsible for parsing it.
 - The gateway does **not** invent a default schema: `create_from_intent` without an explicit `io` installs the agent with `io: None`.
 
