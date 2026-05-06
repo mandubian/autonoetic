@@ -12,7 +12,7 @@ The agent-adapter pattern (`agent-adapter.default`) handles schema mismatches by
 ## Design Principles
 
 1. **Gateway intercepts, gateway decides** — the schema enforcement hook sits between the calling agent's tool call and the target agent's execution
-2. **Pluggable enforcers** — swap between pure code and LLM-based enforcement without changing gateway architecture
+2. **Deterministic enforcement only** — schema coercion is pure code; gateway does not call LLMs in this path
 3. **Fail informatively** — when coercion is impossible, return actionable errors the LLM can reason about and repair
 4. **Audit everything** — every coercion, rejection, and passthrough is logged to the causal chain
 
@@ -87,33 +87,26 @@ Rule-based transformations, no LLM involved:
 
 Cannot fix: deeply nested structural mismatches, wrong array element shapes, semantic errors.
 
-### 2. LlmCoercionEnforcer (cheap LLM — later)
+### 2. LLM coercion fallback (removed)
 
-Calls a fast, cheap model (GPT-4o-mini, Haiku) with:
-- The malformed payload
-- The target schema (JSON Schema)
-- Short system prompt: "Transform input to match schema. Return only valid JSON."
-
-Higher success rate, costs tokens. Good fallback when deterministic enforcer rejects.
+Phase 4.2 removed LLM coercion from gateway schema enforcement. If deterministic
+coercion fails, the gateway returns a structured schema error and the agent must
+repair explicitly (or delegate to a specialist agent).
 
 ## Configuration
 
 ```yaml
 # gateway config
 schema_enforcement:
-  # Primary enforcer (always runs first)
-  primary: "deterministic"
-  
-  # Fallback when primary rejects (null = no fallback, reject immediately)
-  fallback: null  # or "llm"
-  
+  # Deterministic-only enforcement mode.
+  mode: deterministic
+
   # Log all enforcement decisions to causal chain
   audit: true
-  
+
   # Per-agent overrides
   agent_overrides:
-    planner.default:
-      fallback: "llm"  # planner calls many agents, worth the cost
+    planner.default: deterministic
 ```
 
 ## Error Shape Returned to Agent
@@ -177,4 +170,4 @@ The hook is the default fast path. The adapter is for complex transformations. E
 6. Add unit tests for coercion rules (pass, coerce, reject paths)
 7. Add integration tests proving malformed payloads are fixed or rejected with hints
 8. Update planner `SKILL.md` guidance to note that structural errors are auto-corrected when possible
-9. (Later) Implement `LlmCoercionEnforcer` with fallback chain from deterministic
+9. Keep gateway schema enforcement deterministic-only; no LLM fallback.

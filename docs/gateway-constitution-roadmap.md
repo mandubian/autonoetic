@@ -1067,17 +1067,20 @@ value within a system ceiling.
 Size: L (RFC + implementation + migration for agents currently relying
 on auto-repair).
 
-### 4.2 Schema LLM-coercion fallback
+### 4.2 Schema LLM-coercion fallback — **ENFORCED**
 
-**Decision required.** Disable LLM coercion in gateway entirely?
+Gateway schema enforcement is deterministic-only. Legacy `llm` mode has
+been removed from `SchemaEnforcementMode` and config parsing now rejects
+`schema_enforcement.mode: llm` (and `agent_overrides.*: llm`) fail-shut.
+When deterministic coercion cannot satisfy `io.accepts`, the gateway
+returns a structured schema mismatch error; repair must happen explicitly
+in-agent or via a specialist spawn.
 
-Recommendation: yes. Either deterministic coerce succeeds or the
-agent receives a schema error. If automated repair is desired, run
-it as a capability-bound specialist agent (`schema_repair` or similar)
-that the parent can spawn explicitly. Gateway does not call LLMs to
-reshape input.
+Files: `autonoetic-types/src/config.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_no_llm_coercion.rs`,
+`docs/config-reference.md`, `docs/schema-enforcement-hook.md`.
 
-Size: M. Removal + test + documentation update.
+Size: M. Completed via mode removal + docs + constitutional test pin.
 
 ### 4.3 Remote-access static analyzer
 

@@ -156,7 +156,7 @@ chat:
 
 # ── Schema Enforcement ────────────────────────────────────────────────
 # Validates agent.spawn payloads against declared schemas.
-# mode: disabled | deterministic | llm
+# mode: disabled | deterministic
 schema_enforcement:
   mode: deterministic
   audit: true

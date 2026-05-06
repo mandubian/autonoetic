@@ -182,7 +182,7 @@ Validates `agent_spawn` payloads against declared input schemas in agent metadat
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `schema_enforcement.mode` | string | `"deterministic"` | Enforcement mode. `"disabled"`: pass through without checks. `"deterministic"`: type coercion, defaults, required field checks. `"llm"`: (future) LLM-based transformation. |
+| `schema_enforcement.mode` | string | `"deterministic"` | Enforcement mode. `"disabled"`: pass through without checks. `"deterministic"`: type coercion, defaults, required field checks. |
 | `schema_enforcement.audit` | bool | `true` | Log all enforcement decisions to the causal chain. |
 | `schema_enforcement.agent_overrides` | map | `{}` | Per-agent mode overrides. Key = agent ID, value = mode. |
 

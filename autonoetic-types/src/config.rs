@@ -61,11 +61,9 @@ pub struct LlmPreset {
 pub enum SchemaEnforcementMode {
     /// Disabled - pass through payloads without enforcement.
     Disabled,
-    /// Use deterministic coercion (defaults, type coercion).
+    /// Use deterministic coercion only (defaults, type coercion).
     #[default]
     Deterministic,
-    /// (Later) Use LLM for complex transformations.
-    Llm,
 }
 
 /// Policy mode for capability-delta gating during revision promotion.
@@ -84,7 +82,7 @@ pub enum CapabilityDeltaGateMode {
 /// Configuration for schema enforcement on agent.spawn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaEnforcementConfig {
-    /// Enforcement mode: disabled, deterministic, or llm.
+    /// Enforcement mode: disabled or deterministic.
     #[serde(default)]
     pub mode: SchemaEnforcementMode,
     /// Log all enforcement decisions to causal chain.
@@ -1739,5 +1737,34 @@ mod tests {
 
         let errors = config.validate_llm_presets();
         assert!(errors.iter().any(|e| e.contains("unknown preset")));
+    }
+
+    #[test]
+    fn schema_enforcement_config_rejects_llm_mode() {
+        let j = serde_json::json!({
+            "agents_dir": "/tmp/autonoetic-agents",
+            "schema_enforcement": {
+                "mode": "llm",
+                "audit": true
+            }
+        });
+        let err = serde_json::from_value::<GatewayConfig>(j).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn schema_enforcement_config_rejects_llm_agent_override() {
+        let j = serde_json::json!({
+            "agents_dir": "/tmp/autonoetic-agents",
+            "schema_enforcement": {
+                "mode": "deterministic",
+                "audit": true,
+                "agent_overrides": {
+                    "planner.default": "llm"
+                }
+            }
+        });
+        let err = serde_json::from_value::<GatewayConfig>(j).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
     }
 }

@@ -205,10 +205,10 @@ enforcing declared rules. The top ones by structural significance:
    logic living in the gateway. A dumb gateway would reject the turn
    and let the agent decide whether to retry.
 
-2. **Schema LLM-coercion fallback**. If `DeterministicCoercionEnforcer`
-   fails, the fallback calls an LLM to reshape input. The gateway has
-   become an agent. This is the single biggest violation of "dumb
-   gateway."
+2. ~~**Schema LLM-coercion fallback**. If `DeterministicCoercionEnforcer`
+   fails, the fallback calls an LLM to reshape input.~~ **Resolved in
+   Phase 4.2**: schema enforcement is deterministic-only and legacy
+   `schema_enforcement.mode: llm` is now rejected at config parse time.
 
 3. **Remote-access static analyzer** (`runtime/tools/sandbox.rs:935+`,
    `runtime/remote_access.rs`). The gateway hard-codes `urllib`,
