@@ -211,16 +211,23 @@ enforcing declared rules. The top ones by structural significance:
    `schema_enforcement.mode: llm` is now rejected at config parse time.
 
 3. **Remote-access static analyzer** (`runtime/tools/sandbox.rs:935+`,
-   `runtime/remote_access.rs`). The gateway hard-codes `urllib`,
-   `requests`, `socket`, `subprocess` as proxies for network intent.
-   Policy invented in code, not derived from manifest.
+   `runtime/remote_access.rs`). **Partially resolved in Phase 4.3/4.4**:
+   enforcement now checks observed signals against agent-declared
+   `metadata.autonoetic.remote_access`, and agents with
+   `NetworkAccess` capability must declare this block or fail shut.
+   Remaining gap is the final default fail-shut migration for all agents.
 
-4. **Package-manager command redirection** (`sandbox.rs:86`). Same
-   concern: pip/npm detection rules baked into gateway code.
+4. **Package-manager command redirection** (`sandbox.rs:86`).
+   **Partially resolved in Phase 4.3/4.4**: package-manager commands are
+   now validated against `remote_access.package_manager_commands` rather
+   than only gateway-invented policy lists.
 
-5. **Content-handle-as-path heuristic** (`sandbox.rs:107,124`). Brittle
+5. ~~**Content-handle-as-path heuristic** (`sandbox.rs:107,124`). Brittle
    false-positive risk. Prefer a strict positive check — paths must
-   resolve within the sandbox bind-mount layout.
+   resolve within the sandbox bind-mount layout.~~ **Resolved in Phase
+   4.5**: `sandbox.exec` no longer rejects `sha256:` / `cnt_` strings via
+   gateway heuristics; invalid paths now fail naturally at exec time
+   (pinned by `constitution_dumb_gateway_no_handle_heuristic.rs`).
 
 6. **Loop-guard thresholds hardcoded** (`runtime/guard.rs`). Fine as
    system ceilings, but no path for an agent manifest to declare stricter

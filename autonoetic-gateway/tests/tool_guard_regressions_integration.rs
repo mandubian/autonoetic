@@ -73,27 +73,6 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
     );
     let policy = PolicyEngine::new(manifest.clone());
 
-    let prepare = registry.execute(
-        "artifact_prepare",
-        &manifest,
-        &policy,
-        temp.path(),
-        Some(temp.path()),
-        &json!({
-            "artifact_id": "impl_task-1234",
-            "entrypoint": "main.py"
-        })
-        .to_string(),
-        Some("root-1/session-1"),
-        None,
-        Some(&cfg),
-        Some(store.clone()),
-        None,
-    )?;
-    let prepare_json: serde_json::Value = serde_json::from_str(&prepare)?;
-    assert_eq!(prepare_json["ok"], false);
-    assert_eq!(prepare_json["error"], "invalid_artifact_id");
-
     let exec = registry.execute(
         "artifact_exec",
         &manifest,
@@ -101,7 +80,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         temp.path(),
         Some(temp.path()),
         &json!({
-            "artifact_id": "impl_task-1234",
+            "artifact_ref": "impl_task-1234",
             "entrypoint": "main.py"
         })
         .to_string(),
@@ -110,10 +89,14 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         Some(&cfg),
         Some(store.clone()),
         None,
-    )?;
-    let exec_json: serde_json::Value = serde_json::from_str(&exec)?;
-    assert_eq!(exec_json["ok"], false);
-    assert_eq!(exec_json["error"], "invalid_artifact_id");
+    );
+    let exec_err = exec.expect_err("unknown artifact_ref should fail");
+    assert!(
+        exec_err
+            .to_string()
+            .contains("artifact_ref 'impl_task-1234' not found"),
+        "unexpected artifact_exec error: {exec_err}"
+    );
 
     let inspect = registry.execute(
         "artifact_inspect",
@@ -122,7 +105,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         temp.path(),
         Some(temp.path()),
         &json!({
-            "artifact_id": "impl_task-1234"
+            "artifact_ref": "impl_task-1234"
         })
         .to_string(),
         Some("root-1/session-1"),
@@ -130,10 +113,14 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         Some(&cfg),
         Some(store.clone()),
         None,
-    )?;
-    let inspect_json: serde_json::Value = serde_json::from_str(&inspect)?;
-    assert_eq!(inspect_json["ok"], false);
-    assert_eq!(inspect_json["error"], "invalid_artifact_id");
+    );
+    let inspect_err = inspect.expect_err("unknown artifact_ref should fail inspect");
+    assert!(
+        inspect_err
+            .to_string()
+            .contains("artifact_ref 'impl_task-1234' not found"),
+        "unexpected artifact_inspect error: {inspect_err}"
+    );
 
     let sandbox_with_impl = registry.execute(
         "sandbox_exec",
@@ -163,7 +150,7 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         temp.path(),
         Some(temp.path()),
         &json!({
-            "command": "python3 /tmp/cnt_deadbeef"
+            "command": "cat /tmp/cnt_deadbeef"
         })
         .to_string(),
         Some("root-1/session-1"),
@@ -171,13 +158,17 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         Some(&cfg),
         Some(store.clone()),
         None,
-    );
-    let err = cnt_misuse.expect_err("cnt_ handle misuse should fail validation");
+    )?;
+    let cnt_misuse_json: serde_json::Value = serde_json::from_str(&cnt_misuse)?;
+    assert_eq!(cnt_misuse_json["ok"], false);
+    let stderr = cnt_misuse_json["stderr"].as_str().unwrap_or_default();
     assert!(
-        err.to_string()
-            .contains("content handles (cnt_...) are not filesystem paths"),
-        "unexpected error: {}",
-        err
+        stderr.contains("cnt_deadbeef"),
+        "expected natural exec-time missing file error mentioning path, got stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("content handles (cnt_...) are not filesystem paths"),
+        "gateway heuristic message should not appear: {stderr}"
     );
 
     Ok(())

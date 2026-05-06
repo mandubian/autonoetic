@@ -29,6 +29,15 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*"]
     validation: "soft"
+    remote_access:
+      enabled_languages: []
+      python_imports: []
+      js_imports: []
+      rust_imports: []
+      go_imports: []
+      function_calls: []
+      shell_commands: []
+      package_manager_commands: []
     io:
       returns:
         type: object

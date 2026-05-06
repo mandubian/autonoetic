@@ -73,7 +73,13 @@ Phase migration to avoid breaking all agents at once:
 1. **Current state (implemented)**: declaration-gated enforcement.
    - if `remote_access` is declared and a signal is undeclared => fail-shut deny
    - if `remote_access` is absent => legacy behavior (approval flow only)
-2. **Next stage**: move selected agents to mandatory declaration.
+2. **Network-capability mandatory declaration (implemented)**:
+   - agents with `NetworkAccess` capability must declare
+     `metadata.autonoetic.remote_access`.
+   - if missing, `sandbox.exec` fails shut with
+     `missing_remote_access_declaration`.
+   - migrated manifests include `packager.default`, `researcher.default`,
+     and `registration.default`.
 3. **Final stage**: default fail-shut for undeclared signals (constitutional target).
 
 ## Required Code Changes
@@ -89,6 +95,7 @@ Phase migration to avoid breaking all agents at once:
 
 - `agents/specialists/packager.default/SKILL.md`
 - `agents/specialists/researcher.default/SKILL.md`
+- `agents/specialists/registration.default/SKILL.md`
   - declare remote-access patterns for fail-shut enforcement
 
 ## Test Plan

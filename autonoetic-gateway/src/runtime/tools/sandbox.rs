@@ -125,57 +125,10 @@ fn load_manifest_remote_access_declaration(
         .and_then(|v| serde_yaml::from_value::<autonoetic_types::agent::RemoteAccessDeclaration>(v).ok())
 }
 
-/// True if `command` uses a content-store digest (`sha256:` + hex) like a shell path.
-/// Session files are mounted at `/tmp/<name>`; digests must only go to `content.read`, not `cp`/`python` argv.
-fn sandbox_command_misuses_content_digest_as_path(command: &str) -> bool {
-    let lower = command.to_ascii_lowercase();
-    let mut search_from = 0usize;
-    while let Some(rel) = lower[search_from..].find("sha256:") {
-        let after_prefix = search_from + rel + "sha256:".len();
-        let rest = &lower[after_prefix..];
-        let hex_len = rest.chars().take_while(|c| c.is_ascii_hexdigit()).count();
-        if hex_len >= 8 {
-            return true;
-        }
-        search_from = after_prefix;
-    }
-    false
-}
-
-/// True if `command` appears to use a content handle (`cnt_<8hex>`) as a sandbox path.
-/// Handles are stable content references for content.read, not filesystem paths.
-fn sandbox_command_misuses_content_handle_as_path(command: &str) -> bool {
-    let lower = command.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut i = 0usize;
-    while i + 12 <= bytes.len() {
-        if &bytes[i..i + 4] == b"cnt_" {
-            let hex = &bytes[i + 4..i + 12];
-            if hex.iter().all(|b| b.is_ascii_hexdigit()) {
-                let prev_ok = if i == 0 {
-                    true
-                } else {
-                    matches!(
-                        bytes[i - 1],
-                        b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/'
-                    )
-                };
-                let next_ok = if i + 12 >= bytes.len() {
-                    true
-                } else {
-                    matches!(
-                        bytes[i + 12],
-                        b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/'
-                    )
-                };
-                if prev_ok && next_ok {
-                    return true;
-                }
-            }
-        }
-        i += 1;
-    }
-    false
+fn requires_remote_access_declaration(capabilities: &[Capability]) -> bool {
+    capabilities
+        .iter()
+        .any(|c| matches!(c, Capability::NetworkAccess { .. }))
 }
 
 pub fn extract_artifact_source(gw_dir: &Path, artifact_id: &str) -> String {
@@ -1103,20 +1056,6 @@ impl NativeTool for SandboxExecTool {
             }
         }
 
-        if sandbox_command_misuses_content_digest_as_path(&effective_command) {
-            anyhow::bail!(
-                "sandbox.exec: content digests (sha256:...) are not filesystem paths in the sandbox. \
-Use the path from content.write (`sandbox_path`, typically /tmp/<name>), or pass artifact_id so artifact files are mounted under /tmp/."
-            );
-        }
-
-        if sandbox_command_misuses_content_handle_as_path(&effective_command) {
-            anyhow::bail!(
-                "sandbox.exec: content handles (cnt_...) are not filesystem paths in the sandbox. \
-Use content.read(cnt_...) to inspect content by handle, or use the path returned by content.write (`sandbox_path`, typically /tmp/<name>) when executing files."
-            );
-        }
-
         let decision = policy.can_exec_shell_detailed(&effective_command);
         if !decision.is_allowed() {
             let reason = decision.explain_shell_denial("Sandbox execution");
@@ -1187,6 +1126,19 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
         let dep_packages: Option<Vec<String>> =
             args.dependencies.as_ref().map(|d| d.packages.clone());
         let declared_remote_access = load_manifest_remote_access_declaration(agent_dir);
+        let declaration_required = requires_remote_access_declaration(&manifest.capabilities);
+        if declaration_required && declared_remote_access.is_none() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "missing_remote_access_declaration",
+                "message": format!(
+                    "Agent `{}` has NetworkAccess capability and must declare metadata.autonoetic.remote_access in SKILL.md before running sandbox.exec.",
+                    manifest.agent.id
+                ),
+                "repair_hint": "Add metadata.autonoetic.remote_access with enabled_languages/imports/function_calls/shell_commands/package_manager_commands.",
+            })
+            .to_string());
+        }
         let remote_analysis = if let Some(artifact_analysis) = artifact_analysis_override {
             artifact_analysis
         } else {
@@ -2484,48 +2436,6 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
 }
 
 #[cfg(test)]
-mod sandbox_digest_path_tests {
-    use super::{
-        sandbox_command_misuses_content_digest_as_path,
-        sandbox_command_misuses_content_handle_as_path,
-    };
-
-    #[test]
-    fn detects_sha256_hex_as_path_misuse() {
-        assert!(sandbox_command_misuses_content_digest_as_path(
-            "cp sha256:30db6cfe48acf14817e914345f2a9657b510a8138a1442c3015103beef35279a x.py"
-        ));
-    }
-
-    #[test]
-    fn allows_normal_paths_and_short_sha256_prefix_only() {
-        assert!(!sandbox_command_misuses_content_digest_as_path(
-            "python3 /tmp/weather_agent.py Paris today"
-        ));
-        assert!(!sandbox_command_misuses_content_digest_as_path(
-            "echo sha256: not a digest"
-        ));
-    }
-
-    #[test]
-    fn detects_cnt_handle_path_misuse() {
-        assert!(sandbox_command_misuses_content_handle_as_path(
-            "python3 /tmp/cnt_deadbeef"
-        ));
-        assert!(sandbox_command_misuses_content_handle_as_path(
-            "cat cnt_deadbeef"
-        ));
-    }
-
-    #[test]
-    fn allows_normal_tmp_paths_without_cnt_pattern() {
-        assert!(!sandbox_command_misuses_content_handle_as_path(
-            "python3 /tmp/weather_agent.py"
-        ));
-    }
-}
-
-#[cfg(test)]
 mod network_error_detection_tests {
     use super::{apply_network_isolation_failure_to_result, detect_network_errors_in_output};
     use serde_json::json;
@@ -2747,7 +2657,8 @@ mod approval_binding_tests {
 
 #[cfg(test)]
 mod remote_access_declaration_tests {
-    use super::load_manifest_remote_access_declaration;
+    use super::{load_manifest_remote_access_declaration, requires_remote_access_declaration};
+    use autonoetic_types::capability::Capability;
 
     #[test]
     fn loads_nested_autonoetic_remote_access_declaration() {
@@ -2801,6 +2712,17 @@ remote_access:
             decl.shell_commands,
             vec!["curl".to_string(), "wget".to_string()]
         );
+    }
+
+    #[test]
+    fn network_access_capability_requires_remote_access_declaration() {
+        assert!(requires_remote_access_declaration(&[Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }]));
+        assert!(!requires_remote_access_declaration(&[Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec![],
+        }]));
     }
 }
 

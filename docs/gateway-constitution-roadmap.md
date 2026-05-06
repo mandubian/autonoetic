@@ -1082,31 +1082,37 @@ Files: `autonoetic-types/src/config.rs`,
 
 Size: M. Completed via mode removal + docs + constitutional test pin.
 
-### 4.3 Remote-access static analyzer
+### 4.3 Remote-access static analyzer — **PARTIAL**
 
-**Decision required.** Move detection rules out of code into
-manifest-declared patterns?
+Declaration-driven enforcement is active in `sandbox.exec`:
+- undeclared observed signals fail shut with `undeclared_remote_pattern`
+- agents with `NetworkAccess` capability must declare
+  `metadata.autonoetic.remote_access` or fail shut with
+  `missing_remote_access_declaration`
+- migrated specialist manifests currently include
+  `packager.default`, `researcher.default`, and `registration.default`
 
-Recommendation: agents declare the network patterns they use (`python.imports: [urllib, requests]`, `shell.commands: [curl, wget]`).
-The gateway matches code against the declared intent and fails shut on
-undeclared patterns. Detection rules become part of the agent's
-capability surface rather than gateway-invented policy.
+Remaining scope for full closure: default fail-shut for undeclared
+remote signals across all agents, not only those declaring
+`NetworkAccess`.
 
-Size: L. This is a significant manifest change affecting many agents.
+Size: L.
 
 ### 4.4 Package-manager command redirection
 
 Folds into 4.3 — same pattern, same fix.
 
-### 4.5 Content-handle-as-path heuristic
+### 4.5 Content-handle-as-path heuristic — **ENFORCED**
 
-**Decision required.** Replace with strict positive check?
+Gateway-side `sha256:` / `cnt_` path misuse heuristics were removed from
+`sandbox.exec`. Unknown or invalid paths now fail naturally at command
+execution time within the sandbox, instead of returning gateway-invented
+validation errors.
 
-Recommendation: paths must resolve within the sandbox bind-mount
-layout; unknown paths fail naturally at exec time. Remove the heuristic
-detection entirely. Accept the minor UX loss (no custom error hint).
+Files: `autonoetic-gateway/src/runtime/tools/sandbox.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_no_handle_heuristic.rs`.
 
-Size: S.
+Size: S. Completed via heuristic removal + constitutional test pin.
 
 ### 4.6 Loop-guard thresholds
 
