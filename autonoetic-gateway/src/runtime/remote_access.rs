@@ -156,6 +156,79 @@ pub fn approval_remote_operator_suffix(
 /// Static analyzer for detecting remote access patterns in code.
 pub struct RemoteAccessAnalyzer;
 
+fn normalize_declared_pattern(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
+}
+
+fn observed_matches_declared(observed: &str, declared_patterns: &[String]) -> bool {
+    let observed = normalize_declared_pattern(observed);
+    declared_patterns.iter().any(|raw| {
+        let declared = normalize_declared_pattern(raw);
+        !declared.is_empty()
+            && (observed == declared
+                || observed.starts_with(&declared)
+                || observed.contains(&declared))
+    })
+}
+
+fn is_package_manager_command_pattern(pattern: &str) -> bool {
+    let p = normalize_declared_pattern(pattern);
+    [
+        "pip install",
+        "pip3 install",
+        "npm install",
+        "yarn install",
+        "yarn add",
+        "pnpm install",
+        "bun install",
+        "go get",
+        "go mod download",
+        "cargo install",
+        "gem install",
+        "composer install",
+        "composer require",
+        "apt-get install",
+        "apt-get update",
+        "apk add",
+        "yum install",
+        "dnf install",
+        "pacman -s",
+    ]
+    .iter()
+    .any(|prefix| p.starts_with(prefix))
+}
+
+/// Returns network-related detected patterns not covered by agent-declared patterns.
+///
+/// Enforcement is declaration-gated: if the agent does not declare a remote-access
+/// pattern surface, this returns an empty set.
+pub fn undeclared_patterns_against_manifest(
+    patterns: &[DetectedPattern],
+    declaration: Option<&autonoetic_types::agent::RemoteAccessDeclaration>,
+) -> Vec<DetectedPattern> {
+    let Some(decl) = declaration else {
+        return Vec::new();
+    };
+
+    patterns
+        .iter()
+        .filter(|p| match p.category.as_str() {
+            "import" => !observed_matches_declared(&p.pattern, &decl.python_imports),
+            "function_call" => !observed_matches_declared(&p.pattern, &decl.function_calls),
+            "network_command" => {
+                if is_package_manager_command_pattern(&p.pattern) {
+                    !observed_matches_declared(&p.pattern, &decl.package_manager_commands)
+                } else {
+                    !observed_matches_declared(&p.pattern, &decl.shell_commands)
+                }
+            }
+            "dependency_install" => decl.package_manager_commands.is_empty(),
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
 impl RemoteAccessAnalyzer {
     /// Analyzes code for patterns that require network/remote access.
     ///
@@ -1112,6 +1185,75 @@ mymod.do_thing()
             approval_remote_operator_suffix(&[], &patterns),
             " → signals: import:*"
         );
+    }
+
+    #[test]
+    fn test_undeclared_patterns_against_manifest_no_declaration_is_noop() {
+        let patterns = vec![DetectedPattern {
+            category: "network_command".to_string(),
+            pattern: "curl".to_string(),
+            line_number: Some(1),
+            reason: "curl".to_string(),
+        }];
+        let undeclared = undeclared_patterns_against_manifest(&patterns, None);
+        assert!(undeclared.is_empty());
+    }
+
+    #[test]
+    fn test_undeclared_patterns_against_manifest_declared_patterns_pass() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: "import requests".to_string(),
+                line_number: Some(1),
+                reason: "import".to_string(),
+            },
+            DetectedPattern {
+                category: "function_call".to_string(),
+                pattern: "requests.get(".to_string(),
+                line_number: Some(2),
+                reason: "call".to_string(),
+            },
+            DetectedPattern {
+                category: "network_command".to_string(),
+                pattern: "curl".to_string(),
+                line_number: Some(3),
+                reason: "cmd".to_string(),
+            },
+            DetectedPattern {
+                category: "network_command".to_string(),
+                pattern: "pip install".to_string(),
+                line_number: Some(4),
+                reason: "pkg".to_string(),
+            },
+        ];
+        let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            python_imports: vec!["requests".to_string()],
+            function_calls: vec!["requests.get".to_string()],
+            shell_commands: vec!["curl".to_string()],
+            package_manager_commands: vec!["pip install".to_string()],
+        };
+        let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
+        assert!(undeclared.is_empty(), "expected no undeclared patterns");
+    }
+
+    #[test]
+    fn test_undeclared_patterns_against_manifest_missing_command_fails_shut() {
+        let patterns = vec![DetectedPattern {
+            category: "network_command".to_string(),
+            pattern: "wget".to_string(),
+            line_number: Some(1),
+            reason: "cmd".to_string(),
+        }];
+        let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            python_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec!["curl".to_string()],
+            package_manager_commands: vec![],
+        };
+        let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
+        assert_eq!(undeclared.len(), 1);
+        assert_eq!(undeclared[0].pattern, "wget");
     }
 }
 

@@ -175,6 +175,23 @@ pub struct AgentManifest {
     pub compression: Option<CompressionConfig>,
 }
 
+/// Agent-declared remote-access patterns used for deterministic gateway checks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoteAccessDeclaration {
+    /// Python import/module patterns expected in network-capable code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub python_imports: Vec<String>,
+    /// Function/method call patterns expected in network-capable code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub function_calls: Vec<String>,
+    /// Shell command patterns expected for remote/network operations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shell_commands: Vec<String>,
+    /// Package-manager command patterns (pip/npm/apt/etc.) expected by the agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_manager_commands: Vec<String>,
+}
+
 /// Per-agent context compression configuration (opt-in via SKILL.md).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CompressionConfig {

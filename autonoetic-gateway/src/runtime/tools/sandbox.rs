@@ -105,6 +105,26 @@ fn is_package_manager_command(pattern: &str) -> bool {
     )
 }
 
+fn load_manifest_remote_access_declaration(
+    agent_dir: &Path,
+) -> Option<autonoetic_types::agent::RemoteAccessDeclaration> {
+    let skill_path = agent_dir.join("SKILL.md");
+    let skill = std::fs::read_to_string(skill_path).ok()?;
+    let frontmatter = skill.split("---").nth(1)?;
+    let root = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
+
+    let direct = root.get("remote_access").cloned();
+    let nested = root
+        .get("metadata")
+        .and_then(|m| m.get("autonoetic"))
+        .and_then(|a| a.get("remote_access"))
+        .cloned();
+
+    direct
+        .or(nested)
+        .and_then(|v| serde_yaml::from_value::<autonoetic_types::agent::RemoteAccessDeclaration>(v).ok())
+}
+
 /// True if `command` uses a content-store digest (`sha256:` + hex) like a shell path.
 /// Session files are mounted at `/tmp/<name>`; digests must only go to `content.read`, not `cp`/`python` argv.
 fn sandbox_command_misuses_content_digest_as_path(command: &str) -> bool {
@@ -1174,6 +1194,33 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
                 dep_packages.as_deref(),
             )
         };
+
+        let undeclared_remote_patterns =
+            crate::runtime::remote_access::undeclared_patterns_against_manifest(
+                &remote_analysis.detected_patterns,
+                load_manifest_remote_access_declaration(agent_dir).as_ref(),
+            );
+        if !undeclared_remote_patterns.is_empty() {
+            let undeclared: Vec<serde_json::Value> = undeclared_remote_patterns
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "category": p.category,
+                        "pattern": p.pattern,
+                        "line_number": p.line_number,
+                        "reason": p.reason,
+                    })
+                })
+                .collect();
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "undeclared_remote_pattern",
+                "message": "Remote access signals are not covered by manifest remote_access declaration.",
+                "repair_hint": "Declare required remote_access patterns in SKILL.md (python_imports/function_calls/shell_commands/package_manager_commands) or change command/code to match declared behavior.",
+                "undeclared_patterns": undeclared,
+            })
+            .to_string());
+        }
 
         let agent_has_network_access = manifest
             .capabilities
