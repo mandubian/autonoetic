@@ -143,6 +143,11 @@ pub enum Capability {
         #[serde(default = "default_patterns_all")]
         targets: Vec<String>,
     },
+
+    /// Explicit opt-in to allow running with `max_session_price_usd` while
+    /// model price metadata is unavailable.
+    #[serde(rename = "budget.no_price_available.allow")]
+    BudgetNoPriceAvailableAllow,
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -243,6 +248,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::SkillInstall { .. } => "SkillInstall".to_string(),
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal".to_string(),
         Capability::ReasoningAudit { .. } => "ReasoningAudit".to_string(),
+        Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
     }
 }
 

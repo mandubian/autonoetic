@@ -2831,7 +2831,6 @@ mod capability_lenient_deser_tests {
             disclosure: None,
             io: None,
             middleware: None,
-            response_contract: None,
             execution_mode: ExecutionMode::Reasoning,
             script_entry: None,
             script_input_mode: ScriptInputMode::default(),

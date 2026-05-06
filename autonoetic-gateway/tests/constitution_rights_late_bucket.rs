@@ -32,7 +32,6 @@ fn minimal_manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
         disclosure: None,
         io: None,
         middleware: None,
-        response_contract: None,
         execution_mode: Default::default(),
         script_entry: None,
         script_input_mode: Default::default(),

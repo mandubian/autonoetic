@@ -90,7 +90,6 @@ fn evolution_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
 
-        response_contract: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
@@ -128,7 +127,6 @@ fn evaluator_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
 
-        response_contract: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
@@ -346,7 +344,6 @@ async fn test_promotion_auditor_fail_rejected() {
         gateway_url: None,
         gateway_token: None,
 
-        response_contract: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,

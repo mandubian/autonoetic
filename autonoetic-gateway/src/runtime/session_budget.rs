@@ -92,6 +92,25 @@ impl SessionBudgetRegistry {
         output_tokens: u64,
         estimated_cost_usd: Option<f64>,
     ) -> anyhow::Result<()> {
+        self.record_llm_completion_with_unpriced_override(
+            scope,
+            input_tokens,
+            output_tokens,
+            estimated_cost_usd,
+            false,
+        )
+    }
+
+    /// Same as `record_llm_completion`, but allows an explicit capability-gated
+    /// override when no catalog price is available.
+    pub fn record_llm_completion_with_unpriced_override(
+        &self,
+        scope: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        estimated_cost_usd: Option<f64>,
+        allow_unpriced_completion: bool,
+    ) -> anyhow::Result<()> {
         if !self.is_enabled() {
             return Ok(());
         }
@@ -112,16 +131,18 @@ impl SessionBudgetRegistry {
             }
         } else if let Some(max_price) = self.limits.max_session_price_usd {
             if max_price >= 0.0 {
-                let mode = crate::fail_mode::lookup_fail_mode("R-6.5")
-                    .map(|m| m.to_string())
-                    .unwrap_or_else(|| "refuse-session-start".to_string());
-                anyhow::bail!(
-                    "Session cost-budget enforcement requires price estimation but \
-                     catalog is unavailable (R-6.5, R++10: fail-mode={}). \
-                     Refusing untracked LLM completion (scope: {})",
-                    mode,
-                    scope
-                );
+                if !allow_unpriced_completion {
+                    let mode = crate::fail_mode::lookup_fail_mode("R-6.5")
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| "refuse-session-start".to_string());
+                    anyhow::bail!(
+                        "Session cost-budget enforcement requires price estimation but \
+                         catalog is unavailable (R-6.5, R++10: fail-mode={}). \
+                         Refusing untracked LLM completion (scope: {})",
+                        mode,
+                        scope
+                    );
+                }
             }
         }
 

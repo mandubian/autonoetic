@@ -37,7 +37,6 @@ fn no_capability_manifest() -> AgentManifest {
         script_input_mode: Default::default(),
         gateway_url: None,
         gateway_token: None,
-        response_contract: None,
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,

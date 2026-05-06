@@ -81,7 +81,6 @@ fn test_manifest() -> AgentManifest {
         disclosure: None,
         io: None,
         middleware: None,
-        response_contract: None,
         allowed_tool_tiers: vec![],
         execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
         script_entry: None,

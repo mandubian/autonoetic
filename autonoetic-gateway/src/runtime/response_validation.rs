@@ -701,29 +701,29 @@ mod tests {
 
     #[test]
     fn test_required_artifacts_pass() {
-        let c = ResponseContract {
+        let p = autonoetic_types::agent::OutputPolicy {
             required_artifacts: vec!["report.md".into()],
             ..Default::default()
         };
         let r = make_result(vec![make_artifact("report.md")], vec![], Some("done"));
-        assert!(validate_spawn_response(&r, &c, None).is_empty());
+        assert!(validate_spawn_response(&r, None, &p, None).is_empty());
     }
 
     #[test]
     fn test_required_artifacts_fail() {
-        let c = ResponseContract {
+        let p = autonoetic_types::agent::OutputPolicy {
             required_artifacts: vec!["report.md".into(), "data.json".into()],
             ..Default::default()
         };
         let r = make_result(vec![make_artifact("report.md")], vec![], Some("done"));
-        let v = validate_spawn_response(&r, &c, None);
+        let v = validate_spawn_response(&r, None, &p, None);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].rule, "required_artifacts");
     }
 
     #[test]
     fn test_max_artifacts() {
-        let c = ResponseContract {
+        let p = autonoetic_types::agent::OutputPolicy {
             max_artifacts: Some(2),
             ..Default::default()
         };
@@ -732,40 +732,36 @@ mod tests {
             vec![],
             None,
         );
-        assert_eq!(validate_spawn_response(&r, &c, None).len(), 1);
+        assert_eq!(validate_spawn_response(&r, None, &p, None).len(), 1);
     }
 
     #[test]
     fn test_prohibited_text() {
-        let c = ResponseContract {
+        let p = autonoetic_types::agent::OutputPolicy {
             prohibited_text_patterns: vec!["API_KEY".into()],
             ..Default::default()
         };
         let r = make_result(vec![], vec![], Some("key is API_KEY=xyz"));
-        assert_eq!(validate_spawn_response(&r, &c, None).len(), 1);
+        assert_eq!(validate_spawn_response(&r, None, &p, None).len(), 1);
     }
 
     #[test]
     fn test_output_schema_required_fields() {
-        let c = ResponseContract {
-            output_schema: Some(serde_json::json!({"required": ["status", "summary"]})),
-            ..Default::default()
-        };
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status", "summary"]});
         let r = make_result(vec![], vec![], Some(r#"{"status": "ok"}"#));
-        let v = validate_spawn_response(&r, &c, None);
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
         assert!(v.iter().any(|v| v.message.contains("summary")));
     }
 
     #[test]
     fn test_output_schema_type_check() {
-        let c = ResponseContract {
-            output_schema: Some(serde_json::json!({
-                "properties": {"count": {"type": "integer"}}
-            })),
-            ..Default::default()
-        };
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({
+            "properties": {"count": {"type": "integer"}}
+        });
         let r = make_result(vec![], vec![], Some(r#"{"count": "not_a_number"}"#));
-        let v = validate_spawn_response(&r, &c, None);
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
         assert!(v
             .iter()
             .any(|v| v.message.contains("count") && v.message.contains("integer")));
@@ -773,31 +769,27 @@ mod tests {
 
     #[test]
     fn test_no_contract_passes() {
-        let c = ResponseContract::default();
+        let p = autonoetic_types::agent::OutputPolicy::default();
         let r = make_result(vec![], vec![], Some("anything"));
-        assert!(validate_spawn_response(&r, &c, None).is_empty());
+        assert!(validate_spawn_response(&r, None, &p, None).is_empty());
     }
 
     #[test]
     fn test_non_json_reply_fails_schema_validation() {
-        let c = ResponseContract {
-            output_schema: Some(serde_json::json!({"required": ["status"]})),
-            ..Default::default()
-        };
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
         let r = make_result(vec![], vec![], Some("plain text reply"));
-        let v = validate_spawn_response(&r, &c, None);
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
         assert!(v.iter().any(|v| v.rule == "output_schema"));
         assert!(v.iter().any(|v| v.message.contains("valid JSON")));
     }
 
     #[test]
     fn test_missing_reply_fails_schema_validation() {
-        let c = ResponseContract {
-            output_schema: Some(serde_json::json!({"required": ["status"]})),
-            ..Default::default()
-        };
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
         let r = make_result(vec![], vec![], None);
-        let v = validate_spawn_response(&r, &c, None);
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
         assert!(v.iter().any(|v| v.rule == "output_schema"));
         assert!(v.iter().any(|v| v.message.contains("no reply produced")));
     }
@@ -810,7 +802,7 @@ mod tests {
         let store = crate::runtime::content_store::ContentStore::new(&gw).unwrap();
         let handle = store.write(&vec![b'x'; 2 * 1024 * 1024]).unwrap();
 
-        let c = ResponseContract {
+        let p = autonoetic_types::agent::OutputPolicy {
             max_total_size_mb: Some(1),
             ..Default::default()
         };
@@ -825,7 +817,7 @@ mod tests {
             }],
             Some("done"),
         );
-        let v = validate_spawn_response(&r, &c, Some(&gw));
+        let v = validate_spawn_response(&r, None, &p, Some(&gw));
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].rule, "max_total_size_mb");
         assert!(v[0].message.contains("exceeds"));
@@ -834,35 +826,37 @@ mod tests {
     #[test]
     fn test_text_pattern_regex_matching() {
         // Regex anchor: matches only word boundary, not substring
-        let c = ResponseContract {
+        let p = autonoetic_types::agent::OutputPolicy {
             prohibited_text_patterns: vec!["\\bsecret\\b".into()],
             ..Default::default()
         };
         let r_match = make_result(vec![], vec![], Some("this is a secret value"));
         let r_no_match = make_result(vec![], vec![], Some("secretive behavior"));
-        assert_eq!(validate_spawn_response(&r_match, &c, None).len(), 1);
-        assert!(validate_spawn_response(&r_no_match, &c, None).is_empty());
+        assert_eq!(validate_spawn_response(&r_match, None, &p, None).len(), 1);
+        assert!(validate_spawn_response(&r_no_match, None, &p, None).is_empty());
     }
 
     #[test]
     fn test_text_pattern_case_insensitive() {
-        let c = ResponseContract {
+        let p = autonoetic_types::agent::OutputPolicy {
             prohibited_text_patterns: vec!["API_KEY".into()],
             ..Default::default()
         };
         let r = make_result(vec![], vec![], Some("the api_key was leaked"));
-        let v = validate_spawn_response(&r, &c, None);
+        let v = validate_spawn_response(&r, None, &p, None);
         assert_eq!(v.len(), 1);
     }
 
     #[test]
-    fn test_parse_response_contract_invalid_regex() {
+    fn test_parse_output_policy_invalid_regex() {
         let metadata = serde_json::json!({
-            "response_contract": {
-                "prohibited_text_patterns": ["[invalid regex"]
+            "io": {
+                "output_policy": {
+                    "prohibited_text_patterns": ["[invalid regex"]
+                }
             }
         });
-        assert!(parse_response_contract(Some(&metadata)).is_err());
+        assert!(parse_output_policy(Some(&metadata)).is_err());
     }
 
     #[test]

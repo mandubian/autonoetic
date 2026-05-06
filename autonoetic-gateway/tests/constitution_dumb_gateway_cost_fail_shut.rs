@@ -1,9 +1,9 @@
-//! Constitution Phase 4.1: gateway repair loop is opt-in per manifest.
+//! Constitution Phase 4.8: cost-budget fail-shut when pricing catalog is unavailable.
 //!
-//! Pins three invariants:
-//! - repair is disabled by default even when gateway repair subsystem is on
-//! - opt-in via `io.output_policy.repair.auto: true` enables bounded repair
-//! - system ceiling caps agent-declared max attempts
+//! Pins:
+//! - price-capped sessions fail before first LLM call when pricing catalog is unavailable
+//! - sessions without a price cap continue normally
+//! - explicit capability override allows unpriced execution intentionally
 
 mod support;
 
@@ -12,10 +12,10 @@ use autonoetic_gateway::GatewayExecutionService;
 use std::sync::{Arc, Mutex};
 use support::{seed_agent_revision, EnvGuard, OpenAiStub, TestWorkspace};
 
-fn install_validation_agent(
+fn install_budget_agent(
     agent_dir: &std::path::Path,
     agent_id: &str,
-    output_policy_block: &str,
+    extra_capabilities_yaml: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
     let dir = agent_dir.join(agent_id);
     std::fs::create_dir_all(&dir)?;
@@ -34,7 +34,7 @@ runtime:
 agent:
   id: "{agent_id}"
   name: "{agent_id}"
-  description: "Repair opt-in test agent"
+  description: "Cost fail-shut test agent"
 llm_config:
   provider: "openai"
   model: "gpt-4o"
@@ -44,10 +44,10 @@ capabilities:
     scopes: ["*"]
   - type: "ReadAccess"
     scopes: ["*"]
-{output_policy_block}
+{extra_capabilities_yaml}
 ---
 # Instructions
-Return normal text output.
+Return a short answer.
 "#,
         ),
     )?;
@@ -68,22 +68,13 @@ fn setup_store_and_seed(
 
 #[serial_test::serial]
 #[tokio::test]
-async fn repair_disabled_by_default_without_manifest_opt_in() -> anyhow::Result<()> {
+async fn catalog_unavailable_with_price_cap_refuses_session_start() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
-    config.response_validation.enabled = true;
-    config.response_validation.repair_enabled = true;
-    config.response_validation.max_repair_attempts_ceiling = 2;
+    config.session_budget.max_session_price_usd = Some(0.01);
 
-    install_validation_agent(
-        &workspace.agents_dir,
-        "repair.default_off.agent",
-        r#"io:
-  output_policy:
-    required_artifacts: ["required.md"]
-"#,
-    )?;
-    let store = setup_store_and_seed(&config, &workspace.agents_dir, "repair.default_off.agent")?;
+    install_budget_agent(&workspace.agents_dir, "cost.fail.agent", "")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "cost.fail.agent")?;
 
     let call_count = Arc::new(Mutex::new(0usize));
     let cc = call_count.clone();
@@ -92,21 +83,23 @@ async fn repair_disabled_by_default_without_manifest_opt_in() -> anyhow::Result<
         async move {
             *cc.lock().unwrap() += 1;
             serde_json::json!({
-                "choices": [{"message": {"content": "artifact missing"}, "finish_reason": "stop"}],
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}
             })
         }
     })
     .await?;
+
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+    let _catalog = EnvGuard::set("AUTONOETIC_OPENROUTER_CATALOG", "0");
 
     let execution = GatewayExecutionService::new(config, Some(store));
-    let _ = execution
+    let err = execution
         .spawn_agent_once(
-            "repair.default_off.agent",
-            "produce required.md",
-            "sess-repair-default-off",
+            "cost.fail.agent",
+            "say hello",
+            "sess-cost-fail-1",
             None,
             false,
             None,
@@ -118,36 +111,95 @@ async fn repair_disabled_by_default_without_manifest_opt_in() -> anyhow::Result<
         .await
         .unwrap_err();
 
+    assert_eq!(
+        *call_count.lock().unwrap(),
+        0,
+        "fail-shut must refuse before first LLM call when price cap is set"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Session start refused"),
+        "error should indicate refuse-session-start behavior, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("R-6.5"),
+        "error should reference constitutional rule, got: {}",
+        msg
+    );
+    Ok(())
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn catalog_unavailable_without_price_cap_starts_normally() -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+
+    install_budget_agent(&workspace.agents_dir, "cost.nocap.agent", "")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "cost.nocap.agent")?;
+
+    let call_count = Arc::new(Mutex::new(0usize));
+    let cc = call_count.clone();
+    let stub = OpenAiStub::spawn(move |_raw, _body| {
+        let cc = cc.clone();
+        async move {
+            *cc.lock().unwrap() += 1;
+            serde_json::json!({
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            })
+        }
+    })
+    .await?;
+
+    let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
+    let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+    let _catalog = EnvGuard::set("AUTONOETIC_OPENROUTER_CATALOG", "0");
+
+    let execution = GatewayExecutionService::new(config, Some(store));
+    let result = execution
+        .spawn_agent_once(
+            "cost.nocap.agent",
+            "say hello",
+            "sess-cost-nocap-1",
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+    assert_eq!(
+        result.assistant_reply.as_deref(),
+        Some("ok"),
+        "session without price cap should proceed"
+    );
     assert_eq!(
         *call_count.lock().unwrap(),
         1,
-        "without io.output_policy.repair.auto opt-in, gateway must not run repair turns"
+        "session without price cap should call the LLM normally"
     );
     Ok(())
 }
 
 #[serial_test::serial]
 #[tokio::test]
-async fn repair_opt_in_runs_bounded_repair_turn() -> anyhow::Result<()> {
+async fn override_capability_allows_unpriced_price_capped_session() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
-    config.response_validation.enabled = true;
-    config.response_validation.repair_enabled = true;
-    config.response_validation.max_repair_attempts_ceiling = 2;
+    config.session_budget.max_session_price_usd = Some(0.01);
 
-    install_validation_agent(
+    install_budget_agent(
         &workspace.agents_dir,
-        "repair.opt_in.agent",
-        r#"io:
-  output_policy:
-    required_artifacts: ["required.md"]
-    repair:
-      auto: true
-      max_attempts: 1
-    validation_max_duration_ms: 5000
+        "cost.override.agent",
+        r#"  - type: "budget.no_price_available.allow"
 "#,
     )?;
-    let store = setup_store_and_seed(&config, &workspace.agents_dir, "repair.opt_in.agent")?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "cost.override.agent")?;
 
     let call_count = Arc::new(Mutex::new(0usize));
     let cc = call_count.clone();
@@ -156,21 +208,23 @@ async fn repair_opt_in_runs_bounded_repair_turn() -> anyhow::Result<()> {
         async move {
             *cc.lock().unwrap() += 1;
             serde_json::json!({
-                "choices": [{"message": {"content": "still missing artifact"}, "finish_reason": "stop"}],
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}
             })
         }
     })
     .await?;
+
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+    let _catalog = EnvGuard::set("AUTONOETIC_OPENROUTER_CATALOG", "0");
 
     let execution = GatewayExecutionService::new(config, Some(store));
-    let _ = execution
+    let result = execution
         .spawn_agent_once(
-            "repair.opt_in.agent",
-            "produce required.md",
-            "sess-repair-opt-in",
+            "cost.override.agent",
+            "say hello",
+            "sess-cost-override-1",
             None,
             false,
             None,
@@ -179,76 +233,13 @@ async fn repair_opt_in_runs_bounded_repair_turn() -> anyhow::Result<()> {
             None,
             None,
         )
-        .await
-        .unwrap_err();
+        .await?;
 
-    assert!(
-        *call_count.lock().unwrap() >= 2,
-        "with opt-in enabled, gateway should run at least one repair turn"
-    );
-    Ok(())
-}
-
-#[serial_test::serial]
-#[tokio::test]
-async fn repair_attempts_are_capped_by_system_ceiling() -> anyhow::Result<()> {
-    let workspace = TestWorkspace::new()?;
-    let mut config = workspace.gateway_config();
-    config.response_validation.enabled = true;
-    config.response_validation.repair_enabled = true;
-    config.response_validation.max_repair_attempts_ceiling = 1;
-
-    install_validation_agent(
-        &workspace.agents_dir,
-        "repair.ceiling.agent",
-        r#"io:
-  output_policy:
-    required_artifacts: ["required.md"]
-    repair:
-      auto: true
-      max_attempts: 5
-    validation_max_duration_ms: 5000
-"#,
-    )?;
-    let store = setup_store_and_seed(&config, &workspace.agents_dir, "repair.ceiling.agent")?;
-
-    let call_count = Arc::new(Mutex::new(0usize));
-    let cc = call_count.clone();
-    let stub = OpenAiStub::spawn(move |_raw, _body| {
-        let cc = cc.clone();
-        async move {
-            *cc.lock().unwrap() += 1;
-            serde_json::json!({
-                "choices": [{"message": {"content": "still invalid"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
-            })
-        }
-    })
-    .await?;
-    let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
-    let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
-
-    let execution = GatewayExecutionService::new(config, Some(store));
-    let _ = execution
-        .spawn_agent_once(
-            "repair.ceiling.agent",
-            "produce required.md",
-            "sess-repair-ceiling",
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-
+    assert_eq!(result.assistant_reply.as_deref(), Some("ok"));
     assert_eq!(
         *call_count.lock().unwrap(),
-        2,
-        "system ceiling=1 means exactly initial call + one repair attempt"
+        1,
+        "override capability should allow the LLM call despite unavailable catalog"
     );
     Ok(())
 }

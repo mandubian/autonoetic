@@ -47,7 +47,6 @@ fn make_manifest(has_network: bool) -> AgentManifest {
         agentskills_import: None,
         io: None,
         disclosure: None,
-        response_contract: None,
         compression: None,
         allowed_tool_tiers: vec![],
     }

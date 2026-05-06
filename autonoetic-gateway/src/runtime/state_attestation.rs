@@ -217,6 +217,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::SkillInstall { .. } => "SkillInstall",
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal",
         Capability::ReasoningAudit { .. } => "ReasoningAudit",
+        Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
     }
     .to_string()
 }
@@ -254,7 +255,6 @@ mod tests {
             script_input_mode: Default::default(),
             gateway_url: None,
             gateway_token: None,
-            response_contract: None,
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,

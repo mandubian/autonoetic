@@ -1206,6 +1206,52 @@ impl AgentExecutor {
         meters
     }
 
+    async fn enforce_cost_catalog_preflight(
+        &self,
+        model_id: &str,
+        allow_unpriced_budget: bool,
+    ) -> anyhow::Result<()> {
+        if allow_unpriced_budget {
+            return Ok(());
+        }
+        let Some(cfg) = self.config.as_ref() else {
+            return Ok(());
+        };
+        let session_price_cap_enabled = cfg
+            .session_budget
+            .max_session_price_usd
+            .is_some_and(|v| v >= 0.0);
+        let root_price_cap_enabled = cfg
+            .root_session_budget
+            .max_session_price_usd
+            .is_some_and(|v| v >= 0.0);
+        if !session_price_cap_enabled && !root_price_cap_enabled {
+            return Ok(());
+        }
+
+        let mode = crate::fail_mode::lookup_fail_mode("R-6.5")
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "refuse-session-start".to_string());
+        let Some(catalog) = self.openrouter_catalog.as_ref() else {
+            anyhow::bail!(
+                "Session start refused: cost-budget enforcement requires price metadata but \
+                 catalog is unavailable (R-6.5, R++10: fail-mode={}). \
+                 Add capability 'budget.no_price_available.allow' to override intentionally.",
+                mode
+            );
+        };
+        if catalog.estimate_cost_usd(model_id, 1, 1).await.is_none() {
+            anyhow::bail!(
+                "Session start refused: cost-budget enforcement requires price metadata for model '{}' \
+                 but catalog is unavailable (R-6.5, R++10: fail-mode={}). \
+                 Add capability 'budget.no_price_available.allow' to override intentionally.",
+                model_id,
+                mode
+            );
+        }
+        Ok(())
+    }
+
     fn root_session_id_opt(&self) -> Option<&str> {
         self.session_id
             .as_deref()
@@ -1808,6 +1854,12 @@ impl AgentExecutor {
         let mut digest_turn_active = false;
         let mut ri_0_6_snapshot_checked = false;
         let root_session_id = crate::runtime::content_store::root_session_id(&session_id);
+        let allow_unpriced_budget = self.manifest.capabilities.iter().any(|c| {
+            matches!(
+                c,
+                autonoetic_types::capability::Capability::BudgetNoPriceAvailableAllow
+            )
+        });
 
         loop {
             // Loop guard check — save checkpoint before propagating max-turns error
@@ -2349,6 +2401,15 @@ impl AgentExecutor {
                     .unwrap_or_default();
 
                 let mut last_err = None;
+                if let Err(e) = self
+                    .enforce_cost_catalog_preflight(&actual_model, allow_unpriced_budget)
+                    .await
+                {
+                    let cp =
+                        self.build_checkpoint(history, &turn_id, YieldReason::BudgetExhausted, None);
+                    self.save_checkpoint_if_possible(&cp);
+                    return Err(e);
+                }
                 if let Some(root_budget) = self.root_session_budget.as_ref() {
                     if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
                         let cp = self.build_checkpoint(
@@ -2387,6 +2448,19 @@ impl AgentExecutor {
                                 fallback_model = %fb_model,
                                 "Trying fallback model"
                             );
+                            if let Err(e) = self
+                                .enforce_cost_catalog_preflight(fb_model, allow_unpriced_budget)
+                                .await
+                            {
+                                let cp = self.build_checkpoint(
+                                    history,
+                                    &turn_id,
+                                    YieldReason::BudgetExhausted,
+                                    None,
+                                );
+                                self.save_checkpoint_if_possible(&cp);
+                                return Err(e);
+                            }
                             if let Some(root_budget) = self.root_session_budget.as_ref() {
                                 if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
                                     let cp = self.build_checkpoint(
@@ -2464,11 +2538,12 @@ impl AgentExecutor {
 
             if let Some(budget) = self.session_budget.as_ref() {
                 if !skip_llm {
-                    if let Err(e) = budget.record_llm_completion(
+                    if let Err(e) = budget.record_llm_completion_with_unpriced_override(
                         &session_id,
                         response.usage.input_tokens,
                         response.usage.output_tokens,
                         estimated_cost_usd,
+                        allow_unpriced_budget,
                     ) {
                         let cp = self.build_checkpoint(
                             history,
@@ -2484,11 +2559,12 @@ impl AgentExecutor {
 
             if let Some(root_budget) = self.root_session_budget.as_ref() {
                 if !skip_llm {
-                    if let Err(e) = root_budget.record_llm_completion(
+                    if let Err(e) = root_budget.record_llm_completion_with_unpriced_override(
                         root_session_id,
                         response.usage.input_tokens,
                         response.usage.output_tokens,
                         estimated_cost_usd,
+                        allow_unpriced_budget,
                     ) {
                         let cp = self.build_checkpoint(
                             history,

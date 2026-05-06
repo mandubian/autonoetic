@@ -10,6 +10,7 @@ use support::{seed_agent_revision, EnvGuard, OpenAiStub, TestWorkspace};
 fn install_validation_agent(
     agent_dir: &std::path::Path,
     agent_id: &str,
+    io_block: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
     let dir = agent_dir.join(agent_id);
     std::fs::create_dir_all(&dir)?;
@@ -29,6 +30,7 @@ agent:
   id: "{agent_id}"
   name: "{agent_id}"
   description: "Validation test agent"
+{io_block}
 llm_config:
   provider: "openai"
   model: "gpt-4o"
@@ -51,25 +53,10 @@ fn install_validation_agent_with_returns(
     agent_dir: &std::path::Path,
     agent_id: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
-    let dir = agent_dir.join(agent_id);
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(
-        dir.join("SKILL.md"),
-        format!(
-            r#"---
-version: "1.0"
-runtime:
-  engine: "autonoetic"
-  gateway_version: "0.1.0"
-  sdk_version: "0.1.0"
-  type: "stateful"
-  sandbox: "bubblewrap"
-  runtime_lock: "runtime.lock"
-agent:
-  id: "{agent_id}"
-  name: "{agent_id}"
-  description: "Validation test agent with output schema"
-io:
+    install_validation_agent(
+        agent_dir,
+        agent_id,
+        r#"io:
   returns:
     type: object
     required:
@@ -77,22 +64,8 @@ io:
     properties:
       status:
         type: string
-llm_config:
-  provider: "openai"
-  model: "gpt-4o"
-  temperature: 0.0
-capabilities:
-  - type: "WriteAccess"
-    scopes: ["*"]
-  - type: "ReadAccess"
-    scopes: ["*"]
----
-# Instructions
-You are a validation test agent. Produce the requested output.
 "#,
-        ),
-    )?;
-    Ok(dir)
+    )
 }
 
 fn setup_store_and_seed(
@@ -114,7 +87,7 @@ async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<(
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "valid.agent")?;
+    install_validation_agent(&workspace.agents_dir, "valid.agent", "")?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "valid.agent")?;
 
     let call_count = Arc::new(Mutex::new(0usize));
@@ -162,7 +135,14 @@ async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> 
     let config = workspace.gateway_config();
     assert!(!config.response_validation.enabled);
 
-    install_validation_agent(&workspace.agents_dir, "noval.agent")?;
+    install_validation_agent(
+        &workspace.agents_dir,
+        "noval.agent",
+        r#"io:
+  output_policy:
+    required_artifacts: ["missing.md"]
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "noval.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
@@ -177,13 +157,6 @@ async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> 
 
     let execution = GatewayExecutionService::new(config, Some(store));
 
-    let metadata = serde_json::json!({
-        "response_contract": {
-            "required_artifacts": ["missing.md"],
-            "validation_max_loops": 1
-        }
-    });
-
     let result = execution
         .spawn_agent_once(
             "noval.agent",
@@ -192,7 +165,7 @@ async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> 
             None,
             false,
             None,
-            Some(&metadata),
+            None,
             None,
             None,
             None,
@@ -210,7 +183,19 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "missing.agent")?;
+    install_validation_agent(
+        &workspace.agents_dir,
+        "missing.agent",
+        r#"io:
+  output_policy:
+    required_artifacts: ["deployment.yaml"]
+    validation_max_loops: 1
+    validation_max_duration_ms: 500
+    repair:
+      auto: true
+      max_attempts: 1
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "missing.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
@@ -225,15 +210,6 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
 
     let execution = GatewayExecutionService::new(config, Some(store));
 
-    let metadata = serde_json::json!({
-        "response_contract": {
-            "required_artifacts": ["deployment.yaml"],
-            "validation_max_loops": 1,
-            "validation_max_duration_ms": 500,
-            "repair": {"auto": true, "max_attempts": 1}
-        }
-    });
-
     let err = execution
         .spawn_agent_once(
             "missing.agent",
@@ -242,7 +218,7 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
             None,
             false,
             None,
-            Some(&metadata),
+            None,
             None,
             None,
             None,
@@ -277,7 +253,15 @@ async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<(
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "leak.agent")?;
+    install_validation_agent(
+        &workspace.agents_dir,
+        "leak.agent",
+        r#"io:
+  output_policy:
+    prohibited_text_patterns: ["API_KEY_"]
+    validation_max_loops: 1
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "leak.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
@@ -292,13 +276,6 @@ async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<(
 
     let execution = GatewayExecutionService::new(config, Some(store));
 
-    let metadata = serde_json::json!({
-        "response_contract": {
-            "prohibited_text_patterns": ["API_KEY_"],
-            "validation_max_loops": 1
-        }
-    });
-
     let err = execution
         .spawn_agent_once(
             "leak.agent",
@@ -307,7 +284,7 @@ async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<(
             None,
             false,
             None,
-            Some(&metadata),
+            None,
             None,
             None,
             None,
@@ -333,7 +310,16 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "schema.agent")?;
+    install_validation_agent(
+        &workspace.agents_dir,
+        "schema.agent",
+        r#"io:
+  returns:
+    type: object
+    required:
+      - status
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "schema.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
@@ -348,16 +334,6 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
 
     let execution = GatewayExecutionService::new(config, Some(store));
 
-    let metadata = serde_json::json!({
-        "response_contract": {
-            "output_schema": {
-                "type": "object",
-                "required": ["status"]
-            },
-            "validation_max_loops": 1
-        }
-    });
-
     let err = execution
         .spawn_agent_once(
             "schema.agent",
@@ -366,7 +342,7 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
             None,
             false,
             None,
-            Some(&metadata),
+            None,
             None,
             None,
             None,
@@ -391,7 +367,7 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
 
 #[serial_test::serial]
 #[tokio::test]
-async fn test_manifest_io_returns_passes_without_explicit_response_contract() -> anyhow::Result<()>
+async fn test_manifest_io_returns_passes_without_explicit_output_policy() -> anyhow::Result<()>
 {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
@@ -452,7 +428,7 @@ async fn test_manifest_io_returns_passes_without_explicit_response_contract() ->
 
 #[serial_test::serial]
 #[tokio::test]
-async fn test_manifest_io_returns_rejects_and_logs_without_explicit_response_contract(
+async fn test_manifest_io_returns_rejects_and_logs_without_explicit_output_policy(
 ) -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
@@ -525,7 +501,15 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "evidence.agent")?;
+    install_validation_agent(
+        &workspace.agents_dir,
+        "evidence.agent",
+        r#"io:
+  output_policy:
+    min_artifact_builds: 1
+    validation_max_loops: 1
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "evidence.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
@@ -540,13 +524,6 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
 
     let execution = GatewayExecutionService::new(config, Some(store));
 
-    let metadata = serde_json::json!({
-        "response_contract": {
-            "min_artifact_builds": 1,
-            "validation_max_loops": 1
-        }
-    });
-
     let err = execution
         .spawn_agent_once(
             "evidence.agent",
@@ -555,7 +532,7 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
             None,
             false,
             None,
-            Some(&metadata),
+            None,
             None,
             None,
             None,
@@ -585,7 +562,7 @@ async fn test_response_validation_skipped_on_suspended_session() -> anyhow::Resu
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "suspend.agent")?;
+    install_validation_agent(&workspace.agents_dir, "suspend.agent", "")?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "suspend.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
@@ -628,7 +605,16 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
     config.response_validation.enabled = true;
     config.response_validation.repair_enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "repair.agent")?;
+    install_validation_agent(
+        &workspace.agents_dir,
+        "repair.agent",
+        r#"io:
+  output_policy:
+    required_artifacts: ["deployment.yaml"]
+    validation_max_loops: 1
+    validation_max_duration_ms: 500
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "repair.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
@@ -643,14 +629,6 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
 
     let execution = GatewayExecutionService::new(config, Some(store));
 
-    let metadata = serde_json::json!({
-        "response_contract": {
-            "required_artifacts": ["deployment.yaml"],
-            "validation_max_loops": 1,
-            "validation_max_duration_ms": 500
-        }
-    });
-
     let err = execution
         .spawn_agent_once(
             "repair.agent",
@@ -659,7 +637,7 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
             None,
             false,
             None,
-            Some(&metadata),
+            None,
             None,
             None,
             None,
@@ -696,7 +674,19 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
     config.response_validation.enabled = true;
     config.response_validation.repair_enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "exhaust.agent")?;
+    install_validation_agent(
+        &workspace.agents_dir,
+        "exhaust.agent",
+        r#"io:
+  output_policy:
+    required_artifacts: ["output.md"]
+    validation_max_loops: 2
+    validation_max_duration_ms: 5000
+    repair:
+      auto: true
+      max_attempts: 1
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "exhaust.agent")?;
 
     let call_count = Arc::new(Mutex::new(0usize));
@@ -718,15 +708,6 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
 
     let execution = GatewayExecutionService::new(config, Some(store));
 
-    let metadata = serde_json::json!({
-        "response_contract": {
-            "required_artifacts": ["output.md"],
-            "validation_max_loops": 2,
-            "validation_max_duration_ms": 5000,
-            "repair": {"auto": true, "max_attempts": 1}
-        }
-    });
-
     let err = execution
         .spawn_agent_once(
             "exhaust.agent",
@@ -735,7 +716,7 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
             None,
             false,
             None,
-            Some(&metadata),
+            None,
             None,
             None,
             None,
@@ -778,7 +759,19 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
     config.response_validation.enabled = true;
     config.response_validation.repair_enabled = true;
 
-    install_validation_agent(&workspace.agents_dir, "fixer.agent")?;
+    install_validation_agent(
+        &workspace.agents_dir,
+        "fixer.agent",
+        r#"io:
+  output_policy:
+    required_artifacts: ["deployment.yaml"]
+    validation_max_loops: 2
+    validation_max_duration_ms: 5000
+    repair:
+      auto: true
+      max_attempts: 1
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "fixer.agent")?;
 
     let call_count = Arc::new(Mutex::new(0usize));
@@ -821,15 +814,6 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
 
     let execution = GatewayExecutionService::new(config, Some(store));
 
-    let metadata = serde_json::json!({
-        "response_contract": {
-            "required_artifacts": ["deployment.yaml"],
-            "validation_max_loops": 2,
-            "validation_max_duration_ms": 5000,
-            "repair": {"auto": true, "max_attempts": 1}
-        }
-    });
-
     let result = execution
         .spawn_agent_once(
             "fixer.agent",
@@ -838,7 +822,7 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
             None,
             false,
             None,
-            Some(&metadata),
+            None,
             None,
             None,
             None,

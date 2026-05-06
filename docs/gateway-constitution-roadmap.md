@@ -1049,23 +1049,30 @@ Constitution rows for all eight rules were flipped from `PARTIAL` to
 These require RFCs before implementation. Each item here is a policy
 question, not just a code change.
 
-Current state: items **4.1–4.8 remain open**. A narrower policy-only
-determinism suite exists (see 4.9 note), but the original full capstone
-scope is still pending.
+Current state: items **4.1–4.6 and 4.8 are enforced**; item **4.7**
+and the full **4.9 capstone** scope remain open.
 
-### 4.1 Response repair loop (`execution.rs:1965`)
+### 4.1 Response repair loop — **ENFORCED**
 
-**Decision required.** Should the gateway repair agent output
-automatically, or reject and let the agent retry?
+Repair is manifest opt-in (`io.output_policy.repair.auto`, default
+`false`). Without opt-in, validation failures are returned directly to
+the agent as structured errors (no gateway-authored auto-repair turn).
+When enabled, agent-declared `max_attempts` is bounded by the system
+ceiling.
 
-Recommendation: make repair opt-in per-agent via manifest
-(`io.output_policy.repair.auto: bool`, default `false`). When
-disabled, validation failure returns a structured error, the agent
-decides whether to retry. Cap auto-repair attempts at a declared
-value within a system ceiling.
+Legacy `response_contract` metadata overrides are rejected fail-shut;
+policy is manifest-owned (`io.output_policy`) and output schema is
+manifest-owned (`io.returns`).
 
-Size: L (RFC + implementation + migration for agents currently relying
-on auto-repair).
+Files:
+`autonoetic-types/src/agent.rs`,
+`autonoetic-gateway/src/execution.rs`,
+`autonoetic-gateway/src/runtime/response_validation.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_repair_opt_in.rs`,
+`autonoetic-gateway/tests/response_validation_integration.rs`.
+
+Size: L. Completed via contract split + manifest-only enforcement +
+constitutional test pin.
 
 ### 4.2 Schema LLM-coercion fallback — **ENFORCED**
 
@@ -1143,21 +1150,26 @@ per-tool constants.
 
 Size: M.
 
-### 4.8 Cost-budget silent-disable on catalog failure — **PARTIAL**
+### 4.8 Cost-budget silent-disable on catalog failure — **ENFORCED**
 
-**Decision required.** Change default to fail-shut?
+Fail-shut is now the default when price-capped sessions cannot obtain
+model price metadata (`R-6.5` + `R++10`, `RefuseSessionStart` mode).
+The runtime preflight checks catalog availability before first LLM call
+for price-capped sessions; unavailable pricing refuses session start.
 
-Recommendation: yes. Sessions with `max_session_price_usd` set refuse
-to start if the OpenRouter catalog is unavailable. An agent with a
-`budget.no_price_available.allow` capability can override.
+An explicit capability override
+`type: "budget.no_price_available.allow"` allows intentional execution
+without price metadata for trusted agents.
 
-**Current state.** Core fail-shut behavior for price-capped sessions is
-already enforced via R-6.5 + R++10 (`session_budget.rs`,
-`root_session_budget.rs`, `fail_mode.rs`). Remaining scope in #76 is the
-explicit override capability semantics and dedicated test pin described in
-that issue.
+Files:
+`autonoetic-types/src/capability.rs`,
+`autonoetic-gateway/src/runtime/lifecycle.rs`,
+`autonoetic-gateway/src/runtime/session_budget.rs`,
+`autonoetic-gateway/src/runtime/root_session_budget.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_cost_fail_shut.rs`.
 
-Size: S.
+Size: S. Completed via fail-shut preflight + capability override +
+constitutional test pin.
 
 ### 4.9 `R++9` Gateway determinism property test (capstone) — **OPEN (policy-level precursor landed)**
 
