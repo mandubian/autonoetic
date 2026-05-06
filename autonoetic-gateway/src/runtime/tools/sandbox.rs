@@ -1186,19 +1186,21 @@ Use content.read(cnt_...) to inspect content by handle, or use the path returned
 
         let dep_packages: Option<Vec<String>> =
             args.dependencies.as_ref().map(|d| d.packages.clone());
+        let declared_remote_access = load_manifest_remote_access_declaration(agent_dir);
         let remote_analysis = if let Some(artifact_analysis) = artifact_analysis_override {
             artifact_analysis
         } else {
-            crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
+            crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies_with_declaration(
                 &code_to_analyze,
                 dep_packages.as_deref(),
+                declared_remote_access.as_ref(),
             )
         };
 
         let undeclared_remote_patterns =
             crate::runtime::remote_access::undeclared_patterns_against_manifest(
                 &remote_analysis.detected_patterns,
-                load_manifest_remote_access_declaration(agent_dir).as_ref(),
+                declared_remote_access.as_ref(),
             );
         if !undeclared_remote_patterns.is_empty() {
             let undeclared: Vec<serde_json::Value> = undeclared_remote_patterns
@@ -2739,6 +2741,65 @@ mod approval_binding_tests {
         assert_eq!(
             hosts,
             vec!["api.example.com".to_string(), "x.y".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod remote_access_declaration_tests {
+    use super::load_manifest_remote_access_declaration;
+
+    #[test]
+    fn loads_nested_autonoetic_remote_access_declaration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("SKILL.md"),
+            r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      enabled_languages: ["python", "javascript", "rust", "go"]
+      python_imports: ["requests"]
+      js_imports: ["axios"]
+      rust_imports: ["reqwest"]
+      go_imports: ["net/http"]
+      function_calls: ["requests.get", "axios.get"]
+      shell_commands: ["curl"]
+      package_manager_commands: ["pip install"]
+---
+# Test
+"#,
+        )
+        .expect("write skill");
+
+        let decl = load_manifest_remote_access_declaration(tmp.path())
+            .expect("nested remote_access declaration should parse");
+        assert_eq!(decl.enabled_languages.len(), 4);
+        assert_eq!(decl.python_imports, vec!["requests".to_string()]);
+        assert_eq!(decl.js_imports, vec!["axios".to_string()]);
+        assert_eq!(decl.rust_imports, vec!["reqwest".to_string()]);
+        assert_eq!(decl.go_imports, vec!["net/http".to_string()]);
+    }
+
+    #[test]
+    fn loads_top_level_remote_access_declaration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("SKILL.md"),
+            r#"---
+remote_access:
+  shell_commands: ["curl", "wget"]
+---
+# Test
+"#,
+        )
+        .expect("write skill");
+
+        let decl = load_manifest_remote_access_declaration(tmp.path())
+            .expect("top-level remote_access declaration should parse");
+        assert_eq!(
+            decl.shell_commands,
+            vec!["curl".to_string(), "wget".to_string()]
         );
     }
 }

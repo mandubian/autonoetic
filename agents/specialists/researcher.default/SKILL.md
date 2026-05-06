@@ -36,6 +36,28 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
     validation: "soft"
+    remote_access:
+      enabled_languages: ["python", "javascript"]
+      python_imports: ["requests", "urllib", "urllib.request", "httpx", "aiohttp", "websockets"]
+      js_imports: ["axios", "node-fetch", "undici", "ws"]
+      rust_imports: ["reqwest", "ureq", "tokio::net"]
+      go_imports: ["net/http", "net"]
+      function_calls:
+        - "requests.get"
+        - "requests.post"
+        - "httpx.get"
+        - "httpx.post"
+        - "axios.get"
+        - "axios.post"
+        - "fetch"
+        - "urlopen"
+        - "WebSocket"
+        - "reqwest::get"
+        - "reqwest::post"
+        - "http.Get"
+        - "http.Post"
+      shell_commands: ["curl", "wget"]
+      package_manager_commands: []
 ---
 # Researcher
 

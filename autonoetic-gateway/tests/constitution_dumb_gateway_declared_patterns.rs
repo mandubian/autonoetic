@@ -34,7 +34,11 @@ fn declared_patterns_cover_known_signals() {
         },
     ];
     let decl = RemoteAccessDeclaration {
+        enabled_languages: vec![],
         python_imports: vec!["requests".to_string()],
+        js_imports: vec![],
+        rust_imports: vec![],
+        go_imports: vec![],
         function_calls: vec!["requests.get".to_string()],
         shell_commands: vec!["curl".to_string()],
         package_manager_commands: vec!["pip install".to_string()],
@@ -53,7 +57,11 @@ fn undeclared_patterns_fail_shut() {
         reason: "command".to_string(),
     }];
     let decl = RemoteAccessDeclaration {
+        enabled_languages: vec![],
         python_imports: vec![],
+        js_imports: vec![],
+        rust_imports: vec![],
+        go_imports: vec![],
         function_calls: vec![],
         shell_commands: vec!["curl".to_string()],
         package_manager_commands: vec![],

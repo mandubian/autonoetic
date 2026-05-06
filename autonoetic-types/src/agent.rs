@@ -178,9 +178,22 @@ pub struct AgentManifest {
 /// Agent-declared remote-access patterns used for deterministic gateway checks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoteAccessDeclaration {
+    /// Optional language-detector allowlist for import scanning.
+    /// Empty means all registered language detectors are enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled_languages: Vec<RemoteAccessLanguage>,
     /// Python import/module patterns expected in network-capable code.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub python_imports: Vec<String>,
+    /// JavaScript/TypeScript import/module patterns expected in network-capable code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub js_imports: Vec<String>,
+    /// Rust import/module patterns expected in network-capable code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rust_imports: Vec<String>,
+    /// Go import/module patterns expected in network-capable code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub go_imports: Vec<String>,
     /// Function/method call patterns expected in network-capable code.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub function_calls: Vec<String>,
@@ -190,6 +203,16 @@ pub struct RemoteAccessDeclaration {
     /// Package-manager command patterns (pip/npm/apt/etc.) expected by the agent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_manager_commands: Vec<String>,
+}
+
+/// Language detector identifier for remote-access import scanning.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAccessLanguage {
+    Python,
+    Javascript,
+    Rust,
+    Go,
 }
 
 /// Per-agent context compression configuration (opt-in via SKILL.md).

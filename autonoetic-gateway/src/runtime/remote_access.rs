@@ -5,6 +5,9 @@
 //! If detected, the code execution requires operator approval.
 
 use regex::Regex;
+use std::collections::HashSet;
+
+use autonoetic_types::agent::{RemoteAccessDeclaration, RemoteAccessLanguage};
 
 /// Result of analyzing code for remote access patterns.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -156,6 +159,197 @@ pub fn approval_remote_operator_suffix(
 /// Static analyzer for detecting remote access patterns in code.
 pub struct RemoteAccessAnalyzer;
 
+trait ImportLanguageDetector {
+    fn language(&self) -> RemoteAccessLanguage;
+    fn detect(&self, code: &str) -> Vec<DetectedPattern>;
+}
+
+fn push_unique_pattern(
+    patterns: &mut Vec<DetectedPattern>,
+    category: &str,
+    pat_str: &str,
+    line_num: usize,
+    reason: &str,
+) {
+    if !patterns
+        .iter()
+        .any(|p| p.pattern == pat_str && p.line_number == Some(line_num))
+    {
+        patterns.push(DetectedPattern {
+            category: category.to_string(),
+            pattern: pat_str.to_string(),
+            line_number: Some(line_num),
+            reason: reason.to_string(),
+        });
+    }
+}
+
+fn collect_regex_matches(
+    code: &str,
+    regex: &str,
+    category: &str,
+    reason: &str,
+    patterns: &mut Vec<DetectedPattern>,
+) {
+    if let Ok(re) = Regex::new(regex) {
+        for mat in re.find_iter(code) {
+            let line_num = code[..mat.start()].matches('\n').count() + 1;
+            let pat_str = mat.as_str().trim();
+            push_unique_pattern(patterns, category, pat_str, line_num, reason);
+        }
+    }
+}
+
+struct PythonImportDetector;
+impl ImportLanguageDetector for PythonImportDetector {
+    fn language(&self) -> RemoteAccessLanguage {
+        RemoteAccessLanguage::Python
+    }
+
+    fn detect(&self, code: &str) -> Vec<DetectedPattern> {
+        let mut patterns = Vec::new();
+        let import_patterns = vec![
+            ("requests", "HTTP client library"),
+            ("urllib", "URL handling library"),
+            ("urllib.request", "URL request library"),
+            ("urllib3", "HTTP client library"),
+            ("httpx", "Async HTTP client library"),
+            ("aiohttp", "Async HTTP client library"),
+            ("socket", "Low-level networking library"),
+            ("ftplib", "FTP client library"),
+            ("smtplib", "SMTP client library"),
+            ("paramiko", "SSH client library"),
+            ("fabric", "SSH execution library"),
+            ("websockets", "WebSocket client library"),
+            ("redis", "Redis client library"),
+            ("pymongo", "MongoDB client library"),
+            ("mysql", "MySQL client library"),
+            ("psycopg", "PostgreSQL client library"),
+            ("sqlalchemy", "SQL toolkit (can connect to remote DBs)"),
+            ("boto3", "AWS SDK (cloud access)"),
+            ("google.cloud", "Google Cloud SDK"),
+            ("azure", "Azure SDK"),
+        ];
+        for (lib, reason) in &import_patterns {
+            let import_regex = format!(
+                r"(?m)^\s*(?:import\s+{}|from\s+{}\s+import)",
+                regex::escape(lib),
+                regex::escape(lib)
+            );
+            collect_regex_matches(code, &import_regex, "import", reason, &mut patterns);
+        }
+        patterns
+    }
+}
+
+struct JsImportDetector;
+impl ImportLanguageDetector for JsImportDetector {
+    fn language(&self) -> RemoteAccessLanguage {
+        RemoteAccessLanguage::Javascript
+    }
+
+    fn detect(&self, code: &str) -> Vec<DetectedPattern> {
+        let mut patterns = Vec::new();
+        let regexes = vec![
+            (
+                r#"(?m)^\s*import\s+.*\s+from\s+["'](axios|node-fetch|undici|got|ws|http|https|net|tls)["']"#,
+                "JS/TS network-capable module import",
+            ),
+            (
+                r#"(?m)^\s*import\s+["'](axios|node-fetch|undici|got|ws|http|https|net|tls)["']"#,
+                "JS/TS side-effect module import",
+            ),
+            (
+                r#"(?m)^\s*(?:const|let|var)\s+\w+\s*=\s*require\(["'](axios|node-fetch|undici|got|ws|http|https|net|tls)["']\)"#,
+                "JS/TS require() of network-capable module",
+            ),
+        ];
+        for (regex, reason) in regexes {
+            collect_regex_matches(code, regex, "import", reason, &mut patterns);
+        }
+        patterns
+    }
+}
+
+struct RustImportDetector;
+impl ImportLanguageDetector for RustImportDetector {
+    fn language(&self) -> RemoteAccessLanguage {
+        RemoteAccessLanguage::Rust
+    }
+
+    fn detect(&self, code: &str) -> Vec<DetectedPattern> {
+        let mut patterns = Vec::new();
+        let regexes = vec![
+            (
+                r"(?m)^\s*use\s+(reqwest|hyper|ureq|tokio::net|std::net|tokio_tungstenite|redis)(::|;)",
+                "Rust use import for network-capable crate/module",
+            ),
+            (
+                r"(?m)^\s*extern\s+crate\s+(reqwest|hyper|ureq|redis)\s*;",
+                "Rust extern crate network-capable import",
+            ),
+        ];
+        for (regex, reason) in regexes {
+            collect_regex_matches(code, regex, "import", reason, &mut patterns);
+        }
+        patterns
+    }
+}
+
+struct GoImportDetector;
+impl ImportLanguageDetector for GoImportDetector {
+    fn language(&self) -> RemoteAccessLanguage {
+        RemoteAccessLanguage::Go
+    }
+
+    fn detect(&self, code: &str) -> Vec<DetectedPattern> {
+        let mut patterns = Vec::new();
+        let regexes = vec![
+            (
+                r#"(?m)^\s*(?:\w+\s+)?"net/http"\s*$"#,
+                "Go net/http import",
+            ),
+            (
+                r#"(?m)^\s*(?:\w+\s+)?"net"\s*$"#,
+                "Go net import",
+            ),
+            (
+                r#"(?m)^\s*(?:\w+\s+)?"golang\.org/x/net/websocket"\s*$"#,
+                "Go x/net/websocket import",
+            ),
+            (
+                r#"(?m)^\s*(?:\w+\s+)?"google\.golang\.org/grpc"\s*$"#,
+                "Go gRPC import",
+            ),
+        ];
+        for (regex, reason) in regexes {
+            collect_regex_matches(code, regex, "import", reason, &mut patterns);
+        }
+        patterns
+    }
+}
+
+fn import_detector_registry() -> Vec<Box<dyn ImportLanguageDetector>> {
+    vec![
+        Box::new(PythonImportDetector),
+        Box::new(JsImportDetector),
+        Box::new(RustImportDetector),
+        Box::new(GoImportDetector),
+    ]
+}
+
+fn enabled_import_languages(
+    declaration: Option<&RemoteAccessDeclaration>,
+) -> Option<HashSet<RemoteAccessLanguage>> {
+    declaration.and_then(|decl| {
+        if decl.enabled_languages.is_empty() {
+            None
+        } else {
+            Some(decl.enabled_languages.iter().copied().collect())
+        }
+    })
+}
+
 fn normalize_declared_pattern(s: &str) -> String {
     s.trim().to_ascii_lowercase()
 }
@@ -204,16 +398,21 @@ fn is_package_manager_command_pattern(pattern: &str) -> bool {
 /// pattern surface, this returns an empty set.
 pub fn undeclared_patterns_against_manifest(
     patterns: &[DetectedPattern],
-    declaration: Option<&autonoetic_types::agent::RemoteAccessDeclaration>,
+    declaration: Option<&RemoteAccessDeclaration>,
 ) -> Vec<DetectedPattern> {
     let Some(decl) = declaration else {
         return Vec::new();
     };
+    let mut import_patterns = Vec::new();
+    import_patterns.extend(decl.python_imports.clone());
+    import_patterns.extend(decl.js_imports.clone());
+    import_patterns.extend(decl.rust_imports.clone());
+    import_patterns.extend(decl.go_imports.clone());
 
     patterns
         .iter()
         .filter(|p| match p.category.as_str() {
-            "import" => !observed_matches_declared(&p.pattern, &decl.python_imports),
+            "import" => !observed_matches_declared(&p.pattern, &import_patterns),
             "function_call" => !observed_matches_declared(&p.pattern, &decl.function_calls),
             "network_command" => {
                 if is_package_manager_command_pattern(&p.pattern) {
@@ -239,10 +438,20 @@ impl RemoteAccessAnalyzer {
     /// 4. IP address literals
     /// 5. Network shell commands (pip install, curl, git clone, etc.)
     pub fn analyze_code(code: &str) -> RemoteAccessAnalysis {
+        Self::analyze_code_with_declaration(code, None)
+    }
+
+    /// Analyzes code while honoring optional manifest declaration knobs
+    /// (e.g. `enabled_languages` for import detector selection).
+    pub fn analyze_code_with_declaration(
+        code: &str,
+        declaration: Option<&RemoteAccessDeclaration>,
+    ) -> RemoteAccessAnalysis {
         let mut patterns = Vec::new();
+        let enabled_imports = enabled_import_languages(declaration);
 
         // Check for network-related imports
-        patterns.extend(Self::detect_imports(code));
+        patterns.extend(Self::detect_imports(code, enabled_imports.as_ref()));
 
         // Check for network-related function calls
         patterns.extend(Self::detect_function_calls(code));
@@ -281,54 +490,31 @@ impl RemoteAccessAnalyzer {
         }
     }
 
-    /// Detects import statements for network libraries.
-    fn detect_imports(code: &str) -> Vec<DetectedPattern> {
-        let mut patterns = Vec::new();
-
-        // Python import patterns
-        let import_patterns = vec![
-            ("requests", "HTTP client library"),
-            ("urllib", "URL handling library"),
-            ("urllib.request", "URL request library"),
-            ("urllib3", "HTTP client library"),
-            ("httpx", "Async HTTP client library"),
-            ("aiohttp", "Async HTTP client library"),
-            ("socket", "Low-level networking library"),
-            ("ftplib", "FTP client library"),
-            ("smtplib", "SMTP client library"),
-            ("paramiko", "SSH client library"),
-            ("fabric", "SSH execution library"),
-            ("websockets", "WebSocket client library"),
-            ("redis", "Redis client library"),
-            ("pymongo", "MongoDB client library"),
-            ("mysql", "MySQL client library"),
-            ("psycopg", "PostgreSQL client library"),
-            ("sqlalchemy", "SQL toolkit (can connect to remote DBs)"),
-            ("boto3", "AWS SDK (cloud access)"),
-            ("google.cloud", "Google Cloud SDK"),
-            ("azure", "Azure SDK"),
-        ];
-
-        for (lib, reason) in &import_patterns {
-            // Match: import X, from X import, import X as Y
-            let import_regex = format!(
-                r"(?m)^\s*(?:import\s+{}|from\s+{}\s+import)",
-                regex::escape(lib),
-                regex::escape(lib)
-            );
-            if let Ok(re) = Regex::new(&import_regex) {
-                for mat in re.find_iter(code) {
-                    let line_num = code[..mat.start()].matches('\n').count() + 1;
-                    patterns.push(DetectedPattern {
-                        category: "import".to_string(),
-                        pattern: mat.as_str().trim().to_string(),
-                        line_number: Some(line_num),
-                        reason: reason.to_string(),
-                    });
+    /// Detects import statements using registered language detectors.
+    ///
+    /// When `enabled_languages` is set, only those language detectors run.
+    fn detect_imports(
+        code: &str,
+        enabled_languages: Option<&HashSet<RemoteAccessLanguage>>,
+    ) -> Vec<DetectedPattern> {
+        let mut patterns: Vec<DetectedPattern> = Vec::new();
+        for detector in import_detector_registry() {
+            let lang = detector.language();
+            let detector_enabled = match enabled_languages {
+                None => true,
+                Some(set) => set.contains(&lang),
+            };
+            if detector_enabled {
+                for p in detector.detect(code) {
+                    if !patterns
+                        .iter()
+                        .any(|existing| existing.pattern == p.pattern && existing.line_number == p.line_number)
+                    {
+                        patterns.push(p);
+                    }
                 }
             }
         }
-
         patterns
     }
 
@@ -355,9 +541,25 @@ impl RemoteAccessAnalyzer {
             (r"\.get\s*\(.*http", "HTTP GET request"),
             (r"\.post\s*\(.*http", "HTTP POST request"),
             (r"fetch\s*\(", "Fetch API call"),
+            (
+                r"axios\.(get|post|put|delete|patch|head|options)\s*\(",
+                "Axios HTTP request",
+            ),
+            (r"(http|https)\.(get|request)\s*\(", "Node HTTP/HTTPS request"),
+            (r"net\.connect\s*\(", "Node net.connect call"),
             (r"WebSocket\s*\(", "WebSocket connection"),
             (r"connect\s*\(.*ws://", "WebSocket connection"),
             (r"connect\s*\(.*wss://", "Secure WebSocket connection"),
+            (
+                r"(reqwest|ureq)::(get|post|put|delete|patch|head)\s*\(",
+                "Rust HTTP request function call",
+            ),
+            (
+                r"(std::net|tokio::net)::TcpStream::connect\s*\(",
+                "Rust TCP stream connect call",
+            ),
+            (r"http\.(Get|Post|Head)\s*\(", "Go net/http request call"),
+            (r"\.Do\s*\(", "HTTP client Do() call"),
         ];
 
         for (pattern, reason) in &call_patterns {
@@ -562,7 +764,17 @@ impl RemoteAccessAnalyzer {
         code: &str,
         dep_packages: Option<&[String]>,
     ) -> RemoteAccessAnalysis {
-        let mut patterns = Self::analyze_code(code);
+        Self::analyze_command_and_dependencies_with_declaration(code, dep_packages, None)
+    }
+
+    /// Same as [`Self::analyze_command_and_dependencies`] with optional
+    /// manifest declaration to constrain pluggable import detectors.
+    pub fn analyze_command_and_dependencies_with_declaration(
+        code: &str,
+        dep_packages: Option<&[String]>,
+        declaration: Option<&RemoteAccessDeclaration>,
+    ) -> RemoteAccessAnalysis {
+        let mut patterns = Self::analyze_code_with_declaration(code, declaration);
 
         if let Some(packages) = dep_packages {
             if !packages.is_empty() {
@@ -821,6 +1033,102 @@ async def fetch():
 "#;
         let analysis = RemoteAccessAnalyzer::analyze_code(code);
         assert!(analysis.requires_approval);
+    }
+
+    #[test]
+    fn test_js_import_detected() {
+        let code = r#"
+import axios from "axios";
+const http = require("http");
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "import" && p.pattern.contains("axios")));
+    }
+
+    #[test]
+    fn test_rust_import_detected() {
+        let code = r#"
+use reqwest::Client;
+use std::net::TcpStream;
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "import" && p.pattern.contains("reqwest")));
+    }
+
+    #[test]
+    fn test_go_import_detected() {
+        let code = r#"
+import (
+    "net/http"
+)
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "import" && p.pattern.contains("net/http")));
+    }
+
+    #[test]
+    fn test_import_detector_selection_respects_enabled_languages() {
+        let code = r#"
+import requests
+import axios from "axios";
+"#;
+        let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            enabled_languages: vec![RemoteAccessLanguage::Python],
+            python_imports: vec!["requests".to_string()],
+            js_imports: vec!["axios".to_string()],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let analysis = RemoteAccessAnalyzer::analyze_code_with_declaration(code, Some(&declaration));
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "import" && p.pattern.contains("import requests")));
+        assert!(
+            !analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "import" && p.pattern.contains("axios")),
+            "javascript detector should be disabled by enabled_languages"
+        );
+    }
+
+    #[test]
+    fn test_cross_language_function_calls_detected() {
+        let code = r#"
+const res = axios.get("https://example.org");
+let _ = reqwest::get("https://example.org");
+resp, err := http.Get("https://example.org")
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "function_call" && p.pattern.contains("axios.get")));
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "function_call" && p.pattern.contains("reqwest::get")));
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "function_call" && p.pattern.contains("http.Get")));
     }
 
     // --- Network command detection tests ---
@@ -1228,7 +1536,11 @@ mymod.do_thing()
             },
         ];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            enabled_languages: vec![],
             python_imports: vec!["requests".to_string()],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
             function_calls: vec!["requests.get".to_string()],
             shell_commands: vec!["curl".to_string()],
             package_manager_commands: vec!["pip install".to_string()],
@@ -1246,7 +1558,11 @@ mymod.do_thing()
             reason: "cmd".to_string(),
         }];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            enabled_languages: vec![],
             python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
             function_calls: vec![],
             shell_commands: vec!["curl".to_string()],
             package_manager_commands: vec![],
@@ -1254,6 +1570,46 @@ mymod.do_thing()
         let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
         assert_eq!(undeclared.len(), 1);
         assert_eq!(undeclared[0].pattern, "wget");
+    }
+
+    #[test]
+    fn test_undeclared_patterns_against_manifest_accepts_non_python_import_fields() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: r#"import axios from "axios""#.to_string(),
+                line_number: Some(1),
+                reason: "js import".to_string(),
+            },
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: "use reqwest::Client;".to_string(),
+                line_number: Some(2),
+                reason: "rust import".to_string(),
+            },
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: r#""net/http""#.to_string(),
+                line_number: Some(3),
+                reason: "go import".to_string(),
+            },
+        ];
+        let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            enabled_languages: vec![
+                RemoteAccessLanguage::Javascript,
+                RemoteAccessLanguage::Rust,
+                RemoteAccessLanguage::Go,
+            ],
+            python_imports: vec![],
+            js_imports: vec!["axios".to_string()],
+            rust_imports: vec!["reqwest".to_string()],
+            go_imports: vec!["net/http".to_string()],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
+        assert!(undeclared.is_empty(), "expected non-python import declarations to match");
     }
 }
 

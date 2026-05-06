@@ -23,12 +23,21 @@ Add a new optional declaration under agent manifest metadata:
 
 ```yaml
 remote_access:
+  enabled_languages: [python, javascript]
   python_imports:
     - requests
     - urllib
+  js_imports:
+    - axios
+  rust_imports:
+    - reqwest
+  go_imports:
+    - net/http
   function_calls:
     - requests.get
-    - socket.connect
+    - axios.get
+    - reqwest::get
+    - http.Get
   shell_commands:
     - curl
     - wget
@@ -48,6 +57,9 @@ Two-pass, fail-shut:
    - if a signal maps to a declared pattern category and is covered -> allowed
    - if a signal is not covered by declared patterns -> `undeclared_remote_pattern`
      deny (structured tool error)
+3. **Detector selection**:
+   - if `enabled_languages` is empty -> all registered import detectors run
+   - if set -> only those detectors run (pluggable modular selection)
 
 Special case:
 
@@ -58,20 +70,26 @@ Special case:
 
 Phase migration to avoid breaking all agents at once:
 
-1. **Stage A (warn mode)**: undeclared signals emit causal warnings.
-2. **Stage B (enforce mode)**: undeclared signals deny fail-shut.
-3. Migrate built-in agents (`coder`, `packager`, etc.) before Stage B default.
+1. **Current state (implemented)**: declaration-gated enforcement.
+   - if `remote_access` is declared and a signal is undeclared => fail-shut deny
+   - if `remote_access` is absent => legacy behavior (approval flow only)
+2. **Next stage**: move selected agents to mandatory declaration.
+3. **Final stage**: default fail-shut for undeclared signals (constitutional target).
 
 ## Required Code Changes
 
 - `autonoetic-types/src/agent.rs`
   - add `RemoteAccessDeclaration` manifest type
 - `autonoetic-gateway/src/runtime/remote_access.rs`
-  - replace hard-coded "policy" lists with generic signal extraction + declared
-    pattern matcher
+  - add declared-pattern matcher and broaden signal extraction for Python, JS/TS,
+    Rust, and Go network idioms
 - `autonoetic-gateway/src/runtime/tools/sandbox.rs`
-  - pass target manifest declaration into analyzer
+  - load target manifest declaration from `SKILL.md` frontmatter
   - return structured undeclared-pattern errors
+
+- `agents/specialists/packager.default/SKILL.md`
+- `agents/specialists/researcher.default/SKILL.md`
+  - declare remote-access patterns for fail-shut enforcement
 
 ## Test Plan
 

@@ -38,6 +38,44 @@ metadata:
         auto: true
         max_attempts: 1
       validation_max_duration_ms: 120000
+    remote_access:
+      enabled_languages: ["python", "javascript", "rust", "go"]
+      python_imports: ["requests", "urllib", "httpx", "aiohttp"]
+      js_imports: ["axios", "node-fetch", "undici", "got"]
+      rust_imports: ["reqwest", "hyper", "ureq"]
+      go_imports: ["net/http", "google.golang.org/grpc"]
+      function_calls:
+        - "requests.get"
+        - "requests.post"
+        - "httpx.get"
+        - "httpx.post"
+        - "axios.get"
+        - "axios.post"
+        - "reqwest::get"
+        - "reqwest::post"
+        - "http.Get"
+        - "http.Post"
+      shell_commands: ["curl", "wget", "git clone", "git fetch", "git pull", "git push"]
+      package_manager_commands:
+        - "pip install"
+        - "pip3 install"
+        - "npm install"
+        - "yarn install"
+        - "yarn add"
+        - "pnpm install"
+        - "bun install"
+        - "go get"
+        - "go mod download"
+        - "cargo install"
+        - "gem install"
+        - "composer install"
+        - "composer require"
+        - "apt-get install"
+        - "apt-get update"
+        - "apk add"
+        - "yum install"
+        - "dnf install"
+        - "pacman -S"
 ---
 # Packager
 
