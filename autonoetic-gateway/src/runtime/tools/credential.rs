@@ -12,6 +12,7 @@
 
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
+use crate::runtime::network_policy::DeclarationRequirement;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentManifest, CredentialRecord, CredentialSetupStep};
 use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
@@ -254,7 +255,7 @@ impl NativeTool for CredentialRequestTool {
         &self,
         manifest: &AgentManifest,
         policy: &PolicyEngine,
-        _agent_dir: &Path,
+        agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
@@ -358,6 +359,24 @@ impl NativeTool for CredentialRequestTool {
         } else {
             false
         };
+
+        if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
+            manifest,
+            agent_dir,
+            &url_host,
+            Some(&args.url),
+            DeclarationRequirement::Optional,
+        ) {
+            return Ok(json!({
+                "ok": false,
+                "error_type": violation.error_type,
+                "message": violation.message,
+                "repair_hint": violation.repair_hint,
+                "error": "remote access target policy violation",
+                "approval_required": false,
+            })
+            .to_string());
+        }
 
         // Check network policy unless this exact request has been explicitly approved.
         if !policy.can_connect_net(&url_host).is_allowed() && !approval_validated {
@@ -488,7 +507,7 @@ impl NativeTool for CredentialRequestTool {
         }
 
         // Vault auto-init + resolve path
-        let vdir = vault_dir(_gateway_dir, _agent_dir);
+        let vdir = vault_dir(_gateway_dir, agent_dir);
         crate::vault::ensure_default_key(&vdir)?;
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
@@ -570,7 +589,7 @@ impl NativeTool for CredentialRequestTool {
                 match try_auto_refresh(&cred, &store, &v_path) {
                     Ok(updated_cred) => {
                         cred = updated_cred;
-                        let mut vault = crate::Vault::load_from_file(&v_path)?;
+                        let vault = crate::Vault::load_from_file(&v_path)?;
                         secret_value_clone = vault
                             .get_secret(&cred.secret_name)
                             .map(|s| s.expose_secret().to_string());
@@ -659,7 +678,7 @@ impl NativeTool for CredentialRefreshTool {
         agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        session_id: Option<&str>,
+        _session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -1333,6 +1352,23 @@ impl NativeTool for CredentialSetupTool {
         {
             // Policy-check the skill_url host.
             let url_host = extract_host(url)?;
+            if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
+                manifest,
+                _agent_dir,
+                &url_host,
+                Some(url),
+                DeclarationRequirement::Optional,
+            ) {
+                return Ok(json!({
+                        "ok": false,
+                        "error_type": violation.error_type,
+                        "message": violation.message,
+                        "repair_hint": violation.repair_hint,
+                        "error": "remote access target policy violation",
+                        "approval_required": false,
+                    })
+                    .to_string());
+            }
             if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
                 let message = format!("Network access denied for skill_url host: {}", url_host);
                 return Ok(json!({
@@ -1474,6 +1510,23 @@ impl NativeTool for CredentialSetupTool {
         for step in &steps {
             if let CredentialSetupStep::ApiCall { url, .. } = step {
                 let host = extract_host(url)?;
+                if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
+                    manifest,
+                    _agent_dir,
+                    &host,
+                    Some(url),
+                    DeclarationRequirement::Optional,
+                ) {
+                    return Ok(json!({
+                        "ok": false,
+                        "error_type": violation.error_type,
+                        "message": violation.message,
+                        "repair_hint": violation.repair_hint,
+                        "error": "remote access target policy violation",
+                        "approval_required": false,
+                    })
+                    .to_string());
+                }
                 if host.is_empty() || !policy.can_connect_net(&host).is_allowed() {
                     let denied_host = if host.is_empty() { "<empty>" } else { &host };
                     return Ok(json!({

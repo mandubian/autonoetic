@@ -9,7 +9,7 @@ use crate::runtime::tools::{
     load_session_content_mounts, NativeTool, NativeToolRegistry, SandboxExecArgs,
 };
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
-use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::agent::{AgentManifest, RemoteAccessApprovalMode};
 use autonoetic_types::background::{
     ApprovalDecision, ApprovalRequest, LayerMountScopeInfo, ScheduledAction,
 };
@@ -103,32 +103,6 @@ fn is_package_manager_command(pattern: &str) -> bool {
             | "composer install"
             | "composer require"
     )
-}
-
-fn load_manifest_remote_access_declaration(
-    agent_dir: &Path,
-) -> Option<autonoetic_types::agent::RemoteAccessDeclaration> {
-    let skill_path = agent_dir.join("SKILL.md");
-    let skill = std::fs::read_to_string(skill_path).ok()?;
-    let frontmatter = skill.split("---").nth(1)?;
-    let root = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
-
-    let direct = root.get("remote_access").cloned();
-    let nested = root
-        .get("metadata")
-        .and_then(|m| m.get("autonoetic"))
-        .and_then(|a| a.get("remote_access"))
-        .cloned();
-
-    direct
-        .or(nested)
-        .and_then(|v| serde_yaml::from_value::<autonoetic_types::agent::RemoteAccessDeclaration>(v).ok())
-}
-
-fn requires_remote_access_declaration(capabilities: &[Capability]) -> bool {
-    capabilities
-        .iter()
-        .any(|c| matches!(c, Capability::NetworkAccess { .. }))
 }
 
 pub fn extract_artifact_source(gw_dir: &Path, artifact_id: &str) -> String {
@@ -1125,20 +1099,8 @@ impl NativeTool for SandboxExecTool {
 
         let dep_packages: Option<Vec<String>> =
             args.dependencies.as_ref().map(|d| d.packages.clone());
-        let declared_remote_access = load_manifest_remote_access_declaration(agent_dir);
-        let declaration_required = requires_remote_access_declaration(&manifest.capabilities);
-        if declaration_required && declared_remote_access.is_none() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "missing_remote_access_declaration",
-                "message": format!(
-                    "Agent `{}` has NetworkAccess capability and must declare metadata.autonoetic.remote_access in SKILL.md before running sandbox.exec.",
-                    manifest.agent.id
-                ),
-                "repair_hint": "Add metadata.autonoetic.remote_access with enabled_languages/imports/function_calls/shell_commands/package_manager_commands.",
-            })
-            .to_string());
-        }
+        let declared_remote_access =
+            crate::runtime::network_policy::load_manifest_remote_access_declaration(agent_dir);
         let remote_analysis = if let Some(artifact_analysis) = artifact_analysis_override {
             artifact_analysis
         } else {
@@ -1148,6 +1110,32 @@ impl NativeTool for SandboxExecTool {
                 declared_remote_access.as_ref(),
             )
         };
+
+        if declared_remote_access.is_none() && remote_analysis.requires_approval {
+            let undeclared: Vec<serde_json::Value> = remote_analysis
+                .detected_patterns
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "category": p.category,
+                        "pattern": p.pattern,
+                        "line_number": p.line_number,
+                        "reason": p.reason,
+                    })
+                })
+                .collect();
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "missing_remote_access_declaration",
+                "message": format!(
+                    "Agent `{}` triggered remote-access signals but has no metadata.autonoetic.remote_access declaration in SKILL.md.",
+                    manifest.agent.id
+                ),
+                "repair_hint": "Declare metadata.autonoetic.remote_access (approval_mode/targets/enabled_languages/imports/function_calls/shell_commands/package_manager_commands) before running network-related code or commands.",
+                "undeclared_patterns": undeclared,
+            })
+            .to_string());
+        }
 
         let undeclared_remote_patterns =
             crate::runtime::remote_access::undeclared_patterns_against_manifest(
@@ -1170,7 +1158,7 @@ impl NativeTool for SandboxExecTool {
                 "ok": false,
                 "error_type": "undeclared_remote_pattern",
                 "message": "Remote access signals are not covered by manifest remote_access declaration.",
-                "repair_hint": "Declare required remote_access patterns in SKILL.md (python_imports/function_calls/shell_commands/package_manager_commands) or change command/code to match declared behavior.",
+                "repair_hint": "Declare required remote_access behavior in SKILL.md (targets/python_imports/function_calls/shell_commands/package_manager_commands) or change command/code to match declared behavior.",
                 "undeclared_patterns": undeclared,
             })
             .to_string());
@@ -1181,7 +1169,29 @@ impl NativeTool for SandboxExecTool {
             .iter()
             .any(|c| matches!(c, Capability::NetworkAccess { .. }));
 
-        if agent_has_network_access
+        let remote_approval_mode = declared_remote_access
+            .as_ref()
+            .map(|d| d.approval_mode)
+            .unwrap_or(RemoteAccessApprovalMode::Required);
+
+        if matches!(remote_approval_mode, RemoteAccessApprovalMode::Preapproved)
+            && !agent_has_network_access
+            && remote_analysis.requires_approval
+        {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "remote_preapproval_requires_network_capability",
+                "message": format!(
+                    "Agent `{}` declared remote_access.approval_mode=preapproved but does not have NetworkAccess capability.",
+                    manifest.agent.id
+                ),
+                "repair_hint": "Either add NetworkAccess capability or set metadata.autonoetic.remote_access.approval_mode to required.",
+            })
+            .to_string());
+        }
+
+        if matches!(remote_approval_mode, RemoteAccessApprovalMode::Preapproved)
+            && agent_has_network_access
             && remote_analysis.requires_approval
             && !approval_validated_for_command
         {
@@ -1189,7 +1199,7 @@ impl NativeTool for SandboxExecTool {
                 target: "sandbox_exec",
                 agent_id = %manifest.agent.id,
                 patterns = ?remote_analysis.detected_patterns,
-                "Agent has NetworkAccess capability — auto-approving remote access patterns"
+                "remote_access.approval_mode is preapproved and NetworkAccess is present - auto-approving remote access patterns"
             );
             approval_validated_for_command = true;
         }
@@ -2657,8 +2667,7 @@ mod approval_binding_tests {
 
 #[cfg(test)]
 mod remote_access_declaration_tests {
-    use super::{load_manifest_remote_access_declaration, requires_remote_access_declaration};
-    use autonoetic_types::capability::Capability;
+    use crate::runtime::network_policy::load_manifest_remote_access_declaration;
 
     #[test]
     fn loads_nested_autonoetic_remote_access_declaration() {
@@ -2714,16 +2723,6 @@ remote_access:
         );
     }
 
-    #[test]
-    fn network_access_capability_requires_remote_access_declaration() {
-        assert!(requires_remote_access_declaration(&[Capability::NetworkAccess {
-            hosts: vec!["*".to_string()],
-        }]));
-        assert!(!requires_remote_access_declaration(&[Capability::CodeExecution {
-            patterns: vec!["python3 ".to_string()],
-            commands: vec![],
-        }]));
-    }
 }
 
 #[cfg(test)]

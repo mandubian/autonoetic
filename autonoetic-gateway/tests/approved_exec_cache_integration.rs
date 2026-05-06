@@ -85,6 +85,27 @@ fn create_test_script(
     script_path
 }
 
+fn write_remote_access_declaration(agent_dir: &std::path::Path) {
+    let skill = r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: "required"
+      targets:
+        - kind: "any"
+      enabled_languages: []
+      python_imports: []
+      js_imports: []
+      rust_imports: []
+      go_imports: []
+      function_calls: []
+      shell_commands: []
+      package_manager_commands: []
+---
+"#;
+    std::fs::write(agent_dir.join("SKILL.md"), skill).expect("skill should write");
+}
+
 #[test]
 fn test_cache_record_and_find() {
     let temp = tempdir().expect("tempdir should create");
@@ -348,7 +369,7 @@ fn test_cache_not_used_for_unresolved_targets() {
     // Unresolved means no concrete targets to match against
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache should create");
     let targets = normalize_targets(&patterns);
-    let fingerprint = compute_fingerprint("test.agent", &targets, "code", None);
+    let _fingerprint = compute_fingerprint("test.agent", &targets, "code", None);
 
     // In the real flow, this would NOT be recorded because coverage is Unresolved
     assert_eq!(cache.len(), 0);
@@ -364,6 +385,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
 
     let agent_dir = agents_dir.join("test.agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
+    write_remote_access_declaration(&agent_dir);
 
     let manifest = test_agent_manifest();
     let policy = PolicyEngine::new(manifest.clone());
@@ -397,7 +419,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
     cache.record(entry).expect("record should succeed");
 
     // Create a script file with the same code content
-    let script_path = create_test_script(&agent_dir, "fetch.py", code_content);
+    create_test_script(&agent_dir, "fetch.py", code_content);
     // Use relative path to avoid /tmp/ interpretation issues
     let script_rel_path = format!("scripts/fetch.py");
 
@@ -462,6 +484,7 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
 
     let agent_dir = agents_dir.join("test.agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
+    write_remote_access_declaration(&agent_dir);
 
     let manifest = test_agent_manifest();
     let policy = PolicyEngine::new(manifest.clone());
@@ -535,6 +558,7 @@ fn test_sandbox_exec_import_plus_url_caches() {
 
     let agent_dir = agents_dir.join("test.agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
+    write_remote_access_declaration(&agent_dir);
 
     let manifest = test_agent_manifest();
     let policy = PolicyEngine::new(manifest.clone());

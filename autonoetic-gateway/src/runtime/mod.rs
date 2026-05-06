@@ -23,6 +23,7 @@ pub mod llm_preset_resolver;
 pub mod mcp;
 pub mod memory;
 pub mod model_router;
+pub mod network_policy;
 pub mod openrouter_catalog;
 pub mod parser;
 pub mod post_session_digest;

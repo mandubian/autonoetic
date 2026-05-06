@@ -39,6 +39,9 @@ metadata:
         max_attempts: 1
       validation_max_duration_ms: 120000
     remote_access:
+      approval_mode: "preapproved"
+      targets:
+        - kind: "any"
       enabled_languages: ["python", "javascript", "rust", "go"]
       python_imports: ["requests", "urllib", "httpx", "aiohttp"]
       js_imports: ["axios", "node-fetch", "undici", "got"]

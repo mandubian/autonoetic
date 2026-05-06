@@ -1,6 +1,7 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::network_policy::{self, DeclarationRequirement};
 use crate::runtime::tools::{block_on_http, extract_host, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
@@ -99,6 +100,37 @@ fn parse_web_search_provider(raw: Option<&str>) -> anyhow::Result<WebSearchProvi
             ),
         ))),
     }
+}
+
+fn network_policy_violation_to_anyhow(
+    violation: network_policy::NetworkPolicyViolation,
+) -> anyhow::Error {
+    let err = anyhow::anyhow!(violation.message);
+    match violation.error_type {
+        "missing_remote_access_declaration"
+        | "undeclared_remote_target"
+        | "remote_preapproval_requires_network_capability" => {
+            anyhow::Error::from(tagged::Tagged::validation(err))
+        }
+        _ => anyhow::Error::from(tagged::Tagged::permission(err)),
+    }
+}
+
+fn enforce_remote_target_for_web(
+    manifest: &AgentManifest,
+    agent_dir: &Path,
+    host: &str,
+    request_url: &str,
+) -> anyhow::Result<()> {
+    network_policy::enforce_remote_target_policy(
+        manifest,
+        agent_dir,
+        host,
+        Some(request_url),
+        DeclarationRequirement::Optional,
+    )
+    .map(|_| ())
+    .map_err(network_policy_violation_to_anyhow)
 }
 
 fn resolve_duckduckgo_engine_url(args: &WebSearchArgs) -> String {
@@ -401,13 +433,16 @@ struct WebSearchResponse {
 }
 
 fn execute_duckduckgo_search(
+    manifest: &AgentManifest,
     policy: &PolicyEngine,
+    agent_dir: &Path,
     query: &str,
     engine_url: String,
     max_results: usize,
     timeout_secs: u64,
 ) -> anyhow::Result<WebSearchResponse> {
     let engine_host = extract_host(&engine_url)?;
+    enforce_remote_target_for_web(manifest, agent_dir, &engine_host, &engine_url)?;
     if !policy.can_connect_net(&engine_host).is_allowed() {
         return Err(anyhow::Error::from(tagged::Tagged::permission(
             anyhow::anyhow!(
@@ -484,7 +519,9 @@ fn execute_duckduckgo_search(
 }
 
 fn execute_google_search(
+    manifest: &AgentManifest,
     policy: &PolicyEngine,
+    agent_dir: &Path,
     query: &str,
     engine_url: String,
     api_key: String,
@@ -493,6 +530,7 @@ fn execute_google_search(
     timeout_secs: u64,
 ) -> anyhow::Result<WebSearchResponse> {
     let engine_host = extract_host(&engine_url)?;
+    enforce_remote_target_for_web(manifest, agent_dir, &engine_host, &engine_url)?;
     if !policy.can_connect_net(&engine_host).is_allowed() {
         return Err(anyhow::Error::from(tagged::Tagged::permission(
             anyhow::anyhow!(
@@ -638,9 +676,9 @@ impl NativeTool for WebSearchTool {
 
     fn execute(
         &self,
-        _manifest: &AgentManifest,
+        manifest: &AgentManifest,
         policy: &PolicyEngine,
-        _agent_dir: &Path,
+        agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
@@ -680,7 +718,9 @@ impl NativeTool for WebSearchTool {
             WebSearchProvider::DuckDuckGo => {
                 attempted_providers.push(WebSearchProvider::DuckDuckGo.as_str().to_string());
                 execute_duckduckgo_search(
+                    manifest,
                     policy,
+                    agent_dir,
                     &query,
                     resolve_duckduckgo_engine_url(&args),
                     requested_max_results.clamp(1, 20),
@@ -692,7 +732,9 @@ impl NativeTool for WebSearchTool {
                 let api_key = resolve_google_api_key(&args)?;
                 let engine_id = resolve_google_engine_id(&args)?;
                 execute_google_search(
+                    manifest,
                     policy,
+                    agent_dir,
                     &query,
                     resolve_google_engine_url(&args),
                     api_key,
@@ -715,7 +757,9 @@ impl NativeTool for WebSearchTool {
                     Ok((api_key, engine_id)) => {
                         attempted_providers.push(WebSearchProvider::Google.as_str().to_string());
                         match execute_google_search(
+                            manifest,
                             policy,
+                            agent_dir,
                             &query,
                             google_engine_url,
                             api_key,
@@ -731,7 +775,9 @@ impl NativeTool for WebSearchTool {
                                 attempted_providers
                                     .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
                                 execute_duckduckgo_search(
+                                    manifest,
                                     policy,
+                                    agent_dir,
                                     &query,
                                     ddg_engine_url,
                                     ddg_max_results,
@@ -745,7 +791,9 @@ impl NativeTool for WebSearchTool {
                                 attempted_providers
                                     .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
                                 match execute_duckduckgo_search(
+                                    manifest,
                                     policy,
+                                    agent_dir,
                                     &query,
                                     ddg_engine_url,
                                     ddg_max_results,
@@ -771,7 +819,9 @@ impl NativeTool for WebSearchTool {
                         attempted_providers
                             .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
                         execute_duckduckgo_search(
+                            manifest,
                             policy,
+                            agent_dir,
                             &query,
                             ddg_engine_url,
                             ddg_max_results,
@@ -841,9 +891,9 @@ impl NativeTool for WebFetchTool {
 
     fn execute(
         &self,
-        _manifest: &AgentManifest,
+        manifest: &AgentManifest,
         policy: &PolicyEngine,
-        _agent_dir: &Path,
+        agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
@@ -857,6 +907,7 @@ impl NativeTool for WebFetchTool {
 
         anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
         let host = extract_host(&args.url)?;
+        enforce_remote_target_for_web(manifest, agent_dir, &host, &args.url)?;
         if !policy.can_connect_net(&host).is_allowed() {
             return Err(anyhow::Error::from(tagged::Tagged::permission(
                 anyhow::anyhow!(
@@ -1009,9 +1060,9 @@ impl NativeTool for WebCallTool {
 
     fn execute(
         &self,
-        _manifest: &AgentManifest,
+        manifest: &AgentManifest,
         policy: &PolicyEngine,
-        _agent_dir: &Path,
+        agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
@@ -1025,6 +1076,7 @@ impl NativeTool for WebCallTool {
 
         anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
         let host = extract_host(&args.url)?;
+        enforce_remote_target_for_web(manifest, agent_dir, &host, &args.url)?;
         if !policy.can_connect_net(&host).is_allowed() {
             return Err(anyhow::Error::from(tagged::Tagged::permission(
                 anyhow::anyhow!(

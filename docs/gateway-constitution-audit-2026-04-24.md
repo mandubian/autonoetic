@@ -210,17 +210,21 @@ enforcing declared rules. The top ones by structural significance:
    Phase 4.2**: schema enforcement is deterministic-only and legacy
    `schema_enforcement.mode: llm` is now rejected at config parse time.
 
-3. **Remote-access static analyzer** (`runtime/tools/sandbox.rs:935+`,
-   `runtime/remote_access.rs`). **Partially resolved in Phase 4.3/4.4**:
-   enforcement now checks observed signals against agent-declared
-   `metadata.autonoetic.remote_access`, and agents with
-   `NetworkAccess` capability must declare this block or fail shut.
-   Remaining gap is the final default fail-shut migration for all agents.
+3. ~~**Remote-access static analyzer** (`runtime/tools/sandbox.rs:935+`,
+   `runtime/remote_access.rs`). Policy invented in code, not derived from
+   manifest.~~ **Resolved in Phase 4.3/4.4**: gateway now fails shut on
+   undeclared remote signals and requires declaration coverage via
+   `metadata.autonoetic.remote_access` (including default fail-shut when
+   declaration is absent, typed target enforcement through
+   `remote_access.targets`, explicit approval
+   policy via `remote_access.approval_mode`, and a shared resolver used by
+   sandbox/web/credential outbound checks).
 
-4. **Package-manager command redirection** (`sandbox.rs:86`).
-   **Partially resolved in Phase 4.3/4.4**: package-manager commands are
-   now validated against `remote_access.package_manager_commands` rather
-   than only gateway-invented policy lists.
+4. ~~**Package-manager command redirection** (`sandbox.rs:86`). Same
+   concern: pip/npm detection rules baked into gateway code.~~
+   **Resolved in Phase 4.3/4.4**: package-manager command handling is
+   declaration-driven via `remote_access.package_manager_commands`,
+   with fail-shut behavior for undeclared install signals.
 
 5. ~~**Content-handle-as-path heuristic** (`sandbox.rs:107,124`). Brittle
    false-positive risk. Prefer a strict positive check — paths must

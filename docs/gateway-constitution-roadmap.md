@@ -1082,25 +1082,29 @@ Files: `autonoetic-types/src/config.rs`,
 
 Size: M. Completed via mode removal + docs + constitutional test pin.
 
-### 4.3 Remote-access static analyzer — **PARTIAL**
+### 4.3 Remote-access static analyzer — **ENFORCED**
 
 Declaration-driven enforcement is active in `sandbox.exec`:
 - undeclared observed signals fail shut with `undeclared_remote_pattern`
-- agents with `NetworkAccess` capability must declare
-  `metadata.autonoetic.remote_access` or fail shut with
-  `missing_remote_access_declaration`
+- if remote-access signals are observed and declaration is absent, gateway
+  fails shut with `missing_remote_access_declaration` (default fail-shut)
+- concrete URL/IP targets must match `remote_access.targets`
+- `remote_access.approval_mode=preapproved` auto-approves only when
+  `NetworkAccess` capability is also present (otherwise fail-shut)
+- shared resolver now enforces the same declaration target rules in
+  `sandbox.exec`, `web_search`/`web_fetch`/`web_call`, and credential HTTP checks
 - migrated specialist manifests currently include
-  `packager.default`, `researcher.default`, and `registration.default`
-
-Remaining scope for full closure: default fail-shut for undeclared
-remote signals across all agents, not only those declaring
-`NetworkAccess`.
+  `packager.default`, `researcher.default`, `registration.default`, and
+  `executor.default`
 
 Size: L.
 
-### 4.4 Package-manager command redirection
+### 4.4 Package-manager command redirection — **ENFORCED**
 
-Folds into 4.3 — same pattern, same fix.
+Package-manager signals are checked against manifest-declared
+`remote_access.package_manager_commands`; undeclared installs fail shut.
+Runtime redirection behavior for non-NetworkAccess agents remains policy
+gated after declaration coverage checks.
 
 ### 4.5 Content-handle-as-path heuristic — **ENFORCED**
 

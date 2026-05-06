@@ -22,7 +22,9 @@ The system has three distinct human-interaction mechanisms that serve different 
 - Dangerous operations (sudo, rm -rf, dd, mkfs) — blocked by policy
 
 **When it does NOT trigger (auto-approved):**
-- Agents with `NetworkAccess` capability — all remote access patterns auto-approved
+- Agents with `NetworkAccess` capability **and**
+  `metadata.autonoetic.remote_access.approval_mode: preapproved`
+  (with declared target coverage) — remote access can auto-proceed
 - Safe local inspection commands (`pip list`, `pip show`, `npm list`, etc.) — no network needed
 - Dependency install redirect — non-NetworkAccess agents get `dependency_layer_required: true` instead of an approval prompt, directing the planner to route through `packager.default`
 

@@ -1,5 +1,5 @@
-//! Constitution Phase 4.3/4.4 pin: network-capable agents must declare
-//! `metadata.autonoetic.remote_access` before sandbox.exec is allowed.
+//! Constitution Phase 4.3/4.4 pin: any observed remote-access signal must be
+//! covered by a manifest declaration; missing declaration fails shut.
 
 use std::sync::Arc;
 
@@ -76,7 +76,7 @@ fn run_sandbox_exec(manifest: &AgentManifest, command: &str) -> anyhow::Result<s
 }
 
 #[test]
-fn network_access_agent_without_declaration_fails_shut() -> anyhow::Result<()> {
+fn network_access_agent_remote_signal_without_declaration_fails_shut() -> anyhow::Result<()> {
     let manifest = manifest(
         "strict-net.default",
         vec![
@@ -90,19 +90,35 @@ fn network_access_agent_without_declaration_fails_shut() -> anyhow::Result<()> {
         ],
     );
 
-    let body = run_sandbox_exec(&manifest, "echo should-not-run")?;
+    let body = run_sandbox_exec(&manifest, "curl https://api.example.com/v1")?;
     assert_eq!(body["ok"], false);
     assert_eq!(body["error_type"], "missing_remote_access_declaration");
     let msg = body["message"].as_str().unwrap_or_default();
     assert!(
-        msg.contains("must declare metadata.autonoetic.remote_access"),
+        msg.contains("has no metadata.autonoetic.remote_access declaration"),
         "unexpected message: {msg}"
     );
     Ok(())
 }
 
 #[test]
-fn non_network_agent_is_not_blocked_by_declaration_gate() -> anyhow::Result<()> {
+fn non_network_agent_remote_signal_without_declaration_fails_shut() -> anyhow::Result<()> {
+    let manifest = manifest(
+        "no-net.remote.default",
+        vec![Capability::CodeExecution {
+            patterns: vec!["*".to_string()],
+            commands: vec![],
+        }],
+    );
+
+    let body = run_sandbox_exec(&manifest, "curl https://api.example.com/v1")?;
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_type"], "missing_remote_access_declaration");
+    Ok(())
+}
+
+#[test]
+fn non_network_agent_without_remote_signal_is_not_blocked_by_declaration_gate() -> anyhow::Result<()> {
     let manifest = manifest(
         "no-net.default",
         vec![Capability::CodeExecution {

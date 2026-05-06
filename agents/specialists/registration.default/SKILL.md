@@ -30,6 +30,8 @@ metadata:
         scopes: ["self.*"]
     validation: "soft"
     remote_access:
+      approval_mode: "required"
+      targets: []
       enabled_languages: []
       python_imports: []
       js_imports: []

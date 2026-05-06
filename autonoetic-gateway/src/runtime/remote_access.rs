@@ -8,6 +8,7 @@ use regex::Regex;
 use std::collections::HashSet;
 
 use autonoetic_types::agent::{RemoteAccessDeclaration, RemoteAccessLanguage};
+use crate::runtime::network_policy::declaration_allows_target;
 
 /// Result of analyzing code for remote access patterns.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -354,6 +355,17 @@ fn normalize_declared_pattern(s: &str) -> String {
     s.trim().to_ascii_lowercase()
 }
 
+fn extract_host_from_url_literal(url: &str) -> Option<String> {
+    let re = Regex::new(r"(?i)^[a-z]+://([^/:]+)").ok()?;
+    let captures = re.captures(url)?;
+    let host = captures.get(1)?.as_str().trim_end_matches('.');
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
 fn observed_matches_declared(observed: &str, declared_patterns: &[String]) -> bool {
     let observed = normalize_declared_pattern(observed);
     declared_patterns.iter().any(|raw| {
@@ -414,6 +426,10 @@ pub fn undeclared_patterns_against_manifest(
         .filter(|p| match p.category.as_str() {
             "import" => !observed_matches_declared(&p.pattern, &import_patterns),
             "function_call" => !observed_matches_declared(&p.pattern, &decl.function_calls),
+            "url_literal" => extract_host_from_url_literal(&p.pattern)
+                .map(|host| !declaration_allows_target(decl, &host, Some(&p.pattern)))
+                .unwrap_or(true),
+            "ip_address" => !declaration_allows_target(decl, &p.pattern, None),
             "network_command" => {
                 if is_package_manager_command_pattern(&p.pattern) {
                     !observed_matches_declared(&p.pattern, &decl.package_manager_commands)
@@ -1085,6 +1101,8 @@ import requests
 import axios from "axios";
 "#;
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
             enabled_languages: vec![RemoteAccessLanguage::Python],
             python_imports: vec!["requests".to_string()],
             js_imports: vec!["axios".to_string()],
@@ -1536,6 +1554,8 @@ mymod.do_thing()
             },
         ];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
             enabled_languages: vec![],
             python_imports: vec!["requests".to_string()],
             js_imports: vec![],
@@ -1558,6 +1578,8 @@ mymod.do_thing()
             reason: "cmd".to_string(),
         }];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
             enabled_languages: vec![],
             python_imports: vec![],
             js_imports: vec![],
@@ -1595,6 +1617,8 @@ mymod.do_thing()
             },
         ];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
             enabled_languages: vec![
                 RemoteAccessLanguage::Javascript,
                 RemoteAccessLanguage::Rust,
@@ -1610,6 +1634,109 @@ mymod.do_thing()
         };
         let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
         assert!(undeclared.is_empty(), "expected non-python import declarations to match");
+    }
+
+    #[test]
+    fn test_undeclared_patterns_against_manifest_url_target_allowed() {
+        let patterns = vec![DetectedPattern {
+            category: "url_literal".to_string(),
+            pattern: "https://api.example.com/v1/items".to_string(),
+            line_number: Some(1),
+            reason: "url".to_string(),
+        }];
+        let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+            targets: vec![autonoetic_types::agent::RemoteAccessTarget::ExactHost(
+                "api.example.com".to_string(),
+            )],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec!["curl".to_string()],
+            package_manager_commands: vec![],
+        };
+        let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
+        assert!(undeclared.is_empty(), "expected URL host to be allowlisted");
+    }
+
+    #[test]
+    fn test_undeclared_patterns_against_manifest_url_target_not_allowed() {
+        let patterns = vec![DetectedPattern {
+            category: "url_literal".to_string(),
+            pattern: "https://api.example.com/v1/items".to_string(),
+            line_number: Some(1),
+            reason: "url".to_string(),
+        }];
+        let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+            targets: vec![autonoetic_types::agent::RemoteAccessTarget::ExactHost(
+                "api.other.com".to_string(),
+            )],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec!["curl".to_string()],
+            package_manager_commands: vec![],
+        };
+        let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
+        assert_eq!(undeclared.len(), 1, "expected undeclared URL target to fail shut");
+        assert_eq!(undeclared[0].category, "url_literal");
+    }
+
+    #[test]
+    fn test_undeclared_patterns_against_manifest_url_target_wildcard_suffix_allowed() {
+        let patterns = vec![DetectedPattern {
+            category: "url_literal".to_string(),
+            pattern: "https://api.example.com/v1/items".to_string(),
+            line_number: Some(1),
+            reason: "url".to_string(),
+        }];
+        let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+            targets: vec![autonoetic_types::agent::RemoteAccessTarget::HostSuffix(
+                "*.example.com".to_string(),
+            )],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec!["curl".to_string()],
+            package_manager_commands: vec![],
+        };
+        let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
+        assert!(undeclared.is_empty(), "expected wildcard suffix to allow target");
+    }
+
+    #[test]
+    fn test_undeclared_patterns_against_manifest_ip_target_global_wildcard_allowed() {
+        let patterns = vec![DetectedPattern {
+            category: "ip_address".to_string(),
+            pattern: "10.0.0.10".to_string(),
+            line_number: Some(1),
+            reason: "ip".to_string(),
+        }];
+        let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
+            approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
+        assert!(undeclared.is_empty(), "expected wildcard allowlist to allow IP target");
     }
 }
 

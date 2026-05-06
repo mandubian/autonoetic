@@ -34,6 +34,8 @@ fn declared_patterns_cover_known_signals() {
         },
     ];
     let decl = RemoteAccessDeclaration {
+        approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+        targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
         enabled_languages: vec![],
         python_imports: vec!["requests".to_string()],
         js_imports: vec![],
@@ -57,6 +59,8 @@ fn undeclared_patterns_fail_shut() {
         reason: "command".to_string(),
     }];
     let decl = RemoteAccessDeclaration {
+        approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+        targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
         enabled_languages: vec![],
         python_imports: vec![],
         js_imports: vec![],
@@ -70,4 +74,32 @@ fn undeclared_patterns_fail_shut() {
     let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&decl));
     assert_eq!(undeclared.len(), 1);
     assert_eq!(undeclared[0].pattern, "wget");
+}
+
+#[test]
+fn undeclared_remote_target_fails_shut() {
+    let patterns = vec![DetectedPattern {
+        category: "url_literal".to_string(),
+        pattern: "https://api.example.com/v1/data".to_string(),
+        line_number: Some(1),
+        reason: "url".to_string(),
+    }];
+    let decl = RemoteAccessDeclaration {
+        approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
+        targets: vec![autonoetic_types::agent::RemoteAccessTarget::ExactHost(
+            "api.other.com".to_string(),
+        )],
+        enabled_languages: vec![],
+        python_imports: vec![],
+        js_imports: vec![],
+        rust_imports: vec![],
+        go_imports: vec![],
+        function_calls: vec![],
+        shell_commands: vec!["curl".to_string()],
+        package_manager_commands: vec![],
+    };
+
+    let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&decl));
+    assert_eq!(undeclared.len(), 1);
+    assert_eq!(undeclared[0].category, "url_literal");
 }

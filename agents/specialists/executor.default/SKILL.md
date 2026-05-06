@@ -30,6 +30,18 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*"]
     validation: "soft"
+    remote_access:
+      approval_mode: "required"
+      targets:
+        - kind: "any"
+      enabled_languages: []
+      python_imports: []
+      js_imports: []
+      rust_imports: []
+      go_imports: []
+      function_calls: []
+      shell_commands: ["curl", "wget"]
+      package_manager_commands: []
 ---
 # Executor
 

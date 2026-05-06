@@ -37,6 +37,9 @@ metadata:
         scopes: ["self.*", "skills/*"]
     validation: "soft"
     remote_access:
+      approval_mode: "preapproved"
+      targets:
+        - kind: "any"
       enabled_languages: ["python", "javascript"]
       python_imports: ["requests", "urllib", "urllib.request", "httpx", "aiohttp", "websockets"]
       js_imports: ["axios", "node-fetch", "undici", "ws"]

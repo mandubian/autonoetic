@@ -14,6 +14,10 @@ fn is_default_script_input_mode(mode: &ScriptInputMode) -> bool {
     matches!(mode, ScriptInputMode::Stdin)
 }
 
+fn is_default_remote_access_approval_mode(mode: &RemoteAccessApprovalMode) -> bool {
+    matches!(mode, RemoteAccessApprovalMode::Required)
+}
+
 /// Runtime declaration block from the SKILL.md frontmatter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeDeclaration {
@@ -178,6 +182,18 @@ pub struct AgentManifest {
 /// Agent-declared remote-access patterns used for deterministic gateway checks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoteAccessDeclaration {
+    /// How remote signals are handled by sandbox approval flow.
+    /// `required` means operator approval is required for remote execution.
+    /// `preapproved` allows auto-approval when the agent has NetworkAccess capability.
+    #[serde(
+        default,
+        skip_serializing_if = "is_default_remote_access_approval_mode"
+    )]
+    pub approval_mode: RemoteAccessApprovalMode,
+    /// Declarative network targets for outbound access.
+    /// Supports any-host, exact host, host suffix, host+port, and URL prefix rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<RemoteAccessTarget>,
     /// Optional language-detector allowlist for import scanning.
     /// Empty means all registered language detectors are enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -229,6 +245,34 @@ pub enum RemoteAccessLanguage {
     Javascript,
     Rust,
     Go,
+}
+
+/// How sandbox.exec handles approval for detected remote/network behavior.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAccessApprovalMode {
+    /// Every remote execution requires explicit operator approval.
+    #[default]
+    Required,
+    /// Remote execution can auto-proceed when coarse capability allows network use.
+    Preapproved,
+}
+
+/// Typed target declarations for `remote_access`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum RemoteAccessTarget {
+    /// Match any outbound host/URL target.
+    Any,
+    /// Exact hostname match, e.g. `"api.github.com"`.
+    ExactHost(String),
+    /// Matches any subdomain of the suffix, e.g. `"*.github.com"`.
+    HostSuffix(String),
+    /// Exact host + port, e.g. `{"host":"api.github.com","port":443}`.
+    HostAndPort { host: String, port: u16 },
+    /// Matches URLs starting with this prefix, e.g.
+    /// `"https://api.github.com/public/"`.
+    UrlPrefix(String),
 }
 
 /// Per-agent context compression configuration (opt-in via SKILL.md).

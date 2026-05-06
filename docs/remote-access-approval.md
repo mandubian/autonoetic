@@ -6,6 +6,8 @@ This document describes the static analysis system for detecting remote/network 
 
 When `sandbox_exec` runs, the gateway **statically analyzes** the invoked command/code before execution to detect patterns that imply network access. If detected, execution is blocked pending operator approval. The **artifact_exec** path uses the same remote-access analysis and attaches the **same operator-facing hint suffix** (`→ hosts:` or `→ signals:`) when it requires approval.
 
+Outbound network paths share a common declaration resolver (`runtime/network_policy.rs`) that evaluates `metadata.autonoetic.remote_access` target policy (`targets` only) for `sandbox_exec`, `web_search`/`web_fetch`/`web_call`, and credential HTTP calls.
+
 This is a **deterministic** security check that does not rely on LLM self-declaration.
 
 ## Why Static Analysis?
@@ -85,7 +87,10 @@ When there is remote-access risk but **no** extractable literal host (`function_
 │ 2. Static analysis (remote_access.rs)                       │
 │    ├─ No remote patterns → Execute immediately             │
 │    └─ Remote patterns found → proceed to approval checks     │
-│ 3. Approval resolution checks (in order):                   │
+│ 3. Declaration target check (`remote_access.targets`)        │
+│    ├─ Target covered → continue                              │
+│    └─ Target undeclared → fail-shut deny                     │
+│ 4. Approval resolution checks (in order):                    │
 │    a. Exec cache hit (identical code fingerprint) → EXECUTE │
 │    b. Root-session grant covers targets → EXECUTE           │
 │    c. Existing approved/pending approval → REUSE            │
@@ -197,7 +202,7 @@ When an agent encounters remote access approval:
 1. **Agent reports the approval requirement** to the user
 2. **User reviews the detected patterns** and the **`hosts` / `signals`** line to understand what network access may occur
 3. **User decides** whether to approve or deny
-4. **If approved**, user can grant **`NetworkAccess`** for specific hosts or issue an approval that persists the cleared command/effective scope
+4. **If approved**, user grants scoped host targets and the gateway persists approval/grant scope for reuse
 
 ## Pattern Details
 

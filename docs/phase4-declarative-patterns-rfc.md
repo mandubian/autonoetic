@@ -23,6 +23,19 @@ Add a new optional declaration under agent manifest metadata:
 
 ```yaml
 remote_access:
+  approval_mode: required   # required | preapproved
+  targets:
+    - kind: any
+    - kind: host_suffix
+      value: "*.example.com"
+    - kind: exact_host
+      value: "api.github.com"
+    - kind: host_and_port
+      value:
+        host: "registry.npmjs.org"
+        port: 443
+    - kind: url_prefix
+      value: "https://api.github.com/public/"
   enabled_languages: [python, javascript]
   python_imports:
     - requests
@@ -57,45 +70,63 @@ Two-pass, fail-shut:
    - if a signal maps to a declared pattern category and is covered -> allowed
    - if a signal is not covered by declared patterns -> `undeclared_remote_pattern`
      deny (structured tool error)
+  - concrete URL/IP targets must match `remote_access.targets` (typed target rules)
 3. **Detector selection**:
    - if `enabled_languages` is empty -> all registered import detectors run
    - if set -> only those detectors run (pluggable modular selection)
+4. **Approval policy**:
+   - `approval_mode: required` => normal approval flow
+   - `approval_mode: preapproved` => auto-approval only when the agent also has
+     coarse `NetworkAccess` capability (otherwise fail-shut)
 
 Special case:
 
 - Literal URL/IP signals remain concrete targets for approval and grant scope.
   Declared patterns do not bypass approval checks.
+- A shared resolver now evaluates the same declaration target rules for
+  `sandbox.exec`, `web_search`/`web_fetch`/`web_call`, and credential HTTP flows.
 
 ## Compatibility and Migration
 
 Phase migration to avoid breaking all agents at once:
 
-1. **Current state (implemented)**: declaration-gated enforcement.
+1. **Declaration-gated enforcement (implemented)**:
    - if `remote_access` is declared and a signal is undeclared => fail-shut deny
-   - if `remote_access` is absent => legacy behavior (approval flow only)
-2. **Network-capability mandatory declaration (implemented)**:
-   - agents with `NetworkAccess` capability must declare
-     `metadata.autonoetic.remote_access`.
-   - if missing, `sandbox.exec` fails shut with
-     `missing_remote_access_declaration`.
+2. **Default fail-shut for undeclared signals (implemented)**:
+   - if remote-access signals are observed and `remote_access` is absent,
+     `sandbox.exec` fails shut with `missing_remote_access_declaration`.
+3. **Host + approval policy declarations (implemented)**:
+   - `remote_access.targets` are enforced for concrete URL/IP signals.
+   - `remote_access.approval_mode` is enforced with capability intersection.
    - migrated manifests include `packager.default`, `researcher.default`,
-     and `registration.default`.
-3. **Final stage**: default fail-shut for undeclared signals (constitutional target).
+     `registration.default`, and `executor.default`.
+4. **Cross-tool resolver adoption (implemented, transition mode)**:
+   - a shared network-policy resolver now runs in all outbound network tool paths.
+   - current migration posture keeps declaration optional for `web.*` and
+     credential HTTP flows while still enforcing declaration targets when present.
+   - `sandbox.exec` remains strict fail-shut on missing declaration + remote signals.
 
 ## Required Code Changes
 
 - `autonoetic-types/src/agent.rs`
-  - add `RemoteAccessDeclaration` manifest type
+  - add `RemoteAccessDeclaration` policy fields
+    (`approval_mode`, `targets`)
+- `autonoetic-gateway/src/runtime/network_policy.rs`
+  - shared declaration loader + typed target matcher
 - `autonoetic-gateway/src/runtime/remote_access.rs`
   - add declared-pattern matcher and broaden signal extraction for Python, JS/TS,
     Rust, and Go network idioms
 - `autonoetic-gateway/src/runtime/tools/sandbox.rs`
   - load target manifest declaration from `SKILL.md` frontmatter
   - return structured undeclared-pattern errors
+- `autonoetic-gateway/src/runtime/tools/web.rs`
+- `autonoetic-gateway/src/runtime/tools/credential.rs`
+  - enforce shared target resolver for outbound network calls
 
 - `agents/specialists/packager.default/SKILL.md`
 - `agents/specialists/researcher.default/SKILL.md`
 - `agents/specialists/registration.default/SKILL.md`
+- `agents/specialists/executor.default/SKILL.md`
   - declare remote-access patterns for fail-shut enforcement
 
 ## Test Plan
@@ -104,8 +135,11 @@ Add `autonoetic-gateway/tests/constitution_dumb_gateway_declared_patterns.rs`:
 
 - declared pattern + observed usage -> pass to approval flow
 - observed undeclared pattern -> fail-shut structured deny
+- observed concrete target outside declaration target rules -> fail-shut structured deny
 - package-manager undeclared command -> fail-shut
 - concrete URL literal still produces concrete host coverage for approval scope
+- cross-tool parity: same declaration + same host => same allow/deny in
+  `sandbox.exec`, `web.*`, and credential HTTP checks
 
 ## Security Notes
 
