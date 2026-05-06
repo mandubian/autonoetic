@@ -415,7 +415,7 @@ item will move into its numbered category once ENFORCED.
 | R++4 | Operator approval hardening: (a) dwell time (minimum-visible seconds) on high-risk approvals before the confirm action enables; (b) typed confirmation string required for destructive approval classes (bundle promotion, credential register); (c) structural-similarity dedup (similarity scoring on approval creation, displayed in CLI/TUI). | ENFORCED (`approval_hardening.rs`, `approval.rs`, `constitution_approval_hardening.rs`) | §2 Approval |
 | R++7 | Cross-gateway causal continuity: cross-gateway events carry a `peer_event_ref` pointing to the corresponding remote chain entry; gateways exchange signed `chain_attestation` digests and verify signatures before accepting federated requests. | ENFORCED (`autonoetic-ofp/src/wire.rs`, `autonoetic-gateway/src/server/ofp.rs`, `autonoetic-gateway/src/server/router.rs`, `constitution_federation_causal_continuity.rs`) | §10 Federation + §8 Audit |
 | R++8 | Sandbox-escape attempts are counted. Kernel-denied syscalls (seccomp), denied mount attempts, ptrace calls, and equivalents on docker/microvm drivers increment a per-session counter. Threshold crossings trigger R-7.18 degraded mode; further escalation triggers emergency stop. | ENFORCED (`sandbox.rs:detect_sandbox_escape_indicators`, `observability.rs:record_sandbox_escape_attempt`, `scheduler.rs:run_scheduler_tick_at`, `constitution_sandbox_escape_accounting.rs`) | §3 Sandbox + §7 Abuse |
-| R++9 | A test suite pins policy engine determinism: for every `PolicyEngine` decision method, the verdict (allow/deny, enforced rules, security analysis) is a pure function of the declared capability set and the tool-call input — no LLM call, no network fetch, no hidden branch. The test exercises both allowed and denied paths across all methods, verifies idempotency and input sensitivity, and catches any future nondeterminism. Prevents principle erosion. | PARTIAL — policy-level precursor ENFORCED (`policy.rs`, `constitution_policy_determinism.rs`); full gateway-wide capstone scope remains tracked in #77 (Phase 4). | §13 (cross-cutting) |
+| R++9 | Determinism test suite pins gateway decision surfaces: for random valid `(capability-set, tool-call, recorded-state)` inputs, verdicts are pure functions (no LLM call, no network fetch, no hidden branch). Includes policy-engine decisions and gateway tool-gating surfaces (tier filtering + degraded-mode block). | ENFORCED (`constitution_gateway_determinism.rs`, `constitution_policy_determinism.rs`, `tool_call_processor.rs`) | §13 (cross-cutting) |
 | R++10 | Unified fail-mode table: every constitutional invariant has a declared failure action in one place — `refuse-boot`, `refuse-session-start`, `degrade`, `emergency-stop`, or `log-only`. Eliminates silent-disable (R-6.5 OpenRouter-catalog-down default is the archetype to fix). | ENFORCED (`fail_mode.rs`, `session_budget.rs` (R-6.5 catalog-unavailable enforcement), `constitution_fail_mode_table.rs`) | §13 (cross-cutting) |
 
 ### Constitutional additions (`R+++`)
@@ -490,6 +490,10 @@ The gateway is **not** allowed to:
 Current violations are listed in
 `docs/gateway-constitution-audit-2026-04-24.md §12` and tracked in
 `docs/gateway-constitution-roadmap.md`.
+
+Structural back-stop: `R++9` (`autonoetic-gateway/tests/constitution_gateway_determinism.rs`)
+mechanically asserts that gateway decision paths remain deterministic over
+declared inputs.
 
 ---
 

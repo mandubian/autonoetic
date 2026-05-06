@@ -50,3 +50,4 @@ path = "src/bin/mock_moltbook.rs"
 [dev-dependencies]
 tempfile = "3.26.0"
 serial_test = "3.0"
+proptest = "1.11.0"

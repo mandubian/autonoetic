@@ -1049,8 +1049,7 @@ Constitution rows for all eight rules were flipped from `PARTIAL` to
 These require RFCs before implementation. Each item here is a policy
 question, not just a code change.
 
-Current state: items **4.1–4.6 and 4.8 are enforced**; item **4.7**
-and the full **4.9 capstone** scope remain open.
+Current state: items **4.1–4.9 are enforced**.
 
 ### 4.1 Response repair loop — **ENFORCED**
 
@@ -1139,16 +1138,24 @@ Files: `autonoetic-types/src/agent.rs`,
 
 Size: S. Completed via manifest declaration support + ceiling clamp + constitutional pin.
 
-### 4.7 Tool-tier filtering declarative
+### 4.7 Tool-tier filtering declarative — **ENFORCED**
 
-**Decision required.** Move tier assignments out of Rust into a
-reviewable registry?
+Tool-tier assignments were moved out of hardcoded Rust match constants
+into a reviewable registry file (`config/tools.yaml`), loaded at gateway
+startup (with env override path support via
+`AUTONOETIC_TOOL_TIER_REGISTRY_PATH`).
 
-Recommendation: a `tools.yaml` manifest in the gateway's config,
-loaded at startup. `ToolTierFilter` consults this registry rather than
-per-tool constants.
+`ToolTierFilter` now resolves tiers through this registry, not through
+embedded per-tool constants.
 
-Size: M.
+Files:
+`config/tools.yaml`,
+`autonoetic-gateway/src/runtime/tool_tier_registry.rs`,
+`autonoetic-gateway/src/runtime/prompt_budget.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_tier_registry.rs`,
+`docs/config-reference.md`.
+
+Size: M. Completed via declarative registry loader + constitutional test pin.
 
 ### 4.8 Cost-budget silent-disable on catalog failure — **ENFORCED**
 
@@ -1171,34 +1178,21 @@ Files:
 Size: S. Completed via fail-shut preflight + capability override +
 constitutional test pin.
 
-### 4.9 `R++9` Gateway determinism property test (capstone) — **OPEN (policy-level precursor landed)**
+### 4.9 `R++9` Gateway determinism property test (capstone) — **ENFORCED**
 
-**Decision required.** Pin the dumb-gateway principle structurally, not
-just by convention.
+A property-based test now asserts that gateway decision outputs are pure
+functions of random valid inputs `(capability-set, tool-call,
+recorded-state)`, with no LLM call and no network access in the harness.
+It exercises deterministic surfaces across policy checks, tool-tier
+resolution/filtering, and degraded-mode tool blocking.
 
-**Current state.** A policy-engine determinism suite exists today in
-`autonoetic-gateway/tests/constitution_policy_determinism.rs`. It pins
-determinism of `PolicyEngine` decisions, but it does not yet satisfy the
-full post-4.8 gateway-wide capstone scope defined in #77.
-
-**Remaining capstone scope.** Once items 4.1–4.8 land, add a property test that
-asserts: for random valid inputs
-`(capability-set, tool-call, recorded-state)`, the gateway's decision
-is a pure function — no LLM call, no uninstrumented network fetch, no
-nondeterministic branch. Any future change that reintroduces
-nondeterminism fails the test.
-
-This is the long-term mechanism that keeps principle and code aligned
-across contributors. Without it, the §12 cleanup is a one-time victory
-that erodes.
-
-Files (planned): new
+Files:
 `autonoetic-gateway/tests/constitution_gateway_determinism.rs`,
-possible trait refactor so policy + tool_call_processor accept mock
-injected dependencies cleanly.
+`autonoetic-gateway/tests/constitution_policy_determinism.rs`,
+`autonoetic-gateway/src/runtime/tool_call_processor.rs`,
+`docs/constitution/versions/2026.05.05/constitution.md`.
 
-**Size.** M. Largely a test harness effort; the hard work is Phase 4's
-items 4.1–4.8 making the test possible at all.
+**Size.** M. Completed via property-test capstone + constitutional row flip.
 
 ---
 

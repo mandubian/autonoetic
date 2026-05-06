@@ -1,0 +1,51 @@
+version: 1
+default_tier: specialized
+rules:
+  # Core tier: universally available tools.
+  - prefix: content_
+    tier: core
+  # Reading the constitution is a right (Ri-0.10).
+  - prefix: constitution_
+    tier: core
+  - prefix: knowledge_store
+    tier: core
+  - prefix: knowledge_recall
+    tier: core
+  - prefix: knowledge_search_by_tags
+    tier: core
+  - prefix: knowledge_search
+    tier: core
+  - prefix: artifact_
+    tier: core
+  - prefix: sandbox_exec
+    tier: core
+
+  # Workflow tier: orchestration and approval flow.
+  - prefix: agent_spawn
+    tier: workflow
+  - prefix: agent_exists
+    tier: workflow
+  - prefix: agent_discover
+    tier: workflow
+  - prefix: approval_
+    tier: workflow
+  - prefix: workflow_
+    tier: workflow
+  - prefix: eval_
+    tier: workflow
+  - prefix: user_
+    tier: workflow
+  - prefix: digest_
+    tier: workflow
+
+  # Specialized tier: expensive or role-specific operations.
+  - prefix: web_
+    tier: specialized
+  - prefix: execution_
+    tier: specialized
+  - prefix: promotion_
+    tier: specialized
+  - prefix: agent_revision_
+    tier: specialized
+  - prefix: admin_proposal_
+    tier: specialized

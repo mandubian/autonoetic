@@ -321,6 +321,34 @@ prompt_budget:
 
 ---
 
+## Tool Tier Registry
+
+Tool-tier assignments used by `ToolTierFilter` are declarative and loaded at gateway
+startup from `config/tools.yaml`.
+
+- Default path: `config/tools.yaml`
+- Override path: env var `AUTONOETIC_TOOL_TIER_REGISTRY_PATH`
+- Match rule: first `rules[].prefix` that matches `tool_name.starts_with(prefix)` wins
+- Fallback: `default_tier`
+
+Schema:
+
+```yaml
+version: 1
+default_tier: specialized
+rules:
+  - prefix: content_
+    tier: core
+  - prefix: approval_
+    tier: workflow
+  - prefix: web_
+    tier: specialized
+```
+
+`tier` values: `core`, `workflow`, `specialized`.
+
+---
+
 ## LLM Presets
 
 Unified registry for all LLM configurations. Each preset is either **fixed** (concrete provider/model) or **routing** (dynamic selection from fixed presets at call time).

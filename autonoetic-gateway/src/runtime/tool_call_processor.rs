@@ -32,6 +32,16 @@ pub struct ToolCallProcessor<'a> {
     session_state: autonoetic_types::agent::SessionState,
 }
 
+pub fn is_degraded_mode_tool_blocked(
+    session_state: autonoetic_types::agent::SessionState,
+    tool_name: &str,
+) -> bool {
+    if session_state != autonoetic_types::agent::SessionState::Degraded {
+        return false;
+    }
+    matches!(tool_name, "sandbox_exec" | "artifact_exec")
+}
+
 fn strip_gemma_token_artifacts(s: &str) -> String {
     let re = regex::Regex::new(r"<\|[^>]*\|>").unwrap();
     re.replace_all(s, |caps: &regex::Captures| -> String {
@@ -98,10 +108,7 @@ impl<'a> ToolCallProcessor<'a> {
     }
 
     fn is_degraded_blocked_tool(&self, tool_name: &str) -> bool {
-        if self.session_state != autonoetic_types::agent::SessionState::Degraded {
-            return false;
-        }
-        matches!(tool_name, "sandbox_exec" | "artifact_exec")
+        is_degraded_mode_tool_blocked(self.session_state, tool_name)
     }
 
     /// Processes tool calls and returns `(had_any_success, results)`.

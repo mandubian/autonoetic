@@ -235,6 +235,16 @@ max_session_turns: 12
 #   margin_tokens: 4096
 #   on_exceeded: warn           # warn | trim_history | demote_tools | fail
 #   compress_tool_schemas_after_turn_0: false
+#
+# ── Tool Tier Registry (Constitution 4.7) ──────────────────────────────
+# Tier assignments are declarative in config/tools.yaml and loaded at gateway start.
+# Override registry path with env var AUTONOETIC_TOOL_TIER_REGISTRY_PATH.
+# Schema:
+#   version: 1
+#   default_tier: specialized
+#   rules:
+#     - prefix: content_
+#       tier: core
 
 # ── Cross-cutting Routing Concerns ────────────────────────────────────
 # Agent overrides and approval gates. Model definitions live in llm_presets.

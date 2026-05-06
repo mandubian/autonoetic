@@ -432,6 +432,13 @@ impl GatewayExecutionService {
         config: GatewayConfig,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     ) -> Self {
+        if let Err(e) = crate::runtime::tool_tier_registry::initialize_from_startup_path() {
+            tracing::warn!(
+                target: "autonoetic::tool_tier_registry",
+                error = %e,
+                "Failed to load tool-tier registry from startup path; using embedded defaults"
+            );
+        }
         let session_budget = Arc::new(SessionBudgetRegistry::new(config.session_budget.clone()));
         let root_session_budget = Arc::new(RootSessionBudgetRegistry::new(
             config.root_session_budget.clone(),

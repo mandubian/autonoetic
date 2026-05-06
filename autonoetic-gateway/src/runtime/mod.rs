@@ -40,4 +40,5 @@ pub mod session_tracer;
 pub mod state_attestation;
 pub mod store;
 pub mod tool_call_processor;
+pub mod tool_tier_registry;
 pub mod tools;

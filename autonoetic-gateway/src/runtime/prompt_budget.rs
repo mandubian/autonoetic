@@ -94,34 +94,9 @@ pub fn estimate_tool_definition(tool: &ToolDefinition) -> usize {
     name_tokens + desc_tokens + schema_tokens + TOOL_OVERHEAD_TOKENS
 }
 
-/// Get the tier for a tool by name prefix.
+/// Get the tier for a tool using the declarative registry.
 pub fn tool_tier(tool_name: &str) -> ToolTier {
-    match tool_name {
-        n if n.starts_with("content_") => ToolTier::Core,
-        // Reading the constitution is a right (Ri-0.10) — must be available
-        // in every tier filter, so classify as Core.
-        n if n.starts_with("constitution_") => ToolTier::Core,
-        n if n.starts_with("knowledge_store") => ToolTier::Core,
-        n if n.starts_with("knowledge_recall") => ToolTier::Core,
-        n if n.starts_with("knowledge_search_by_tags") => ToolTier::Core,
-        n if n.starts_with("knowledge_search") => ToolTier::Core,
-        n if n.starts_with("artifact_") => ToolTier::Core,
-        n if n.starts_with("sandbox_exec") => ToolTier::Core,
-        n if n.starts_with("agent_spawn") => ToolTier::Workflow,
-        n if n.starts_with("agent_exists") => ToolTier::Workflow,
-        n if n.starts_with("agent_discover") => ToolTier::Workflow,
-        n if n.starts_with("approval_") => ToolTier::Workflow,
-        n if n.starts_with("workflow_") => ToolTier::Workflow,
-        n if n.starts_with("eval_") => ToolTier::Workflow,
-        n if n.starts_with("user_") => ToolTier::Workflow,
-        n if n.starts_with("digest_") => ToolTier::Workflow,
-        n if n.starts_with("web_") => ToolTier::Specialized,
-        n if n.starts_with("execution_") => ToolTier::Specialized,
-        n if n.starts_with("promotion_") => ToolTier::Specialized,
-        n if n.starts_with("agent_revision_") => ToolTier::Specialized,
-        n if n.starts_with("admin_proposal_") => ToolTier::Specialized,
-        _ => ToolTier::Specialized,
-    }
+    crate::runtime::tool_tier_registry::tool_tier(tool_name)
 }
 
 /// Filter tool definitions by tier.
