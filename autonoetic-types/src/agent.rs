@@ -205,6 +205,22 @@ pub struct RemoteAccessDeclaration {
     pub package_manager_commands: Vec<String>,
 }
 
+/// Optional per-agent LoopGuard limits declared in SKILL metadata.
+///
+/// Gateway applies these as stricter bounds within system ceilings.
+/// Any declared value above system config is capped to the system value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoopGuardDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_loops_without_progress: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_failures: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_consecutive_same_progress: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_child_failures: Option<u32>,
+}
+
 /// Language detector identifier for remote-access import scanning.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]

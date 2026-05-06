@@ -1114,15 +1114,18 @@ Files: `autonoetic-gateway/src/runtime/tools/sandbox.rs`,
 
 Size: S. Completed via heuristic removal + constitutional test pin.
 
-### 4.6 Loop-guard thresholds
+### 4.6 Loop-guard thresholds — **ENFORCED**
 
-**Decision required.** Manifest-declared limits within a system
-ceiling?
+Agents can now declare stricter `loop_guard` limits in SKILL frontmatter
+(`metadata.autonoetic.loop_guard`). Gateway applies these as bounded
+overrides: each declared value is clamped with `min(declared, system_ceiling)`
+from `config.loop_guard`.
 
-Recommendation: yes. Manifests declare
-`loop_guard.max_tool_failures ≤ system_ceiling`. Defaults unchanged.
+Files: `autonoetic-types/src/agent.rs`,
+`autonoetic-gateway/src/runtime/lifecycle.rs`,
+`autonoetic-gateway/tests/constitution_dumb_gateway_loop_guard_declared.rs`.
 
-Size: S.
+Size: S. Completed via manifest declaration support + ceiling clamp + constitutional pin.
 
 ### 4.7 Tool-tier filtering declarative
 

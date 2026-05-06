@@ -362,6 +362,19 @@ loop_guard:
   max_consecutive_same_progress: 1  # default
 ```
 
+Agents may declare stricter per-agent limits in SKILL frontmatter:
+
+```yaml
+metadata:
+  autonoetic:
+    loop_guard:
+      max_loops_without_progress: 3
+      max_tool_failures: 2
+```
+
+Gateway treats these as bounded overrides and enforces
+`min(declared_value, config.loop_guard ceiling)` for each field.
+
 ### Workflow State Fields
 
 `workflow_wait` and `workflow_state` expose failure data for the planner:

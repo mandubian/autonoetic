@@ -229,9 +229,12 @@ enforcing declared rules. The top ones by structural significance:
    gateway heuristics; invalid paths now fail naturally at exec time
    (pinned by `constitution_dumb_gateway_no_handle_heuristic.rs`).
 
-6. **Loop-guard thresholds hardcoded** (`runtime/guard.rs`). Fine as
+6. ~~**Loop-guard thresholds hardcoded** (`runtime/guard.rs`). Fine as
    system ceilings, but no path for an agent manifest to declare stricter
-   limits within them.
+   limits within them.~~ **Resolved in Phase 4.6**: agents can declare
+   `metadata.autonoetic.loop_guard`, and gateway enforces bounded
+   overrides with `min(declared, config.loop_guard ceiling)` (pinned by
+   `constitution_dumb_gateway_loop_guard_declared.rs`).
 
 7. **Tool-tier filtering based on workflow state**
    (`runtime/tools/mod.rs:79`, `runtime/lifecycle.rs`). The decision

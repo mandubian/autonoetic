@@ -278,6 +278,10 @@ The loop guard trips when EITHER condition is met:
 
 "Meaningful progress" requires a tool call with a fingerprint different from the previous `max_consecutive_same_progress` calls. This prevents agents from spinning on the same successful-but-useless tool call indefinitely.
 
+Per-agent manifests may declare stricter loop limits under
+`metadata.autonoetic.loop_guard`. Gateway treats `config.loop_guard` as the
+ceiling and applies `min(declared, configured)` per field.
+
 ---
 
 ## Max Session Turns

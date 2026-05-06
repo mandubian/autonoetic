@@ -18,9 +18,9 @@ use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_tracer::{EvidenceMode, SessionTracer};
 use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tool_call_processor::ToolCallProcessor;
-use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware};
+use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, LoopGuardDeclaration, Middleware};
 use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
-use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::config::{GatewayConfig, LoopGuardConfig};
 use autonoetic_types::disclosure::DisclosurePolicy;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -639,6 +639,59 @@ fn tool_result_counts_as_progress(result: &str) -> bool {
     false
 }
 
+fn load_manifest_loop_guard_declaration(agent_dir: &Path) -> Option<LoopGuardDeclaration> {
+    let skill_path = agent_dir.join("SKILL.md");
+    let skill = std::fs::read_to_string(skill_path).ok()?;
+    let frontmatter = skill.split("---").nth(1)?;
+    let root = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
+
+    let direct = root.get("loop_guard").cloned();
+    let nested = root
+        .get("metadata")
+        .and_then(|m| m.get("autonoetic"))
+        .and_then(|a| a.get("loop_guard"))
+        .cloned();
+
+    direct
+        .or(nested)
+        .and_then(|v| serde_yaml::from_value::<LoopGuardDeclaration>(v).ok())
+}
+
+fn effective_loop_guard_config(
+    system: &LoopGuardConfig,
+    declaration: Option<&LoopGuardDeclaration>,
+) -> LoopGuardConfig {
+    let Some(decl) = declaration else {
+        return system.clone();
+    };
+
+    let mut effective = system.clone();
+    if let Some(v) = decl.max_loops_without_progress {
+        effective.max_loops_without_progress = v.min(system.max_loops_without_progress);
+    }
+    if let Some(v) = decl.max_tool_failures {
+        effective.max_tool_failures = v.min(system.max_tool_failures);
+    }
+    if let Some(v) = decl.max_consecutive_same_progress {
+        effective.max_consecutive_same_progress = v.min(system.max_consecutive_same_progress);
+    }
+    if let Some(v) = decl.max_child_failures {
+        effective.max_child_failures = v.min(system.max_child_failures);
+    }
+    effective
+}
+
+fn loop_guard_from_config_and_manifest(config: Option<&GatewayConfig>, agent_dir: &Path) -> LoopGuard {
+    match config {
+        Some(cfg) => {
+            let declaration = load_manifest_loop_guard_declaration(agent_dir);
+            let effective = effective_loop_guard_config(&cfg.loop_guard, declaration.as_ref());
+            LoopGuard::with_config(&effective)
+        }
+        None => LoopGuard::new(5),
+    }
+}
+
 impl AgentExecutor {
     pub fn new(
         manifest: AgentManifest,
@@ -697,7 +750,7 @@ impl AgentExecutor {
     }
 
     pub fn with_config(mut self, config: Arc<GatewayConfig>) -> Self {
-        self.guard = LoopGuard::with_config(&config.loop_guard);
+        self.guard = loop_guard_from_config_and_manifest(Some(config.as_ref()), &self.agent_dir);
         self.config = Some(config);
         self
     }
@@ -1461,7 +1514,7 @@ impl AgentExecutor {
         history: &mut Vec<Message>,
     ) -> anyhow::Result<TurnOutcome> {
         tracing::info!("Agent {} waking up...", self.manifest.agent.id);
-        self.guard = LoopGuard::new(5);
+        self.guard = loop_guard_from_config_and_manifest(self.config.as_deref(), &self.agent_dir);
         self.llm_usage_last_run.clear();
         let session_id = self.ensure_session_id();
         let turn_id = self.next_turn_id();
