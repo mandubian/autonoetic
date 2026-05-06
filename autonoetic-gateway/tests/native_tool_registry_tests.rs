@@ -112,6 +112,27 @@ fn spawn_counting_http_server(
     (format!("http://{}", addr), hits, handle)
 }
 
+fn write_remote_access_any(agent_dir: &std::path::Path) {
+    let skill = r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: "required"
+      targets:
+        - kind: "any"
+      enabled_languages: []
+      python_imports: []
+      js_imports: []
+      rust_imports: []
+      go_imports: []
+      function_calls: []
+      shell_commands: []
+      package_manager_commands: []
+---
+"#;
+    std::fs::write(agent_dir.join("SKILL.md"), skill).expect("skill should write");
+}
+
 #[test]
 fn test_native_tool_registry_availability() {
     let registry = default_registry();
@@ -249,6 +270,7 @@ fn test_web_fetch_tool_roundtrip_local_server() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
     let (base_url, handle) = spawn_one_shot_http_server(
         "200 OK",
         "text/plain; charset=utf-8",
@@ -297,6 +319,7 @@ fn test_web_fetch_tool_denied_by_netconnect_policy() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
 
     let args = serde_json::json!({
         "url": "http://127.0.0.1:65535/forbidden"
@@ -328,6 +351,7 @@ fn test_web_search_tool_denied_by_netconnect_policy() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
 
     let args = serde_json::json!({
         "query": "rust",
@@ -360,6 +384,7 @@ fn test_web_search_tool_roundtrip_local_engine() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
     let body = serde_json::json!({
         "Results": [],
         "RelatedTopics": [
@@ -426,6 +451,7 @@ fn test_web_search_google_requires_api_key_env() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
 
     let args = serde_json::json!({
         "query": "rust",
@@ -461,6 +487,7 @@ fn test_web_search_google_roundtrip_local_engine() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
     let body = serde_json::json!({
         "searchInformation": {
             "totalResults": "123"
@@ -538,6 +565,7 @@ fn test_web_search_google_legacy_cx_env_alias_roundtrip() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
 
     let body = serde_json::json!({
         "searchInformation": {
@@ -608,6 +636,7 @@ fn test_web_search_auto_falls_back_to_duckduckgo_when_google_fails() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
 
     let google_body = serde_json::json!({
         "error": { "message": "quota exceeded" }
@@ -708,6 +737,7 @@ fn test_web_search_cache_hits_without_second_network_call() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
 
     let body = serde_json::json!({
         "Results": [],

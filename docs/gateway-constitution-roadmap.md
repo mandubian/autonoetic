@@ -1091,8 +1091,9 @@ Declaration-driven enforcement is active in `sandbox.exec`:
 - concrete URL/IP targets must match `remote_access.targets`
 - `remote_access.approval_mode=preapproved` auto-approves only when
   `NetworkAccess` capability is also present (otherwise fail-shut)
-- shared resolver now enforces the same declaration target rules in
-  `sandbox.exec`, `web_search`/`web_fetch`/`web_call`, and credential HTTP checks
+- shared resolver now enforces the same declaration target rules and
+  missing-declaration fail-shut behavior in `sandbox.exec`,
+  `web_search`/`web_fetch`/`web_call`, and credential HTTP checks
 - migrated specialist manifests currently include
   `packager.default`, `researcher.default`, `registration.default`, and
   `executor.default`

@@ -365,7 +365,7 @@ impl NativeTool for CredentialRequestTool {
             agent_dir,
             &url_host,
             Some(&args.url),
-            DeclarationRequirement::Optional,
+            DeclarationRequirement::Required,
         ) {
             return Ok(json!({
                 "ok": false,
@@ -1357,7 +1357,7 @@ impl NativeTool for CredentialSetupTool {
                 _agent_dir,
                 &url_host,
                 Some(url),
-                DeclarationRequirement::Optional,
+                DeclarationRequirement::Required,
             ) {
                 return Ok(json!({
                         "ok": false,
@@ -1515,7 +1515,7 @@ impl NativeTool for CredentialSetupTool {
                     _agent_dir,
                     &host,
                     Some(url),
-                    DeclarationRequirement::Optional,
+                    DeclarationRequirement::Required,
                 ) {
                     return Ok(json!({
                         "ok": false,

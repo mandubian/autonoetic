@@ -11,12 +11,10 @@ use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, CredentialRecord, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
-use tempfile::tempdir;
 
 fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
     AgentManifest {
@@ -87,6 +85,33 @@ fn setup_vault(_secret_name: &str, _secret_value: &str) -> tempfile::TempDir {
     std::env::set_var("AUTONOETIC_VAULT_KEY", key_hex);
     std::env::set_var("AUTONOETIC_VAULT_PATH", &vault_path);
     temp
+}
+
+fn write_remote_access_any(agent_dir: &std::path::Path) {
+    let skill = r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: "required"
+      targets:
+        - kind: "any"
+      enabled_languages: []
+      python_imports: []
+      js_imports: []
+      rust_imports: []
+      go_imports: []
+      function_calls: []
+      shell_commands: []
+      package_manager_commands: []
+---
+"#;
+    std::fs::write(agent_dir.join("SKILL.md"), skill).expect("skill should write");
+}
+
+fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    let temp = tempfile::tempdir()?;
+    write_remote_access_any(temp.path());
+    Ok(temp)
 }
 
 // ---------------------------------------------------------------------------

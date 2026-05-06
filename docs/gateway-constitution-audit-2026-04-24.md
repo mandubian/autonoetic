@@ -218,7 +218,8 @@ enforcing declared rules. The top ones by structural significance:
    declaration is absent, typed target enforcement through
    `remote_access.targets`, explicit approval
    policy via `remote_access.approval_mode`, and a shared resolver used by
-   sandbox/web/credential outbound checks).
+   sandbox/web/credential outbound checks with strict missing-declaration
+   fail-shut behavior).
 
 4. ~~**Package-manager command redirection** (`sandbox.rs:86`). Same
    concern: pip/npm detection rules baked into gateway code.~~

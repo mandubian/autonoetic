@@ -19,7 +19,7 @@ infers.
 
 ## Proposed Manifest Surface
 
-Add a new optional declaration under agent manifest metadata:
+Add a declaration under agent manifest metadata:
 
 ```yaml
 remote_access:
@@ -100,11 +100,10 @@ Phase migration to avoid breaking all agents at once:
    - `remote_access.approval_mode` is enforced with capability intersection.
    - migrated manifests include `packager.default`, `researcher.default`,
      `registration.default`, and `executor.default`.
-4. **Cross-tool resolver adoption (implemented, transition mode)**:
+4. **Cross-tool resolver adoption (implemented)**:
    - a shared network-policy resolver now runs in all outbound network tool paths.
-   - current migration posture keeps declaration optional for `web.*` and
-     credential HTTP flows while still enforcing declaration targets when present.
-   - `sandbox.exec` remains strict fail-shut on missing declaration + remote signals.
+   - `sandbox.exec`, `web.*`, and credential HTTP flows all fail shut with
+     `missing_remote_access_declaration` when declaration is absent.
 
 ## Required Code Changes
 

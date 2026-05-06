@@ -127,7 +127,7 @@ fn enforce_remote_target_for_web(
         agent_dir,
         host,
         Some(request_url),
-        DeclarationRequirement::Optional,
+        DeclarationRequirement::Required,
     )
     .map(|_| ())
     .map_err(network_policy_violation_to_anyhow)
