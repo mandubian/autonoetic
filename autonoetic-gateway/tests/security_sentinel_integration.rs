@@ -1,4 +1,4 @@
-//! Integration tests for the security sentinel (Phases 0–3).
+//! Integration tests for the security sentinel (Phases 0–4).
 //!
 //! Covers:
 //! - `SecurityFinding` serialization and DB round-trip
@@ -6,6 +6,7 @@
 //! - Deterministic checks via `SentinelRunner::run_sweep`
 //! - Phase 2 heuristic checks (prompt injection, session cluster)
 //! - Phase 3 dual-sweep: baseline annotation and disagreement recording
+//! - Phase 4 supply-chain auditing: scope violations and provenance gaps
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::security::{
@@ -647,4 +648,187 @@ fn dual_sweep_disagreement_persisted_in_db() {
     // The disagreement must be persisted in the DB.
     let db_rows = store.list_sentinel_disagreements(None, 100).expect("list");
     assert!(!db_rows.is_empty(), "disagreements must be persisted to DB");
+}
+
+// ── Phase 4: supply-chain auditing ───────────────────────────────────────────
+
+fn insert_layer_mount_approval(dir: &TempDir, request_id: &str, status: &str, layers_json: &str) {
+    let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+    let payload = format!(r#"{{"layers": {layers_json}, "command": "pip install numpy"}}"#);
+    db.execute(
+        "INSERT INTO approvals
+            (request_id, agent_id, session_id, action_type, action_payload,
+             status, created_at, decided_at, approval_level)
+         VALUES (?1, 'coder.default', 'sess_sc_001', 'layer_mount', ?2,
+                 ?3, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 'operator')",
+        rusqlite::params![request_id, payload, status],
+    )
+    .unwrap();
+}
+
+#[test]
+fn supply_chain_scope_violation_warning_for_artifact_layer() {
+    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+
+    let (dir, store) = open_store();
+
+    insert_layer_mount_approval(
+        &dir,
+        "apr-sc-001",
+        "granted",
+        r#"[{"layer_id":"layer_abc","digest":"sha256:aabbcc112233","name":"python-deps","mount_path":"/deps","source":"artifact:art_001","build_time_approved_hosts":["pypi.org"],"unapproved_delta":["pypi.org"]}]"#,
+    );
+
+    let runner = SentinelRunner::new(Arc::clone(&store));
+    let result = runner
+        .run_sweep(&SweepConfig {
+            sentinel_revision_id: "sentinel.test".to_string(),
+            ..SweepConfig::default()
+        })
+        .expect("sweep");
+
+    // The layer has a scope violation (unapproved_delta non-empty) and also a
+    // provenance gap (no capture trace), so at least 2 findings are expected.
+    assert!(!result.supply_chain_findings.is_empty());
+    let scope_finding = result
+        .supply_chain_findings
+        .iter()
+        .find(|f| f.severity == FindingSeverity::Warning && f.proposed_remediation.contains("pypi.org"));
+    assert!(scope_finding.is_some(), "scope violation warning for pypi.org must be present");
+    assert_eq!(scope_finding.unwrap().finding_type, FindingType::SupplyChainScopeViolation);
+}
+
+#[test]
+fn supply_chain_scope_violation_critical_for_runtime_lock_layer() {
+    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+
+    let (dir, store) = open_store();
+
+    insert_layer_mount_approval(
+        &dir,
+        "apr-sc-002",
+        "granted",
+        r#"[{"layer_id":"layer_def","digest":"sha256:ddeeff445566","name":"locked-deps","mount_path":"/deps","source":"runtime.lock","build_time_approved_hosts":["private.registry.internal"],"unapproved_delta":["private.registry.internal"]}]"#,
+    );
+
+    let runner = SentinelRunner::new(Arc::clone(&store));
+    let result = runner
+        .run_sweep(&SweepConfig {
+            sentinel_revision_id: "sentinel.test".to_string(),
+            ..SweepConfig::default()
+        })
+        .expect("sweep");
+
+    let critical = result
+        .supply_chain_findings
+        .iter()
+        .find(|f| f.severity == FindingSeverity::Critical);
+    assert!(
+        critical.is_some(),
+        "runtime.lock scope violation must be critical"
+    );
+}
+
+#[test]
+fn supply_chain_no_finding_when_delta_empty() {
+    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+
+    let (dir, store) = open_store();
+
+    insert_layer_mount_approval(
+        &dir,
+        "apr-sc-003",
+        "granted",
+        r#"[{"layer_id":"layer_clean","digest":"sha256:clean001","name":"clean","mount_path":"/deps","source":"artifact:x","build_time_approved_hosts":["pypi.org"],"unapproved_delta":[]}]"#,
+    );
+
+    let runner = SentinelRunner::new(Arc::clone(&store));
+    let result = runner
+        .run_sweep(&SweepConfig {
+            sentinel_revision_id: "sentinel.test".to_string(),
+            ..SweepConfig::default()
+        })
+        .expect("sweep");
+
+    // No scope violation finding (empty delta), but there IS a provenance gap finding
+    // since no capture trace exists in causal_events.
+    let scope_violations: Vec<_> = result
+        .supply_chain_findings
+        .iter()
+        .filter(|f| f.proposed_remediation.contains("captured with"))
+        .collect();
+    assert!(scope_violations.is_empty(), "empty delta must not fire a scope violation");
+}
+
+#[test]
+fn supply_chain_provenance_gap_flagged_by_runner() {
+    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+
+    let (dir, store) = open_store();
+
+    // Approve a layer mount with no capture trace in causal_events.
+    insert_layer_mount_approval(
+        &dir,
+        "apr-sc-004",
+        "granted",
+        r#"[{"layer_id":"layer_notr","digest":"sha256:notrace999","name":"no-trace","mount_path":"/deps","source":"artifact:art_002","build_time_approved_hosts":[],"unapproved_delta":[]}]"#,
+    );
+
+    let runner = SentinelRunner::new(Arc::clone(&store));
+    let result = runner
+        .run_sweep(&SweepConfig {
+            sentinel_revision_id: "sentinel.test".to_string(),
+            ..SweepConfig::default()
+        })
+        .expect("sweep");
+
+    let gap = result
+        .supply_chain_findings
+        .iter()
+        .find(|f| f.proposed_remediation.contains("no capture trace"));
+    assert!(gap.is_some(), "layer with no capture trace must produce a provenance gap finding");
+}
+
+#[test]
+fn supply_chain_provenance_gap_cleared_when_capture_trace_present() {
+    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+
+    let (dir, store) = open_store();
+
+    insert_layer_mount_approval(
+        &dir,
+        "apr-sc-005",
+        "granted",
+        r#"[{"layer_id":"layer_traced","digest":"sha256:traced001","name":"traced","mount_path":"/deps","source":"artifact:art_003","build_time_approved_hosts":[],"unapproved_delta":[]}]"#,
+    );
+
+    // Insert a capture trace for layer_traced via target column.
+    {
+        let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute(
+            "INSERT INTO causal_events
+                (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, enforced_rules, target)
+             VALUES ('evt_layer_cap', 'packager.default', 'sess_build', 0, ?1, 'tool', 'sandbox_exec', 'success', '[]', 'layer_traced')",
+            rusqlite::params![now],
+        )
+        .unwrap();
+    }
+
+    let runner = SentinelRunner::new(Arc::clone(&store));
+    let result = runner
+        .run_sweep(&SweepConfig {
+            sentinel_revision_id: "sentinel.test".to_string(),
+            ..SweepConfig::default()
+        })
+        .expect("sweep");
+
+    let gap = result
+        .supply_chain_findings
+        .iter()
+        .find(|f| f.proposed_remediation.contains("no capture trace"));
+    assert!(
+        gap.is_none(),
+        "layer with capture trace must not produce a provenance gap finding"
+    );
 }

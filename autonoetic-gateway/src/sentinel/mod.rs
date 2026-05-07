@@ -10,6 +10,8 @@
 //! - Capability-accretion detection via SQL over `promotion_history`
 //! - Approval-bypass pattern detection
 //! - Sandbox-escape recorded-attempt table scan + escape pattern regex
+//! - Supply-chain scope-delta auditing (granted `layer_mount` approvals with
+//!   non-empty `unapproved_delta`) and layer provenance gap detection
 //!
 //! ## Phase 2 (LLM-judgment heuristics)
 //!

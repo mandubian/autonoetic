@@ -256,6 +256,7 @@ fn annotate_baseline_agreed(current_raw: &mut RawSweepFindings, agreed: &HashSet
         .chain(current_raw.capability_accretion.iter_mut())
         .chain(current_raw.approval_bypass.iter_mut())
         .chain(current_raw.sandbox_escape.iter_mut())
+        .chain(current_raw.supply_chain.iter_mut())
     {
         if agreed.contains(&f.finding_id) {
             f.baseline_agreed = true;

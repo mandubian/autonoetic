@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::scheduler::gateway_store::GatewayStore;
-use super::checks::{approval_bypass, capability_accretion, credential, prompt_injection, sandbox_escape, session_cluster};
+use super::checks::{approval_bypass, capability_accretion, credential, prompt_injection, sandbox_escape, session_cluster, supply_chain};
 
 /// Configuration for a sentinel sweep (Phase 1 + Phase 2).
 pub struct SweepConfig {
@@ -87,6 +87,7 @@ pub struct SweepResult {
     pub capability_accretion_findings: Vec<SecurityFinding>,
     pub approval_bypass_findings: Vec<SecurityFinding>,
     pub sandbox_escape_findings: Vec<SecurityFinding>,
+    pub supply_chain_findings: Vec<SecurityFinding>,
     // Phase 2 — LLM-judgment heuristics
     pub prompt_injection_findings: Vec<SecurityFinding>,
     pub behavioral_anomaly_findings: Vec<SecurityFinding>,
@@ -99,6 +100,7 @@ impl SweepResult {
             + self.capability_accretion_findings.len()
             + self.approval_bypass_findings.len()
             + self.sandbox_escape_findings.len()
+            + self.supply_chain_findings.len()
             + self.prompt_injection_findings.len()
             + self.behavioral_anomaly_findings.len()
     }
@@ -109,6 +111,7 @@ impl SweepResult {
             .chain(&self.capability_accretion_findings)
             .chain(&self.approval_bypass_findings)
             .chain(&self.sandbox_escape_findings)
+            .chain(&self.supply_chain_findings)
             .chain(&self.prompt_injection_findings)
             .chain(&self.behavioral_anomaly_findings)
     }
@@ -120,6 +123,7 @@ impl SweepResult {
             .chain(&self.capability_accretion_findings)
             .chain(&self.approval_bypass_findings)
             .chain(&self.sandbox_escape_findings)
+            .chain(&self.supply_chain_findings)
     }
 }
 
@@ -132,6 +136,7 @@ pub(super) struct RawSweepFindings {
     pub capability_accretion: Vec<SecurityFinding>,
     pub approval_bypass: Vec<SecurityFinding>,
     pub sandbox_escape: Vec<SecurityFinding>,
+    pub supply_chain: Vec<SecurityFinding>,
     pub prompt_injection: Vec<SecurityFinding>,
     pub behavioral_anomaly: Vec<SecurityFinding>,
     pub scan_errors: Vec<String>,
@@ -144,6 +149,7 @@ impl RawSweepFindings {
             .chain(&self.capability_accretion)
             .chain(&self.approval_bypass)
             .chain(&self.sandbox_escape)
+            .chain(&self.supply_chain)
     }
 
     pub fn all(&self) -> impl Iterator<Item = &SecurityFinding> {
@@ -152,6 +158,7 @@ impl RawSweepFindings {
             .chain(&self.capability_accretion)
             .chain(&self.approval_bypass)
             .chain(&self.sandbox_escape)
+            .chain(&self.supply_chain)
             .chain(&self.prompt_injection)
             .chain(&self.behavioral_anomaly)
     }
@@ -208,6 +215,9 @@ impl SentinelRunner {
                 approval_bypass::scan_exec_without_grant(conn, rev_id, since, scan_limit),
                 sandbox_escape::scan_escape_attempt_records(conn, rev_id, since, scan_limit),
                 sandbox_escape::scan_escape_patterns_in_events(conn, rev_id, since, scan_limit),
+                // Phase 1 — supply-chain auditing
+                supply_chain::scan_layer_scope_violations(conn, rev_id, since, scan_limit),
+                supply_chain::scan_layer_provenance_gaps(conn, rev_id, since, scan_limit),
             ];
             // Phase 2a — cluster heuristics (always rolling window, not `since`).
             // Skipped when phase1_only is set (e.g. frozen baseline runner).
@@ -237,6 +247,8 @@ impl SentinelRunner {
         take_check!(approval_bypass, "exec_without_grant");
         take_check!(sandbox_escape, "escape_records");
         take_check!(sandbox_escape, "escape_patterns");
+        take_check!(supply_chain, "supply_chain_scope");
+        take_check!(supply_chain, "supply_chain_provenance");
         if !config.phase1_only {
             take_check!(behavioral_anomaly, "failure_burst");
             take_check!(behavioral_anomaly, "exec_repeat");
@@ -278,6 +290,7 @@ impl SentinelRunner {
         persist_bucket!(raw.capability_accretion, capability_accretion_findings, "accretion");
         persist_bucket!(raw.approval_bypass, approval_bypass_findings, "approval_bypass");
         persist_bucket!(raw.sandbox_escape, sandbox_escape_findings, "sandbox_escape");
+        persist_bucket!(raw.supply_chain, supply_chain_findings, "supply_chain");
         persist_bucket!(raw.prompt_injection, prompt_injection_findings, "prompt_injection");
         persist_bucket!(raw.behavioral_anomaly, behavioral_anomaly_findings, "behavioral_anomaly");
 
