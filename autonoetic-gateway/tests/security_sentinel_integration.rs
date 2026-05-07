@@ -485,11 +485,12 @@ fn dual_sweep_sets_baseline_agreed_when_both_find_same_anchor() {
     {
         let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
+        let fake_key = format!("sk-ant-api03-{}-{}", "A".repeat(92), "A".repeat(10));
         db.execute(
             "INSERT INTO causal_events
                 (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
-             VALUES ('evt_cred_001', 'coder.default', 'sess_001', 0, ?1, 'tool', 'tool_call', 'success', 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-AAAAAAAAAA')",
-            rusqlite::params![now],
+             VALUES ('evt_cred_001', 'coder.default', 'sess_001', 0, ?1, 'tool', 'tool_call', 'success', ?2)",
+            rusqlite::params![now, fake_key],
         ).unwrap();
     }
 
@@ -531,43 +532,67 @@ fn dual_sweep_sets_baseline_agreed_when_both_find_same_anchor() {
 
 #[test]
 fn dual_sweep_records_baseline_only_disagreement() {
-    use autonoetic_gateway::sentinel::{DualSweepRunner};
+    use autonoetic_gateway::sentinel::DualSweepRunner;
     use autonoetic_gateway::sentinel::runner::SweepConfig;
     use autonoetic_gateway::scheduler::gateway_store::sentinel_disagreements::DisagreementDirection;
 
     let (dir, store) = open_store();
 
-    // Insert a sandbox_escape_attempts row — the baseline (Phase 1) will flag it.
-    // The current sentinel also runs Phase 1 so it will also flag it.
-    // To simulate a baseline_only disagreement we need the current to miss something.
-    // We achieve this by inserting the row AFTER the current config's since_rfc3339,
-    // but both configs here use None (full scan). The disagreement will be current_only
-    // if the current has something the baseline doesn't — we test that path separately.
-    //
-    // For baseline_only, we simulate via the disagreement store directly.
+    // Insert a credential event with a past timestamp so the baseline (no since cutoff)
+    // will find it, but the current sentinel's since_rfc3339 is set to the far future
+    // so it misses everything — producing a baseline_only disagreement.
     {
-        use autonoetic_gateway::scheduler::gateway_store::sentinel_disagreements::SentinelDisagreementRecord;
-        let rec = SentinelDisagreementRecord {
-            disagreement_id: "dis_test_001".to_string(),
-            sweep_at: chrono::Utc::now().to_rfc3339(),
-            direction: DisagreementDirection::BaselineOnly,
-            anchor_json: r#"[{"type":"causal_event","id":"evt_missing"}]"#.to_string(),
-            baseline_finding_id: Some("finding_baseline_001".to_string()),
-            current_finding_id: None,
-            baseline_sentinel_rev: "sentinel.baseline".to_string(),
-            current_sentinel_rev: "sentinel.current".to_string(),
-        };
-        store.insert_sentinel_disagreement(&rec).expect("insert disagreement");
+        let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+        let past = "2020-01-01T00:00:00Z";
+        let fake_key = format!("sk-ant-api03-{}-{}", "C".repeat(92), "C".repeat(10));
+        db.execute(
+            "INSERT INTO causal_events
+                (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
+             VALUES ('evt_cred_base_only', 'coder.default', 'sess_base_only', 0, ?1, 'tool', 'tool_call', 'success', ?2)",
+            rusqlite::params![past, fake_key],
+        ).unwrap();
     }
 
+    let runner = DualSweepRunner::new(Arc::clone(&store));
+    // Baseline scans full history (since_rfc3339 = None).
+    let baseline_config = SweepConfig {
+        sentinel_revision_id: "sentinel.baseline".to_string(),
+        since_rfc3339: None,
+        ..SweepConfig::default()
+    };
+    // Current only looks at events from the far future — misses the past event.
+    let current_config = SweepConfig {
+        sentinel_revision_id: "sentinel.current".to_string(),
+        since_rfc3339: Some("2099-01-01T00:00:00Z".to_string()),
+        ..SweepConfig::default()
+    };
+
+    let result = runner.run(&baseline_config, &current_config).expect("dual sweep");
+
+    // Baseline must have found the credential.
+    assert!(
+        !result.baseline.credential_findings.is_empty(),
+        "baseline must find the credential event"
+    );
+    // Current must have found nothing.
+    assert!(
+        result.current.credential_findings.is_empty(),
+        "current must miss the credential event (future since cutoff)"
+    );
+    // A baseline_only disagreement must have been recorded.
+    let baseline_only = result
+        .disagreements
+        .iter()
+        .any(|d| d.direction == DisagreementDirection::BaselineOnly);
+    assert!(baseline_only, "must produce a baseline_only disagreement");
+
+    // Verify it is also in the DB.
     let rows = store.list_sentinel_disagreements(None, 10).expect("list");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].direction, DisagreementDirection::BaselineOnly);
-    assert_eq!(rows[0].disagreement_id, "dis_test_001");
+    assert!(rows.iter().any(|r| r.direction == DisagreementDirection::BaselineOnly));
 
     let counts = store.count_sentinel_disagreements_by_direction().expect("count");
-    let baseline_only = counts.iter().find(|(d, _)| d == "baseline_only").map(|(_, n)| *n);
-    assert_eq!(baseline_only, Some(1));
+    let n = counts.iter().find(|(d, _)| d == "baseline_only").map(|(_, n)| *n);
+    assert_eq!(n, Some(1));
 }
 
 #[test]
@@ -584,11 +609,12 @@ fn dual_sweep_disagreement_persisted_in_db() {
     {
         let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
+        let fake_key = format!("sk-ant-api03-{}-{}", "B".repeat(92), "B".repeat(10));
         db.execute(
             "INSERT INTO causal_events
                 (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
-             VALUES ('evt_cred_dis', 'coder.default', 'sess_dis', 0, ?1, 'tool', 'tool_call', 'success', 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-AAAAAAAAAA')",
-            rusqlite::params![now],
+             VALUES ('evt_cred_dis', 'coder.default', 'sess_dis', 0, ?1, 'tool', 'tool_call', 'success', ?2)",
+            rusqlite::params![now, fake_key],
         ).unwrap();
     }
 

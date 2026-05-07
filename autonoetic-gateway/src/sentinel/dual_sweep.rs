@@ -26,7 +26,7 @@
 
 use anyhow::Result;
 use autonoetic_types::security::{EvidenceAnchor, SecurityFinding};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,6 +38,8 @@ use super::runner::{RawSweepFindings, SentinelRunner, SweepConfig, SweepResult};
 
 /// Result of a dual sweep (baseline + current).
 pub struct DualSweepResult {
+    /// Findings from the baseline sentinel (Phase 1 only), persisted to DB.
+    pub baseline: SweepResult,
     /// Findings from the current sentinel, persisted with `baseline_agreed` set.
     pub current: SweepResult,
     /// Number of current Phase-1 findings that the baseline also flagged.
@@ -77,9 +79,23 @@ impl DualSweepRunner {
     ) -> Result<DualSweepResult> {
         let sweep_at = chrono::Utc::now().to_rfc3339();
 
+        // Enforce Phase-1-only on the baseline regardless of caller config.
+        let baseline_config_p1 = SweepConfig {
+            phase1_only: true,
+            sentinel_revision_id: baseline_config.sentinel_revision_id.clone(),
+            since_rfc3339: baseline_config.since_rfc3339.clone(),
+            scan_limit: baseline_config.scan_limit,
+            window_days: baseline_config.window_days,
+            accretion_threshold: baseline_config.accretion_threshold,
+            denial_threshold: baseline_config.denial_threshold,
+            cluster_window_minutes: baseline_config.cluster_window_minutes,
+            failure_burst_threshold: baseline_config.failure_burst_threshold,
+            exec_repeat_threshold: baseline_config.exec_repeat_threshold,
+        };
+
         // 1. Collect baseline findings (Phase 1 only, no prompt-injection scan).
         let baseline_runner = SentinelRunner::new(Arc::clone(&self.store));
-        let baseline_raw = baseline_runner.collect_findings(baseline_config)?;
+        let baseline_raw = baseline_runner.collect_findings(&baseline_config_p1)?;
 
         // 2. Collect current findings (Phase 1 + 2).
         let mut current_runner = SentinelRunner::new(Arc::clone(&self.store));
@@ -93,7 +109,7 @@ impl DualSweepRunner {
             &baseline_raw,
             &current_raw,
             &sweep_at,
-            &baseline_config.sentinel_revision_id,
+            &baseline_config_p1.sentinel_revision_id,
             &current_config.sentinel_revision_id,
         )?;
 
@@ -102,10 +118,13 @@ impl DualSweepRunner {
 
         let baseline_agreed_count = agreed_current_ids.len();
 
-        // 5. Persist current findings (now annotated with baseline_agreed).
+        // 5. Persist baseline findings so baseline_finding_id references a real DB row.
+        let baseline_result = baseline_runner.persist_findings(baseline_raw);
+
+        // 6. Persist current findings (now annotated with baseline_agreed).
         let current_result = current_runner.persist_findings(current_raw);
 
-        // 6. Persist disagreements.
+        // 7. Persist disagreements.
         for d in &disagreements {
             if let Err(e) = self.store.insert_sentinel_disagreement(d) {
                 tracing::warn!(
@@ -118,6 +137,7 @@ impl DualSweepRunner {
         }
 
         Ok(DualSweepResult {
+            baseline: baseline_result,
             current: current_result,
             baseline_agreed_count,
             disagreements,
@@ -149,12 +169,6 @@ fn finding_anchor_keys(f: &SecurityFinding) -> HashSet<String> {
     f.evidence_anchors.iter().map(anchor_key).collect()
 }
 
-/// Check whether two findings share at least one evidence anchor.
-fn anchors_overlap(a: &SecurityFinding, b: &SecurityFinding) -> bool {
-    let keys_a = finding_anchor_keys(a);
-    finding_anchor_keys(b).iter().any(|k| keys_a.contains(k))
-}
-
 // ── Comparison logic ──────────────────────────────────────────────────────────
 
 /// Compare Phase-1 baseline and current findings.
@@ -172,16 +186,31 @@ fn compare_phase1(
     let baseline_p1: Vec<&SecurityFinding> = baseline_raw.all_phase1().collect();
     let current_p1: Vec<&SecurityFinding> = current_raw.all_phase1().collect();
 
-    let mut agreed_current_ids = HashSet::new();
+    // Build an anchor_key → Vec<current_finding_id> index for O(n+m) matching.
+    let mut current_by_anchor: HashMap<String, Vec<&SecurityFinding>> = HashMap::new();
+    for cf in &current_p1 {
+        for key in finding_anchor_keys(cf) {
+            current_by_anchor.entry(key).or_default().push(cf);
+        }
+    }
+
+    let mut agreed_current_ids: HashSet<String> = HashSet::new();
+    // Track which current findings were matched (for current_only detection below).
+    let mut matched_current_ids: HashSet<&str> = HashSet::new();
     let mut disagreements = Vec::new();
 
-    // For each baseline finding, check if any current Phase-1 finding agrees.
     for bf in &baseline_p1 {
-        let matching_current = current_p1.iter().find(|cf| anchors_overlap(bf, cf));
-        if let Some(cf) = matching_current {
-            // Both agree — mark the current finding as baseline_agreed.
-            agreed_current_ids.insert(cf.finding_id.clone());
-        } else {
+        let mut found_match = false;
+        for key in finding_anchor_keys(bf) {
+            if let Some(matches) = current_by_anchor.get(&key) {
+                for cf in matches {
+                    agreed_current_ids.insert(cf.finding_id.clone());
+                    matched_current_ids.insert(cf.finding_id.as_str());
+                    found_match = true;
+                }
+            }
+        }
+        if !found_match {
             // Baseline flagged something current missed.
             let anchor_json = serde_json::to_string(&bf.evidence_anchors)
                 .unwrap_or_else(|_| "[]".to_string());
@@ -198,13 +227,9 @@ fn compare_phase1(
         }
     }
 
-    // For each current Phase-1 finding NOT matched by baseline, record current_only.
+    // For each current Phase-1 finding NOT matched by any baseline anchor, record current_only.
     for cf in &current_p1 {
-        if agreed_current_ids.contains(&cf.finding_id) {
-            continue;
-        }
-        let baseline_match = baseline_p1.iter().any(|bf| anchors_overlap(bf, cf));
-        if !baseline_match {
+        if !matched_current_ids.contains(cf.finding_id.as_str()) {
             let anchor_json = serde_json::to_string(&cf.evidence_anchors)
                 .unwrap_or_else(|_| "[]".to_string());
             disagreements.push(SentinelDisagreementRecord {
@@ -233,7 +258,7 @@ fn annotate_baseline_agreed(current_raw: &mut RawSweepFindings, agreed: &HashSet
         .chain(current_raw.sandbox_escape.iter_mut())
     {
         if agreed.contains(&f.finding_id) {
-            *f = f.clone().with_baseline_agreed(true);
+            f.baseline_agreed = true;
         }
     }
 }

@@ -1595,7 +1595,7 @@ fn apply_sentinel_disagreements_v27(conn: &mut Connection) -> Result<()> {
             created_at            TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_sentinel_disagreements_sweep
-            ON security_sentinel_disagreements(sweep_at);
+            ON security_sentinel_disagreements(sweep_at DESC, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_sentinel_disagreements_direction
             ON security_sentinel_disagreements(direction);",
     )?;

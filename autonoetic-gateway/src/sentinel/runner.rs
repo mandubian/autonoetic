@@ -54,6 +54,12 @@ pub struct SweepConfig {
     pub failure_burst_threshold: u32,
     /// Number of identical sandbox_exec targets in `cluster_window_minutes` that triggers a repeat warning.
     pub exec_repeat_threshold: u32,
+
+    // ── Scope control ───────────────────────────────────────────────────
+    /// When `true`, run only Phase-1 (deterministic) checks — skip cluster
+    /// heuristics and prompt-injection scanning. Used by the dual-sweep
+    /// orchestrator for the frozen baseline runner.
+    pub phase1_only: bool,
 }
 
 impl Default for SweepConfig {
@@ -68,6 +74,7 @@ impl Default for SweepConfig {
             cluster_window_minutes: 60,
             failure_burst_threshold: 20,
             exec_repeat_threshold: 10,
+            phase1_only: false,
         }
     }
 }
@@ -191,7 +198,7 @@ impl SentinelRunner {
 
         // All DB checks in a single connection borrow.
         let db_results: Vec<Result<Vec<SecurityFinding>>> = self.store.with_conn(|conn| {
-            Ok(vec![
+            let mut checks = vec![
                 // Phase 1 — deterministic
                 credential::scan_credential_leaks(conn, rev_id, since, scan_limit),
                 capability_accretion::scan_capability_accretion(
@@ -201,14 +208,18 @@ impl SentinelRunner {
                 approval_bypass::scan_exec_without_grant(conn, rev_id, since, scan_limit),
                 sandbox_escape::scan_escape_attempt_records(conn, rev_id, since, scan_limit),
                 sandbox_escape::scan_escape_patterns_in_events(conn, rev_id, since, scan_limit),
-                // Phase 2a — cluster heuristics (always rolling window, not `since`)
-                session_cluster::scan_failure_bursts(
+            ];
+            // Phase 2a — cluster heuristics (always rolling window, not `since`).
+            // Skipped when phase1_only is set (e.g. frozen baseline runner).
+            if !config.phase1_only {
+                checks.push(session_cluster::scan_failure_bursts(
                     conn, rev_id, cluster_window_minutes, failure_burst_threshold, scan_limit,
-                ),
-                session_cluster::scan_exec_repeats(
+                ));
+                checks.push(session_cluster::scan_exec_repeats(
                     conn, rev_id, cluster_window_minutes, exec_repeat_threshold, scan_limit,
-                ),
-            ])
+                ));
+            }
+            Ok(checks)
         })?;
 
         let mut it = db_results.into_iter();
@@ -226,14 +237,18 @@ impl SentinelRunner {
         take_check!(approval_bypass, "exec_without_grant");
         take_check!(sandbox_escape, "escape_records");
         take_check!(sandbox_escape, "escape_patterns");
-        take_check!(behavioral_anomaly, "failure_burst");
-        take_check!(behavioral_anomaly, "exec_repeat");
+        if !config.phase1_only {
+            take_check!(behavioral_anomaly, "failure_burst");
+            take_check!(behavioral_anomaly, "exec_repeat");
+        }
 
-        // Phase 2b — prompt injection (filesystem, optional).
-        if let Some(ref agents_dir) = self.agents_dir {
-            match prompt_injection::scan_prompt_injection(agents_dir, rev_id, scan_limit as usize) {
-                Ok(v) => raw.prompt_injection = v,
-                Err(e) => raw.scan_errors.push(format!("prompt_injection scan: {}", e)),
+        // Phase 2b — prompt injection (filesystem, optional). Skipped for baseline.
+        if !config.phase1_only {
+            if let Some(ref agents_dir) = self.agents_dir {
+                match prompt_injection::scan_prompt_injection(agents_dir, rev_id, scan_limit as usize) {
+                    Ok(v) => raw.prompt_injection = v,
+                    Err(e) => raw.scan_errors.push(format!("prompt_injection scan: {}", e)),
+                }
             }
         }
 

@@ -88,7 +88,7 @@ impl GatewayStore {
                         baseline_sentinel_rev, current_sentinel_rev
                  FROM security_sentinel_disagreements
                  WHERE sweep_at >= ?1
-                 ORDER BY created_at DESC LIMIT ?2",
+                 ORDER BY sweep_at DESC, created_at DESC LIMIT ?2",
             )?;
             let result = stmt.query_map(params![since, lim], decode_disagreement_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -99,7 +99,7 @@ impl GatewayStore {
                         baseline_finding_id, current_finding_id,
                         baseline_sentinel_rev, current_sentinel_rev
                  FROM security_sentinel_disagreements
-                 ORDER BY created_at DESC LIMIT ?1",
+                 ORDER BY sweep_at DESC, created_at DESC LIMIT ?1",
             )?;
             let result = stmt.query_map(params![lim], decode_disagreement_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -128,7 +128,16 @@ fn decode_disagreement_row(
     let direction_str: String = row.get(2)?;
     let direction = match direction_str.as_str() {
         "baseline_only" => DisagreementDirection::BaselineOnly,
-        _ => DisagreementDirection::CurrentOnly,
+        "current_only" => DisagreementDirection::CurrentOnly,
+        other => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(format!(
+                    "unknown disagreement direction: {other:?}"
+                ))),
+            ));
+        }
     };
     Ok(SentinelDisagreementRecord {
         disagreement_id: row.get(0)?,
