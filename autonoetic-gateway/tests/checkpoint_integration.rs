@@ -29,6 +29,7 @@ fn default_guard_state() -> LoopGuardState {
         last_progress_fingerprint: None,
         consecutive_progress_count: 0,
         child_failure_count: 0,
+        ..Default::default()
     }
 }
 

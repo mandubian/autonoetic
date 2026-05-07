@@ -459,6 +459,7 @@ mod tests {
                 last_progress_fingerprint: None,
                 consecutive_progress_count: 0,
                 child_failure_count: 0,
+                ..Default::default()
             },
             session_state: autonoetic_types::agent::SessionState::Normal,
             agent_id: "test-agent".to_string(),
@@ -510,6 +511,7 @@ mod tests {
                 last_progress_fingerprint: None,
                 consecutive_progress_count: 0,
                 child_failure_count: 0,
+                ..Default::default()
             },
             session_state: autonoetic_types::agent::SessionState::Normal,
             agent_id: "test-agent".to_string(),
@@ -569,6 +571,7 @@ mod tests {
                     last_progress_fingerprint: None,
                     consecutive_progress_count: 0,
                     child_failure_count: 0,
+                    ..Default::default()
                 },
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 agent_id: "test-agent".to_string(),

@@ -37,6 +37,7 @@ fn test_checkpoint(
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
             child_failure_count: 0,
+            ..Default::default()
         },
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),

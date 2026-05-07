@@ -107,6 +107,7 @@ fn declared_loop_guard_values_are_applied_when_stricter() -> anyhow::Result<()> 
             max_tool_failures: 5,
             max_consecutive_same_progress: 3,
             max_child_failures: 4,
+            ..Default::default()
         },
         ..GatewayConfig::default()
     };
@@ -146,6 +147,7 @@ fn declared_loop_guard_values_are_capped_by_system_ceiling() -> anyhow::Result<(
             max_tool_failures: 5,
             max_consecutive_same_progress: 2,
             max_child_failures: 3,
+            ..Default::default()
         },
         ..GatewayConfig::default()
     };
@@ -179,6 +181,7 @@ fn absent_manifest_declaration_uses_system_loop_guard_limits() -> anyhow::Result
             max_tool_failures: 4,
             max_consecutive_same_progress: 2,
             max_child_failures: 5,
+            ..Default::default()
         },
         ..GatewayConfig::default()
     };

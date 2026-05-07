@@ -360,8 +360,7 @@ fn test_web_fetch_denied_by_netconnect_mints_approval_and_grant_allows_retry() {
     std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
     write_remote_access_any(&agent_dir);
 
-    let gateway_store =
-        Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
+    let gateway_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
     let mut config = GatewayConfig {
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
@@ -527,8 +526,7 @@ fn test_web_call_denied_by_netconnect_mints_approval_when_store_config_present()
     std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
     write_remote_access_any(&agent_dir);
 
-    let gateway_store =
-        Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
+    let gateway_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
     let mut config = GatewayConfig {
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
@@ -556,14 +554,8 @@ fn test_web_call_denied_by_netconnect_mints_approval_when_store_config_present()
         .expect("web.call should return approval-required payload");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("json should decode");
-    assert_eq!(
-        parsed.get("approval_required"),
-        Some(&serde_json::json!(true))
-    );
-    let request_id = parsed["request_id"]
-        .as_str()
-        .expect("request_id")
-        .to_string();
+    assert_eq!(parsed.get("approval_required"), Some(&serde_json::json!(true)));
+    let request_id = parsed["request_id"].as_str().expect("request_id").to_string();
     let row = gateway_store
         .get_approval(&request_id)
         .expect("get_approval should succeed")
@@ -590,8 +582,7 @@ fn test_web_search_denied_by_netconnect_mints_approval_when_store_config_present
     std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
     write_remote_access_any(&agent_dir);
 
-    let gateway_store =
-        Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
+    let gateway_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
     let mut config = GatewayConfig {
         agents_dir: agents_dir.clone(),
         ..GatewayConfig::default()
@@ -620,14 +611,8 @@ fn test_web_search_denied_by_netconnect_mints_approval_when_store_config_present
         .expect("web.search should return approval-required payload");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("json should decode");
-    assert_eq!(
-        parsed.get("approval_required"),
-        Some(&serde_json::json!(true))
-    );
-    let request_id = parsed["request_id"]
-        .as_str()
-        .expect("request_id")
-        .to_string();
+    assert_eq!(parsed.get("approval_required"), Some(&serde_json::json!(true)));
+    let request_id = parsed["request_id"].as_str().expect("request_id").to_string();
     let row = gateway_store
         .get_approval(&request_id)
         .expect("get_approval should succeed")
@@ -1219,4 +1204,219 @@ fn test_agent_spawn_tool_accepts_metadata_argument() {
         )
         .expect_err("empty message should be rejected even with metadata");
     assert!(err.to_string().contains("message must not be empty"));
+}
+
+#[test]
+fn test_skill_normalize_writes_autonoetic_skill_under_skills_scope() {
+    let manifest = test_manifest(vec![Capability::WriteAccess {
+        scopes: vec!["skills/*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agent_dir = temp.path().join("agents").join("planner.default");
+    std::fs::create_dir_all(&agent_dir).expect("agent workspace should create");
+
+    let md = r#"## Example API
+
+Use this to register:
+
+POST /v1/register
+{
+  "username": "alice"
+}
+"#;
+
+    let args = serde_json::json!({
+        "intent": "normalize third-party doc for credential_setup",
+        "content": md,
+        "service": "examplesvc",
+        "source_url": "https://api.example.com/docs"
+    });
+
+    let registry = default_registry();
+    let result = registry
+        .execute(
+            "skill_normalize",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("skill_normalize should succeed");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("skill_normalize result should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(true)));
+    let rel = parsed
+        .get("skill_path")
+        .and_then(|v| v.as_str())
+        .expect("skill_path");
+    assert_eq!(rel, "skills/examplesvc/SKILL.md");
+    assert_eq!(parsed.get("steps_count").and_then(|v| v.as_u64()), Some(1_u64));
+
+    let written = std::fs::read_to_string(agent_dir.join(rel)).expect("normalized file should exist");
+    assert!(written.starts_with("---\n"));
+    assert!(written.contains("autonoetic:"));
+    assert!(written.contains("/v1/register"));
+}
+
+#[test]
+fn test_skill_normalize_moltbook_fixture_generates_expected_steps() {
+    let manifest = test_manifest(vec![Capability::WriteAccess {
+        scopes: vec!["skills/*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agent_dir = temp.path().join("agents").join("planner.default");
+    std::fs::create_dir_all(&agent_dir).expect("agent workspace should create");
+
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("bin")
+        .join("mock_moltbook_skill.md");
+    let fixture_markdown = std::fs::read_to_string(&fixture_path).expect("fixture should read");
+
+    let args = serde_json::json!({
+        "intent": "normalize moltbook fixture for credential_setup",
+        "content": fixture_markdown,
+        "service": "moltbook",
+        "source_url": "http://127.0.0.1:8787/skill.md"
+    });
+
+    let registry = default_registry();
+    let result = registry
+        .execute(
+            "skill_normalize",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("skill_normalize should succeed for fixture");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("skill_normalize result should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        parsed.get("skill_path").and_then(|v| v.as_str()),
+        Some("skills/moltbook/SKILL.md")
+    );
+    assert_eq!(parsed.get("steps_count").and_then(|v| v.as_u64()), Some(6_u64));
+
+    let written = std::fs::read_to_string(agent_dir.join("skills/moltbook/SKILL.md"))
+        .expect("normalized fixture file should exist");
+    assert!(written.contains("autonoetic:"));
+    assert!(written.contains("service: moltbook"));
+    assert!(written.contains("inject_as: MOLTBOOK_SECRET"));
+    assert!(written.contains("/api/register-agent"));
+    assert!(written.contains("/api/human-claim"));
+    assert!(written.contains("/api/verify-human-claim"));
+    assert!(written.contains("/api/setup-heartbeat"));
+    assert!(written.contains("/api/post-to-feed"));
+    assert!(written.contains("/status"));
+}
+
+#[test]
+fn test_skill_normalize_denied_without_skills_write_capability() {
+    let manifest = test_manifest(vec![Capability::WriteAccess {
+        scopes: vec!["self.*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agent_dir = temp.path();
+
+    let registry = default_registry();
+    assert!(
+        !registry.available_definitions(&manifest).iter().any(|d| d.name == "skill_normalize"),
+        "skill_normalize should not appear without skills/* write scope"
+    );
+
+    let args = serde_json::json!({
+        "intent": "should not run",
+        "content": "POST /x",
+        "service": "noop"
+    });
+
+    let err = registry
+        .execute(
+            "skill_normalize",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("skill_normalize must be unavailable without capability");
+    assert!(err.to_string().contains("skill_normalize"));
+}
+
+#[test]
+fn test_skill_normalize_requires_non_empty_intent() {
+    let manifest = test_manifest(vec![Capability::WriteAccess {
+        scopes: vec!["skills/*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agent_dir = temp.path();
+
+    let args = serde_json::json!({
+        "intent": "",
+        "content": "POST /ping",
+        "service": "svc"
+    });
+
+    let registry = default_registry();
+    let err = registry
+        .execute(
+            "skill_normalize",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("skill_normalize must reject blank intent");
+    assert!(
+        err.to_string().contains("intent"),
+        "expected intent validation error; got {}",
+        err
+    );
+}
+
+#[test]
+fn test_credential_setup_and_skill_normalize_exposed_for_planner_like_caps() {
+    let registry = default_registry();
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["*".to_string()],
+        },
+        Capability::WriteAccess {
+            scopes: vec!["skills/*".to_string()],
+        },
+    ]);
+    let defs = registry.available_definitions(&manifest);
+    assert!(defs.iter().any(|d| d.name == "credential_setup"));
+    assert!(defs.iter().any(|d| d.name == "skill_normalize"));
 }

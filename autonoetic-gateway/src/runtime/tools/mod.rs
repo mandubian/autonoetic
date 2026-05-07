@@ -240,6 +240,7 @@ pub(crate) fn tool_requires_intent(tool_name: &str) -> bool {
         || tool_name.starts_with("credential_")
         || tool_name.starts_with("agent_revision_")
         || tool_name.starts_with("scheduler_")
+        || tool_name == "skill_normalize"
 }
 
 fn with_intent_schema(mut definition: ToolDefinition) -> ToolDefinition {

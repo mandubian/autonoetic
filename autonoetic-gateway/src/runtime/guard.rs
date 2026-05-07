@@ -17,6 +17,7 @@
 //! `max_consecutive_same_progress` consecutive occurrences.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use autonoetic_types::config::LoopGuardConfig;
@@ -27,6 +28,10 @@ pub struct LoopGuard {
     max_tool_failures: u32,
     max_consecutive_same_progress: u32,
     max_child_failures: u32,
+    /// From gateway config — max loop resets attributable to each tool name.
+    progress_budget_tools: HashMap<String, u32>,
+    /// How many times each budgeted tool has reset `current_loops` this session.
+    progress_budget_used: HashMap<String, u32>,
     current_loops: u32,
     tool_failure_counts: std::collections::HashMap<String, u32>,
     last_progress_fingerprint: Option<(String, u64)>,
@@ -41,6 +46,8 @@ impl LoopGuard {
             max_tool_failures: 5,
             max_consecutive_same_progress: 1,
             max_child_failures: 3,
+            progress_budget_tools: HashMap::new(),
+            progress_budget_used: HashMap::new(),
             current_loops: 0,
             tool_failure_counts: std::collections::HashMap::new(),
             last_progress_fingerprint: None,
@@ -55,6 +62,8 @@ impl LoopGuard {
             max_tool_failures: cfg.max_tool_failures,
             max_consecutive_same_progress: cfg.max_consecutive_same_progress,
             max_child_failures: cfg.max_child_failures,
+            progress_budget_tools: cfg.progress_budget_tools.clone(),
+            progress_budget_used: HashMap::new(),
             current_loops: 0,
             tool_failure_counts: std::collections::HashMap::new(),
             last_progress_fingerprint: None,
@@ -103,9 +112,7 @@ impl LoopGuard {
     /// sub-trip warnings.
     pub fn is_sub_trip_warning(&self) -> bool {
         let loop_threshold = ((self.max_loops_without_progress as u64 * 4 + 4) / 5) as u32;
-        if self.current_loops >= loop_threshold
-            && self.current_loops < self.max_loops_without_progress
-        {
+        if self.current_loops >= loop_threshold && self.current_loops < self.max_loops_without_progress {
             return true;
         }
         let failure_threshold = ((self.max_tool_failures as u64 * 4 + 4) / 5) as u32;
@@ -163,8 +170,28 @@ impl LoopGuard {
             self.consecutive_progress_count += 1;
         }
 
-        if is_new || self.consecutive_progress_count <= self.max_consecutive_same_progress {
-            self.current_loops = 0;
+        let would_reset_loops = is_new
+            || self.consecutive_progress_count <= self.max_consecutive_same_progress;
+
+        if would_reset_loops {
+            let allowed_by_budget = match self.progress_budget_tools.get(tool_name) {
+                None => true,
+                Some(&budget) => {
+                    let used = self
+                        .progress_budget_used
+                        .entry(tool_name.to_string())
+                        .or_insert(0);
+                    if *used >= budget {
+                        false
+                    } else {
+                        *used += 1;
+                        true
+                    }
+                }
+            };
+            if allowed_by_budget {
+                self.current_loops = 0;
+            }
         }
 
         self.last_progress_fingerprint = Some(fp);
@@ -176,6 +203,8 @@ impl LoopGuard {
             max_tool_failures: self.max_tool_failures,
             max_consecutive_same_progress: self.max_consecutive_same_progress,
             max_child_failures: self.max_child_failures,
+            progress_budget_tools: self.progress_budget_tools.clone(),
+            progress_budget_used: self.progress_budget_used.clone(),
             current_loops: self.current_loops,
             tool_failure_counts: self.tool_failure_counts.clone(),
             last_progress_fingerprint: self.last_progress_fingerprint.clone(),
@@ -190,6 +219,8 @@ impl LoopGuard {
             max_tool_failures: state.max_tool_failures,
             max_consecutive_same_progress: state.max_consecutive_same_progress,
             max_child_failures: state.max_child_failures,
+            progress_budget_tools: state.progress_budget_tools,
+            progress_budget_used: state.progress_budget_used,
             current_loops: state.current_loops,
             tool_failure_counts: state.tool_failure_counts,
             last_progress_fingerprint: state.last_progress_fingerprint,
@@ -229,11 +260,33 @@ pub struct LoopGuardState {
     pub max_tool_failures: u32,
     pub max_consecutive_same_progress: u32,
     pub max_child_failures: u32,
+    #[serde(default)]
+    pub progress_budget_tools: HashMap<String, u32>,
+    #[serde(default)]
+    pub progress_budget_used: HashMap<String, u32>,
     pub current_loops: u32,
     pub tool_failure_counts: std::collections::HashMap<String, u32>,
     pub last_progress_fingerprint: Option<(String, u64)>,
     pub consecutive_progress_count: u32,
     pub child_failure_count: u32,
+}
+
+impl Default for LoopGuardState {
+    fn default() -> Self {
+        Self {
+            max_loops_without_progress: 5,
+            max_tool_failures: 5,
+            max_consecutive_same_progress: 1,
+            max_child_failures: 3,
+            progress_budget_tools: HashMap::new(),
+            progress_budget_used: HashMap::new(),
+            current_loops: 0,
+            tool_failure_counts: std::collections::HashMap::new(),
+            last_progress_fingerprint: None,
+            consecutive_progress_count: 0,
+            child_failure_count: 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -279,7 +332,9 @@ mod tests {
             assert!(guard.check_loop().is_ok(), "epoch {}", epoch);
             guard.register_progress(
                 "agent_exists",
-                &format!(r#"{{"agent_id":"weather.default","intent":"check-{epoch}"}}"#),
+                &format!(
+                    r#"{{"agent_id":"weather.default","intent":"check-{epoch}"}}"#
+                ),
             );
         }
         unreachable!("check_loop did not trip");
@@ -500,6 +555,31 @@ mod tests {
         // fingerprint is different. Now call check_loop without progress to exhaust the budget.
         assert!(guard.check_loop().is_ok());
         assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_err());
+    }
+
+    /// After N successful `knowledge_store` calls, further ones must not reset
+    /// `current_loops` (unique args would otherwise defeat `max_loops_without_progress`).
+    #[test]
+    fn knowledge_store_progress_budget_exhausts_then_trips() {
+        let mut cfg = autonoetic_types::config::LoopGuardConfig::default();
+        cfg.max_loops_without_progress = 5;
+        cfg.progress_budget_tools = [("knowledge_store".to_string(), 3u32)]
+            .into_iter()
+            .collect();
+
+        let mut guard = LoopGuard::with_config(&cfg);
+        for i in 0..3 {
+            assert!(guard.check_loop().is_ok(), "epoch {i}");
+            guard.register_progress(
+                "knowledge_store",
+                &format!(r#"{{"id":"note-{i}","content":"x"}}"#),
+            );
+        }
+        for _ in 0..5 {
+            assert!(guard.check_loop().is_ok());
+            guard.register_progress("knowledge_store", r#"{"id":"note-overflow","content":"y"}"#);
+        }
         assert!(guard.check_loop().is_err());
     }
 }

@@ -61,6 +61,7 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
             child_failure_count: 0,
+            ..Default::default()
         },
         session_state: SessionState::Normal,
         agent_id: "planner.default".to_string(),

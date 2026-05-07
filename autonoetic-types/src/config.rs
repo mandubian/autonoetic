@@ -1141,6 +1141,23 @@ pub struct LoopGuardConfig {
     /// from re-spawning failed specialist tasks indefinitely.
     #[serde(default = "default_max_child_failures")]
     pub max_child_failures: u32,
+
+    /// Per-tool caps on how many times a successful tool result may reset
+    /// `current_loops` in a session. After the budget for a tool name is exhausted,
+    /// further successes from that tool no longer reset the loop counter. Prevents
+    /// alternating `knowledge_store`/`knowledge_search`
+    /// fingerprints from resetting progress indefinitely.
+    #[serde(default = "default_progress_budget_tools")]
+    pub progress_budget_tools: HashMap<String, u32>,
+}
+
+fn default_progress_budget_tools() -> HashMap<String, u32> {
+    [
+        ("knowledge_store".to_string(), 3u32),
+        ("knowledge_search".to_string(), 3u32),
+    ]
+    .into_iter()
+    .collect()
 }
 
 impl Default for LoopGuardConfig {
@@ -1150,6 +1167,7 @@ impl Default for LoopGuardConfig {
             max_tool_failures: default_max_tool_failures(),
             max_consecutive_same_progress: default_max_consecutive_same_progress(),
             max_child_failures: default_max_child_failures(),
+            progress_budget_tools: default_progress_budget_tools(),
         }
     }
 }

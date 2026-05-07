@@ -9,11 +9,16 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{extract_host, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::capability::Capability;
+use gray_matter::Matter;
+use regex::Regex;
 use serde::Deserialize;
-use std::path::Path;
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path};
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(SkillInstallTool));
+    registry.register(Box::new(SkillNormalizeTool));
 }
 
 pub struct SkillInstallTool;
@@ -262,6 +267,405 @@ impl NativeTool for SkillInstallTool {
             "trust_mode": trust_mode,
             "activated": activated,
             "message": message,
+        })
+        .to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// skill_normalize — heuristically convert plain-markdown API docs to Autonoetic
+// SKILL.md with YAML frontmatter (+ autonoetic.onboarding) for credential_setup(skill_url).
+// ---------------------------------------------------------------------------
+
+pub struct SkillNormalizeTool;
+
+#[derive(Debug, Deserialize)]
+struct SkillNormalizeArgs {
+    /// Markdown body of the third-party skill spec (no Autonoetic frontmatter required).
+    content: String,
+    /// Logical service name (used in credential + default path).
+    service: String,
+    /// Where the markdown was loaded from, for base_url + allowed_hosts inference.
+    #[serde(default)]
+    source_url: Option<String>,
+    /// Relative path under the agent workspace, e.g. `skills/moltbook/SKILL.md`.
+    #[serde(default)]
+    store_path: Option<String>,
+    /// Required by JSON schema; must be non-empty after trim.
+    #[serde(default)]
+    intent: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SkillNormalizeFrontmatter {
+    autonoetic: SkillNormalizeAutonoeticBody,
+}
+
+#[derive(Serialize)]
+struct SkillNormalizeAutonoeticBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    credential: NormalizeCredentialOut,
+    onboarding: NormalizeOnboardingOut,
+}
+
+#[derive(Serialize)]
+struct NormalizeCredentialOut {
+    service: String,
+    inject_as: String,
+    allowed_hosts: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct NormalizeOnboardingOut {
+    steps: Vec<serde_yaml::Value>,
+}
+
+fn service_slug(service: &str) -> String {
+    service
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn inject_as_for_service(service: &str) -> String {
+    let mut s = String::new();
+    for c in service.chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_uppercase());
+        } else {
+            s.push('_');
+        }
+    }
+    let s = s.trim_matches('_');
+    if s.is_empty() {
+        "SERVICE_SECRET".to_string()
+    } else {
+        format!("{s}_SECRET")
+    }
+}
+
+fn extract_base_and_hosts(source_url: Option<&str>) -> (Option<String>, Vec<String>) {
+    let Some(raw) = source_url else {
+        return (None, Vec::new());
+    };
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return (None, Vec::new());
+    };
+    let host = parsed.host_str().unwrap_or("").to_string();
+    if host.is_empty() {
+        return (None, Vec::new());
+    }
+    let base = match parsed.port() {
+        Some(p) => format!(
+            "{}://{}:{}",
+            parsed.scheme(),
+            host,
+            p
+        ),
+        None => format!("{}://{}", parsed.scheme(), host),
+    };
+    (Some(base), vec![host])
+}
+
+fn sniff_json_object_after(text: &str, search_from: usize) -> Option<serde_json::Value> {
+    let slice = text.get(search_from..)?;
+    let brace = slice.find('{')?;
+    let rest = &slice[brace..];
+    let mut depth = 0usize;
+    let mut end_idx = None;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end_idx = Some(i + ch.len_utf8());
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end_idx?;
+    let snippet = rest.get(..end)?;
+    serde_json::from_str(snippet).ok()
+}
+
+fn extract_api_steps_from_markdown(body: &str) -> (Vec<serde_yaml::Value>, Vec<String>) {
+    let re = Regex::new(
+        r#"(?i)\b(GET|POST|PUT|PATCH|DELETE)\s+(`([^`]+)`|(/[a-zA-Z0-9_./-]+))"#,
+    )
+    .expect("valid regex");
+    let mut steps: Vec<serde_yaml::Value> = Vec::new();
+    let mut fragments: Vec<String> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+
+    for cap in re.captures_iter(body) {
+        let method = cap.get(1).map(|m| m.as_str().to_uppercase()).unwrap();
+        let path = cap
+            .get(3)
+            .map(|m| m.as_str().to_string())
+            .or_else(|| cap.get(4).map(|m| m.as_str().to_string()))
+            .unwrap_or_default();
+        let path = path.trim().to_string();
+        if path.starts_with("http://") || path.starts_with("https://") {
+            fragments.push(format!("skipped absolute url endpoint: {path}"));
+            continue;
+        }
+        let path = if path.starts_with('/') {
+            path
+        } else {
+            format!("/{}", path.trim_start_matches('/'))
+        };
+        let key = (method.clone(), path.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        let m_end = cap.get(0).map(|m| m.end()).unwrap_or(0);
+        let json_body = sniff_json_object_after(body, m_end);
+
+        let mut step_map: HashMap<String, serde_yaml::Value> = HashMap::new();
+        step_map.insert(
+            "type".to_string(),
+            serde_yaml::Value::String("api_call".to_string()),
+        );
+        step_map.insert(
+            "method".to_string(),
+            serde_yaml::Value::String(method.clone()),
+        );
+        step_map.insert("url".to_string(), serde_yaml::Value::String(path.clone()));
+        if let Some(j) = json_body {
+            if let Ok(v) = serde_yaml::to_value(&j) {
+                step_map.insert("body".to_string(), v);
+            }
+        }
+        // Heuristic: registration-style responses often expose `secret`.
+        if method == "POST" && path.contains("register") {
+            let mut es = serde_yaml::Mapping::new();
+            es.insert(
+                serde_yaml::Value::String("api_secret".to_string()),
+                serde_yaml::Value::String("$.secret".to_string()),
+            );
+            step_map.insert(
+                "extract_secrets".to_string(),
+                serde_yaml::Value::Mapping(es),
+            );
+        }
+        if let Ok(v) = serde_yaml::to_value(&step_map) {
+            steps.push(v);
+        }
+    }
+    (steps, fragments)
+}
+
+fn autonoetic_onboarding_present(content: &str) -> bool {
+    if !content.trim_start().starts_with("---") {
+        return false;
+    }
+    let matter = Matter::<gray_matter::engine::YAML>::new();
+    let Ok(parsed) = matter.parse::<serde_yaml::Value>(content) else {
+        return false;
+    };
+    let Some(data) = parsed.data else {
+        return false;
+    };
+    data.get("autonoetic")
+        .and_then(|a| a.get("onboarding"))
+        .and_then(|o| o.get("steps"))
+        .and_then(|s| s.as_sequence())
+        .map(|seq| !seq.is_empty())
+        .unwrap_or(false)
+}
+
+fn validate_rel_store_path(path: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!path.is_empty(), "store_path must not be empty");
+    anyhow::ensure!(
+        !path.contains(".."),
+        "store_path must not contain '..'"
+    );
+    let p = Path::new(path);
+    anyhow::ensure!(
+        !p.is_absolute(),
+        "store_path must be relative to the agent workspace"
+    );
+    anyhow::ensure!(
+        p.components()
+            .all(|c| matches!(c, Component::Normal(_))),
+        "store_path must be a simple relative path"
+    );
+    anyhow::ensure!(
+        path.starts_with("skills/"),
+        "store_path must be under skills/ (WriteAccess scope)"
+    );
+    Ok(())
+}
+
+impl NativeTool for SkillNormalizeTool {
+    fn name(&self) -> &'static str {
+        "skill_normalize"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Convert a plain-markdown third-party skill/API document into an Autonoetic \
+                SKILL.md with YAML frontmatter (`autonoetic.onboarding` steps) so `credential_setup` \
+                can load it via `skill_url`. Uses heuristics (HTTP method + path + optional JSON body); \
+                ambiguous docs return `ok:false` with `partial` and `fragments` for manual completion. \
+                Requires WriteAccess under `skills/`."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "description": "Why you are normalizing this skill (1-2 sentences)."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full markdown text of the external skill/API spec."
+                    },
+                    "service": {
+                        "type": "string",
+                        "description": "Short service identifier (e.g. moltbook)."
+                    },
+                    "source_url": {
+                        "type": "string",
+                        "description": "Optional original URL; used to set base_url and allowed_hosts."
+                    },
+                    "store_path": {
+                        "type": "string",
+                        "description": "Relative path to write, default skills/<service>/SKILL.md"
+                    }
+                },
+                "required": ["intent", "content", "service"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest.capabilities.iter().any(|c| {
+            matches!(
+                c,
+                Capability::WriteAccess { scopes }
+                    if scopes.iter().any(|s| s == "skills/*" || s == "skills/" || s.starts_with("skills"))
+            )
+        })
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: SkillNormalizeArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid arguments: {}", e))?;
+
+        let intent = args.intent.as_deref().unwrap_or("").trim();
+        anyhow::ensure!(!intent.is_empty(), "`intent` is required for skill_normalize");
+
+        let slug = service_slug(&args.service);
+        anyhow::ensure!(!slug.is_empty(), "service must yield a non-empty slug");
+
+        let rel = args
+            .store_path
+            .clone()
+            .unwrap_or_else(|| format!("skills/{slug}/SKILL.md"));
+        validate_rel_store_path(&rel)?;
+        if !policy.can_write_path(&rel).is_allowed() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "permission",
+                "error": format!(
+                    "WriteAccess denied for normalized skill path '{}' (policy R-1.4)",
+                    rel
+                ),
+            })
+            .to_string());
+        }
+
+        if autonoetic_onboarding_present(&args.content) {
+            let out_path = agent_dir.join(&rel);
+            std::fs::create_dir_all(out_path.parent().unwrap())?;
+            std::fs::write(&out_path, &args.content)?;
+            return Ok(serde_json::json!({
+                "ok": true,
+                "skill_path": rel,
+                "already_normalized": true,
+                "message": "Content already contains autonoetic.onboarding steps; file written as-is.",
+            })
+            .to_string());
+        }
+
+        let (base_url, mut allowed_hosts) = extract_base_and_hosts(args.source_url.as_deref());
+        if allowed_hosts.is_empty() {
+            allowed_hosts.push("localhost".to_string());
+        }
+
+        let (step_values, fragments) = extract_api_steps_from_markdown(&args.content);
+        if step_values.is_empty() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "partial": true,
+                "error": "No HTTP API endpoints could be extracted from the markdown",
+                "fragments": fragments,
+            })
+            .to_string());
+        }
+
+        let steps_count = step_values.len();
+        let inject_as = inject_as_for_service(&args.service);
+        let fm = SkillNormalizeFrontmatter {
+            autonoetic: SkillNormalizeAutonoeticBody {
+                base_url: base_url.clone(),
+                credential: NormalizeCredentialOut {
+                    service: args.service.clone(),
+                    inject_as,
+                    allowed_hosts,
+                },
+                onboarding: NormalizeOnboardingOut {
+                    steps: step_values,
+                },
+            },
+        };
+        let yaml = serde_yaml::to_string(&fm)
+            .map_err(|e| anyhow::anyhow!("failed to serialize skill frontmatter: {}", e))?;
+        let document = format!("---\n{yaml}---\n\n{}", args.content);
+
+        let out_path = agent_dir.join(&rel);
+        std::fs::create_dir_all(
+            out_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("invalid store_path"))?,
+        )?;
+        std::fs::write(&out_path, document)?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "skill_path": rel,
+            "service": args.service,
+            "steps_count": steps_count,
+            "base_url": base_url,
+            "fragments": fragments,
+            "message": "Wrote Autonoetic SKILL.md; use credential_setup with skill_url pointing at this path or a file:// URL as supported by your deployment.",
         })
         .to_string())
     }

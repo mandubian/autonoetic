@@ -65,7 +65,9 @@ impl SessionCloseReason {
             Self::JsonRpcSpawnComplete => "jsonrpc_spawn_complete",
             Self::JsonRpcSpawnCompleteEmpty => "jsonrpc_spawn_complete_empty",
             Self::CheckpointRespawnSuspendedApproval => "checkpoint_respawn_suspended",
-            Self::CheckpointRespawnSuspendedUserInput => "checkpoint_respawn_suspended_user_input",
+            Self::CheckpointRespawnSuspendedUserInput => {
+                "checkpoint_respawn_suspended_user_input"
+            }
             Self::CheckpointRespawnComplete => "checkpoint_respawn_complete",
             Self::CheckpointRespawnCompleteEmpty => "checkpoint_respawn_complete_empty",
         }
@@ -651,12 +653,8 @@ impl GatewayExecutionService {
 
         if let Some(store) = self.gateway_store.as_ref() {
             if notify_where_practical {
-                let msg_id = Self::queue_gateway_last_word_notice(
-                    store.as_ref(),
-                    session_id,
-                    "degrade",
-                    reason,
-                )?;
+                let msg_id =
+                    Self::queue_gateway_last_word_notice(store.as_ref(), session_id, "degrade", reason)?;
                 last_word_notice_message_id = Some(msg_id.clone());
                 Self::record_last_word_event(
                     store.as_ref(),
@@ -1075,6 +1073,7 @@ impl GatewayExecutionService {
                     last_progress_fingerprint: None,
                     consecutive_progress_count: 0,
                     child_failure_count: 0,
+                    ..Default::default()
                 },
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 agent_id: lead.to_string(),
@@ -1640,6 +1639,7 @@ impl GatewayExecutionService {
                                 Some(&cont.session_id),
                                 &self.config,
                                 self.gateway_store.clone(),
+                                Some(&cont.pending_tool_call),
                             ) {
                                 Ok(r) => {
                                     tracing::info!(
@@ -2663,9 +2663,11 @@ impl GatewayExecutionService {
             std::time::Instant::now() + std::time::Duration::from_millis(max_duration_ms as u64);
         let repair_enabled =
             self.config.response_validation.repair_enabled && output_policy.repair.auto;
-        let max_repair_rounds = output_policy
-            .declared_repair_attempts()
-            .min(self.config.response_validation.max_repair_attempts_ceiling as usize);
+        let max_repair_rounds = output_policy.declared_repair_attempts().min(
+            self.config
+                .response_validation
+                .max_repair_attempts_ceiling as usize,
+        );
 
         // Initial validation.
         let gateway_dir = self.config.agents_dir.join(".gateway");
@@ -4449,6 +4451,7 @@ fn resolve_pending_prefers_checkpoint_pending_tool_state() {
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
             child_failure_count: 0,
+            ..Default::default()
         },
         session_state: autonoetic_types::agent::SessionState::Normal,
         agent_id: "a".into(),

@@ -342,6 +342,7 @@ pub fn execute_approved_action(
     session_id: Option<&str>,
     config: &GatewayConfig,
     gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    pending_tool_call: Option<&PendingApprovalToolCall>,
 ) -> anyhow::Result<String> {
     let registry = crate::runtime::tools::default_registry();
     let policy = crate::policy::PolicyEngine::new(manifest.clone());
@@ -424,8 +425,58 @@ pub fn execute_approved_action(
             headers,
             body,
             inject_secret_as,
+            payload,
             ..
         } => {
+            let source_tool = payload
+                .as_ref()
+                .and_then(|p| p.get("source_tool"))
+                .and_then(|v| v.as_str());
+
+            if source_tool == Some("credential_setup") {
+                let mut args = if let Some(pending) = pending_tool_call {
+                    if pending.tool_name == "credential_setup" {
+                        match serde_json::from_str::<serde_json::Value>(&pending.arguments) {
+                            Ok(serde_json::Value::Object(map)) => map,
+                            _ => serde_json::Map::new(),
+                        }
+                    } else {
+                        serde_json::Map::new()
+                    }
+                } else {
+                    serde_json::Map::new()
+                };
+                if !args.contains_key("skill_url") {
+                    args.insert("skill_url".to_string(), serde_json::json!(url));
+                }
+                if !credential_id.is_empty() && !args.contains_key("credential_id") {
+                    args.insert(
+                        "credential_id".to_string(),
+                        serde_json::json!(credential_id),
+                    );
+                }
+                args.insert("approval_ref".to_string(), serde_json::json!(decision.request_id));
+                tracing::info!(
+                    target: "continuation",
+                    request_id = %decision.request_id,
+                    url = %url,
+                    "Executing approved credential.setup remote-access gate"
+                );
+                return registry.execute(
+                    "credential_setup",
+                    manifest,
+                    &policy,
+                    agent_dir,
+                    gateway_dir,
+                    &serde_json::Value::Object(args).to_string(),
+                    session_id,
+                    None,
+                    Some(config),
+                    gateway_store,
+                    None,
+                );
+            }
+
             let mut args = serde_json::Map::new();
             args.insert("credential_id".to_string(), serde_json::json!(credential_id));
             args.insert("url".to_string(), serde_json::json!(url));

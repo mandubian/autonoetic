@@ -21,7 +21,7 @@ metadata:
       temperature: 0.1
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "sandbox."]
+        allowed: ["knowledge.", "sandbox.", "credential."]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "bash -c ", "sh -c ", "python3 scripts/", "python scripts/"]
         commands: ["date", "ls", "echo", "cat", "pwd", "wc", "grep", "sed", "awk", "sort", "head", "tail", "cut", "tr", "tee", "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat", "du", "df", "uname", "hostname", "whoami", "which", "basename", "dirname", "readlink", "file", "sleep", "test", "true", "false", "curl", "wget"]
@@ -29,6 +29,8 @@ metadata:
         scopes: ["self.*"]
       - type: "ReadAccess"
         scopes: ["self.*"]
+      - type: "CredentialAccess"
+        services: ["*"]
     validation: "soft"
     remote_access:
       approval_mode: "required"
@@ -92,6 +94,8 @@ artifact_exec({
 Do NOT use `artifact_exec` for generic shell commands — use `sandbox_exec` for those.
 
 ## Injecting Credentials
+
+You have `CredentialAccess` + `credential.*` tools when the planner explicitly delegates vault-backed onboarding to you (e.g. `credential_setup` with `service`+`steps`). Prefer that over echoing secrets from raw `curl` output. For normal API calls, still use `credential_env` / `artifact_prepare` as below.
 
 When the planner delegates a task that requires an API key or secret, use `artifact_prepare` to resolve everything in one pass before executing:
 

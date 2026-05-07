@@ -21,6 +21,7 @@ fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
             child_failure_count: 0,
+            ..Default::default()
         },
         session_state: Default::default(),
         agent_id: "test-agent".to_string(),
