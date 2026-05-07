@@ -1,4 +1,4 @@
-//! Integration tests for the security sentinel (Phases 0–4).
+//! Integration tests for the security sentinel (Phases 0–5).
 //!
 //! Covers:
 //! - `SecurityFinding` serialization and DB round-trip
@@ -7,6 +7,7 @@
 //! - Phase 2 heuristic checks (prompt injection, session cluster)
 //! - Phase 3 dual-sweep: baseline annotation and disagreement recording
 //! - Phase 4 supply-chain auditing: scope violations and provenance gaps
+//! - Phase 5 scheduling and promotion-gate integration
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::security::{
@@ -828,4 +829,143 @@ fn supply_chain_provenance_gap_cleared_when_capture_trace_present() {
         gap.is_none(),
         "layer with capture trace in execution_traces must not produce a provenance gap finding"
     );
+}
+
+// ── Phase 5: Scheduling and promotion-gate integration ───────────────────────
+
+#[test]
+fn sentinel_config_defaults_are_sane() {
+    let cfg = autonoetic_types::config::SentinelConfig::default();
+    assert!(cfg.enabled, "sentinel enabled by default");
+    assert!(cfg.promotion_gate_enabled, "promotion gate enabled by default");
+    assert_eq!(cfg.promotion_gate_timeout_secs, 30);
+    assert!(!cfg.full_sweep_schedule.is_empty());
+    assert!(!cfg.incremental_sweep_schedule.is_empty());
+    assert!(!cfg.sentinel_revision_id.is_empty());
+    assert!(!cfg.baseline_revision_id.is_empty());
+}
+
+#[test]
+fn ensure_sentinel_scheduled_jobs_creates_both_jobs() {
+    let (_dir, store) = open_store();
+    let cfg = autonoetic_types::config::SentinelConfig::default();
+    let results = autonoetic_gateway::ensure_sentinel_scheduled_jobs(&store, &cfg);
+
+    assert_eq!(results.len(), 2, "must register exactly 2 sentinel jobs");
+
+    let created: Vec<_> = results
+        .iter()
+        .filter(|r| matches!(r.action, autonoetic_gateway::sentinel::scheduler::JobAction::Created))
+        .collect();
+    assert_eq!(created.len(), 2, "both jobs must be Created on first call");
+
+    // Verify the jobs are queryable in the store.
+    let jobs = store
+        .list_scheduled_jobs_for_owner("security_sentinel", None, None)
+        .expect("list jobs");
+    assert_eq!(jobs.len(), 2);
+    let job_ids: std::collections::HashSet<_> = jobs.iter().map(|j| j.job_id.as_str()).collect();
+    assert!(job_ids.contains("sentinel.sweep.full"));
+    assert!(job_ids.contains("sentinel.sweep.incremental"));
+}
+
+#[test]
+fn ensure_sentinel_scheduled_jobs_is_idempotent() {
+    let (_dir, store) = open_store();
+    let cfg = autonoetic_types::config::SentinelConfig::default();
+
+    // First call creates.
+    let r1 = autonoetic_gateway::ensure_sentinel_scheduled_jobs(&store, &cfg);
+    assert!(r1.iter().all(|r| matches!(r.action, autonoetic_gateway::sentinel::scheduler::JobAction::Created)));
+
+    // Second call skips.
+    let r2 = autonoetic_gateway::ensure_sentinel_scheduled_jobs(&store, &cfg);
+    assert!(
+        r2.iter().all(|r| matches!(r.action, autonoetic_gateway::sentinel::scheduler::JobAction::SkippedExists)),
+        "second call must SkippedExists, got: {:?}",
+        r2.iter().map(|r| format!("{:?}", r.action)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn ensure_sentinel_scheduled_jobs_disabled_skips_all() {
+    let (_dir, store) = open_store();
+    let cfg = autonoetic_types::config::SentinelConfig {
+        enabled: false,
+        ..autonoetic_types::config::SentinelConfig::default()
+    };
+    let results = autonoetic_gateway::ensure_sentinel_scheduled_jobs(&store, &cfg);
+    assert!(
+        results.iter().all(|r| matches!(r.action, autonoetic_gateway::sentinel::scheduler::JobAction::SkippedDisabled)),
+        "disabled sentinel must skip all jobs"
+    );
+    let jobs = store.list_scheduled_jobs_for_owner("security_sentinel", None, None).unwrap();
+    assert!(jobs.is_empty(), "no jobs must be created when sentinel is disabled");
+}
+
+#[test]
+fn promotion_gate_passes_on_clean_store() {
+    // With an empty store (no findings), the gate must return Passed.
+    let (_dir, store) = open_store();
+    let outcome = autonoetic_gateway::sentinel::check_pre_promotion(
+        Arc::clone(&store),
+        "sentinel.test",
+        10,
+    )
+    .expect("gate must not error on clean store");
+
+    assert!(
+        matches!(outcome, autonoetic_gateway::sentinel::GateOutcome::Passed),
+        "gate must pass when no critical findings exist"
+    );
+}
+
+#[test]
+fn promotion_gate_blocks_on_critical_finding() {
+    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+
+    let (dir, store) = open_store();
+
+    // Inject a causal event that will trigger a credential-leak (critical) finding.
+    {
+        let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+        let fake_key = format!("sk-ant-api03-{}-{}", "A".repeat(92), "A".repeat(10));
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute(
+            "INSERT INTO causal_events
+                 (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
+             VALUES ('evt_gate_crit', 'coder.default', 'sess_gate', 0, ?1, 'tool', 'tool_call', 'success', ?2)",
+            rusqlite::params![now, fake_key],
+        )
+        .unwrap();
+    }
+
+    // Run a sweep so the finding is persisted to security_findings.
+    {
+        let runner = SentinelRunner::new(Arc::clone(&store));
+        runner
+            .run_sweep(&SweepConfig {
+                sentinel_revision_id: "sentinel.test".to_string(),
+                phase1_only: true,
+                ..SweepConfig::default()
+            })
+            .expect("sweep");
+    }
+
+    // Now the gate should detect the critical finding and block.
+    let outcome = autonoetic_gateway::sentinel::check_pre_promotion(
+        Arc::clone(&store),
+        "sentinel.test",
+        10,
+    )
+    .expect("gate must not error");
+
+    match outcome {
+        autonoetic_gateway::sentinel::GateOutcome::Blocked { critical_count, .. } => {
+            assert!(critical_count >= 1, "must report at least one critical finding");
+        }
+        autonoetic_gateway::sentinel::GateOutcome::Passed => {
+            panic!("gate must block when critical findings exist in the store");
+        }
+    }
 }

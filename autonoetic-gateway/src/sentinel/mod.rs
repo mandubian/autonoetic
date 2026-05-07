@@ -40,7 +40,11 @@
 
 pub mod checks;
 pub mod dual_sweep;
+pub mod promotion_gate;
 pub mod runner;
+pub mod scheduler;
 
 pub use dual_sweep::{DualSweepResult, DualSweepRunner};
+pub use promotion_gate::{check_pre_promotion, GateOutcome};
 pub use runner::{SentinelRunner, SweepResult};
+pub use scheduler::{ensure_sentinel_scheduled_jobs, run_due_sentinel_jobs};
