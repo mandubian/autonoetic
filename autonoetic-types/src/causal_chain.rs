@@ -139,7 +139,7 @@ impl ExecutionTraceRecord {
                 turn_id: self.turn_id.clone(),
                 timestamp: self.timestamp.clone(),
                 tool_name: self.tool_name.clone(),
-                command: self.command.clone(),
+                command: self.command.as_ref().map(|_| "***REDACTED***".to_string()),
                 exit_code: self.exit_code,
                 stdout: None,
                 stderr: None,

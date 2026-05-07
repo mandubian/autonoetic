@@ -299,13 +299,14 @@ impl HookExecutor {
         let mut html_handle: Option<String> = None;
         let html_path = session_dir.join("session_report_final.html");
         if let Ok(html_body) = std::fs::read_to_string(&html_path) {
+            let sanitized_html = sanitize_html_for_publishing(&html_body);
             let h =
-                crate::runtime::content_store::ContentStore::compute_handle(html_body.as_bytes());
+                crate::runtime::content_store::ContentStore::compute_handle(sanitized_html.as_bytes());
             html_handle = Some(h);
             if let Ok(content_store) =
                 crate::runtime::content_store::ContentStore::new(&gateway_dir)
             {
-                let _ = content_store.write(html_body.as_bytes());
+                let _ = content_store.write(sanitized_html.as_bytes());
             }
         }
 
@@ -1034,6 +1035,10 @@ fn sanitize_report_for_publishing(report_json: &str) -> String {
     }
 
     serde_json::to_string(&parsed).unwrap_or_else(|_| report_json.to_string())
+}
+
+fn sanitize_html_for_publishing(html: &str) -> String {
+    crate::log_redaction::redact_text_for_logs(html)
 }
 
 /// Renders a `message_template` string by replacing `{{key}}` placeholders
