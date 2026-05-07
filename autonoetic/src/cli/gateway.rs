@@ -804,13 +804,16 @@ async fn run_interactive_approvals(
                         Span::styled(reason, Style::default().fg(Color::Magenta)),
                     ]));
                 }
-                match &req.action {
+                let redacted_action = req.action.redact_for_display();
+                match &redacted_action {
                     autonoetic_types::background::ScheduledAction::SandboxExec { command, dependencies, .. } => {
+                        let command = command.clone();
+                        let deps = dependencies.clone();
                         lines.push(Line::from(vec![
                             Span::styled("Command: ", Style::default().fg(Color::Gray)),
                             Span::styled(command, Style::default().fg(Color::Green)),
                         ]));
-                        if let Some(deps) = dependencies {
+                        if let Some(deps) = deps {
                             let pkgs = deps.packages.join(", ");
                             lines.push(Line::from(vec![
                                 Span::styled("Deps:    ", Style::default().fg(Color::Gray)),
@@ -819,6 +822,9 @@ async fn run_interactive_approvals(
                         }
                     }
                     autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, summary, payload, .. } => {
+                        let agent_id = agent_id.clone();
+                        let summary = summary.clone();
+                        let payload = payload.clone();
                         lines.push(Line::from(vec![
                             Span::styled("Install: ", Style::default().fg(Color::Gray)),
                             Span::styled(format!("{} ({})", agent_id, summary), Style::default().fg(Color::Green)),
@@ -843,18 +849,22 @@ async fn run_interactive_approvals(
                     autonoetic_types::background::ScheduledAction::SessionEscalate {
                         reason, context, urgency, suggested_actions, ..
                     } => {
+                        let reason = reason.clone();
+                        let context = context.clone();
+                        let urgency = urgency.clone();
+                        let suggested_actions = suggested_actions.clone();
                         lines.push(Line::from(vec![
                             Span::styled("Urgency: ", Style::default().fg(Color::Gray)),
-                            Span::styled(urgency.clone(), Style::default().fg(Color::Yellow)),
+                            Span::styled(urgency, Style::default().fg(Color::Yellow)),
                         ]));
                         lines.push(Line::from(vec![
                             Span::styled("Reason:  ", Style::default().fg(Color::Gray)),
-                            Span::styled(reason.clone(), Style::default().fg(Color::Green)),
+                            Span::styled(reason, Style::default().fg(Color::Green)),
                         ]));
                         if !context.is_empty() {
                             lines.push(Line::from(vec![
                                 Span::styled("Context: ", Style::default().fg(Color::Gray)),
-                                Span::styled(context.clone(), Style::default().fg(Color::Green)),
+                                Span::styled(context, Style::default().fg(Color::Green)),
                             ]));
                         }
                         if !suggested_actions.is_empty() {
@@ -872,6 +882,11 @@ async fn run_interactive_approvals(
                         broadened_capabilities,
                         ..
                     } => {
+                        let agent_id = agent_id.clone();
+                        let revision_id = revision_id.clone();
+                        let outgoing_revision_id = outgoing_revision_id.clone();
+                        let added_capabilities = added_capabilities.clone();
+                        let broadened_capabilities = broadened_capabilities.clone();
                         lines.push(Line::from(vec![
                             Span::styled("Promote: ", Style::default().fg(Color::Gray)),
                             Span::styled(
@@ -881,7 +896,7 @@ async fn run_interactive_approvals(
                         ]));
                         lines.push(Line::from(vec![
                             Span::styled("Agent:   ", Style::default().fg(Color::Gray)),
-                            Span::styled(agent_id.clone(), Style::default().fg(Color::Green)),
+                            Span::styled(agent_id, Style::default().fg(Color::Green)),
                         ]));
                         if !added_capabilities.is_empty() {
                             lines.push(Line::from(vec![
@@ -908,6 +923,138 @@ async fn run_interactive_approvals(
                                 Style::default().fg(Color::DarkGray),
                             ),
                         ]));
+                    }
+                    autonoetic_types::background::ScheduledAction::CredentialRequest {
+                        credential_id, url, method, headers, body, inject_secret_as, ..
+                    } => {
+                        let credential_id = credential_id.clone();
+                        let url = url.clone();
+                        let method = method.clone();
+                        let headers = headers.clone();
+                        let body = body.clone();
+                        let inject_secret_as = inject_secret_as.clone();
+                        lines.push(Line::from(vec![
+                            Span::styled("Type:    ", Style::default().fg(Color::Gray)),
+                            Span::styled("credential_request", Style::default().fg(Color::White)),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("Cred:    ", Style::default().fg(Color::Gray)),
+                            Span::styled(credential_id, Style::default().fg(Color::Green)),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("URL:     ", Style::default().fg(Color::Gray)),
+                            Span::styled(url, Style::default().fg(Color::Green)),
+                        ]));
+                        if let Some(m) = method {
+                            lines.push(Line::from(vec![
+                                Span::styled("Method:  ", Style::default().fg(Color::Gray)),
+                                Span::styled(m, Style::default().fg(Color::Green)),
+                            ]));
+                        }
+                        if let Some(h) = headers {
+                            if !h.is_empty() {
+                                lines.push(Line::from(vec![
+                                    Span::styled("Headers: ", Style::default().fg(Color::Gray)),
+                                    Span::styled(
+                                        serde_json::to_string(&h).unwrap_or_default(),
+                                        Style::default().fg(Color::Green),
+                                    ),
+                                ]));
+                            }
+                        }
+                        if let Some(b) = body {
+                            lines.push(Line::from(vec![
+                                Span::styled("Body:    ", Style::default().fg(Color::Gray)),
+                                Span::styled(
+                                    serde_json::to_string(&b).unwrap_or_default(),
+                                    Style::default().fg(Color::Green),
+                                ),
+                            ]));
+                        }
+                        if let Some(i) = inject_secret_as {
+                            lines.push(Line::from(vec![
+                                Span::styled("Inject:  ", Style::default().fg(Color::Gray)),
+                                Span::styled(i, Style::default().fg(Color::Green)),
+                            ]));
+                        }
+                    }
+                    autonoetic_types::background::ScheduledAction::WebFetch { url, timeout_secs, .. } => {
+                        let url = url.clone();
+                        let timeout_secs = *timeout_secs;
+                        lines.push(Line::from(vec![
+                            Span::styled("Type:    ", Style::default().fg(Color::Gray)),
+                            Span::styled("web_fetch", Style::default().fg(Color::White)),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("URL:     ", Style::default().fg(Color::Gray)),
+                            Span::styled(url, Style::default().fg(Color::Green)),
+                        ]));
+                        if let Some(t) = timeout_secs {
+                            lines.push(Line::from(vec![
+                                Span::styled("Timeout: ", Style::default().fg(Color::Gray)),
+                                Span::styled(format!("{t}s"), Style::default().fg(Color::Green)),
+                            ]));
+                        }
+                    }
+                    autonoetic_types::background::ScheduledAction::WebCall {
+                        url, method, headers, body, ..
+                    } => {
+                        let url = url.clone();
+                        let method = method.clone();
+                        let headers = headers.clone();
+                        let body = body.clone();
+                        lines.push(Line::from(vec![
+                            Span::styled("Type:    ", Style::default().fg(Color::Gray)),
+                            Span::styled("web_call", Style::default().fg(Color::White)),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("URL:     ", Style::default().fg(Color::Gray)),
+                            Span::styled(url, Style::default().fg(Color::Green)),
+                        ]));
+                        if let Some(m) = method {
+                            lines.push(Line::from(vec![
+                                Span::styled("Method:  ", Style::default().fg(Color::Gray)),
+                                Span::styled(m, Style::default().fg(Color::Green)),
+                            ]));
+                        }
+                        if let Some(h) = headers {
+                            if !h.is_empty() {
+                                lines.push(Line::from(vec![
+                                    Span::styled("Headers: ", Style::default().fg(Color::Gray)),
+                                    Span::styled(
+                                        serde_json::to_string(&h).unwrap_or_default(),
+                                        Style::default().fg(Color::Green),
+                                    ),
+                                ]));
+                            }
+                        }
+                        if let Some(b) = body {
+                            lines.push(Line::from(vec![
+                                Span::styled("Body:    ", Style::default().fg(Color::Gray)),
+                                Span::styled(
+                                    serde_json::to_string(&b).unwrap_or_default(),
+                                    Style::default().fg(Color::Green),
+                                ),
+                            ]));
+                        }
+                    }
+                    autonoetic_types::background::ScheduledAction::WebSearch { query, provider, .. } => {
+                        let query = query.clone();
+                        let provider = provider.clone();
+                        lines.push(Line::from(vec![
+                            Span::styled("Type:    ", Style::default().fg(Color::Gray)),
+                            Span::styled("web_search", Style::default().fg(Color::White)),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("Query:   ", Style::default().fg(Color::Gray)),
+                            Span::styled(query, Style::default().fg(Color::Green)),
+                        ]));
+                        if let Some(p) = provider {
+                            lines.push(Line::from(vec![
+                                Span::styled("Provider:", Style::default().fg(Color::Gray)),
+                                Span::styled(p, Style::default().fg(Color::Green)),
+                            ]));
+                        }
                     }
                     other => {
                         lines.push(Line::from(vec![

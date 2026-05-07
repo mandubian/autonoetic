@@ -3402,7 +3402,8 @@ fn approval_level_as_str(level: &ApprovalLevel) -> String {
 
 /// Full action detail lines for store-backed approvals (scrollable in the transcript).
 fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String> {
-    match action {
+    let redacted = action.redact_for_display();
+    match &redacted {
         ScheduledAction::SessionContinue {
             session_id,
             root_session_id,
@@ -3631,6 +3632,108 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
                     "  broadened caps: {}",
                     broadened_capabilities.join(", ")
                 ));
+            }
+            v
+        }
+        ScheduledAction::WebFetch {
+            url,
+            timeout_secs,
+            max_chars,
+            detected_hosts,
+            ..
+        } => {
+            let mut v = vec![
+                "type: web_fetch".to_string(),
+                format!("  url: {}", clamp_chat_field(url)),
+            ];
+            if let Some(t) = timeout_secs {
+                v.push(format!("  timeout_secs: {t}"));
+            }
+            if let Some(m) = max_chars {
+                v.push(format!("  max_chars: {m}"));
+            }
+            if let Some(hosts) = detected_hosts {
+                v.push(format!(
+                    "  detected_hosts: {}",
+                    hosts
+                        .iter()
+                        .map(|h| clamp_chat_field(h.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            v
+        }
+        ScheduledAction::WebCall {
+            url,
+            method,
+            headers,
+            body,
+            timeout_secs,
+            max_chars,
+            detected_hosts,
+            ..
+        } => {
+            let mut v = vec![
+                "type: web_call".to_string(),
+                format!("  url: {}", clamp_chat_field(url)),
+            ];
+            if let Some(m) = method {
+                v.push(format!("  method: {m}"));
+            }
+            if let Some(t) = timeout_secs {
+                v.push(format!("  timeout_secs: {t}"));
+            }
+            if let Some(m) = max_chars {
+                v.push(format!("  max_chars: {m}"));
+            }
+            if let Some(h) = headers {
+                if let Ok(s) = serde_json::to_string_pretty(h) {
+                    v.push("  headers:".to_string());
+                    for ln in s.lines() {
+                        v.push(format!("    {}", clamp_chat_field(ln)));
+                    }
+                }
+            }
+            if let Some(b) = body {
+                if let Ok(s) = serde_json::to_string_pretty(b) {
+                    v.push("  body:".to_string());
+                    for ln in s.lines() {
+                        v.push(format!("    {}", clamp_chat_field(ln)));
+                    }
+                }
+            }
+            if let Some(hosts) = detected_hosts {
+                v.push(format!(
+                    "  detected_hosts: {}",
+                    hosts
+                        .iter()
+                        .map(|h| clamp_chat_field(h.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            v
+        }
+        ScheduledAction::WebSearch {
+            query,
+            provider,
+            max_results,
+            timeout_secs,
+            ..
+        } => {
+            let mut v = vec![
+                "type: web_search".to_string(),
+                format!("  query: {}", clamp_chat_field(query)),
+            ];
+            if let Some(p) = provider {
+                v.push(format!("  provider: {p}"));
+            }
+            if let Some(m) = max_results {
+                v.push(format!("  max_results: {m}"));
+            }
+            if let Some(t) = timeout_secs {
+                v.push(format!("  timeout_secs: {t}"));
             }
             v
         }
