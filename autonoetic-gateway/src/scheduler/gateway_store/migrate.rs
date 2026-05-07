@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 26;
+const SCHEMA_VERSION_LATEST: i64 = 27;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -510,6 +510,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_revision_signature_v24(conn)?;
     apply_sandbox_escape_attempts_v25(conn)?;
     apply_security_findings_v26(conn)?;
+    apply_sentinel_disagreements_v27(conn)?;
 
     Ok(())
 }
@@ -1561,6 +1562,49 @@ fn apply_security_findings_v26(conn: &mut Connection) -> Result<()> {
         params![
             26_i64,
             "security_findings",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_sentinel_disagreements_v27(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 27 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS security_sentinel_disagreements (
+            disagreement_id       TEXT PRIMARY KEY,
+            sweep_at              TEXT NOT NULL,
+            -- 'baseline_only': baseline found this anchor, current sentinel did not.
+            -- 'current_only':  current sentinel found this anchor, baseline did not
+            --                  (only Phase-1 findings are compared; Phase-2 is expected
+            --                  to diverge from the deterministic baseline).
+            direction             TEXT NOT NULL CHECK(direction IN ('baseline_only', 'current_only')),
+            anchor_json           TEXT NOT NULL,
+            baseline_finding_id   TEXT,
+            current_finding_id    TEXT,
+            baseline_sentinel_rev TEXT NOT NULL,
+            current_sentinel_rev  TEXT NOT NULL,
+            created_at            TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sentinel_disagreements_sweep
+            ON security_sentinel_disagreements(sweep_at);
+        CREATE INDEX IF NOT EXISTS idx_sentinel_disagreements_direction
+            ON security_sentinel_disagreements(direction);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            27_i64,
+            "sentinel_disagreements",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

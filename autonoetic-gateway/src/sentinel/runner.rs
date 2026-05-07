@@ -14,6 +14,10 @@
 //! The prompt-injection scan reads SKILL.md bodies from the filesystem via
 //! `agents_dir` (optional — skipped if not set).
 //!
+//! ## Phase 3 dual-sweep
+//! See [`super::dual_sweep::DualSweepRunner`] for the orchestrator that runs
+//! the frozen baseline alongside the current sentinel and records disagreements.
+//!
 //! NOTE: Emission of `security_finding_recorded` events to the causal chain is
 //! planned for Phase 5 (scheduling integration). The current runner persists
 //! findings to the `security_findings` table only.
@@ -101,15 +105,56 @@ impl SweepResult {
             .chain(&self.prompt_injection_findings)
             .chain(&self.behavioral_anomaly_findings)
     }
+
+    /// Return only Phase 1 (deterministic) findings — used for baseline comparison.
+    pub fn phase1_findings(&self) -> impl Iterator<Item = &SecurityFinding> {
+        self.credential_findings
+            .iter()
+            .chain(&self.capability_accretion_findings)
+            .chain(&self.approval_bypass_findings)
+            .chain(&self.sandbox_escape_findings)
+    }
+}
+
+/// Raw findings from a sweep, before persisting. Used internally by the runner
+/// and by the dual-sweep orchestrator to annotate `baseline_agreed` before the
+/// final persist step.
+#[derive(Debug, Default)]
+pub(super) struct RawSweepFindings {
+    pub credential: Vec<SecurityFinding>,
+    pub capability_accretion: Vec<SecurityFinding>,
+    pub approval_bypass: Vec<SecurityFinding>,
+    pub sandbox_escape: Vec<SecurityFinding>,
+    pub prompt_injection: Vec<SecurityFinding>,
+    pub behavioral_anomaly: Vec<SecurityFinding>,
+    pub scan_errors: Vec<String>,
+}
+
+impl RawSweepFindings {
+    pub fn all_phase1(&self) -> impl Iterator<Item = &SecurityFinding> {
+        self.credential
+            .iter()
+            .chain(&self.capability_accretion)
+            .chain(&self.approval_bypass)
+            .chain(&self.sandbox_escape)
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &SecurityFinding> {
+        self.credential
+            .iter()
+            .chain(&self.capability_accretion)
+            .chain(&self.approval_bypass)
+            .chain(&self.sandbox_escape)
+            .chain(&self.prompt_injection)
+            .chain(&self.behavioral_anomaly)
+    }
 }
 
 /// Runs deterministic (Phase 1) and heuristic (Phase 2) security sweeps.
 pub struct SentinelRunner {
-    store: Arc<GatewayStore>,
-    /// Root directory of the agents tree (e.g. `agents/` in the workspace).
-    /// When set, Phase 2 prompt-injection scans read SKILL.md bodies from here.
-    /// When `None`, the prompt-injection check is skipped.
-    agents_dir: Option<PathBuf>,
+    pub(super) store: Arc<GatewayStore>,
+    /// Root directory of the agents tree for Phase 2 prompt-injection scanning.
+    pub(super) agents_dir: Option<PathBuf>,
 }
 
 impl SentinelRunner {
@@ -126,13 +171,13 @@ impl SentinelRunner {
         self
     }
 
-    /// Run a full sweep according to `config`.
+    /// Run all checks and return raw (unpersisted) findings.
     ///
-    /// Findings are persisted to `security_findings` as they are discovered;
-    /// failures to persist individual findings are collected in
-    /// `SweepResult::persist_errors` rather than aborting the entire run.
-    pub fn run_sweep(&self, config: &SweepConfig) -> Result<SweepResult> {
-        let mut result = SweepResult::default();
+    /// The dual-sweep orchestrator calls this to collect findings from both the
+    /// baseline and current sentinel before annotating `baseline_agreed` and
+    /// persisting. Direct callers should use [`run_sweep`] instead.
+    pub(super) fn collect_findings(&self, config: &SweepConfig) -> Result<RawSweepFindings> {
+        let mut raw = RawSweepFindings::default();
 
         let since = config.since_rfc3339.as_deref();
         let rev_id = &config.sentinel_revision_id;
@@ -144,102 +189,92 @@ impl SentinelRunner {
         let failure_burst_threshold = config.failure_burst_threshold;
         let exec_repeat_threshold = config.exec_repeat_threshold;
 
-        // ── Phase 1: deterministic checks (single connection borrow) ───────────
-        // ── Phase 2a: session-cluster heuristics (SQL, same borrow) ────────────
-        //
-        // Both phases run inside a single `with_conn` borrow for efficiency.
-        // Results are collected in a flat vec; the macro below distributes
-        // them into typed buckets in order.
-        let all_db_checks: Vec<Result<Vec<SecurityFinding>>> = self.store.with_conn(|conn| {
+        // All DB checks in a single connection borrow.
+        let db_results: Vec<Result<Vec<SecurityFinding>>> = self.store.with_conn(|conn| {
             Ok(vec![
                 // Phase 1 — deterministic
                 credential::scan_credential_leaks(conn, rev_id, since, scan_limit),
                 capability_accretion::scan_capability_accretion(
-                    conn,
-                    rev_id,
-                    window_days,
-                    accretion_threshold,
+                    conn, rev_id, window_days, accretion_threshold,
                 ),
                 approval_bypass::scan_approval_denials(conn, rev_id, window_days, denial_threshold),
                 approval_bypass::scan_exec_without_grant(conn, rev_id, since, scan_limit),
                 sandbox_escape::scan_escape_attempt_records(conn, rev_id, since, scan_limit),
                 sandbox_escape::scan_escape_patterns_in_events(conn, rev_id, since, scan_limit),
-                // Phase 2a — cluster heuristics (always use rolling window, not `since`)
+                // Phase 2a — cluster heuristics (always rolling window, not `since`)
                 session_cluster::scan_failure_bursts(
-                    conn,
-                    rev_id,
-                    cluster_window_minutes,
-                    failure_burst_threshold,
-                    scan_limit,
+                    conn, rev_id, cluster_window_minutes, failure_burst_threshold, scan_limit,
                 ),
                 session_cluster::scan_exec_repeats(
-                    conn,
-                    rev_id,
-                    cluster_window_minutes,
-                    exec_repeat_threshold,
-                    scan_limit,
+                    conn, rev_id, cluster_window_minutes, exec_repeat_threshold, scan_limit,
                 ),
             ])
         })?;
 
-        let mut checks_iter = all_db_checks.into_iter();
-
-        macro_rules! collect_check {
+        let mut it = db_results.into_iter();
+        macro_rules! take_check {
             ($bucket:ident, $label:expr) => {
-                match checks_iter.next().expect("result count mismatch") {
-                    Ok(findings) => {
-                        for f in findings {
-                            if let Err(e) = self.store.insert_security_finding(&f) {
-                                result
-                                    .persist_errors
-                                    .push(format!("{} persist: {}", $label, e));
-                            } else {
-                                result.$bucket.push(f);
-                            }
-                        }
+                match it.next().expect("result count mismatch") {
+                    Ok(v) => raw.$bucket.extend(v),
+                    Err(e) => raw.scan_errors.push(format!("{} scan: {}", $label, e)),
+                }
+            };
+        }
+        take_check!(credential, "credential");
+        take_check!(capability_accretion, "accretion");
+        take_check!(approval_bypass, "approval_denial");
+        take_check!(approval_bypass, "exec_without_grant");
+        take_check!(sandbox_escape, "escape_records");
+        take_check!(sandbox_escape, "escape_patterns");
+        take_check!(behavioral_anomaly, "failure_burst");
+        take_check!(behavioral_anomaly, "exec_repeat");
+
+        // Phase 2b — prompt injection (filesystem, optional).
+        if let Some(ref agents_dir) = self.agents_dir {
+            match prompt_injection::scan_prompt_injection(agents_dir, rev_id, scan_limit as usize) {
+                Ok(v) => raw.prompt_injection = v,
+                Err(e) => raw.scan_errors.push(format!("prompt_injection scan: {}", e)),
+            }
+        }
+
+        Ok(raw)
+    }
+
+    /// Persist pre-collected findings and return a structured `SweepResult`.
+    pub(super) fn persist_findings(&self, raw: RawSweepFindings) -> SweepResult {
+        let mut result = SweepResult::default();
+        result.persist_errors = raw.scan_errors;
+
+        macro_rules! persist_bucket {
+            ($raw_field:expr, $result_field:ident, $label:expr) => {
+                for f in $raw_field {
+                    if let Err(e) = self.store.insert_security_finding(&f) {
+                        result
+                            .persist_errors
+                            .push(format!("{} persist: {}", $label, e));
+                    } else {
+                        result.$result_field.push(f);
                     }
-                    Err(e) => result
-                        .persist_errors
-                        .push(format!("{} scan: {}", $label, e)),
                 }
             };
         }
 
-        // Phase 1
-        collect_check!(credential_findings, "credential");
-        collect_check!(capability_accretion_findings, "accretion");
-        collect_check!(approval_bypass_findings, "approval_denial");
-        collect_check!(approval_bypass_findings, "exec_without_grant");
-        collect_check!(sandbox_escape_findings, "escape_records");
-        collect_check!(sandbox_escape_findings, "escape_patterns");
-        // Phase 2a
-        collect_check!(behavioral_anomaly_findings, "failure_burst");
-        collect_check!(behavioral_anomaly_findings, "exec_repeat");
+        persist_bucket!(raw.credential, credential_findings, "credential");
+        persist_bucket!(raw.capability_accretion, capability_accretion_findings, "accretion");
+        persist_bucket!(raw.approval_bypass, approval_bypass_findings, "approval_bypass");
+        persist_bucket!(raw.sandbox_escape, sandbox_escape_findings, "sandbox_escape");
+        persist_bucket!(raw.prompt_injection, prompt_injection_findings, "prompt_injection");
+        persist_bucket!(raw.behavioral_anomaly, behavioral_anomaly_findings, "behavioral_anomaly");
 
-        // 2b. Prompt-injection surface scan (filesystem-backed, optional).
-        if let Some(ref agents_dir) = self.agents_dir {
-            match prompt_injection::scan_prompt_injection(
-                agents_dir,
-                rev_id,
-                scan_limit as usize,
-            ) {
-                Ok(findings) => {
-                    for f in findings {
-                        if let Err(e) = self.store.insert_security_finding(&f) {
-                            result
-                                .persist_errors
-                                .push(format!("prompt_injection persist: {}", e));
-                        } else {
-                            result.prompt_injection_findings.push(f);
-                        }
-                    }
-                }
-                Err(e) => result
-                    .persist_errors
-                    .push(format!("prompt_injection scan: {}", e)),
-            }
-        }
+        result
+    }
 
-        Ok(result)
+    /// Run a full sweep: collect, persist, and return results.
+    ///
+    /// For dual-sweep (baseline + current with disagreement recording) use
+    /// [`super::dual_sweep::DualSweepRunner`] instead.
+    pub fn run_sweep(&self, config: &SweepConfig) -> Result<SweepResult> {
+        let raw = self.collect_findings(config)?;
+        Ok(self.persist_findings(raw))
     }
 }
