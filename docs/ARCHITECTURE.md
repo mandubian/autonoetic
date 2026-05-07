@@ -224,6 +224,18 @@ Gateway: 1. Resolve name → handle from session manifest
 
 ## Security Model
 
+### Security Sentinel
+
+A dedicated system-tier agent audits the gateway's own state for security issues. See [`docs/security-sentinel.md`](security-sentinel.md) for design, phased build plan, and the three hard problems (recursive trust, prompt injection against the auditor, and calibration).
+
+The sentinel lives in `agents/system/` — a new tier parallel to `lead/`, `specialists/`, and `evolution/`. Placing it in a distinct tier signals that it must be visibly harder to silently revise than evolution-tier agents.
+
+Key design decisions:
+- **Read-only capability profile**: no `NetworkAccess`, no `CodeExecution`, no write access to privileged surfaces.
+- **Append-only findings**: the `security_findings` SQLite table is insert-only; only triage state may be updated after insert.
+- **Frozen baseline**: `security_sentinel_baseline.default` runs alongside the current sentinel on every sweep and never promotes automatically.
+- **Deterministic first**: Phase 1 checks (credential regex, capability accretion SQL, approval bypass, sandbox escape) produce `critical` findings without LLM involvement. LLM-judgment findings (Phase 2) land at `warning` by default.
+
 ### Capability-Based Access Control
 
 All external interactions require declared capabilities:

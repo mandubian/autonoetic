@@ -14,6 +14,7 @@ mod observability;
 mod row_decode;
 mod runtime_control;
 mod scheduled_jobs;
+pub mod security_findings;
 mod user_interactions;
 mod user_profiles;
 mod util;
@@ -155,6 +156,17 @@ impl GatewayStore {
     pub fn migrate(&self) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         migrate::migrate(&mut conn)
+    }
+
+    /// Execute a closure with a read-only borrow of the underlying connection.
+    /// Used by the sentinel runner to pass the connection to deterministic
+    /// check functions without exposing the field directly.
+    pub(crate) fn with_conn<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let conn = self.conn.lock().unwrap();
+        f(&conn)
     }
 
     pub fn create_scheduled_job(

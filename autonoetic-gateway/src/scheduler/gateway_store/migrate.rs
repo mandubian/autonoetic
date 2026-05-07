@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 25;
+const SCHEMA_VERSION_LATEST: i64 = 26;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -509,6 +509,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_approval_hardening_v23(conn)?;
     apply_revision_signature_v24(conn)?;
     apply_sandbox_escape_attempts_v25(conn)?;
+    apply_security_findings_v26(conn)?;
 
     Ok(())
 }
@@ -1480,6 +1481,86 @@ fn apply_sandbox_escape_attempts_v25(conn: &mut Connection) -> Result<()> {
         params![
             25_i64,
             "sandbox_escape_attempts",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_security_findings_v26(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 26 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS security_findings (
+            finding_id        TEXT PRIMARY KEY,
+            severity          TEXT NOT NULL,
+            confidence        REAL NOT NULL,
+            finding_type      TEXT NOT NULL,
+            affected_json     TEXT NOT NULL,
+            evidence_json     TEXT NOT NULL,
+            reproducibility   TEXT NOT NULL,
+            proposed_remediation TEXT NOT NULL,
+            sentinel_revision_id TEXT NOT NULL,
+            baseline_agreed   INTEGER NOT NULL DEFAULT 0,
+            ensemble_agreed   INTEGER,
+            triage_state      TEXT NOT NULL DEFAULT 'pending',
+            triage_reason     TEXT,
+            created_at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_findings_severity
+            ON security_findings(severity);
+        CREATE INDEX IF NOT EXISTS idx_security_findings_type
+            ON security_findings(finding_type);
+        CREATE INDEX IF NOT EXISTS idx_security_findings_triage
+            ON security_findings(triage_state);
+        CREATE INDEX IF NOT EXISTS idx_security_findings_created
+            ON security_findings(created_at);
+
+        -- Append-only enforcement: allow UPDATE only when the only changed
+        -- columns are triage_state and/or triage_reason. Any attempt to
+        -- mutate the immutable finding body raises an error.
+        CREATE TRIGGER IF NOT EXISTS security_findings_no_body_update
+        BEFORE UPDATE ON security_findings
+        FOR EACH ROW
+        WHEN (
+            NEW.finding_id        != OLD.finding_id        OR
+            NEW.severity          != OLD.severity          OR
+            NEW.confidence        != OLD.confidence        OR
+            NEW.finding_type      != OLD.finding_type      OR
+            NEW.affected_json     != OLD.affected_json     OR
+            NEW.evidence_json     != OLD.evidence_json     OR
+            NEW.reproducibility   != OLD.reproducibility   OR
+            NEW.proposed_remediation != OLD.proposed_remediation OR
+            NEW.sentinel_revision_id != OLD.sentinel_revision_id OR
+            NEW.baseline_agreed   != OLD.baseline_agreed   OR
+            IFNULL(NEW.ensemble_agreed,-1) != IFNULL(OLD.ensemble_agreed,-1) OR
+            NEW.created_at        != OLD.created_at
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'security_findings is append-only: only triage_state and triage_reason may be updated');
+        END;
+
+        -- Prevent all DELETEs unconditionally.
+        CREATE TRIGGER IF NOT EXISTS security_findings_no_delete
+        BEFORE DELETE ON security_findings
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'security_findings is append-only: rows cannot be deleted');
+        END;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            26_i64,
+            "security_findings",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

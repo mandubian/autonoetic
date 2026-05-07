@@ -22,6 +22,7 @@ pub mod runtime;
 pub mod runtime_lock;
 pub mod sandbox;
 pub mod scheduler;
+pub mod sentinel;
 pub mod server;
 pub mod tracing;
 pub mod vault;
