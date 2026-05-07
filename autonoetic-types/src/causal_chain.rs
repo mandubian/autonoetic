@@ -117,6 +117,166 @@ pub struct ExecutionTraceRecord {
     pub result: Option<String>,
 }
 
+impl ExecutionTraceRecord {
+    pub fn redact_for_viewer(&self, viewer: super::disclosure::ViewerClass) -> Self {
+        match viewer {
+            super::disclosure::ViewerClass::Admin => self.clone(),
+            super::disclosure::ViewerClass::Operator => {
+                let mut out = self.clone();
+                if let Some(ref args) = self.arguments {
+                    out.arguments = Some(redact_json_string(args));
+                }
+                if let Some(ref result) = self.result {
+                    out.result = Some(redact_json_string(result));
+                }
+                out
+            }
+            super::disclosure::ViewerClass::Agent => Self {
+                trace_id: self.trace_id.clone(),
+                event_id: self.event_id.clone(),
+                agent_id: self.agent_id.clone(),
+                session_id: self.session_id.clone(),
+                turn_id: self.turn_id.clone(),
+                timestamp: self.timestamp.clone(),
+                tool_name: self.tool_name.clone(),
+                command: self.command.as_ref().map(|_| "***REDACTED***".to_string()),
+                exit_code: self.exit_code,
+                stdout: None,
+                stderr: None,
+                duration_ms: self.duration_ms,
+                success: self.success,
+                error_type: self.error_type.clone(),
+                error_summary: self.error_summary.clone(),
+                approval_required: self.approval_required,
+                approval_request_id: self.approval_request_id.clone(),
+                arguments: None,
+                result: None,
+            },
+        }
+    }
+
+    pub fn to_json_for_viewer(&self, viewer: super::disclosure::ViewerClass) -> serde_json::Value {
+        let r = self.redact_for_viewer(viewer);
+        serde_json::json!({
+            "trace_id": r.trace_id,
+            "agent_id": r.agent_id,
+            "session_id": r.session_id,
+            "turn_id": r.turn_id,
+            "timestamp": r.timestamp,
+            "tool_name": r.tool_name,
+            "command": r.command,
+            "exit_code": r.exit_code,
+            "stdout": r.stdout,
+            "stderr": r.stderr,
+            "duration_ms": r.duration_ms,
+            "success": r.success == 1,
+            "error_type": r.error_type,
+            "error_summary": r.error_summary,
+            "approval_required": r.approval_required == Some(1),
+            "approval_request_id": r.approval_request_id,
+        })
+    }
+}
+
+impl CausalEventRecord {
+    pub fn redact_for_viewer(&self, viewer: super::disclosure::ViewerClass) -> Self {
+        match viewer {
+            super::disclosure::ViewerClass::Admin => self.clone(),
+            super::disclosure::ViewerClass::Operator => {
+                let mut out = self.clone();
+                if let Some(ref payload) = self.payload {
+                    out.payload = Some(redact_json_string(payload));
+                }
+                out.payload_ref = None;
+                out
+            }
+            super::disclosure::ViewerClass::Agent => Self {
+                event_id: self.event_id.clone(),
+                agent_id: self.agent_id.clone(),
+                session_id: self.session_id.clone(),
+                turn_id: self.turn_id.clone(),
+                event_seq: self.event_seq,
+                timestamp: self.timestamp.clone(),
+                category: self.category.clone(),
+                action: self.action.clone(),
+                status: self.status.clone(),
+                enforced_rules: self.enforced_rules.clone(),
+                target: self.target.clone(),
+                payload: None,
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            },
+        }
+    }
+}
+
+fn redact_json_string(s: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(v) => serde_json::to_string(&redact_json_value(&v)).unwrap_or_else(|_| "***REDACTED***".to_string()),
+        Err(_) => {
+            let lower = s.to_ascii_lowercase();
+            if lower.contains("token")
+                || lower.contains("secret")
+                || lower.contains("authorization")
+                || lower.contains("api_key")
+                || lower.contains("apikey")
+            {
+                "***REDACTED***".to_string()
+            } else {
+                s.to_string()
+            }
+        }
+    }
+}
+
+fn redact_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if is_sensitive_key(k) {
+                    out.insert(k.clone(), serde_json::Value::String("***REDACTED***".to_string()));
+                } else {
+                    out.insert(k.clone(), redact_json_value(v));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_json_value).collect())
+        }
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if !t.is_empty() {
+                let lower = t.to_ascii_lowercase();
+                if lower.contains("bearer ")
+                    || t.starts_with("sk-")
+                    || t.contains("-----BEGIN")
+                {
+                    return serde_json::Value::String("***REDACTED***".to_string());
+                }
+            }
+            serde_json::Value::String(s.clone())
+        }
+        other => other.clone(),
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k.contains("secret")
+        || k.contains("token")
+        || k.contains("password")
+        || k.contains("api_key")
+        || k.contains("apikey")
+        || k.contains("authorization")
+        || k.contains("access_key")
+        || k.contains("access_token")
+        || k.contains("refresh_token")
+        || k.contains("client_secret")
+}
+
 /// Session transcript record for storage in gateway.db session_transcripts table.
 /// Used for full-text search across conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -250,7 +250,12 @@ impl NativeTool for ApprovalWithdrawTool {
 }
 
 fn approval_summary(r: &autonoetic_types::background::ApprovalRequest) -> serde_json::Value {
-    let action_summary = match &r.action {
+    approval_summary_for_viewer(r, autonoetic_types::disclosure::ViewerClass::Agent)
+}
+
+fn approval_summary_for_viewer(r: &autonoetic_types::background::ApprovalRequest, viewer: autonoetic_types::disclosure::ViewerClass) -> serde_json::Value {
+    let redacted = r.action.redact_for_viewer(viewer);
+    let action_summary = match &redacted {
         autonoetic_types::background::ScheduledAction::SandboxExec {
             command,
             detected_hosts,
@@ -276,9 +281,16 @@ fn approval_summary(r: &autonoetic_types::background::ApprovalRequest) -> serde_
             "service": service,
             "credential_id": credential_id,
         }),
+        autonoetic_types::background::ScheduledAction::CredentialRequest {
+            credential_id, url, method, ..
+        } => serde_json::json!({
+            "kind": "credential_request",
+            "credential_id": credential_id,
+            "url": url,
+            "method": method,
+        }),
         other => serde_json::json!({
-            "kind": "other",
-            "detail": format!("{:?}", other),
+            "kind": other.kind(),
         }),
     };
     serde_json::json!({

@@ -3,6 +3,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::disclosure::ViewerClass;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -24,7 +25,7 @@ impl NativeTool for ExecutionSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Search raw execution traces for tool-level debugging within sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns full execution details including stdout, stderr, exit codes, and duration. For cross-session discovery of high-level session summaries, use observability.search instead.".to_string(),
+            description: "Search raw execution traces for tool-level debugging within sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns execution metadata including exit codes, duration, and error info. For cross-session discovery of high-level session summaries, use observability.search instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -103,6 +104,8 @@ impl NativeTool for ExecutionSearchTool {
 
         let limit = args.limit.unwrap_or(10).min(100) as i64;
 
+        let viewer = ViewerClass::Agent;
+
         let traces = store.search_execution_traces(
             args.tool_name.as_deref(),
             args.success,
@@ -115,26 +118,7 @@ impl NativeTool for ExecutionSearchTool {
 
         let items: Vec<serde_json::Value> = traces
             .into_iter()
-            .map(|t| {
-                serde_json::json!({
-                    "trace_id": t.trace_id,
-                    "agent_id": t.agent_id,
-                    "session_id": t.session_id,
-                    "turn_id": t.turn_id,
-                    "timestamp": t.timestamp,
-                    "tool_name": t.tool_name,
-                    "command": t.command,
-                    "exit_code": t.exit_code,
-                    "stdout": t.stdout,
-                    "stderr": t.stderr,
-                    "duration_ms": t.duration_ms,
-                    "success": t.success == 1,
-                    "error_type": t.error_type,
-                    "error_summary": t.error_summary,
-                    "approval_required": t.approval_required == Some(1),
-                    "approval_request_id": t.approval_request_id,
-                })
-            })
+            .map(|t| t.to_json_for_viewer(viewer))
             .collect();
 
         serde_json::to_string(&serde_json::json!({
