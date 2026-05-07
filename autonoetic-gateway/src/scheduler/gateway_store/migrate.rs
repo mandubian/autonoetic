@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 25;
+const SCHEMA_VERSION_LATEST: i64 = 26;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -509,6 +509,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_approval_hardening_v23(conn)?;
     apply_revision_signature_v24(conn)?;
     apply_sandbox_escape_attempts_v25(conn)?;
+    apply_security_findings_v26(conn)?;
 
     Ok(())
 }
@@ -1480,6 +1481,54 @@ fn apply_sandbox_escape_attempts_v25(conn: &mut Connection) -> Result<()> {
         params![
             25_i64,
             "sandbox_escape_attempts",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_security_findings_v26(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 26 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS security_findings (
+            finding_id        TEXT PRIMARY KEY,
+            severity          TEXT NOT NULL,
+            confidence        REAL NOT NULL,
+            finding_type      TEXT NOT NULL,
+            affected_json     TEXT NOT NULL,
+            evidence_json     TEXT NOT NULL,
+            reproducibility   TEXT NOT NULL,
+            proposed_remediation TEXT NOT NULL,
+            sentinel_revision_id TEXT NOT NULL,
+            baseline_agreed   INTEGER NOT NULL DEFAULT 0,
+            ensemble_agreed   INTEGER,
+            triage_state      TEXT NOT NULL DEFAULT 'pending',
+            triage_reason     TEXT,
+            created_at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_findings_severity
+            ON security_findings(severity);
+        CREATE INDEX IF NOT EXISTS idx_security_findings_type
+            ON security_findings(finding_type);
+        CREATE INDEX IF NOT EXISTS idx_security_findings_triage
+            ON security_findings(triage_state);
+        CREATE INDEX IF NOT EXISTS idx_security_findings_created
+            ON security_findings(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            26_i64,
+            "security_findings",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;
