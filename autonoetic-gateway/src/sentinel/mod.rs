@@ -1,14 +1,33 @@
-//! Security sentinel — deterministic check engine (Phase 1).
+//! Security sentinel — deterministic and heuristic check engine.
 //!
-//! This module provides the gateway-side, LLM-free scan that runs
-//! credential-pattern matching, capability-accretion detection,
-//! approval-bypass detection, and sandbox-escape pattern matching.
+//! ## Phase 1 (deterministic)
 //!
-//! The checks produce `SecurityFinding` records that are persisted in the
-//! `security_findings` table.
+//! Pure regex and SQL checks that run without any LLM calls. Findings may
+//! reach `critical` severity because they are reproducible by anyone who
+//! re-runs the same query.
 //!
-//! NOTE: Emission of `security_finding_recorded` events to the causal chain is
-//! planned for Phase 5 (scheduling integration), when the sentinel runs with a
+//! - Credential-pattern regex over causal-event payloads
+//! - Capability-accretion detection via SQL over `promotion_history`
+//! - Approval-bypass pattern detection
+//! - Sandbox-escape recorded-attempt table scan + escape pattern regex
+//!
+//! ## Phase 2 (LLM-judgment heuristics)
+//!
+//! Structural pattern matching that requires human or LLM reasoning to confirm.
+//! Findings land at `warning` severity with `llm_judgment` reproducibility.
+//!
+//! - Prompt-injection surface detection on SKILL.md instruction bodies
+//!   (reads files from `agents_dir` when set on the runner)
+//! - Session-cluster anomaly detection: rapid failure bursts, repeated
+//!   identical sandbox_exec calls
+//!
+//! Curator decision-journal audits (Phase 2, issue #30 dependency) are
+//! deferred until the memory curator decision journal lands.
+//!
+//! ## Phase 5 (planned)
+//!
+//! Emission of `security_finding_recorded` events to the causal chain will be
+//! added in Phase 5 (scheduling integration), when the sentinel runs with a
 //! dedicated session context. The current runner persists findings to the
 //! `security_findings` table only — no causal event is emitted here yet.
 //!
