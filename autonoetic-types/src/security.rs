@@ -30,7 +30,12 @@ pub enum FindingType {
     SandboxEscapeAttempt,
     ApprovalBypass,
     PromptInjectionSurface,
+    /// A layer was mounted whose build-time network scope was not subsumed by the
+    /// mounting session's grants — operator explicitly approved the expansion.
     SupplyChainScopeViolation,
+    /// A layer was approved for mounting but has no capture trace in this
+    /// gateway's `execution_traces` — supply-chain provenance is unverifiable here.
+    SupplyChainProvenanceGap,
     BehavioralAnomaly,
     CuratorBias,
 }
@@ -75,6 +80,8 @@ pub enum EvidenceAnchor {
     PromotionRecord { promotion_id: String },
     /// A row from `sandbox_escape_attempts` identified by its integer rowid.
     SandboxEscapeRecord { rowid: i64 },
+    /// A row from the `approvals` table identified by its `request_id`.
+    ApprovalRecord { request_id: String },
 }
 
 /// Which entities are implicated in a finding.

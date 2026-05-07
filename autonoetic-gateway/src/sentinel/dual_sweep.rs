@@ -161,6 +161,9 @@ fn anchor_key(anchor: &EvidenceAnchor) -> String {
         EvidenceAnchor::SandboxEscapeRecord { rowid } => {
             format!("sandbox_escape_record:{}", rowid)
         }
+        EvidenceAnchor::ApprovalRecord { request_id } => {
+            format!("approval_record:{}", request_id)
+        }
     }
 }
 

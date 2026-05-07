@@ -652,7 +652,7 @@ fn dual_sweep_disagreement_persisted_in_db() {
 
 // ── Phase 4: supply-chain auditing ───────────────────────────────────────────
 
-fn insert_layer_mount_approval(dir: &TempDir, request_id: &str, status: &str, layers_json: &str) {
+fn insert_layer_mount_approval(dir: &TempDir, request_id: &str, layers_json: &str) {
     let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
     let payload = format!(r#"{{"layers": {layers_json}, "command": "pip install numpy"}}"#);
     db.execute(
@@ -660,8 +660,8 @@ fn insert_layer_mount_approval(dir: &TempDir, request_id: &str, status: &str, la
             (request_id, agent_id, session_id, action_type, action_payload,
              status, created_at, decided_at, approval_level)
          VALUES (?1, 'coder.default', 'sess_sc_001', 'layer_mount', ?2,
-                 ?3, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 'operator')",
-        rusqlite::params![request_id, payload, status],
+                 'approved', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 'operator')",
+        rusqlite::params![request_id, payload],
     )
     .unwrap();
 }
@@ -675,7 +675,6 @@ fn supply_chain_scope_violation_warning_for_artifact_layer() {
     insert_layer_mount_approval(
         &dir,
         "apr-sc-001",
-        "granted",
         r#"[{"layer_id":"layer_abc","digest":"sha256:aabbcc112233","name":"python-deps","mount_path":"/deps","source":"artifact:art_001","build_time_approved_hosts":["pypi.org"],"unapproved_delta":["pypi.org"]}]"#,
     );
 
@@ -707,7 +706,6 @@ fn supply_chain_scope_violation_critical_for_runtime_lock_layer() {
     insert_layer_mount_approval(
         &dir,
         "apr-sc-002",
-        "granted",
         r#"[{"layer_id":"layer_def","digest":"sha256:ddeeff445566","name":"locked-deps","mount_path":"/deps","source":"runtime.lock","build_time_approved_hosts":["private.registry.internal"],"unapproved_delta":["private.registry.internal"]}]"#,
     );
 
@@ -738,7 +736,6 @@ fn supply_chain_no_finding_when_delta_empty() {
     insert_layer_mount_approval(
         &dir,
         "apr-sc-003",
-        "granted",
         r#"[{"layer_id":"layer_clean","digest":"sha256:clean001","name":"clean","mount_path":"/deps","source":"artifact:x","build_time_approved_hosts":["pypi.org"],"unapproved_delta":[]}]"#,
     );
 
@@ -766,11 +763,10 @@ fn supply_chain_provenance_gap_flagged_by_runner() {
 
     let (dir, store) = open_store();
 
-    // Approve a layer mount with no capture trace in causal_events.
+    // Approve a layer mount with no capture trace in execution_traces.
     insert_layer_mount_approval(
         &dir,
         "apr-sc-004",
-        "granted",
         r#"[{"layer_id":"layer_notr","digest":"sha256:notrace999","name":"no-trace","mount_path":"/deps","source":"artifact:art_002","build_time_approved_hosts":[],"unapproved_delta":[]}]"#,
     );
 
@@ -785,7 +781,7 @@ fn supply_chain_provenance_gap_flagged_by_runner() {
     let gap = result
         .supply_chain_findings
         .iter()
-        .find(|f| f.proposed_remediation.contains("no capture trace"));
+        .find(|f| f.finding_type == FindingType::SupplyChainProvenanceGap);
     assert!(gap.is_some(), "layer with no capture trace must produce a provenance gap finding");
 }
 
@@ -798,19 +794,20 @@ fn supply_chain_provenance_gap_cleared_when_capture_trace_present() {
     insert_layer_mount_approval(
         &dir,
         "apr-sc-005",
-        "granted",
         r#"[{"layer_id":"layer_traced","digest":"sha256:traced001","name":"traced","mount_path":"/deps","source":"artifact:art_003","build_time_approved_hosts":[],"unapproved_delta":[]}]"#,
     );
 
-    // Insert a capture trace for layer_traced via target column.
+    // Insert a capture trace in execution_traces with result JSON containing
+    // captured_layers[*].layer_id — the shape the runtime actually writes.
     {
         let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
+        let result_json = r#"{"ok":true,"captured_layers":[{"layer_id":"layer_traced","digest":"sha256:traced001","file_count":10,"size_bytes":1024}]}"#;
         db.execute(
-            "INSERT INTO causal_events
-                (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, enforced_rules, target)
-             VALUES ('evt_layer_cap', 'packager.default', 'sess_build', 0, ?1, 'tool', 'sandbox_exec', 'success', '[]', 'layer_traced')",
-            rusqlite::params![now],
+            "INSERT INTO execution_traces
+                (trace_id, agent_id, session_id, timestamp, tool_name, success, duration_ms, result)
+             VALUES ('trace_prov_001', 'packager.default', 'sess_build', ?1, 'sandbox_exec', 1, 500, ?2)",
+            rusqlite::params![now, result_json],
         )
         .unwrap();
     }
@@ -826,9 +823,9 @@ fn supply_chain_provenance_gap_cleared_when_capture_trace_present() {
     let gap = result
         .supply_chain_findings
         .iter()
-        .find(|f| f.proposed_remediation.contains("no capture trace"));
+        .find(|f| f.finding_type == FindingType::SupplyChainProvenanceGap);
     assert!(
         gap.is_none(),
-        "layer with capture trace must not produce a provenance gap finding"
+        "layer with capture trace in execution_traces must not produce a provenance gap finding"
     );
 }
