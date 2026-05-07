@@ -213,6 +213,16 @@ impl GatewayStore {
         scheduled_jobs::load_due_scheduled_jobs(&conn, now_rfc3339, limit)
     }
 
+    pub fn load_due_scheduled_jobs_for_owner(
+        &self,
+        owner_agent_id: &str,
+        now_rfc3339: &str,
+        limit: usize,
+    ) -> Result<Vec<autonoetic_types::scheduled_job::ScheduledJob>> {
+        let conn = self.conn.lock().unwrap();
+        scheduled_jobs::load_due_scheduled_jobs_for_owner(&conn, owner_agent_id, now_rfc3339, limit)
+    }
+
     pub fn claim_due_scheduled_job(
         &self,
         job_id: &str,

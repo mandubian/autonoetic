@@ -220,7 +220,18 @@ async fn run_scheduler_tick_at(
         .await?;
     }
 
-    // Process due scheduled jobs
+    // Run due sentinel sweeps directly (not via workflow dispatch).
+    {
+        let cfg = execution.config();
+        if cfg.sentinel.enabled {
+            if let Some(store) = execution.gateway_store() {
+                let agents_dir = cfg.agents_dir.clone();
+                crate::sentinel::run_due_sentinel_jobs(&store, &cfg.sentinel, Some(&agents_dir));
+            }
+        }
+    }
+
+    // Process due scheduled jobs (sentinel-owned jobs are excluded below).
     if let Err(e) = process_due_scheduled_jobs(execution.clone(), now).await {
         tracing::warn!(error = %e, "Failed to process due scheduled jobs");
     }
@@ -1662,6 +1673,17 @@ async fn process_due_scheduled_jobs(
                 continue;
             }
         };
+
+        // Sentinel-owned jobs are executed directly by run_due_sentinel_jobs;
+        // skip them here to avoid spurious workflow dispatch attempts.
+        if claimed.owner_agent_id == crate::sentinel::scheduler::SENTINEL_OWNER {
+            tracing::debug!(
+                target: "scheduler",
+                job_id = %claimed.job_id,
+                "Skipping sentinel job — handled by sentinel scheduler"
+            );
+            continue;
+        }
 
         tracing::info!(
             target: "scheduler",

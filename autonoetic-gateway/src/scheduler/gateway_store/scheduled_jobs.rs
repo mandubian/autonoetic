@@ -162,6 +162,35 @@ pub fn load_due_scheduled_jobs(
     Ok(jobs)
 }
 
+/// Load due scheduled jobs whose `owner_agent_id` matches the given owner.
+///
+/// Unlike [`load_due_scheduled_jobs`] (which loads globally), this query
+/// filters by owner before the LIMIT is applied, preventing sentinel-owned
+/// jobs from being starved by a backlog of non-sentinel due jobs.
+pub fn load_due_scheduled_jobs_for_owner(
+    conn: &Connection,
+    owner_agent_id: &str,
+    now_rfc3339: &str,
+    limit: usize,
+) -> Result<Vec<ScheduledJob>> {
+    let limit = limit as i64;
+    let mut stmt = conn.prepare(
+        "SELECT job_id, owner_agent_id, root_session_id, target_agent_id,
+                target_revision_id, message, metadata_json, cron_expr, timezone, next_run_at,
+                last_run_at, status, created_at, updated_at, last_error, generation
+         FROM scheduled_jobs
+         WHERE owner_agent_id = ?1 AND status = 'active' AND next_run_at <= ?2
+         ORDER BY next_run_at ASC
+         LIMIT ?3",
+    )?;
+    let mut rows = stmt.query(params![owner_agent_id, now_rfc3339, limit])?;
+    let mut jobs = Vec::new();
+    while let Some(row) = rows.next()? {
+        jobs.push(row_to_job(row)?);
+    }
+    Ok(jobs)
+}
+
 pub fn advance_next_run(
     conn: &Connection,
     job_id: &str,

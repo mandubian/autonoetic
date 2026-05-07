@@ -2039,6 +2039,54 @@ impl NativeTool for AgentRevisionPromoteTool {
             );
         }
 
+        // Security sentinel pre-promotion gate (fail-closed).
+        // Runs a full-store Phase-1 sweep — any critical finding in the system
+        // blocks promotion. Per-agent scoping is planned for a future phase.
+        if let Some(cfg) = config {
+            if cfg.sentinel.enabled && cfg.sentinel.promotion_gate_enabled {
+                match crate::sentinel::check_pre_promotion(
+                    Arc::clone(&gateway_store),
+                    &cfg.sentinel.sentinel_revision_id,
+                    cfg.sentinel.promotion_gate_timeout_secs,
+                ) {
+                    Ok(crate::sentinel::GateOutcome::Passed) => {
+                        tracing::debug!(
+                            target: "sentinel.promotion_gate",
+                            agent_id = %args.agent_id,
+                            revision_id = %args.revision_id,
+                            "Sentinel pre-promotion gate passed"
+                        );
+                    }
+                    Ok(crate::sentinel::GateOutcome::Blocked { reason, critical_count }) => {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": "sentinel_gate",
+                            "error": "sentinel_critical_findings_block_promotion",
+                            "message": format!(
+                                "Sentinel pre-promotion gate blocked: {} critical finding(s). Resolve findings before promoting.",
+                                critical_count
+                            ),
+                            "critical_count": critical_count,
+                            "reason": reason,
+                            "repair_hint": "Review findings in the security_findings table, resolve or triage them, then retry promotion.",
+                        })
+                        .to_string());
+                    }
+                    Err(e) => {
+                        // Fail-closed: timeout or sweep error blocks promotion.
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": "sentinel_gate",
+                            "error": "sentinel_gate_failed",
+                            "message": format!("Sentinel pre-promotion gate failed (fail-closed): {}", e),
+                            "repair_hint": "Check gateway logs for sentinel errors. If sentinel is misconfigured, disable promotion_gate_enabled in config.",
+                        })
+                        .to_string());
+                    }
+                }
+            }
+        }
+
         let promotion_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
             "prom-",
             &format!(

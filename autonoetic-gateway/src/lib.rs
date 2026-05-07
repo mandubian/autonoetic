@@ -49,6 +49,7 @@ pub use runtime::tools::resolve_target_to_agent_ref;
 pub use runtime_lock::resolve_runtime_lock;
 pub use sandbox::SandboxRunner;
 pub use scheduler::system_agents::reconcile_system_agents;
+pub use sentinel::{ensure_sentinel_scheduled_jobs, run_due_sentinel_jobs};
 pub use server::GatewayServer;
 pub use tracing::session_tracer::{EventScope, EventSeq, SessionId, TraceSession};
 pub use vault::Vault;

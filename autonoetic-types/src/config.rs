@@ -797,6 +797,10 @@ pub struct GatewayConfig {
     /// disable dwell-time enforcement (for tests). Default: 1.0.
     #[serde(default = "default_approval_dwell_multiplier")]
     pub approval_dwell_multiplier: f64,
+
+    /// Security sentinel configuration.
+    #[serde(default)]
+    pub sentinel: SentinelConfig,
 }
 
 fn default_approval_dwell_multiplier() -> f64 {
@@ -845,6 +849,72 @@ fn default_scheduled_jobs_max_per_root() -> usize {
 fn default_scheduled_jobs_max_due_per_tick() -> usize {
     16
 }
+
+/// Security sentinel configuration.
+///
+/// The sentinel runs deterministic and heuristic checks against the gateway's
+/// local SQLite store. It has two operating modes:
+///
+/// - **Scheduled sweeps**: registered as internal cron jobs at gateway startup.
+/// - **Promotion gate**: a scoped sweep fires synchronously before
+///   `atomic_promote` is called; promotion is blocked until it completes or
+///   times out (fail-closed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentinelConfig {
+    /// Enable the security sentinel. Default: true.
+    #[serde(default = "default_sentinel_enabled")]
+    pub enabled: bool,
+
+    /// Cron schedule for a full (all-history) sentinel sweep. Default: daily at 03:00 UTC.
+    #[serde(default = "default_sentinel_full_sweep_schedule")]
+    pub full_sweep_schedule: String,
+
+    /// Cron schedule for an incremental sweep (last 24 h). Default: every 6 hours.
+    #[serde(default = "default_sentinel_incremental_sweep_schedule")]
+    pub incremental_sweep_schedule: String,
+
+    /// Block agent promotion when the pre-promotion sentinel sweep finds any
+    /// `critical` severity findings. Default: true (fail-closed).
+    #[serde(default = "default_sentinel_promotion_gate_enabled")]
+    pub promotion_gate_enabled: bool,
+
+    /// Maximum seconds the promotion gate waits for the sentinel sweep to complete.
+    /// If the sweep exceeds this limit, promotion is blocked (fail-closed). Default: 30.
+    #[serde(default = "default_sentinel_promotion_gate_timeout_secs")]
+    pub promotion_gate_timeout_secs: u64,
+
+    /// Sentinel revision ID embedded in findings produced by the live sentinel.
+    /// Update this when the sentinel logic changes to track which version flagged
+    /// a finding. Default: "sentinel.current".
+    #[serde(default = "default_sentinel_revision_id")]
+    pub sentinel_revision_id: String,
+
+    /// Sentinel revision ID for the frozen baseline. Default: "sentinel.baseline.frozen".
+    #[serde(default = "default_sentinel_baseline_revision_id")]
+    pub baseline_revision_id: String,
+}
+
+impl Default for SentinelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_sentinel_enabled(),
+            full_sweep_schedule: default_sentinel_full_sweep_schedule(),
+            incremental_sweep_schedule: default_sentinel_incremental_sweep_schedule(),
+            promotion_gate_enabled: default_sentinel_promotion_gate_enabled(),
+            promotion_gate_timeout_secs: default_sentinel_promotion_gate_timeout_secs(),
+            sentinel_revision_id: default_sentinel_revision_id(),
+            baseline_revision_id: default_sentinel_baseline_revision_id(),
+        }
+    }
+}
+
+fn default_sentinel_enabled() -> bool { true }
+fn default_sentinel_full_sweep_schedule() -> String { "0 3 * * *".to_string() }
+fn default_sentinel_incremental_sweep_schedule() -> String { "0 */6 * * *".to_string() }
+fn default_sentinel_promotion_gate_enabled() -> bool { true }
+fn default_sentinel_promotion_gate_timeout_secs() -> u64 { 30 }
+fn default_sentinel_revision_id() -> String { "sentinel.current".to_string() }
+fn default_sentinel_baseline_revision_id() -> String { "sentinel.baseline.frozen".to_string() }
 
 /// A system agent declaration for gateway-managed background execution.
 ///
@@ -1427,6 +1497,7 @@ impl Default for GatewayConfig {
             allow_runtime_lock_drift: false,
             trust_unsigned_bundles: false,
             approval_dwell_multiplier: default_approval_dwell_multiplier(),
+            sentinel: SentinelConfig::default(),
         }
     }
 }

@@ -23,7 +23,7 @@
 //! findings to the `security_findings` table only.
 
 use anyhow::Result;
-use autonoetic_types::security::SecurityFinding;
+use autonoetic_types::security::{FindingSeverity, SecurityFinding};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -295,6 +295,31 @@ impl SentinelRunner {
         persist_bucket!(raw.behavioral_anomaly, behavioral_anomaly_findings, "behavioral_anomaly");
 
         result
+    }
+
+    /// Scan Phase-1 checks and return `(critical_count, scan_errors)` without persisting.
+    ///
+    /// Used by the promotion gate to evaluate findings without creating duplicate
+    /// DB rows on every promotion attempt. Any scan error is propagated in the
+    /// returned `Vec<String>` so callers can treat non-empty errors as fail-closed.
+    pub fn scan_phase1_critical(&self, config: &SweepConfig) -> Result<(usize, Vec<String>)> {
+        let raw = self.collect_findings(&SweepConfig {
+            phase1_only: true,
+            ..SweepConfig {
+                sentinel_revision_id: config.sentinel_revision_id.clone(),
+                since_rfc3339: config.since_rfc3339.clone(),
+                scan_limit: config.scan_limit,
+                window_days: config.window_days,
+                accretion_threshold: config.accretion_threshold,
+                denial_threshold: config.denial_threshold,
+                ..SweepConfig::default()
+            }
+        })?;
+        let critical = raw
+            .all_phase1()
+            .filter(|f| f.severity == FindingSeverity::Critical)
+            .count();
+        Ok((critical, raw.scan_errors))
     }
 
     /// Run a full sweep: collect, persist, and return results.
