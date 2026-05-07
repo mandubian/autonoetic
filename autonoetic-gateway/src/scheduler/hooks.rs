@@ -484,7 +484,9 @@ impl HookExecutor {
         let action_name = "http.callback";
 
         if let Some(store) = store {
-            if let Some(existing) = store.get_hook_delivery(&delivery_id, event_name, action_name)? {
+            if let Some(existing) =
+                store.get_hook_delivery(&delivery_id, event_name, action_name)?
+            {
                 if existing.status == "delivered" {
                     tracing::debug!(
                         target: "hooks",
@@ -565,10 +567,7 @@ impl HookExecutor {
                 }
                 Ok(response) => {
                     let status = response.status();
-                    let body_preview = response
-                        .text()
-                        .await
-                        .unwrap_or_default();
+                    let body_preview = response.text().await.unwrap_or_default();
                     last_error = Some(format_http_callback_error(status, &body_preview));
                 }
                 Err(error) => {
@@ -898,8 +897,12 @@ fn load_sanitized_session_report(ctx: &HookContext) -> anyhow::Result<Option<ser
         }
     };
     let sanitized = sanitize_report_for_publishing(&raw);
-    let parsed = serde_json::from_str(&sanitized)
-        .with_context(|| format!("failed to parse sanitized session report {}", path.display()))?;
+    let parsed = serde_json::from_str(&sanitized).with_context(|| {
+        format!(
+            "failed to parse sanitized session report {}",
+            path.display()
+        )
+    })?;
     Ok(Some(parsed))
 }
 
@@ -1252,7 +1255,10 @@ mod tests {
         assert_eq!(captured.len(), 1);
         let request = &captured[0];
         assert_eq!(
-            request.headers.get("x-autonoetic-event").map(String::as_str),
+            request
+                .headers
+                .get("x-autonoetic-event")
+                .map(String::as_str),
             Some("session.closed")
         );
         assert_eq!(

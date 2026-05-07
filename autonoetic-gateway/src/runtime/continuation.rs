@@ -463,6 +463,157 @@ pub fn execute_approved_action(
             )
         }
 
+        ScheduledAction::WebFetch {
+            url,
+            timeout_secs,
+            max_chars,
+            ..
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("url".to_string(), serde_json::json!(url));
+            args.insert("approval_ref".to_string(), serde_json::json!(decision.request_id));
+            if let Some(t) = timeout_secs {
+                args.insert("timeout_secs".to_string(), serde_json::json!(t));
+            }
+            if let Some(m) = max_chars {
+                args.insert("max_chars".to_string(), serde_json::json!(m));
+            }
+            tracing::info!(
+                target: "continuation",
+                request_id = %decision.request_id,
+                url = %url,
+                "Executing approved web.fetch action"
+            );
+            registry.execute(
+                "web_fetch",
+                manifest,
+                &policy,
+                agent_dir,
+                gateway_dir,
+                &serde_json::Value::Object(args).to_string(),
+                session_id,
+                None,
+                Some(config),
+                gateway_store,
+                None,
+            )
+        }
+
+        ScheduledAction::WebCall {
+            url,
+            method,
+            headers,
+            body,
+            timeout_secs,
+            max_chars,
+            ..
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("url".to_string(), serde_json::json!(url));
+            args.insert("approval_ref".to_string(), serde_json::json!(decision.request_id));
+            if let Some(m) = method {
+                args.insert("method".to_string(), serde_json::json!(m));
+            }
+            if let Some(h) = headers {
+                args.insert("headers".to_string(), serde_json::json!(h));
+            }
+            if let Some(b) = body {
+                args.insert("body".to_string(), b.clone());
+            }
+            if let Some(t) = timeout_secs {
+                args.insert("timeout_secs".to_string(), serde_json::json!(t));
+            }
+            if let Some(m) = max_chars {
+                args.insert("max_chars".to_string(), serde_json::json!(m));
+            }
+            tracing::info!(
+                target: "continuation",
+                request_id = %decision.request_id,
+                url = %url,
+                "Executing approved web.call action"
+            );
+            registry.execute(
+                "web_call",
+                manifest,
+                &policy,
+                agent_dir,
+                gateway_dir,
+                &serde_json::Value::Object(args).to_string(),
+                session_id,
+                None,
+                Some(config),
+                gateway_store,
+                None,
+            )
+        }
+
+        ScheduledAction::WebSearch {
+            query,
+            provider,
+            max_results,
+            timeout_secs,
+            engine_url,
+            duckduckgo_engine_url,
+            google_engine_url,
+            google_engine_id,
+            google_api_key_env,
+            google_engine_id_env,
+            cache_ttl_secs,
+            ..
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("query".to_string(), serde_json::json!(query));
+            args.insert("approval_ref".to_string(), serde_json::json!(decision.request_id));
+            if let Some(p) = provider {
+                args.insert("provider".to_string(), serde_json::json!(p));
+            }
+            if let Some(m) = max_results {
+                args.insert("max_results".to_string(), serde_json::json!(m));
+            }
+            if let Some(t) = timeout_secs {
+                args.insert("timeout_secs".to_string(), serde_json::json!(t));
+            }
+            if let Some(u) = engine_url {
+                args.insert("engine_url".to_string(), serde_json::json!(u));
+            }
+            if let Some(u) = duckduckgo_engine_url {
+                args.insert("duckduckgo_engine_url".to_string(), serde_json::json!(u));
+            }
+            if let Some(u) = google_engine_url {
+                args.insert("google_engine_url".to_string(), serde_json::json!(u));
+            }
+            if let Some(id) = google_engine_id {
+                args.insert("google_engine_id".to_string(), serde_json::json!(id));
+            }
+            if let Some(env) = google_api_key_env {
+                args.insert("google_api_key_env".to_string(), serde_json::json!(env));
+            }
+            if let Some(env) = google_engine_id_env {
+                args.insert("google_engine_id_env".to_string(), serde_json::json!(env));
+            }
+            if let Some(ttl) = cache_ttl_secs {
+                args.insert("cache_ttl_secs".to_string(), serde_json::json!(ttl));
+            }
+            tracing::info!(
+                target: "continuation",
+                request_id = %decision.request_id,
+                "Executing approved web.search action"
+            );
+            registry.execute(
+                "web_search",
+                manifest,
+                &policy,
+                agent_dir,
+                gateway_dir,
+                &serde_json::Value::Object(args).to_string(),
+                session_id,
+                None,
+                Some(config),
+                gateway_store,
+                None,
+            )
+        }
+
         other => {
             anyhow::bail!(
                 "execute_approved_action: unsupported ScheduledAction variant {:?}",

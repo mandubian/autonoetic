@@ -52,7 +52,10 @@ fn r10_rate_limiter_blocks_over_limit() {
     for _ in 0..5 {
         assert!(limiter.check_rate_at(t), "calls under limit should succeed");
     }
-    assert!(!limiter.check_rate_at(t), "call over limit should be blocked");
+    assert!(
+        !limiter.check_rate_at(t),
+        "call over limit should be blocked"
+    );
 }
 
 #[test]
@@ -91,12 +94,8 @@ fn r10_oversized_payload_returns_error() {
         while !stop_clone.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let _ = handle_sdk_in_test(
-                        stream,
-                        &agent_dir_clone,
-                        &gateway_dir,
-                        &rate_limiter,
-                    );
+                    let _ =
+                        handle_sdk_in_test(stream, &agent_dir_clone, &gateway_dir, &rate_limiter);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(5));
@@ -169,12 +168,8 @@ fn r10_rate_limited_returns_error() {
         while !stop_clone.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let _ = handle_sdk_in_test(
-                        stream,
-                        &agent_dir_clone,
-                        &gateway_dir,
-                        &rate_limiter,
-                    );
+                    let _ =
+                        handle_sdk_in_test(stream, &agent_dir_clone, &gateway_dir, &rate_limiter);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(5));
@@ -187,10 +182,7 @@ fn r10_rate_limited_returns_error() {
     let mut last_response = String::new();
     for i in 0..5 {
         let mut client = UnixStream::connect(&socket_path).unwrap();
-        let request = make_sdk_request(
-            "memory_list_keys",
-            serde_json::json!({}),
-        );
+        let request = make_sdk_request("memory_list_keys", serde_json::json!({}));
         writeln!(client, "{}", request).unwrap();
         client.flush().unwrap();
         let mut response = String::new();
@@ -204,7 +196,9 @@ fn r10_rate_limited_returns_error() {
     let _ = handle.join();
 
     let parsed = parse_response(&last_response);
-    let error = parsed.get("error").expect("later calls should be rate-limited");
+    let error = parsed
+        .get("error")
+        .expect("later calls should be rate-limited");
     assert_eq!(
         error["code"], -32002,
         "rate-limited call should return code -32002"
@@ -286,8 +280,15 @@ fn handle_sdk_in_test(
     }
 
     let request: serde_json::Value = serde_json::from_str(&line)?;
-    let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
-    let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let method = request
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let params = request
         .get("params")
         .and_then(|v| v.as_object())

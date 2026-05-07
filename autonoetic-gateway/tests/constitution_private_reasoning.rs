@@ -242,11 +242,10 @@ fn ri_0_13b_reasoning_hash_in_causal_event() -> anyhow::Result<()> {
     let agent_dir = tempdir.path().join("agents").join("test.agent");
     std::fs::create_dir_all(&agent_dir)?;
 
-    let mut tracer = SessionTracer::new_with_evidence_mode(
-        &agent_dir, "test.agent", "sess-ri-0-13b", "off",
-    )?
-    .with_gateway_store(Some(store.clone()))
-    .with_turn_id("turn-1");
+    let mut tracer =
+        SessionTracer::new_with_evidence_mode(&agent_dir, "test.agent", "sess-ri-0-13b", "off")?
+            .with_gateway_store(Some(store.clone()))
+            .with_turn_id("turn-1");
 
     tracer.log_llm_completion(
         "test-model",
@@ -268,7 +267,10 @@ fn ri_0_13b_reasoning_hash_in_causal_event() -> anyhow::Result<()> {
         .expect("llm.completion event must exist");
 
     let payload: serde_json::Value = serde_json::from_str(
-        completion_event.payload.as_deref().expect("payload present"),
+        completion_event
+            .payload
+            .as_deref()
+            .expect("payload present"),
     )?;
     assert!(
         payload.get("reasoning_sha256").is_some(),
@@ -297,7 +299,10 @@ fn ri_0_13b_reasoning_force_captured_even_in_off_mode() -> anyhow::Result<()> {
     std::fs::create_dir_all(&agent_dir)?;
 
     let mut tracer = SessionTracer::new_with_evidence_mode(
-        &agent_dir, "test.agent", "sess-ri-0-13b-force", "off",
+        &agent_dir,
+        "test.agent",
+        "sess-ri-0-13b-force",
+        "off",
     )?
     .with_gateway_store(Some(store.clone()))
     .with_turn_id("turn-1");
@@ -322,7 +327,10 @@ fn ri_0_13b_reasoning_force_captured_even_in_off_mode() -> anyhow::Result<()> {
         .expect("llm.completion event must exist");
 
     let payload: serde_json::Value = serde_json::from_str(
-        completion_event.payload.as_deref().expect("payload present"),
+        completion_event
+            .payload
+            .as_deref()
+            .expect("payload present"),
     )?;
     let evidence_ref = payload
         .get("reasoning_evidence_ref")
@@ -362,11 +370,10 @@ fn ri_0_13b_no_reasoning_hash_when_absent() -> anyhow::Result<()> {
     let agent_dir = tempdir.path().join("agents").join("test.agent");
     std::fs::create_dir_all(&agent_dir)?;
 
-    let mut tracer = SessionTracer::new_with_evidence_mode(
-        &agent_dir, "test.agent", "sess-ri-0-13b-no", "off",
-    )?
-    .with_gateway_store(Some(store.clone()))
-    .with_turn_id("turn-1");
+    let mut tracer =
+        SessionTracer::new_with_evidence_mode(&agent_dir, "test.agent", "sess-ri-0-13b-no", "off")?
+            .with_gateway_store(Some(store.clone()))
+            .with_turn_id("turn-1");
 
     tracer.log_llm_completion(
         "test-model",
@@ -388,7 +395,10 @@ fn ri_0_13b_no_reasoning_hash_when_absent() -> anyhow::Result<()> {
         .expect("llm.completion event must exist");
 
     let payload: serde_json::Value = serde_json::from_str(
-        completion_event.payload.as_deref().expect("payload present"),
+        completion_event
+            .payload
+            .as_deref()
+            .expect("payload present"),
     )?;
     assert!(
         payload.get("reasoning_sha256").is_none(),

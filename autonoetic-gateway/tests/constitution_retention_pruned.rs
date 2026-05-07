@@ -180,7 +180,11 @@ fn r_plus_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
     store.apply_retention_policy(&retention)?;
 
     let events = store.search_causal_events(None, None, 50)?;
-    assert_eq!(events.len(), 1, "only the original event should exist, no pruned event");
+    assert_eq!(
+        events.len(),
+        1,
+        "only the original event should exist, no pruned event"
+    );
 
     Ok(())
 }

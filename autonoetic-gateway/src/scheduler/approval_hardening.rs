@@ -31,6 +31,9 @@ pub fn classify_approval_risk(action: &ScheduledAction) -> ApprovalRisk {
             }
         }
         ScheduledAction::CredentialRequest { .. } => ApprovalRisk::High,
+        ScheduledAction::WebFetch { .. } => ApprovalRisk::High,
+        ScheduledAction::WebCall { .. } => ApprovalRisk::High,
+        ScheduledAction::WebSearch { .. } => ApprovalRisk::High,
         ScheduledAction::LayerMount { .. } => ApprovalRisk::High,
         ScheduledAction::SessionContinue { .. } => ApprovalRisk::Standard,
         ScheduledAction::ProfileShare { .. } => ApprovalRisk::Standard,

@@ -44,11 +44,17 @@ impl BwrapIsolationOverrides {
         let share_net = caps
             .iter()
             .any(|cap| matches!(cap, Capability::NetworkAccess { hosts } if !hosts.is_empty()));
-        Self { share_net, force_network_off: false }
+        Self {
+            share_net,
+            force_network_off: false,
+        }
     }
 
     pub fn promotion_gate_overrides() -> Self {
-        Self { share_net: false, force_network_off: true }
+        Self {
+            share_net: false,
+            force_network_off: true,
+        }
     }
 }
 
@@ -522,7 +528,11 @@ fn handle_sdk_client(
         .get("id")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let method = request
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let params = request
         .get("params")
         .and_then(|v| v.as_object())
@@ -534,7 +544,11 @@ fn handle_sdk_client(
         let _ = log_sdk_bridge_abuse(
             agent_dir,
             "rate_limited",
-            &format!("sdk bridge call '{}' exceeded rate limit of {}/sec", method, rate_limiter.rate_limit()),
+            &format!(
+                "sdk bridge call '{}' exceeded rate limit of {}/sec",
+                method,
+                rate_limiter.rate_limit()
+            ),
             seq,
         );
         let error_resp = serde_json::json!({
@@ -659,10 +673,12 @@ fn log_sdk_bridge_abuse(
         "abuse",
         violation,
         EntryStatus::Denied,
-        Some(crate::log_redaction::RedactedPayload::from_raw(serde_json::json!({
-            "detail": detail,
-            "violation": violation,
-        }))),
+        Some(crate::log_redaction::RedactedPayload::from_raw(
+            serde_json::json!({
+                "detail": detail,
+                "violation": violation,
+            }),
+        )),
     )
 }
 

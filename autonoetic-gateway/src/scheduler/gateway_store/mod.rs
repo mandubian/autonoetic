@@ -151,7 +151,10 @@ impl GatewayStore {
     /// Wire the gateway hook executor for [`autonoetic_types::hooks::HookEvent::PolicyDecision`].
     /// Safe to call once at daemon startup; tests that open the store directly leave this unset.
     pub fn set_policy_hook_executor(&self, exec: &Arc<crate::scheduler::hooks::HookExecutor>) {
-        let mut g = self.policy_hook_executor.lock().expect("policy_hook_executor mutex poisoned");
+        let mut g = self
+            .policy_hook_executor
+            .lock()
+            .expect("policy_hook_executor mutex poisoned");
         *g = Some(Arc::downgrade(exec));
     }
 
@@ -641,6 +644,36 @@ mod tests {
             answered_by: "test".to_string(),
         });
         assert!(unknown.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn answered_standalone_interaction_resume_claim_is_single_use() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let interaction = pending_interaction("ui-claim-1", true, vec![]);
+        store.create_user_interaction(&interaction)?;
+        store.answer_user_interaction(&UserInteractionAnswer {
+            interaction_id: "ui-claim-1".to_string(),
+            answer_option_id: None,
+            answer_text: Some("yes".to_string()),
+            answered_by: "test".to_string(),
+        })?;
+
+        let answered = store.get_answered_standalone_interactions()?;
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].interaction_id, "ui-claim-1");
+
+        assert!(store.try_claim_answered_standalone_interaction_resume("ui-claim-1")?);
+        assert!(!store.try_claim_answered_standalone_interaction_resume("ui-claim-1")?);
+        assert!(store.get_answered_standalone_interactions()?.is_empty());
+
+        store.release_answered_standalone_interaction_resume_claim("ui-claim-1")?;
+        let after_release = store.get_answered_standalone_interactions()?;
+        assert_eq!(after_release.len(), 1);
+        assert_eq!(after_release[0].interaction_id, "ui-claim-1");
 
         Ok(())
     }

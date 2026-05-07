@@ -37,7 +37,9 @@ fn test_manifest() -> AgentManifest {
             name: "revision.tester".to_string(),
             description: "test".to_string(),
         },
-        capabilities: vec![Capability::AgentRevision { patterns: vec!["*".to_string()] }],
+        capabilities: vec![Capability::AgentRevision {
+            patterns: vec!["*".to_string()],
+        }],
         llm_config: None,
         limits: None,
         background: None,
@@ -77,7 +79,9 @@ fn build_test_artifact(gw_dir: &std::path::Path) -> String {
     let content_store =
         autonoetic_gateway::runtime::content_store::ContentStore::new(gw_dir).unwrap();
     let h1 = content_store.write(skill_md.as_bytes()).unwrap();
-    content_store.register_name(session_id, "SKILL.md", &h1).unwrap();
+    content_store
+        .register_name(session_id, "SKILL.md", &h1)
+        .unwrap();
     let h2 = content_store.write(runtime_lock.as_bytes()).unwrap();
     content_store
         .register_name(session_id, "runtime.lock", &h2)
@@ -99,7 +103,10 @@ fn create_test_revision(
     temp: &tempfile::TempDir,
     gw_dir: &std::path::Path,
     store: &Arc<GatewayStore>,
-) -> (String, autonoetic_types::agent_revision::AgentRevisionRecord) {
+) -> (
+    String,
+    autonoetic_types::agent_revision::AgentRevisionRecord,
+) {
     let manifest = test_manifest();
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
     let registry = default_registry();
@@ -172,9 +179,7 @@ fn r11_auto_signature_verifies_against_gateway_key() {
 
     assert!(
         autonoetic_gateway::runtime::crypto::ManifestVerifier::verify(
-            &pub_bytes,
-            digest_hex,
-            sig_b64,
+            &pub_bytes, digest_hex, sig_b64,
         )
         .unwrap(),
         "auto-generated signature should verify against gateway public key"
@@ -224,9 +229,7 @@ fn r11_wrong_key_does_not_verify() {
 
     assert!(
         !autonoetic_gateway::runtime::crypto::ManifestVerifier::verify(
-            &wrong_pub,
-            digest_hex,
-            sig_b64,
+            &wrong_pub, digest_hex, sig_b64,
         )
         .unwrap(),
         "signature should not verify against a different gateway key"

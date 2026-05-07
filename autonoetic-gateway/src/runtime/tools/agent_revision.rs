@@ -362,7 +362,7 @@ fn parse_frontmatter_capabilities(
 }
 
 #[derive(Debug, Deserialize)]
- struct RevisionCreateArgs {
+struct RevisionCreateArgs {
     agent_id: String,
     artifact_id: String,
     #[serde(default, alias = "base_ref")]
@@ -563,7 +563,9 @@ fn create_revision_from_files(
     let revision_id = format!("rev_sha256:{}", revision_digest_hex);
     let content_digest = format!("sha256:{}", revision_digest_hex);
 
-    let (signature, signer_id) = match crate::runtime::crypto::GatewayIdentityKey::load_or_generate(gateway_dir) {
+    let (signature, signer_id) = match crate::runtime::crypto::GatewayIdentityKey::load_or_generate(
+        gateway_dir,
+    ) {
         Ok(key) => {
             let sig = key.sign(revision_digest_hex.as_bytes());
             let fp = format!("gateway:{}", key.fingerprint());

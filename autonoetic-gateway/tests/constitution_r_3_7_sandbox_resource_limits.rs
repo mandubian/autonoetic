@@ -43,14 +43,12 @@ fn r_3_7_driver_specific_profiles_are_mandatory() {
     let temp = tempdir().expect("tempdir");
     let agent_dir = temp.path().to_string_lossy().to_string();
 
-    let docker_err = match SandboxRunner::spawn_with_driver(
-        SandboxDriverKind::Docker,
-        &agent_dir,
-        "echo hello",
-    ) {
-        Ok(_) => panic!("docker driver must fail without explicit image/profile"),
-        Err(err) => err,
-    };
+    let docker_err =
+        match SandboxRunner::spawn_with_driver(SandboxDriverKind::Docker, &agent_dir, "echo hello")
+        {
+            Ok(_) => panic!("docker driver must fail without explicit image/profile"),
+            Err(err) => err,
+        };
     assert!(
         docker_err.to_string().contains(DOCKER_IMAGE_ENV),
         "expected missing docker profile env error, got: {docker_err}"

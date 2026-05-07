@@ -367,8 +367,7 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
 
 #[serial_test::serial]
 #[tokio::test]
-async fn test_manifest_io_returns_passes_without_explicit_output_policy() -> anyhow::Result<()>
-{
+async fn test_manifest_io_returns_passes_without_explicit_output_policy() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
 

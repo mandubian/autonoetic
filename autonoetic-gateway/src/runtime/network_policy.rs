@@ -28,7 +28,9 @@ impl NetworkPolicyViolation {
 }
 
 /// Load `metadata.autonoetic.remote_access` (or top-level `remote_access`) from SKILL.md.
-pub fn load_manifest_remote_access_declaration(agent_dir: &Path) -> Option<RemoteAccessDeclaration> {
+pub fn load_manifest_remote_access_declaration(
+    agent_dir: &Path,
+) -> Option<RemoteAccessDeclaration> {
     let skill_path = agent_dir.join("SKILL.md");
     let skill = std::fs::read_to_string(skill_path).ok()?;
     let frontmatter = skill.split("---").nth(1)?;
@@ -128,10 +130,11 @@ pub fn declaration_allows_target(
         return false;
     }
 
-    declaration
-        .targets
-        .iter()
-        .any(|target| candidates.iter().any(|candidate| target_matches(target, candidate)))
+    declaration.targets.iter().any(|target| {
+        candidates
+            .iter()
+            .any(|candidate| target_matches(target, candidate))
+    })
 }
 
 /// Enforce remote target declaration constraints for a concrete outbound request.
@@ -167,7 +170,8 @@ pub fn enforce_remote_target_policy(
         .capabilities
         .iter()
         .any(|c| matches!(c, Capability::NetworkAccess { .. }));
-    if matches!(decl.approval_mode, RemoteAccessApprovalMode::Preapproved) && !has_network_capability
+    if matches!(decl.approval_mode, RemoteAccessApprovalMode::Preapproved)
+        && !has_network_capability
     {
         return Err(NetworkPolicyViolation::new(
             "remote_preapproval_requires_network_capability",
@@ -364,4 +368,3 @@ metadata:
         assert!(result.is_none());
     }
 }
-

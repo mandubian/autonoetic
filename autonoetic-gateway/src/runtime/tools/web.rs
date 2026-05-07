@@ -4,6 +4,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::network_policy::{self, DeclarationRequirement};
 use crate::runtime::tools::{block_on_http, extract_host, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::tagged;
 use serde::Deserialize;
@@ -41,6 +42,9 @@ struct WebSearchArgs {
     google_engine_id_env: Option<String>,
     #[serde(default)]
     cache_ttl_secs: Option<u64>,
+    /// Approval request ID from a previous approval-required response.
+    #[serde(default)]
+    approval_ref: Option<String>,
 }
 
 fn default_web_search_engine_url() -> String {
@@ -131,6 +135,128 @@ fn enforce_remote_target_for_web(
     )
     .map(|_| ())
     .map_err(network_policy_violation_to_anyhow)
+}
+
+fn resolve_approval_execution_context(
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    run_context: Option<&NativeToolRunContext>,
+    session_id: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let root_session_id = run_context
+        .map(|rc| rc.root_session_id.clone())
+        .or_else(|| {
+            if session_id.is_empty() {
+                None
+            } else {
+                Some(crate::runtime::content_store::root_session_id(session_id).to_string())
+            }
+        });
+
+    let workflow_id = run_context
+        .and_then(|rc| rc.workflow_id.clone())
+        .or_else(|| {
+            let (Some(cfg), Some(root_sid)) = (config, root_session_id.as_ref()) else {
+                return None;
+            };
+            crate::scheduler::resolve_workflow_id_for_root_session(cfg, root_sid)
+                .ok()
+                .flatten()
+        });
+
+    let task_id = run_context.and_then(|rc| rc.task_id.clone()).or_else(|| {
+        if session_id.is_empty() {
+            return None;
+        }
+        let (Some(cfg), Some(workflow)) = (config, workflow_id.as_ref()) else {
+            return None;
+        };
+        crate::scheduler::resolve_task_id_for_session(cfg, None, workflow, session_id)
+            .ok()
+            .flatten()
+    });
+
+    (root_session_id, workflow_id, task_id)
+}
+
+fn create_network_approval(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    manifest: &AgentManifest,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    run_context: Option<&NativeToolRunContext>,
+    session_id: Option<&str>,
+    action: ScheduledAction,
+    reason: String,
+) -> anyhow::Result<String> {
+    let sid = session_id.unwrap_or("");
+    let (root_session_id, workflow_id, task_id) =
+        resolve_approval_execution_context(config, run_context, sid);
+    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let mut req = ApprovalRequest {
+        request_id: request_id.clone(),
+        agent_id: manifest.agent.id.clone(),
+        session_id: sid.to_string(),
+        root_session_id,
+        workflow_id,
+        task_id,
+        action: action.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        reason: Some(reason),
+        evidence_ref: None,
+        decision_reason: None,
+        approval_level: config
+            .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
+            .unwrap_or(ApprovalLevel::Operator),
+        similar_to_request_id: None,
+        similarity_score: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+    };
+    store.create_approval(&mut req)?;
+    Ok(request_id)
+}
+
+fn validate_approval_ref_context(
+    approval: &ApprovalRequest,
+    manifest: &AgentManifest,
+    session_id: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        approval.agent_id == manifest.agent.id,
+        "approval_ref belongs to agent '{}' but current agent is '{}'",
+        approval.agent_id,
+        manifest.agent.id
+    );
+    let sid = session_id.ok_or_else(|| {
+        anyhow::anyhow!("approval_ref requires a session context but no session_id was provided")
+    })?;
+    let current_root = crate::runtime::content_store::root_session_id(sid);
+    let approved_root = approval
+        .root_session_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::runtime::content_store::root_session_id(&approval.session_id));
+    anyhow::ensure!(
+        approved_root == current_root,
+        "approval_ref belongs to root session '{}' but current root session is '{}'",
+        approved_root,
+        current_root
+    );
+    Ok(())
+}
+
+fn session_grants_allow_host(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    session_id: Option<&str>,
+    host: &str,
+) -> bool {
+    let Some(sid) = session_id else {
+        return false;
+    };
+    let root_sid = crate::runtime::content_store::root_session_id(sid);
+    store.session_grants_cover_targets(root_sid, &[host.to_string()])
 }
 
 fn resolve_duckduckgo_engine_url(args: &WebSearchArgs) -> String {
@@ -434,7 +560,7 @@ struct WebSearchResponse {
 
 fn execute_duckduckgo_search(
     manifest: &AgentManifest,
-    policy: &PolicyEngine,
+    _policy: &PolicyEngine,
     agent_dir: &Path,
     query: &str,
     engine_url: String,
@@ -443,14 +569,6 @@ fn execute_duckduckgo_search(
 ) -> anyhow::Result<WebSearchResponse> {
     let engine_host = extract_host(&engine_url)?;
     enforce_remote_target_for_web(manifest, agent_dir, &engine_host, &engine_url)?;
-    if !policy.can_connect_net(&engine_host).is_allowed() {
-        return Err(anyhow::Error::from(tagged::Tagged::permission(
-            anyhow::anyhow!(
-                "Permission Denied: NetworkAccess does not allow host '{}'",
-                engine_host
-            ),
-        )));
-    }
 
     let request_engine_url = engine_url.clone();
     let request_query = query.to_string();
@@ -520,7 +638,7 @@ fn execute_duckduckgo_search(
 
 fn execute_google_search(
     manifest: &AgentManifest,
-    policy: &PolicyEngine,
+    _policy: &PolicyEngine,
     agent_dir: &Path,
     query: &str,
     engine_url: String,
@@ -531,14 +649,6 @@ fn execute_google_search(
 ) -> anyhow::Result<WebSearchResponse> {
     let engine_host = extract_host(&engine_url)?;
     enforce_remote_target_for_web(manifest, agent_dir, &engine_host, &engine_url)?;
-    if !policy.can_connect_net(&engine_host).is_allowed() {
-        return Err(anyhow::Error::from(tagged::Tagged::permission(
-            anyhow::anyhow!(
-                "Permission Denied: NetworkAccess does not allow host '{}'",
-                engine_host
-            ),
-        )));
-    }
 
     let request_engine_url = engine_url.clone();
     let request_query = query.to_string();
@@ -666,7 +776,8 @@ impl NativeTool for WebSearchTool {
                     "google_engine_id": { "type": "string" },
                     "google_api_key_env": { "type": "string" },
                     "google_engine_id_env": { "type": "string" },
-                    "cache_ttl_secs": { "type": "integer", "minimum": 0, "maximum": 3600 }
+                    "cache_ttl_secs": { "type": "integer", "minimum": 0, "maximum": 3600 },
+                    "approval_ref": { "type": "string" }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -711,24 +822,224 @@ impl NativeTool for WebSearchTool {
             }
         }
 
+        let approved_host_override: Option<String> = if let (Some(approval_ref), Some(store)) =
+            (args.approval_ref.as_deref(), _gateway_store.as_ref())
+        {
+            let Some(approval) = store.get_approval(approval_ref)? else {
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("approval '{}'", approval_ref),
+                    Some(
+                        "The approval may not exist, may have expired, or may not yet be decided."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
+            };
+            validate_approval_ref_context(&approval, manifest, _session_id)?;
+            if approval.status != Some(autonoetic_types::background::ApprovalStatus::Approved) {
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("approval '{}'", approval_ref),
+                    Some(
+                        "The approval may not exist, may have expired, or may not yet be decided."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
+            }
+            match approval.action {
+                ScheduledAction::WebSearch {
+                    query: approved_query,
+                    provider,
+                    max_results,
+                    timeout_secs,
+                    engine_url,
+                    duckduckgo_engine_url,
+                    google_engine_url,
+                    google_engine_id,
+                    google_api_key_env,
+                    google_engine_id_env,
+                    cache_ttl_secs,
+                    detected_hosts,
+                    ..
+                } => {
+                    let args_query = args.query.trim();
+                    if approved_query == args_query
+                        && provider == args.provider
+                        && max_results == args.max_results
+                        && timeout_secs == args.timeout_secs
+                        && engine_url == args.engine_url
+                        && duckduckgo_engine_url == args.duckduckgo_engine_url
+                        && google_engine_url == args.google_engine_url
+                        && google_engine_id == args.google_engine_id
+                        && google_api_key_env == args.google_api_key_env
+                        && google_engine_id_env == args.google_engine_id_env
+                        && cache_ttl_secs == args.cache_ttl_secs
+                    {
+                        let host = detected_hosts
+                            .as_ref()
+                            .and_then(|hosts| hosts.first().cloned());
+                        Some(
+                            host.or_else(|| {
+                                let url = engine_url
+                                    .as_ref()
+                                    .or(duckduckgo_engine_url.as_ref())
+                                    .or(google_engine_url.as_ref())?;
+                                extract_host(url).ok()
+                            })
+                            .ok_or_else(|| {
+                                anyhow::Error::from(tagged::Tagged::validation(anyhow::anyhow!(
+                                    "approval_ref does not specify an engine host"
+                                )))
+                            })?,
+                        )
+                    } else {
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            "approval_ref does not match this web.search payload",
+                            Some(
+                                "Ensure all parameters match the original request that created the approval."
+                                    .to_string(),
+                            ),
+                        )
+                        .to_error_response());
+                    }
+                }
+                _ => {
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
+                        format!("approval_ref '{}' is not for web.search", approval_ref),
+                        Some(
+                            "Use the approval_ref from a web.search approval response.".to_string(),
+                        ),
+                    )
+                    .to_error_response());
+                }
+            }
+        } else {
+            None
+        };
+
+        let host_allowed = |host: &str| -> bool {
+            policy.can_connect_net(host).is_allowed()
+                || _gateway_store
+                    .as_ref()
+                    .is_some_and(|s| session_grants_allow_host(s.as_ref(), _session_id, host))
+                || approved_host_override.as_deref() == Some(host)
+        };
+
+        let mut maybe_suspend_for_engine = |provider: WebSearchProvider,
+                                            engine_url: &str,
+                                            max_results: usize|
+         -> anyhow::Result<Option<String>> {
+            let engine_host = extract_host(engine_url)?;
+            enforce_remote_target_for_web(manifest, agent_dir, &engine_host, engine_url)?;
+
+            if host_allowed(&engine_host) {
+                return Ok(None);
+            }
+
+            let Some(store) = _gateway_store.as_ref() else {
+                return Err(anyhow::Error::from(tagged::Tagged::permission(
+                    anyhow::anyhow!(
+                        "Permission Denied: NetworkAccess does not allow host '{}'",
+                        engine_host
+                    ),
+                )));
+            };
+            let Some(cfg) = _config else {
+                return Err(anyhow::Error::from(tagged::Tagged::permission(
+                    anyhow::anyhow!(
+                        "Permission Denied: NetworkAccess does not allow host '{}'",
+                        engine_host
+                    ),
+                )));
+            };
+
+            let action = ScheduledAction::WebSearch {
+                query: query.clone(),
+                provider: Some(provider.as_str().to_string()),
+                max_results: Some(max_results),
+                timeout_secs: Some(timeout_secs),
+                engine_url: Some(engine_url.to_string()),
+                duckduckgo_engine_url: None,
+                google_engine_url: None,
+                google_engine_id: args.google_engine_id.clone(),
+                google_api_key_env: args.google_api_key_env.clone(),
+                google_engine_id_env: args.google_engine_id_env.clone(),
+                cache_ttl_secs: args.cache_ttl_secs,
+                detected_hosts: Some(vec![engine_host.clone()]),
+                payload: Some(serde_json::json!({
+                    "host": engine_host.clone(),
+                    "retry_field": "approval_ref"
+                })),
+            };
+            let reason = format!("web.search to {} requires approval", engine_host);
+            let request_id = create_network_approval(
+                store.as_ref(),
+                manifest,
+                Some(cfg),
+                _run_context,
+                _session_id,
+                action,
+                reason.clone(),
+            )?;
+            Ok(Some(
+                serde_json::json!({
+                    "ok": false,
+                    "error_type": "permission",
+                    "message": format!(
+                        "Execution suspended pending operator approval ({}). Retry web.search with approval_ref after approval.",
+                        request_id
+                    ),
+                    "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                    "error": format!("Network access denied for host: {}", engine_host),
+                    "approval_required": true,
+                    "request_id": request_id,
+                    "suspended": true,
+                    "reason": reason,
+                    "approval": {
+                        "kind": "web_search",
+                        "summary": format!("web.search {}", engine_host),
+                        "reason": format!("web.search to {} requires approval", engine_host),
+                        "retry_field": "approval_ref"
+                    }
+                })
+                .to_string(),
+            ))
+        };
+
         let mut attempted_providers = Vec::new();
         let mut fallback_reason: Option<String> = None;
 
         let response = match requested_provider {
             WebSearchProvider::DuckDuckGo => {
                 attempted_providers.push(WebSearchProvider::DuckDuckGo.as_str().to_string());
+                let engine_url = resolve_duckduckgo_engine_url(&args);
+                if let Some(suspended) = maybe_suspend_for_engine(
+                    WebSearchProvider::DuckDuckGo,
+                    &engine_url,
+                    requested_max_results.clamp(1, 20),
+                )? {
+                    return Ok(suspended);
+                }
                 execute_duckduckgo_search(
                     manifest,
                     policy,
                     agent_dir,
                     &query,
-                    resolve_duckduckgo_engine_url(&args),
+                    engine_url,
                     requested_max_results.clamp(1, 20),
                     timeout_secs,
                 )?
             }
             WebSearchProvider::Google => {
                 attempted_providers.push(WebSearchProvider::Google.as_str().to_string());
+                let engine_url = resolve_google_engine_url(&args);
+                if let Some(suspended) = maybe_suspend_for_engine(
+                    WebSearchProvider::Google,
+                    &engine_url,
+                    requested_max_results.clamp(1, 10),
+                )? {
+                    return Ok(suspended);
+                }
                 let api_key = resolve_google_api_key(&args)?;
                 let engine_id = resolve_google_engine_id(&args)?;
                 execute_google_search(
@@ -736,7 +1047,7 @@ impl NativeTool for WebSearchTool {
                     policy,
                     agent_dir,
                     &query,
-                    resolve_google_engine_url(&args),
+                    engine_url,
                     api_key,
                     engine_id,
                     requested_max_results.clamp(1, 10),
@@ -756,58 +1067,132 @@ impl NativeTool for WebSearchTool {
                 match google_credentials {
                     Ok((api_key, engine_id)) => {
                         attempted_providers.push(WebSearchProvider::Google.as_str().to_string());
-                        match execute_google_search(
+                        // If google is blocked (remote_access or NetworkAccess), fall back to
+                        // duckduckgo without prompting.
+                        let google_engine_host = extract_host(&google_engine_url)?;
+                        let google_declared = enforce_remote_target_for_web(
                             manifest,
-                            policy,
                             agent_dir,
-                            &query,
-                            google_engine_url,
-                            api_key,
-                            engine_id,
-                            google_max_results,
-                            timeout_secs,
-                        ) {
-                            Ok(google_response) if !google_response.results.is_empty() => {
-                                google_response
+                            &google_engine_host,
+                            &google_engine_url,
+                        )
+                        .is_ok();
+                        if !google_declared {
+                            fallback_reason = Some(format!(
+                                "google provider blocked by remote_access for host {}",
+                                google_engine_host
+                            ));
+                            attempted_providers
+                                .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
+                            if let Some(suspended) = maybe_suspend_for_engine(
+                                WebSearchProvider::DuckDuckGo,
+                                &ddg_engine_url,
+                                ddg_max_results,
+                            )? {
+                                return Ok(suspended);
                             }
-                            Ok(_) => {
-                                fallback_reason = Some("google returned no results".to_string());
-                                attempted_providers
-                                    .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
-                                execute_duckduckgo_search(
-                                    manifest,
-                                    policy,
-                                    agent_dir,
-                                    &query,
-                                    ddg_engine_url,
-                                    ddg_max_results,
-                                    timeout_secs,
-                                )?
+                            execute_duckduckgo_search(
+                                manifest,
+                                policy,
+                                agent_dir,
+                                &query,
+                                ddg_engine_url,
+                                ddg_max_results,
+                                timeout_secs,
+                            )?
+                        } else if !host_allowed(&google_engine_host) {
+                            fallback_reason = Some(format!(
+                                "google provider blocked by NetworkAccess for host {}",
+                                google_engine_host
+                            ));
+                            attempted_providers
+                                .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
+                            if let Some(suspended) = maybe_suspend_for_engine(
+                                WebSearchProvider::DuckDuckGo,
+                                &ddg_engine_url,
+                                ddg_max_results,
+                            )? {
+                                return Ok(suspended);
                             }
-                            Err(google_err) => {
-                                let google_error_text = google_err.to_string();
-                                fallback_reason =
-                                    Some(format!("google provider failed: {google_error_text}"));
-                                attempted_providers
-                                    .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
-                                match execute_duckduckgo_search(
-                                    manifest,
-                                    policy,
-                                    agent_dir,
-                                    &query,
-                                    ddg_engine_url,
-                                    ddg_max_results,
-                                    timeout_secs,
-                                ) {
-                                    Ok(ddg_response) => ddg_response,
-                                    Err(ddg_err) => {
-                                        return Err(anyhow::Error::from(tagged::Tagged::resource(
+                            execute_duckduckgo_search(
+                                manifest,
+                                policy,
+                                agent_dir,
+                                &query,
+                                ddg_engine_url,
+                                ddg_max_results,
+                                timeout_secs,
+                            )?
+                        } else {
+                            match execute_google_search(
+                                manifest,
+                                policy,
+                                agent_dir,
+                                &query,
+                                google_engine_url,
+                                api_key,
+                                engine_id,
+                                google_max_results,
+                                timeout_secs,
+                            ) {
+                                Ok(google_response) if !google_response.results.is_empty() => {
+                                    google_response
+                                }
+                                Ok(_) => {
+                                    fallback_reason =
+                                        Some("google returned no results".to_string());
+                                    attempted_providers
+                                        .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
+                                    if let Some(suspended) = maybe_suspend_for_engine(
+                                        WebSearchProvider::DuckDuckGo,
+                                        &ddg_engine_url,
+                                        ddg_max_results,
+                                    )? {
+                                        return Ok(suspended);
+                                    }
+                                    execute_duckduckgo_search(
+                                        manifest,
+                                        policy,
+                                        agent_dir,
+                                        &query,
+                                        ddg_engine_url,
+                                        ddg_max_results,
+                                        timeout_secs,
+                                    )?
+                                }
+                                Err(google_err) => {
+                                    let google_error_text = google_err.to_string();
+                                    fallback_reason = Some(format!(
+                                        "google provider failed: {google_error_text}"
+                                    ));
+                                    attempted_providers
+                                        .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
+                                    if let Some(suspended) = maybe_suspend_for_engine(
+                                        WebSearchProvider::DuckDuckGo,
+                                        &ddg_engine_url,
+                                        ddg_max_results,
+                                    )? {
+                                        return Ok(suspended);
+                                    }
+                                    match execute_duckduckgo_search(
+                                        manifest,
+                                        policy,
+                                        agent_dir,
+                                        &query,
+                                        ddg_engine_url,
+                                        ddg_max_results,
+                                        timeout_secs,
+                                    ) {
+                                        Ok(ddg_response) => ddg_response,
+                                        Err(ddg_err) => {
+                                            return Err(anyhow::Error::from(tagged::Tagged::resource(
                                             anyhow::anyhow!(
                                                 "web.search auto provider failed: google error: {}; duckduckgo error: {}",
                                                 google_error_text,
                                                 ddg_err
                                             ),
                                         )));
+                                        }
                                     }
                                 }
                             }
@@ -818,6 +1203,13 @@ impl NativeTool for WebSearchTool {
                             Some("google credentials unavailable; used duckduckgo".to_string());
                         attempted_providers
                             .push(WebSearchProvider::DuckDuckGo.as_str().to_string());
+                        if let Some(suspended) = maybe_suspend_for_engine(
+                            WebSearchProvider::DuckDuckGo,
+                            &ddg_engine_url,
+                            ddg_max_results,
+                        )? {
+                            return Ok(suspended);
+                        }
                         execute_duckduckgo_search(
                             manifest,
                             policy,
@@ -856,6 +1248,9 @@ struct WebFetchArgs {
     timeout_secs: Option<u64>,
     #[serde(default)]
     max_chars: Option<usize>,
+    /// Approval request ID from a previous approval-required response.
+    #[serde(default)]
+    approval_ref: Option<String>,
 }
 
 pub struct WebFetchTool;
@@ -881,7 +1276,8 @@ impl NativeTool for WebFetchTool {
                 "properties": {
                     "url": { "type": "string" },
                     "timeout_secs": { "type": "integer", "minimum": 5, "maximum": 120 },
-                    "max_chars": { "type": "integer", "minimum": 512, "maximum": 200000 }
+                    "max_chars": { "type": "integer", "minimum": 512, "maximum": 200000 },
+                    "approval_ref": { "type": "string" }
                 },
                 "required": ["url"],
                 "additionalProperties": false
@@ -908,13 +1304,132 @@ impl NativeTool for WebFetchTool {
         anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
         let host = extract_host(&args.url)?;
         enforce_remote_target_for_web(manifest, agent_dir, &host, &args.url)?;
-        if !policy.can_connect_net(&host).is_allowed() {
-            return Err(anyhow::Error::from(tagged::Tagged::permission(
-                anyhow::anyhow!(
-                    "Permission Denied: NetworkAccess does not allow host '{}'",
-                    host
+        let approval_validated = if let (Some(approval_ref), Some(store)) =
+            (args.approval_ref.as_deref(), _gateway_store.as_ref())
+        {
+            let Some(approval) = store.get_approval(approval_ref)? else {
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("approval '{}'", approval_ref),
+                    Some(
+                        "The approval may not exist, may have expired, or may not yet be decided."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
+            };
+            validate_approval_ref_context(&approval, manifest, _session_id)?;
+            if approval.status != Some(autonoetic_types::background::ApprovalStatus::Approved) {
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("approval '{}'", approval_ref),
+                    Some(
+                        "The approval may not exist, may have expired, or may not yet be decided."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
+            }
+            match approval.action {
+                ScheduledAction::WebFetch {
+                    url,
+                    timeout_secs,
+                    max_chars,
+                    ..
+                } => {
+                    if url == args.url
+                        && timeout_secs == args.timeout_secs
+                        && max_chars == args.max_chars
+                    {
+                        true
+                    } else {
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            "approval_ref does not match this web.fetch payload",
+                            Some(
+                                "Ensure all parameters match the original request that created the approval."
+                                    .to_string(),
+                            ),
+                        )
+                        .to_error_response());
+                    }
+                }
+                _ => {
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
+                        format!("approval_ref '{}' is not for web.fetch", approval_ref),
+                        Some(
+                            "Use the approval_ref from a web.fetch approval response.".to_string(),
+                        ),
+                    )
+                    .to_error_response());
+                }
+            }
+        } else {
+            false
+        };
+
+        let host_allowed = policy.can_connect_net(&host).is_allowed()
+            || _gateway_store
+                .as_ref()
+                .is_some_and(|s| session_grants_allow_host(s.as_ref(), _session_id, &host))
+            || approval_validated;
+
+        if !host_allowed {
+            let Some(store) = _gateway_store else {
+                return Err(anyhow::Error::from(tagged::Tagged::permission(
+                    anyhow::anyhow!(
+                        "Permission Denied: NetworkAccess does not allow host '{}'",
+                        host
+                    ),
+                )));
+            };
+            let Some(cfg) = _config else {
+                return Err(anyhow::Error::from(tagged::Tagged::permission(
+                    anyhow::anyhow!(
+                        "Permission Denied: NetworkAccess does not allow host '{}'",
+                        host
+                    ),
+                )));
+            };
+
+            let action = ScheduledAction::WebFetch {
+                url: args.url.clone(),
+                timeout_secs: args.timeout_secs,
+                max_chars: args.max_chars,
+                detected_hosts: Some(vec![host.clone()]),
+                payload: Some(serde_json::json!({
+                    "host": host.clone(),
+                    "retry_field": "approval_ref"
+                })),
+            };
+            let reason = format!("web.fetch to {} requires approval", host);
+            let request_id = create_network_approval(
+                store.as_ref(),
+                manifest,
+                Some(cfg),
+                _run_context,
+                _session_id,
+                action,
+                reason.clone(),
+            )?;
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "permission",
+                "message": format!(
+                    "Execution suspended pending operator approval ({}). Retry web.fetch with approval_ref after approval.",
+                    request_id
                 ),
-            )));
+                "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                "error": format!("Network access denied for host: {}", host),
+                "approval_required": true,
+                "request_id": request_id,
+                "suspended": true,
+                "reason": reason,
+                "approval": {
+                    "kind": "web_fetch",
+                    "summary": format!("web.fetch {}", host),
+                    "reason": format!("web.fetch to {} requires approval", host),
+                    "retry_field": "approval_ref"
+                }
+            })
+            .to_string());
         }
 
         let timeout_secs = args.timeout_secs.unwrap_or(20).clamp(5, 120);
@@ -995,6 +1510,9 @@ struct WebCallArgs {
     timeout_secs: Option<u64>,
     #[serde(default)]
     max_chars: Option<usize>,
+    /// Approval request ID from a previous approval-required response.
+    #[serde(default)]
+    approval_ref: Option<String>,
 }
 
 pub struct WebCallTool;
@@ -1050,6 +1568,10 @@ impl NativeTool for WebCallTool {
                         "type": "integer",
                         "minimum": 512,
                         "maximum": 200000
+                    },
+                    "approval_ref": {
+                        "type": "string",
+                        "description": "Approval request ID from a previous approval-required response."
                     }
                 },
                 "required": ["url"],
@@ -1077,13 +1599,139 @@ impl NativeTool for WebCallTool {
         anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
         let host = extract_host(&args.url)?;
         enforce_remote_target_for_web(manifest, agent_dir, &host, &args.url)?;
-        if !policy.can_connect_net(&host).is_allowed() {
-            return Err(anyhow::Error::from(tagged::Tagged::permission(
-                anyhow::anyhow!(
-                    "Permission Denied: NetworkAccess does not allow host '{}'",
-                    host
+        let approval_validated = if let (Some(approval_ref), Some(store)) =
+            (args.approval_ref.as_deref(), _gateway_store.as_ref())
+        {
+            let Some(approval) = store.get_approval(approval_ref)? else {
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("approval '{}'", approval_ref),
+                    Some(
+                        "The approval may not exist, may have expired, or may not yet be decided."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
+            };
+            validate_approval_ref_context(&approval, manifest, _session_id)?;
+            if approval.status != Some(autonoetic_types::background::ApprovalStatus::Approved) {
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("approval '{}'", approval_ref),
+                    Some(
+                        "The approval may not exist, may have expired, or may not yet be decided."
+                            .to_string(),
+                    ),
+                )
+                .to_error_response());
+            }
+            match approval.action {
+                ScheduledAction::WebCall {
+                    url,
+                    method,
+                    headers,
+                    body,
+                    timeout_secs,
+                    max_chars,
+                    ..
+                } => {
+                    if url == args.url
+                        && method == args.method
+                        && headers == args.headers
+                        && body == args.body
+                        && timeout_secs == args.timeout_secs
+                        && max_chars == args.max_chars
+                    {
+                        true
+                    } else {
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            "approval_ref does not match this web.call payload",
+                            Some(
+                                "Ensure all parameters match the original request that created the approval."
+                                    .to_string(),
+                            ),
+                        )
+                        .to_error_response());
+                    }
+                }
+                _ => {
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
+                        format!("approval_ref '{}' is not for web.call", approval_ref),
+                        Some("Use the approval_ref from a web.call approval response.".to_string()),
+                    )
+                    .to_error_response());
+                }
+            }
+        } else {
+            false
+        };
+
+        let host_allowed = policy.can_connect_net(&host).is_allowed()
+            || _gateway_store
+                .as_ref()
+                .is_some_and(|s| session_grants_allow_host(s.as_ref(), _session_id, &host))
+            || approval_validated;
+
+        if !host_allowed {
+            let Some(store) = _gateway_store else {
+                return Err(anyhow::Error::from(tagged::Tagged::permission(
+                    anyhow::anyhow!(
+                        "Permission Denied: NetworkAccess does not allow host '{}'",
+                        host
+                    ),
+                )));
+            };
+            let Some(cfg) = _config else {
+                return Err(anyhow::Error::from(tagged::Tagged::permission(
+                    anyhow::anyhow!(
+                        "Permission Denied: NetworkAccess does not allow host '{}'",
+                        host
+                    ),
+                )));
+            };
+
+            let action = ScheduledAction::WebCall {
+                url: args.url.clone(),
+                method: args.method.clone(),
+                headers: args.headers.clone(),
+                body: args.body.clone(),
+                timeout_secs: args.timeout_secs,
+                max_chars: args.max_chars,
+                detected_hosts: Some(vec![host.clone()]),
+                payload: Some(serde_json::json!({
+                    "host": host.clone(),
+                    "retry_field": "approval_ref"
+                })),
+            };
+            let reason = format!("web.call to {} requires approval", host);
+            let request_id = create_network_approval(
+                store.as_ref(),
+                manifest,
+                Some(cfg),
+                _run_context,
+                _session_id,
+                action,
+                reason.clone(),
+            )?;
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "permission",
+                "message": format!(
+                    "Execution suspended pending operator approval ({}). Retry web.call with approval_ref after approval.",
+                    request_id
                 ),
-            )));
+                "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                "error": format!("Network access denied for host: {}", host),
+                "approval_required": true,
+                "request_id": request_id,
+                "suspended": true,
+                "reason": reason,
+                "approval": {
+                    "kind": "web_call",
+                    "summary": format!("web.call {}", host),
+                    "reason": format!("web.call to {} requires approval", host),
+                    "retry_field": "approval_ref"
+                }
+            })
+            .to_string());
         }
 
         let method = args

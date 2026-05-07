@@ -30,6 +30,7 @@ use autonoetic_gateway::router::{
     JsonRpcRequest as GatewayJsonRpcRequest, JsonRpcResponse as GatewayJsonRpcResponse,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use autonoetic_types::agent::LlmExchangeUsage;
 use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction, UserInteraction};
 use autonoetic_types::config::GatewayConfig;
 
@@ -260,6 +261,9 @@ struct App {
     prompt_history_draft: Option<String>,
     /// If set, the next submitted line is handled as structured input instead of chat.
     pending_prompt: Option<PendingPrompt>,
+    /// Latest prompt footprint from the gateway: largest `input_tokens` among `llm_usage` entries
+    /// for the last completed `event.ingest` (sync) response.
+    last_llm_context: Option<LlmExchangeUsage>,
 }
 
 impl App {
@@ -303,6 +307,7 @@ impl App {
             prompt_history_scroll_back: None,
             prompt_history_draft: None,
             pending_prompt: None,
+            last_llm_context: None,
         }
     }
 
@@ -1668,6 +1673,39 @@ fn extract_structured_approval(text: &str) -> Option<StructuredApprovalView> {
 // Drawing
 // ============================================================================
 
+/// Compact token counts for the narrow right pane (width ~42).
+fn format_tokens_compact(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 100_000 {
+        format!("{:.0}k", n as f64 / 1000.0)
+    } else if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else if n >= 1_000 {
+        format!("{:.2}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Prefer the completion with the largest `input_tokens` in `llm_usage` so the pane reflects peak prompt size for that ingest.
+fn pick_peak_llm_usage_from_result(result: &serde_json::Value) -> Option<LlmExchangeUsage> {
+    let arr = result.get("llm_usage")?.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut best: Option<LlmExchangeUsage> = None;
+    for v in arr {
+        let u: LlmExchangeUsage = serde_json::from_value(v.clone()).ok()?;
+        best = Some(match best {
+            None => u,
+            Some(prev) if u.input_tokens > prev.input_tokens => u,
+            Some(prev) => prev,
+        });
+    }
+    best
+}
+
 struct ChatLayout {
     status: Rect,
     separator: Rect,
@@ -1805,8 +1843,74 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
         Line::raw(format!("follow: {}", if app.follow_output { "on" } else { "off" })),
         Line::raw(format!("paused: {}", if app.session_paused { "yes" } else { "no" })),
         Line::raw(""),
-        Line::from(Span::styled("Active Agents", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "LLM context",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
     ];
+
+    match &app.last_llm_context {
+        None => {
+            lines.push(Line::raw("(after first reply)"));
+        }
+        Some(u) => {
+            let model = if u.model.len() > 22 {
+                format!("{}…", &u.model[..22])
+            } else {
+                u.model.clone()
+            };
+            lines.push(Line::raw(model));
+            let in_s = format_tokens_compact(u.input_tokens);
+            let derived_pct = u.context_window_tokens.map(|w| {
+                if w == 0 {
+                    None
+                } else {
+                    Some((u.input_tokens as f64 / f64::from(w)) * 100.0)
+                }
+            });
+            let pct_for_style = u
+                .input_context_pct
+                .map(f64::from)
+                .or(derived_pct.flatten());
+            let (detail, pct_style) = match (u.context_window_tokens, u.input_context_pct) {
+                (Some(w), Some(p)) => {
+                    let w_s = format_tokens_compact(u64::from(w));
+                    (
+                        format!("{}/{} tok · {:.0}%", in_s, w_s, f64::from(p)),
+                        match f64::from(p) {
+                            x if x >= 95.0 => Style::default().fg(Color::Red),
+                            x if x >= 80.0 => Style::default().fg(Color::Yellow),
+                            _ => Style::default(),
+                        },
+                    )
+                }
+                (Some(w), None) => {
+                    let w_s = format_tokens_compact(u64::from(w));
+                    let body = if let Some(p) = derived_pct.flatten() {
+                        format!("{}/{} tok · {:.0}%", in_s, w_s, p)
+                    } else {
+                        format!("{}/{} tok", in_s, w_s)
+                    };
+                    let style = match pct_for_style {
+                        Some(x) if x >= 95.0 => Style::default().fg(Color::Red),
+                        Some(x) if x >= 80.0 => Style::default().fg(Color::Yellow),
+                        _ => Style::default(),
+                    };
+                    (body, style)
+                }
+                _ => (
+                    format!("prompt {} tok · max n/a", in_s),
+                    Style::default(),
+                ),
+            };
+            lines.push(Line::from(Span::styled(detail, pct_style)));
+        }
+    }
+
+    lines.extend([
+        Line::raw(""),
+        Line::from(Span::styled("Active Agents", Style::default().add_modifier(Modifier::BOLD))),
+    ]);
 
     let mut active_count = 0usize;
     for task in app.live_tasks.iter().filter(|t| {
@@ -2407,6 +2511,12 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     // Channel for sending messages from TUI to gateway
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
 
+    // When the user answers a `user_ask` via the TUI, resume runs in a background task (no
+    // `event.ingest` JSON-RPC round-trip). Notify the UI loop when that work finishes so we can
+    // clear the same `Working...` pending row used for normal chat sends.
+    let (interaction_resume_tx, mut interaction_resume_rx) =
+        tokio::sync::mpsc::unbounded_channel::<u64>();
+
     // Shared shutdown flag — set by Ctrl+C handler, checked by all loops
     let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
 
@@ -2507,6 +2617,8 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
             &mut signal_interval,
             &shutdown,
             &jsonrpc_auth_token,
+            interaction_resume_tx.clone(),
+            &mut interaction_resume_rx,
         )
         .await?;
 
@@ -2563,6 +2675,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
     signal_interval: &mut tokio::time::Interval,
     shutdown: &std::sync::Arc<tokio::sync::Notify>,
     jsonrpc_auth_token: &str,
+    interaction_resume_tx: tokio::sync::mpsc::UnboundedSender<u64>,
+    interaction_resume_rx: &mut tokio::sync::mpsc::UnboundedReceiver<u64>,
 ) -> anyhow::Result<bool> {
     let mut needs_redraw = true;
     let mut last_spinner_tick = Instant::now();
@@ -2611,6 +2725,12 @@ async fn run_loop<B: ratatui::backend::Backend>(
                 }
             }
 
+            // Background `answer_and_orchestrate_resume` finished (user answered `user_ask` in TUI)
+            Some(done_pending_id) = interaction_resume_rx.recv() => {
+                app.remove_pending(done_pending_id);
+                needs_redraw = true;
+            }
+
             // Gateway response
             result = gateway_lines.next_line() => {
                 match result {
@@ -2631,6 +2751,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     app.add_message(MessageRole::System, format!("Error: {}", error.message));
                                 } else {
                                     let result_json = resp.result.as_ref();
+                                    if let Some(v) = result_json {
+                                        if let Some(usage) = pick_peak_llm_usage_from_result(v) {
+                                            app.last_llm_context = Some(usage);
+                                        }
+                                    }
                                     let reply = result_json
                                         .and_then(|v| v.get("assistant_reply").and_then(|r| r.as_str().map(ToOwned::to_owned)))
                                         .unwrap_or_else(|| "[No response]".to_string());
@@ -2718,6 +2843,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                 if let Some((id, message)) = msg {
                     // Pending user.ask: gateway-owned answer + resume (workflow Runnable or session checkpoint).
                     let mut skip_chat_ingest = false;
+                    let mut defer_pending_clear_for_interaction_resume = false;
                     if let (Some(store), Some(exec)) = (gateway_store, execution_for_interactions) {
                         if let Ok(mut pending) =
                             list_pending_user_interactions_for_terminal_session(store, &app.session_id)
@@ -2761,6 +2887,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     let interaction_id_for_task = interaction.interaction_id.clone();
                                     let exec = std::sync::Arc::clone(exec);
                                     let answer_text = message.clone();
+                                    let resume_notify = interaction_resume_tx.clone();
+                                    let pending_row_id = id;
                                     tokio::spawn(async move {
                                         let result = answer_and_orchestrate_resume(
                                             &exec,
@@ -2781,6 +2909,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 "Background interaction answer orchestration failed"
                                             );
                                         }
+                                        let _ = resume_notify.send(pending_row_id);
                                     });
                                     app.add_message(
                                         MessageRole::System,
@@ -2790,16 +2919,19 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         ),
                                     );
                                     skip_chat_ingest = true;
+                                    defer_pending_clear_for_interaction_resume = true;
                                 }
                             }
                         }
                     }
 
                     if skip_chat_ingest {
-                        // We answered the interaction in-process and intentionally skipped
-                        // sending `event.ingest`, so clear the in-flight request marker
-                        // created when the user pressed Enter.
-                        app.remove_pending(id);
+                        // We skipped `event.ingest` (interaction answer path or validation error).
+                        // For a background resume, keep `Working...` until orchestration finishes
+                        // (see `interaction_resume_rx` branch).
+                        if !defer_pending_clear_for_interaction_resume {
+                            app.remove_pending(id);
+                        }
                         needs_redraw = true;
                         continue;
                     }

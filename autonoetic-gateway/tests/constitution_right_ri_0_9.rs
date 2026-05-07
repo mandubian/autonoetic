@@ -21,7 +21,11 @@ use autonoetic_types::config::GatewayConfig;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-fn setup() -> (GatewayConfig, Arc<GatewayStore>, Arc<GatewayExecutionService>) {
+fn setup() -> (
+    GatewayConfig,
+    Arc<GatewayStore>,
+    Arc<GatewayExecutionService>,
+) {
     let temp = tempdir().unwrap();
     let agents_dir = temp.keep().join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -33,7 +37,10 @@ fn setup() -> (GatewayConfig, Arc<GatewayStore>, Arc<GatewayExecutionService>) {
         ..GatewayConfig::default()
     };
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
     (config, store, execution)
 }
 
@@ -97,11 +104,15 @@ async fn ri_0_9_degrade_notifies_where_practical() {
         "Ri-0.9 notice should enqueue one last-word message"
     );
     assert!(
-        pending_messages[0].message.contains("Gateway Notice Ri-0.9"),
+        pending_messages[0]
+            .message
+            .contains("Gateway Notice Ri-0.9"),
         "queued message should be an Ri-0.9 notice"
     );
 
-    let events = store.search_causal_events(Some(session_id), None, 64).unwrap();
+    let events = store
+        .search_causal_events(Some(session_id), None, 64)
+        .unwrap();
     let notice = events
         .iter()
         .find(|e| e.action == "session.last_word_notice")
@@ -132,7 +143,9 @@ async fn ri_0_9_degrade_can_foreclose_when_not_practical() {
         "foreclosed path must not enqueue a last-word notice"
     );
 
-    let events = store.search_causal_events(Some(session_id), None, 64).unwrap();
+    let events = store
+        .search_causal_events(Some(session_id), None, 64)
+        .unwrap();
     let foreclosed = events
         .iter()
         .find(|e| e.action == "session.last_word_foreclosed")
@@ -170,7 +183,9 @@ async fn ri_0_9_emergency_stop_explicit_where_practical_flag() {
         "where_practical=true should enqueue a last-word notice before stop"
     );
     assert!(
-        pending_messages[0].message.contains("Trigger: emergency_stop"),
+        pending_messages[0]
+            .message
+            .contains("Trigger: emergency_stop"),
         "message should identify emergency_stop trigger"
     );
 
@@ -315,7 +330,8 @@ async fn ri_0_9_records_last_word_response_after_notice_delivered_and_turn_compl
         "response should reference the Ri-0.9 notice message id"
     );
     assert_eq!(
-        body.get("assistant_reply_present").and_then(|v| v.as_bool()),
+        body.get("assistant_reply_present")
+            .and_then(|v| v.as_bool()),
         Some(true)
     );
     let preview = body

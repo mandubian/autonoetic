@@ -124,18 +124,9 @@ async fn ri_0_6_operator_clear_degradation_emits_causal_event() {
 #[test]
 fn ri_0_6_degraded_state_clamps_tool_tier_to_core_only() {
     let manifest = minimal_manifest();
-    let normal_filter = determine_tool_tier_filter(
-        &manifest,
-        None,
-        false,
-        SessionState::Normal,
-    );
-    let degraded_filter = determine_tool_tier_filter(
-        &manifest,
-        None,
-        false,
-        SessionState::Degraded,
-    );
+    let normal_filter = determine_tool_tier_filter(&manifest, None, false, SessionState::Normal);
+    let degraded_filter =
+        determine_tool_tier_filter(&manifest, None, false, SessionState::Degraded);
 
     assert!(
         normal_filter.allows("web_search"),
@@ -221,7 +212,8 @@ fn ri_0_12_all_yield_reasons_roundtrip() {
         );
     }
     assert_eq!(
-        reasons.len(), 10,
+        reasons.len(),
+        10,
         "YieldReason must have exactly 10 variants — update this test if adding one"
     );
 }
@@ -241,7 +233,9 @@ fn ri_0_12_terminal_vs_resumable_categorized() {
     let terminal = vec![
         YieldReason::MaxTurnsReached,
         YieldReason::BudgetExhausted,
-        YieldReason::EmergencyStop { stop_id: "t".to_string() },
+        YieldReason::EmergencyStop {
+            stop_id: "t".to_string(),
+        },
         YieldReason::ManualStop,
         YieldReason::Error("fatal".to_string()),
         YieldReason::ParentTerminated {
@@ -251,9 +245,15 @@ fn ri_0_12_terminal_vs_resumable_categorized() {
     ];
     let resumable = vec![
         YieldReason::Hibernation,
-        YieldReason::ApprovalRequired { approval_request_id: "a".to_string() },
-        YieldReason::UserInputRequired { interaction_id: "u".to_string() },
-        YieldReason::HumanEscalation { escalation_request_id: "h".to_string() },
+        YieldReason::ApprovalRequired {
+            approval_request_id: "a".to_string(),
+        },
+        YieldReason::UserInputRequired {
+            interaction_id: "u".to_string(),
+        },
+        YieldReason::HumanEscalation {
+            escalation_request_id: "h".to_string(),
+        },
     ];
 
     assert_eq!(
@@ -282,8 +282,19 @@ fn ri_0_12_each_terminal_reason_has_correct_tag() {
         (YieldReason::MaxTurnsReached, "max_turns_reached"),
         (YieldReason::BudgetExhausted, "budget_exhausted"),
         (YieldReason::ManualStop, "manual_stop"),
-        (YieldReason::EmergencyStop { stop_id: "t".to_string() }, "emergency_stop"),
-        (YieldReason::ParentTerminated { parent_session_id: "p".to_string(), reason: "r".to_string() }, "parent_terminated"),
+        (
+            YieldReason::EmergencyStop {
+                stop_id: "t".to_string(),
+            },
+            "emergency_stop",
+        ),
+        (
+            YieldReason::ParentTerminated {
+                parent_session_id: "p".to_string(),
+                reason: "r".to_string(),
+            },
+            "parent_terminated",
+        ),
     ];
     for (reason, expected_tag) in &cases {
         let json = serde_json::to_string(reason).unwrap();
@@ -300,9 +311,24 @@ fn ri_0_12_each_terminal_reason_has_correct_tag() {
 fn ri_0_12_each_resumable_reason_has_correct_tag() {
     let cases = vec![
         (YieldReason::Hibernation, "hibernation"),
-        (YieldReason::ApprovalRequired { approval_request_id: "a".to_string() }, "approval_required"),
-        (YieldReason::UserInputRequired { interaction_id: "u".to_string() }, "user_input_required"),
-        (YieldReason::HumanEscalation { escalation_request_id: "h".to_string() }, "human_escalation"),
+        (
+            YieldReason::ApprovalRequired {
+                approval_request_id: "a".to_string(),
+            },
+            "approval_required",
+        ),
+        (
+            YieldReason::UserInputRequired {
+                interaction_id: "u".to_string(),
+            },
+            "user_input_required",
+        ),
+        (
+            YieldReason::HumanEscalation {
+                escalation_request_id: "h".to_string(),
+            },
+            "human_escalation",
+        ),
     ];
     for (reason, expected_tag) in &cases {
         let json = serde_json::to_string(reason).unwrap();

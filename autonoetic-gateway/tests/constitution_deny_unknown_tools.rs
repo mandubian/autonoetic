@@ -90,10 +90,7 @@ fn r_plus_14_unknown_tool_name_denied() {
     let manifest = manifest_with_sandbox(vec!["web."]);
     let policy = PolicyEngine::new(manifest);
     let decision = policy.can_invoke_tool("totally_bogus_tool_xyz");
-    assert!(
-        !decision.is_allowed(),
-        "unknown tool name must be denied"
-    );
+    assert!(!decision.is_allowed(), "unknown tool name must be denied");
     assert!(
         decision.enforced_rules.contains(&"R-1.1"),
         "denial must cite rule R-1.1"

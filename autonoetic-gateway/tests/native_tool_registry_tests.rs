@@ -1,7 +1,9 @@
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
+use autonoetic_gateway::scheduler::approval::approve_request;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use std::io::{Read, Write};
@@ -344,6 +346,140 @@ fn test_web_fetch_tool_denied_by_netconnect_policy() {
 }
 
 #[test]
+fn test_web_fetch_denied_by_netconnect_mints_approval_and_grant_allows_retry() {
+    let manifest = test_manifest(vec![Capability::NetworkAccess { hosts: vec![] }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let temp = tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    let agents_dir = temp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+    let agent_dir = agents_dir.join(&manifest.agent.id);
+    std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
+    write_remote_access_any(&agent_dir);
+
+    let gateway_store =
+        Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
+    let mut config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+    config.approval_dwell_multiplier = 0.0;
+
+    // First call: host is not allowed by NetworkAccess → approval required.
+    let first_args = serde_json::json!({
+        "url": "http://127.0.0.1:65535/needs-approval"
+    });
+    let first = registry
+        .execute(
+            "web_fetch",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &first_args.to_string(),
+            Some("root-test"),
+            None,
+            Some(&config),
+            Some(Arc::clone(&gateway_store)),
+            None,
+        )
+        .expect("web.fetch should return approval-required payload");
+
+    let parsed: serde_json::Value = serde_json::from_str(&first).expect("json should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(
+        parsed.get("approval_required"),
+        Some(&serde_json::json!(true))
+    );
+    let request_id = parsed
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .expect("request_id present")
+        .to_string();
+    assert!(
+        request_id.starts_with("apr-"),
+        "request_id must look like an approval id: {}",
+        request_id
+    );
+
+    let row = gateway_store
+        .get_approval(&request_id)
+        .expect("get_approval should succeed")
+        .expect("approval row should exist");
+    match row.action {
+        ScheduledAction::WebFetch {
+            url,
+            detected_hosts,
+            ..
+        } => {
+            assert_eq!(url, "http://127.0.0.1:65535/needs-approval");
+            let hosts = detected_hosts.expect("detected_hosts should be set");
+            assert!(hosts.contains(&"127.0.0.1".to_string()));
+        }
+        other => panic!("unexpected approval action: {:?}", other),
+    }
+
+    // Approve: should insert a session grant for 127.0.0.1
+    approve_request(
+        &config,
+        Some(gateway_store.as_ref()),
+        &request_id,
+        "tester",
+        Some("ok".to_string()),
+        None,
+        None,
+        None,
+    )
+    .expect("approval should succeed");
+
+    assert!(
+        gateway_store.session_grants_cover_targets("root-test", &[String::from("127.0.0.1")]),
+        "approval should create a session grant for 127.0.0.1"
+    );
+
+    // Retry (new URL, same host): should now succeed because the session grant covers 127.0.0.1.
+    let (base_url, handle) = spawn_one_shot_http_server(
+        "200 OK",
+        "text/plain; charset=utf-8",
+        "hello after approval".to_string(),
+    );
+    let retry_args = serde_json::json!({
+        "url": format!("{}/doc", base_url),
+        "timeout_secs": 10,
+        "max_chars": 4096
+    });
+    let retry = registry
+        .execute(
+            "web_fetch",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &retry_args.to_string(),
+            Some("root-test"),
+            None,
+            Some(&config),
+            Some(gateway_store),
+            None,
+        )
+        .expect("web.fetch should succeed after approval grant");
+
+    let retry_parsed: serde_json::Value =
+        serde_json::from_str(&retry).expect("retry response should decode");
+    assert_eq!(retry_parsed.get("ok"), Some(&serde_json::json!(true)));
+    assert!(retry_parsed
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .contains("hello after approval"));
+
+    handle.join().expect("server thread should join");
+}
+
+#[test]
 fn test_web_search_tool_denied_by_netconnect_policy() {
     let manifest = test_manifest(vec![Capability::NetworkAccess {
         hosts: vec!["example.com".to_string()],
@@ -374,6 +510,133 @@ fn test_web_search_tool_denied_by_netconnect_policy() {
         )
         .expect_err("web.search should be denied");
     assert!(err.to_string().contains("NetworkAccess"));
+}
+
+#[test]
+fn test_web_call_denied_by_netconnect_mints_approval_when_store_config_present() {
+    let manifest = test_manifest(vec![Capability::NetworkAccess { hosts: vec![] }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let temp = tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    let agents_dir = temp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+    let agent_dir = agents_dir.join(&manifest.agent.id);
+    std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
+    write_remote_access_any(&agent_dir);
+
+    let gateway_store =
+        Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
+    let mut config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+    config.approval_dwell_multiplier = 0.0;
+
+    let args = serde_json::json!({
+        "url": "http://127.0.0.1:65535/forbidden",
+        "method": "GET"
+    });
+    let result = registry
+        .execute(
+            "web_call",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            Some("root-test"),
+            None,
+            Some(&config),
+            Some(Arc::clone(&gateway_store)),
+            None,
+        )
+        .expect("web.call should return approval-required payload");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("json should decode");
+    assert_eq!(
+        parsed.get("approval_required"),
+        Some(&serde_json::json!(true))
+    );
+    let request_id = parsed["request_id"]
+        .as_str()
+        .expect("request_id")
+        .to_string();
+    let row = gateway_store
+        .get_approval(&request_id)
+        .expect("get_approval should succeed")
+        .expect("approval row should exist");
+    assert!(
+        matches!(row.action, ScheduledAction::WebCall { .. }),
+        "expected WebCall action, got: {:?}",
+        row.action
+    );
+}
+
+#[test]
+fn test_web_search_denied_by_netconnect_mints_approval_when_store_config_present() {
+    let manifest = test_manifest(vec![Capability::NetworkAccess { hosts: vec![] }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let temp = tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    let agents_dir = temp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+    let agent_dir = agents_dir.join(&manifest.agent.id);
+    std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
+    write_remote_access_any(&agent_dir);
+
+    let gateway_store =
+        Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
+    let mut config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+    config.approval_dwell_multiplier = 0.0;
+
+    let args = serde_json::json!({
+        "query": "rust",
+        "provider": "duckduckgo",
+        "engine_url": "http://127.0.0.1:65535/search"
+    });
+    let result = registry
+        .execute(
+            "web_search",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            Some("root-test"),
+            None,
+            Some(&config),
+            Some(Arc::clone(&gateway_store)),
+            None,
+        )
+        .expect("web.search should return approval-required payload");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("json should decode");
+    assert_eq!(
+        parsed.get("approval_required"),
+        Some(&serde_json::json!(true))
+    );
+    let request_id = parsed["request_id"]
+        .as_str()
+        .expect("request_id")
+        .to_string();
+    let row = gateway_store
+        .get_approval(&request_id)
+        .expect("get_approval should succeed")
+        .expect("approval row should exist");
+    assert!(
+        matches!(row.action, ScheduledAction::WebSearch { .. }),
+        "expected WebSearch action, got: {:?}",
+        row.action
+    );
 }
 
 #[test]

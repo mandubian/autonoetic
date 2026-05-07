@@ -24,11 +24,7 @@ fn make_transcript(
         revision_id: None,
         user_id: None,
         started_at: now.clone(),
-        ended_at: if status != "active" {
-            Some(now)
-        } else {
-            None
-        },
+        ended_at: if status != "active" { Some(now) } else { None },
         status: status.to_string(),
         turn_count: 0,
         transcript_handle: None,
@@ -50,19 +46,32 @@ async fn orphan_reaper_cancels_child_when_parent_ends() {
     let child_id = "root-session-001/planner.default-abcd1234/coder.default-efgh5678";
 
     store
-        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "completed"))
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "completed",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(parent_id, root_id, "planner.default", "failed"))
+        .upsert_session_transcript(&make_transcript(
+            parent_id,
+            root_id,
+            "planner.default",
+            "failed",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(child_id, root_id, "coder.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            child_id,
+            root_id,
+            "coder.default",
+            "active",
+        ))
         .unwrap();
 
     let config = ws.gateway_config();
-    let execution = std::sync::Arc::new(
-        GatewayExecutionService::new(config, Some(store.clone())),
-    );
+    let execution = std::sync::Arc::new(GatewayExecutionService::new(config, Some(store.clone())));
 
     reap_orphaned_sessions(execution)
         .await
@@ -105,19 +114,32 @@ async fn orphan_reaper_ignores_active_parent() {
     let child_id = "root-session-002/planner.default-aaaa1111/coder.default-bbbb2222";
 
     store
-        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "active",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(parent_id, root_id, "planner.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            parent_id,
+            root_id,
+            "planner.default",
+            "active",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(child_id, root_id, "coder.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            child_id,
+            root_id,
+            "coder.default",
+            "active",
+        ))
         .unwrap();
 
     let config = ws.gateway_config();
-    let execution = std::sync::Arc::new(
-        GatewayExecutionService::new(config, Some(store.clone())),
-    );
+    let execution = std::sync::Arc::new(GatewayExecutionService::new(config, Some(store.clone())));
 
     reap_orphaned_sessions(execution)
         .await
@@ -157,22 +179,40 @@ async fn orphan_reaper_handles_multiple_orphans() {
     let child2_id = "root-session-003/planner.default-cccc3333/researcher.default-eeee5555";
 
     store
-        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "completed"))
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "completed",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(parent_id, root_id, "planner.default", "completed"))
+        .upsert_session_transcript(&make_transcript(
+            parent_id,
+            root_id,
+            "planner.default",
+            "completed",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(child1_id, root_id, "coder.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            child1_id,
+            root_id,
+            "coder.default",
+            "active",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(child2_id, root_id, "researcher.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            child2_id,
+            root_id,
+            "researcher.default",
+            "active",
+        ))
         .unwrap();
 
     let config = ws.gateway_config();
-    let execution = std::sync::Arc::new(
-        GatewayExecutionService::new(config, Some(store.clone())),
-    );
+    let execution = std::sync::Arc::new(GatewayExecutionService::new(config, Some(store.clone())));
 
     reap_orphaned_sessions(execution)
         .await
@@ -204,19 +244,32 @@ async fn orphan_reaper_does_not_reap_suspended_parent() {
     let child_id = "root-session-004/planner.default-ffff6666/coder.default-gggg7777";
 
     store
-        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "active",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(parent_id, root_id, "planner.default", "suspended"))
+        .upsert_session_transcript(&make_transcript(
+            parent_id,
+            root_id,
+            "planner.default",
+            "suspended",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(child_id, root_id, "coder.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            child_id,
+            root_id,
+            "coder.default",
+            "active",
+        ))
         .unwrap();
 
     let config = ws.gateway_config();
-    let execution = std::sync::Arc::new(
-        GatewayExecutionService::new(config, Some(store.clone())),
-    );
+    let execution = std::sync::Arc::new(GatewayExecutionService::new(config, Some(store.clone())));
 
     reap_orphaned_sessions(execution)
         .await

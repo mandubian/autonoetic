@@ -221,11 +221,13 @@ pub fn approve_request_with_options(
         };
         let effective_dwell = (min_dwell_ms as f64 * multiplier) as i64;
         if effective_dwell > 0 {
-            let created = chrono::DateTime::parse_from_rfc3339(&req.created_at)
-                .map_err(|e| anyhow::anyhow!(
+            let created = chrono::DateTime::parse_from_rfc3339(&req.created_at).map_err(|e| {
+                anyhow::anyhow!(
                     "R++4: Cannot parse created_at '{}' for dwell-time check: {}",
-                    req.created_at, e
-                ))?;
+                    req.created_at,
+                    e
+                )
+            })?;
             let elapsed_ms = chrono::Utc::now()
                 .signed_duration_since(created.with_timezone(&chrono::Utc))
                 .num_milliseconds();
@@ -1079,11 +1081,27 @@ fn decide_request_with_options(
     }
 
     if matches!(status, ApprovalStatus::Approved) {
-        if let ScheduledAction::SandboxExec {
-            detected_hosts: Some(ref hosts),
-            ..
-        } = decision.action
-        {
+        let hosts: Option<&Vec<String>> = match &decision.action {
+            ScheduledAction::SandboxExec {
+                detected_hosts: Some(hosts),
+                ..
+            } => Some(hosts),
+            ScheduledAction::WebFetch {
+                detected_hosts: Some(hosts),
+                ..
+            } => Some(hosts),
+            ScheduledAction::WebCall {
+                detected_hosts: Some(hosts),
+                ..
+            } => Some(hosts),
+            ScheduledAction::WebSearch {
+                detected_hosts: Some(hosts),
+                ..
+            } => Some(hosts),
+            _ => None,
+        };
+
+        if let Some(hosts) = hosts {
             if !hosts.is_empty() {
                 if let Some(root_sid) = &decision.root_session_id {
                     if let Some(store) = gateway_store {
@@ -1105,8 +1123,8 @@ fn decide_request_with_options(
                         let computed_expiry = if options.grant_expires_at.is_none()
                             && config.default_grant_ttl_secs > 0
                         {
-                            let ttl_secs = i64::try_from(config.default_grant_ttl_secs)
-                                .unwrap_or(i64::MAX);
+                            let ttl_secs =
+                                i64::try_from(config.default_grant_ttl_secs).unwrap_or(i64::MAX);
                             let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
                                 .map(|dt| dt.with_timezone(&chrono::Utc))
                                 .unwrap_or_else(|_| chrono::Utc::now());
@@ -1144,7 +1162,7 @@ fn decide_request_with_options(
                                 root_session_id = %root_sid,
                                 scope = %scope.as_str(),
                                 targets = ?targets,
-                                "Inserted session approval grants for approved sandbox exec"
+                                "Inserted session approval grants for approved network action"
                             );
                         }
                     }

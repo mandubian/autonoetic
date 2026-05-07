@@ -313,6 +313,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT interaction_id FROM user_interactions \
              WHERE status = 'answered' AND (workflow_id IS NULL OR workflow_id = '') \
+               AND resumed_at IS NULL \
              ORDER BY answered_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -328,6 +329,48 @@ impl GatewayStore {
             }
         }
         Ok(results)
+    }
+
+    pub fn try_claim_answered_standalone_interaction_resume(
+        &self,
+        interaction_id: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        anyhow::ensure!(
+            !interaction_id.trim().is_empty(),
+            "interaction_id must not be empty"
+        );
+        let claimed_at = chrono::Utc::now().to_rfc3339();
+        let changed = conn.execute(
+            "UPDATE user_interactions
+             SET resumed_at = ?1
+             WHERE interaction_id = ?2
+               AND status = 'answered'
+               AND (workflow_id IS NULL OR workflow_id = '')
+               AND resumed_at IS NULL",
+            params![claimed_at, interaction_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn release_answered_standalone_interaction_resume_claim(
+        &self,
+        interaction_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        anyhow::ensure!(
+            !interaction_id.trim().is_empty(),
+            "interaction_id must not be empty"
+        );
+        conn.execute(
+            "UPDATE user_interactions
+             SET resumed_at = NULL
+             WHERE interaction_id = ?1
+               AND status = 'answered'
+               AND (workflow_id IS NULL OR workflow_id = '')",
+            params![interaction_id],
+        )?;
+        Ok(())
     }
 
     pub fn list_user_interactions_for_session_trace(

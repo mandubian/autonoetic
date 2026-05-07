@@ -117,7 +117,8 @@ fn non_network_agent_remote_signal_without_declaration_fails_shut() -> anyhow::R
 }
 
 #[test]
-fn non_network_agent_without_remote_signal_is_not_blocked_by_declaration_gate() -> anyhow::Result<()> {
+fn non_network_agent_without_remote_signal_is_not_blocked_by_declaration_gate() -> anyhow::Result<()>
+{
     let manifest = manifest(
         "no-net.default",
         vec![Capability::CodeExecution {

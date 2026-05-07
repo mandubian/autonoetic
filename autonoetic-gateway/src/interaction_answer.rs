@@ -231,6 +231,18 @@ pub async fn answer_and_orchestrate_resume(
                 crate::scheduler::process_runnable_workflow_tasks(Arc::clone(execution)).await?;
             }
         }
+        // Async `agent_spawn` children are drained by `process_queued_workflow_tasks` (background
+        // tick). After an operator answers in chat, nudge the queue immediately so Pending tasks
+        // are not left waiting on the next tick (which may be delayed or skipped if a tick fails
+        // early while processing background agents).
+        if let Err(e) = crate::scheduler::process_queued_workflow_tasks(Arc::clone(execution)).await
+        {
+            tracing::warn!(
+                target: "workflow",
+                error = %e,
+                "Failed to process queued workflow tasks after workflow-bound interaction answer"
+            );
+        }
         return Ok(InteractionAnswerOutcome {
             interaction_id: params.interaction_id.clone(),
             answer_applied: true,
@@ -243,10 +255,43 @@ pub async fn answer_and_orchestrate_resume(
     }
 
     // Standalone session: drive checkpoint resume immediately.
+    if !store.try_claim_answered_standalone_interaction_resume(&params.interaction_id)? {
+        return Ok(InteractionAnswerOutcome {
+            interaction_id: params.interaction_id.clone(),
+            answer_applied: true,
+            resumed: false,
+            workflow_task_unblocked: false,
+            ambiguous: false,
+            ambiguous_candidates: vec![],
+            error: None,
+        });
+    }
+
     let default_follow = "[operator] User answered the pending question via interaction.answer.";
-    execution
+    if let Err(e) = execution
         .resume_from_user_interaction(&params.interaction_id, follow.or(Some(default_follow)))
-        .await?;
+        .await
+    {
+        if let Err(release_err) =
+            store.release_answered_standalone_interaction_resume_claim(&params.interaction_id)
+        {
+            tracing::warn!(
+                target: "scheduler",
+                interaction_id = %params.interaction_id,
+                error = %release_err,
+                "Failed to release standalone interaction resume claim after resume error"
+            );
+        }
+        return Err(e);
+    }
+
+    if let Err(e) = crate::scheduler::process_queued_workflow_tasks(Arc::clone(execution)).await {
+        tracing::warn!(
+            target: "workflow",
+            error = %e,
+            "Failed to process queued workflow tasks after standalone interaction resume"
+        );
+    }
 
     Ok(InteractionAnswerOutcome {
         interaction_id: params.interaction_id.clone(),

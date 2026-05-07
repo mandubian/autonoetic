@@ -4,7 +4,9 @@ use autonoetic_gateway::server::ofp::{
     hmac_sign, read_framed_message, start_ofp_server, write_framed_message,
 };
 use autonoetic_gateway::server::registry::PeerRegistry;
-use autonoetic_ofp::wire::{ConstitutionProfile, WireMessage, WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION};
+use autonoetic_ofp::wire::{
+    ConstitutionProfile, WireMessage, WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION,
+};
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::{
     FederationConstitutionConfig, FederationConstitutionMode, GatewayConfig,
@@ -16,8 +18,8 @@ use tokio::time::Duration;
 
 fn canonical_profile() -> ConstitutionProfile {
     ConstitutionProfile {
-        rules_enforcement: autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table(
-        ),
+        rules_enforcement:
+            autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table(),
         rights_enforcement:
             autonoetic_gateway::constitution_digest::canonical_right_enforcement_table(),
     }
@@ -177,7 +179,10 @@ async fn mismatched_digest_is_rejected_and_records_both_digests() {
             assert_eq!(code, 409);
             assert!(message.contains("constitutional_incompatibility"));
         }
-        other => panic!("expected constitutional incompatibility error, got {:?}", other),
+        other => panic!(
+            "expected constitutional incompatibility error, got {:?}",
+            other
+        ),
     }
 
     let events = gateway_store

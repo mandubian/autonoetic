@@ -825,7 +825,11 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match self.execution.clear_session_degradation(&params.session_id).await {
+                match self
+                    .execution
+                    .clear_session_degradation(&params.session_id)
+                    .await
+                {
                     Ok(v) => JsonRpcResponse::success(req.id, v),
                     Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
                 }

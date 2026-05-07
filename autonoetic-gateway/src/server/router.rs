@@ -4,17 +4,17 @@
 //! locally or transparently over OFP federation.
 
 use crate::server::ofp::{
-    compose_local_chain_attestation, emit_federation_message_event, evaluate_constitution_compatibility,
-    hmac_sign, hmac_verify, parse_ofp_response, sign_wire_message, verify_chain_attestation,
-    verify_wire_message, write_framed_message,
+    compose_local_chain_attestation, emit_federation_message_event,
+    evaluate_constitution_compatibility, hmac_sign, hmac_verify, parse_ofp_response,
+    sign_wire_message, verify_chain_attestation, verify_wire_message, write_framed_message,
 };
 use crate::server::registry::PeerRegistry;
 use autonoetic_ofp::wire::{
     RemoteAgentInfo, WireMessage, WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION,
 };
+use autonoetic_types::config::FederationConstitutionConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
-use autonoetic_types::config::FederationConstitutionConfig;
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 
@@ -129,8 +129,12 @@ impl MessageRouter {
                 }],
                 nonce,
                 auth_hmac,
-                constitution_digest: Some(crate::constitution_digest::constitution_digest().to_string()),
-                constitution_profile: Some(crate::constitution_digest::canonical_constitution_profile()),
+                constitution_digest: Some(
+                    crate::constitution_digest::constitution_digest().to_string(),
+                ),
+                constitution_profile: Some(
+                    crate::constitution_digest::canonical_constitution_profile(),
+                ),
                 extensions: Some(vec!["msg_hmac".into()]),
             }),
         };
@@ -146,31 +150,30 @@ impl MessageRouter {
             _ack_constitution_digest,
             ack_constitution_profile,
             ack_extensions,
-        ) =
-            match ack.kind {
-                WireMessageKind::Response(WireResponse::HandshakeAck {
-                    node_id,
-                    protocol_version,
-                    nonce,
-                    auth_hmac,
-                    constitution_digest,
-                    constitution_profile,
-                    extensions,
-                    ..
-                }) => (
-                    node_id,
-                    protocol_version,
-                    nonce,
-                    auth_hmac,
-                    constitution_digest,
-                    constitution_profile,
-                    extensions,
-                ),
-                WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
-                    anyhow::bail!("Handshake failed: [{}]: {}", code, message);
-                }
-                _ => anyhow::bail!("Expected HandshakeAck"),
-            };
+        ) = match ack.kind {
+            WireMessageKind::Response(WireResponse::HandshakeAck {
+                node_id,
+                protocol_version,
+                nonce,
+                auth_hmac,
+                constitution_digest,
+                constitution_profile,
+                extensions,
+                ..
+            }) => (
+                node_id,
+                protocol_version,
+                nonce,
+                auth_hmac,
+                constitution_digest,
+                constitution_profile,
+                extensions,
+            ),
+            WireMessageKind::Response(WireResponse::Error { code, message, .. }) => {
+                anyhow::bail!("Handshake failed: [{}]: {}", code, message);
+            }
+            _ => anyhow::bail!("Expected HandshakeAck"),
+        };
 
         if ack_protocol_version != PROTOCOL_VERSION {
             anyhow::bail!(
@@ -191,7 +194,8 @@ impl MessageRouter {
             );
         }
         let local_constitution_digest = crate::constitution_digest::constitution_digest();
-        let local_constitution_profile = crate::constitution_digest::canonical_constitution_profile();
+        let local_constitution_profile =
+            crate::constitution_digest::canonical_constitution_profile();
         evaluate_constitution_compatibility(
             &self.federation_constitution,
             local_constitution_digest.as_ref(),
@@ -225,7 +229,8 @@ impl MessageRouter {
         };
         if use_msg_hmac {
             attestation_req.seq_num = Some(outbound_seq);
-            attestation_req.signature = Some(sign_wire_message(&self.shared_secret, &attestation_req)?);
+            attestation_req.signature =
+                Some(sign_wire_message(&self.shared_secret, &attestation_req)?);
             outbound_seq += 1;
         }
         write_framed_message(&mut writer, &attestation_req).await?;

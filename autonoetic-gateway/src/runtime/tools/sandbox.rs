@@ -406,7 +406,10 @@ pub fn detect_sandbox_escape_indicators(
         ("mount: ", "mount command output (mount attempt)"),
         ("umount: ", "umount command output (unmount attempt)"),
         ("ptrace", "ptrace reference (debugging/tracing attempt)"),
-        ("/proc/self/exe", "/proc/self/exe access (self-replacement attempt)"),
+        (
+            "/proc/self/exe",
+            "/proc/self/exe access (self-replacement attempt)",
+        ),
         ("kexec", "kexec reference (kernel replacement attempt)"),
         ("nsenter", "nsenter reference (namespace escape attempt)"),
     ];
@@ -869,26 +872,28 @@ impl NativeTool for SandboxExecTool {
             None
         };
 
-        let explicit_mount_artifact_id: Option<String> =
-            match (&args.artifact_id, &resolved_from_ref) {
-                (Some(id), Some(rid)) => {
-                    let id = id.trim();
-                    if id == rid.as_str() {
-                        Some(id.to_string())
-                    } else {
-                        return Err(tagged::Tagged::validation(anyhow::anyhow!(
+        let explicit_mount_artifact_id: Option<String> = match (
+            &args.artifact_id,
+            &resolved_from_ref,
+        ) {
+            (Some(id), Some(rid)) => {
+                let id = id.trim();
+                if id == rid.as_str() {
+                    Some(id.to_string())
+                } else {
+                    return Err(tagged::Tagged::validation(anyhow::anyhow!(
                             "sandbox_exec: artifact_id '{}' does not match artifact_ref '{}' (resolved to '{}')",
                             id,
                             artifact_ref_trimmed.as_deref().unwrap_or_default(),
                             rid
                         ))
                         .into());
-                    }
                 }
-                (Some(id), None) => Some(id.trim().to_string()),
-                (None, Some(rid)) => Some(rid.clone()),
-                (None, None) => None,
-            };
+            }
+            (Some(id), None) => Some(id.trim().to_string()),
+            (None, Some(rid)) => Some(rid.clone()),
+            (None, None) => None,
+        };
         let explicit_mount_artifact_id = explicit_mount_artifact_id.filter(|s| !s.is_empty());
 
         let mut approval_validated_for_command = false;
@@ -2226,8 +2231,7 @@ impl NativeTool for SandboxExecTool {
         // in stderr/exit code, record per session, and trigger degradation or
         // emergency stop when thresholds are crossed.
         {
-            let escape_indicators =
-                detect_sandbox_escape_indicators(&stderr, output.status.code());
+            let escape_indicators = detect_sandbox_escape_indicators(&stderr, output.status.code());
             if !escape_indicators.is_empty() {
                 let root_sid = root_session_id
                     .as_deref()
@@ -2251,11 +2255,14 @@ impl NativeTool for SandboxExecTool {
                             );
                         }
                     }
-                    if let Ok(count) =
-                        store.count_sandbox_escape_attempts_for_session(sid)
-                    {
+                    if let Ok(count) = store.count_sandbox_escape_attempts_for_session(sid) {
                         let (degrade_threshold, emergency_threshold) = config
-                            .map(|c| (c.escape_attempt_degrade_threshold, c.escape_attempt_emergency_threshold))
+                            .map(|c| {
+                                (
+                                    c.escape_attempt_degrade_threshold,
+                                    c.escape_attempt_emergency_threshold,
+                                )
+                            })
                             .unwrap_or((5, 20));
                         if emergency_threshold > 0 && count >= emergency_threshold {
                             tracing::error!(
@@ -2729,7 +2736,6 @@ remote_access:
             vec!["curl".to_string(), "wget".to_string()]
         );
     }
-
 }
 
 #[cfg(test)]

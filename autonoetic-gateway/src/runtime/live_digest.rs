@@ -972,7 +972,8 @@ mod tests {
         let tmp = tempdir().unwrap();
         let gw = tmp.path().join(".gateway");
 
-        let mut planner = LiveDigestWriter::open(&gw, "root", "planner.default", None, None).unwrap();
+        let mut planner =
+            LiveDigestWriter::open(&gw, "root", "planner.default", None, None).unwrap();
         planner.start_turn().unwrap();
         planner.end_turn().unwrap();
 

@@ -12,7 +12,9 @@ use autonoetic_gateway::policy::{PolicyDecision, PolicyEngine};
 use autonoetic_gateway::runtime::prompt_budget::tool_tier;
 use autonoetic_gateway::runtime::tool_call_processor::is_degraded_mode_tool_blocked;
 use autonoetic_gateway::runtime::tools::ToolTierFilter;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration, SessionState, ToolTier};
+use autonoetic_types::agent::{
+    AgentIdentity, AgentManifest, RuntimeDeclaration, SessionState, ToolTier,
+};
 use autonoetic_types::capability::Capability;
 use proptest::prelude::*;
 
@@ -293,7 +295,9 @@ fn evaluate_gateway_decision(input: &GatewayInput) -> GatewayDecisionSnapshot {
         emergency_stop_gate: summarize(policy.can_request_emergency_stop()),
         message_gate: summarize(policy.can_message_agent(&input.target_agent)),
         revision_gate: summarize(policy.can_agent_revision(&input.target_agent)),
-        evaluation_gate: summarize(policy.can_evaluate_suite(&input.suite_id, &input.subject_agent_id)),
+        evaluation_gate: summarize(
+            policy.can_evaluate_suite(&input.suite_id, &input.subject_agent_id),
+        ),
         evaluation_publish_gate: summarize(policy.can_evaluate_suite_publish(&input.suite_id)),
         schedule_gate: summarize(policy.can_schedule(&input.schedule_operation)),
         install_gate: summarize(policy.can_install_skill(&input.install_host)),

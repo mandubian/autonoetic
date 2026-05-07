@@ -330,9 +330,9 @@ fn resolve_constitution_signer_public_key(
     signer_id: &str,
 ) -> anyhow::Result<[u8; 32]> {
     if let Some(fingerprint) = signer_id.strip_prefix("gateway:") {
-        let public_path =
-            rt.gateway_dir
-                .join(crate::runtime::crypto::GatewayIdentityKey::PUBLIC_FILENAME);
+        let public_path = rt
+            .gateway_dir
+            .join(crate::runtime::crypto::GatewayIdentityKey::PUBLIC_FILENAME);
         let bytes = std::fs::read(&public_path).map_err(|e| {
             anyhow::anyhow!(
                 "failed to read gateway signer public key '{}': {}",
@@ -363,9 +363,13 @@ fn resolve_constitution_signer_public_key(
         .get(signer_id)
         .ok_or_else(|| anyhow::anyhow!("constitution signer '{}' is not trusted", signer_id))?;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let decoded = STANDARD
-        .decode(encoded)
-        .map_err(|e| anyhow::anyhow!("invalid base64 public key for signer '{}': {}", signer_id, e))?;
+    let decoded = STANDARD.decode(encoded).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid base64 public key for signer '{}': {}",
+            signer_id,
+            e
+        )
+    })?;
     anyhow::ensure!(
         decoded.len() == 32,
         "trusted signer '{}' key has wrong length ({} bytes, expected 32)",
@@ -430,7 +434,9 @@ fn extract_enforcement_table(text: &str, id_prefix: &str) -> BTreeMap<String, St
 /// which can pair a `constitution.md` from one tree with a `gateway-constitution.lock.json`
 /// from another (digest mismatch at startup). We only accept a root when both paths exist
 /// there as regular files.
-fn resolve_constitution_artifact_paths(config: &GatewayConfig) -> anyhow::Result<(PathBuf, PathBuf)> {
+fn resolve_constitution_artifact_paths(
+    config: &GatewayConfig,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
     let source_configured = &config.constitution.source_path;
     let lock_configured = &config.constitution.lock_path;
     let source_abs = source_configured.is_absolute();
@@ -442,7 +448,10 @@ fn resolve_constitution_artifact_paths(config: &GatewayConfig) -> anyhow::Result
             source_configured.display(),
             lock_configured.display(),
         );
-        return Ok((source_configured.to_path_buf(), lock_configured.to_path_buf()));
+        return Ok((
+            source_configured.to_path_buf(),
+            lock_configured.to_path_buf(),
+        ));
     }
 
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -551,7 +560,9 @@ mod tests {
             .parent()
             .expect("CARGO_MANIFEST_DIR parent");
         let canonical_md = workspace_root.join(rel).join("constitution.md");
-        let canonical_lock = workspace_root.join(rel).join("gateway-constitution.lock.json");
+        let canonical_lock = workspace_root
+            .join(rel)
+            .join("gateway-constitution.lock.json");
         std::fs::copy(&canonical_md, parent_docs.join("constitution.md")).unwrap();
 
         let mut cfg = GatewayConfig::default();
@@ -573,7 +584,8 @@ mod tests {
             PathBuf::from("docs/constitution/versions/2026.05.05/gateway-constitution.lock.json");
         let err = initialize_constitution(&cfg).expect_err("mixed abs/rel should be rejected");
         assert!(
-            err.to_string().contains("both be absolute or both be relative"),
+            err.to_string()
+                .contains("both be absolute or both be relative"),
             "unexpected error: {err}"
         );
     }

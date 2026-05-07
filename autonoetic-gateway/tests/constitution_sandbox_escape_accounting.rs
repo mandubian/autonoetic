@@ -141,8 +141,14 @@ fn r_plus_plus_8_counts_are_session_scoped() -> anyhow::Result<()> {
         )?;
     }
 
-    assert_eq!(store.count_sandbox_escape_attempts_for_session("sess-a")?, 3);
-    assert_eq!(store.count_sandbox_escape_attempts_for_session("sess-b")?, 3);
+    assert_eq!(
+        store.count_sandbox_escape_attempts_for_session("sess-a")?,
+        3
+    );
+    assert_eq!(
+        store.count_sandbox_escape_attempts_for_session("sess-b")?,
+        3
+    );
     assert_eq!(store.count_sandbox_escape_attempts_for_root("root-x")?, 6);
 
     Ok(())

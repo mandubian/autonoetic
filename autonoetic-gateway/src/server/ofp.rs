@@ -13,8 +13,8 @@ use autonoetic_types::config::{
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use std::path::Path;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -547,81 +547,81 @@ async fn handle_inbound_connection(
         peer_constitution_profile,
         peer_extensions,
     ) = match msg.kind {
-            WireMessageKind::Request(WireRequest::Handshake {
-                node_id,
-                node_name,
-                protocol_version,
-                agents,
-                nonce,
-                auth_hmac,
-                constitution_digest,
-                constitution_profile,
-                extensions,
-            }) => {
-                if protocol_version != PROTOCOL_VERSION {
-                    let err = WireMessage {
-                        id: msg.id.clone(),
-                        signature: None,
-                        seq_num: None,
-                        kind: WireMessageKind::Response(WireResponse::Error {
-                            code: 1,
-                            message: format!("Version mismatch. Expected {}", PROTOCOL_VERSION),
-                            peer_event_ref: None,
-                        }),
-                    };
-                    write_framed_message(&mut writer, &err).await?;
-                    anyhow::bail!("Protocol version mismatch from {}", peer_addr);
-                }
-
-                // Verify HMAC
-                let expected_data = format!("{}{}", nonce, node_id);
-                if !hmac_verify(&shared_secret, expected_data.as_bytes(), &auth_hmac) {
-                    let err = WireMessage {
-                        id: msg.id.clone(),
-                        signature: None,
-                        seq_num: None,
-                        kind: WireMessageKind::Response(WireResponse::Error {
-                            code: 403,
-                            message: "HMAC authentication failed".into(),
-                            peer_event_ref: None,
-                        }),
-                    };
-                    write_framed_message(&mut writer, &err).await?;
-                    anyhow::bail!("HMAC auth failed for {}", peer_addr);
-                }
-
-                info!(
-                    "OFP: authenticated handshake via {} ({}) from {} [{} agents]",
-                    node_name,
-                    node_id,
-                    peer_addr,
-                    agents.len()
-                );
-                (
-                    node_id,
-                    node_name,
-                    protocol_version,
-                    agents,
-                    constitution_digest,
-                    constitution_profile,
-                    extensions.unwrap_or_default(),
-                )
-            }
-            _ => {
+        WireMessageKind::Request(WireRequest::Handshake {
+            node_id,
+            node_name,
+            protocol_version,
+            agents,
+            nonce,
+            auth_hmac,
+            constitution_digest,
+            constitution_profile,
+            extensions,
+        }) => {
+            if protocol_version != PROTOCOL_VERSION {
                 let err = WireMessage {
                     id: msg.id.clone(),
                     signature: None,
                     seq_num: None,
                     kind: WireMessageKind::Response(WireResponse::Error {
-                        code: 401,
-                        message: "First message must be Handshake".into(),
+                        code: 1,
+                        message: format!("Version mismatch. Expected {}", PROTOCOL_VERSION),
                         peer_event_ref: None,
                     }),
                 };
                 write_framed_message(&mut writer, &err).await?;
-                anyhow::bail!("Unauthenticated connection attempt from {}", peer_addr);
+                anyhow::bail!("Protocol version mismatch from {}", peer_addr);
             }
-        };
+
+            // Verify HMAC
+            let expected_data = format!("{}{}", nonce, node_id);
+            if !hmac_verify(&shared_secret, expected_data.as_bytes(), &auth_hmac) {
+                let err = WireMessage {
+                    id: msg.id.clone(),
+                    signature: None,
+                    seq_num: None,
+                    kind: WireMessageKind::Response(WireResponse::Error {
+                        code: 403,
+                        message: "HMAC authentication failed".into(),
+                        peer_event_ref: None,
+                    }),
+                };
+                write_framed_message(&mut writer, &err).await?;
+                anyhow::bail!("HMAC auth failed for {}", peer_addr);
+            }
+
+            info!(
+                "OFP: authenticated handshake via {} ({}) from {} [{} agents]",
+                node_name,
+                node_id,
+                peer_addr,
+                agents.len()
+            );
+            (
+                node_id,
+                node_name,
+                protocol_version,
+                agents,
+                constitution_digest,
+                constitution_profile,
+                extensions.unwrap_or_default(),
+            )
+        }
+        _ => {
+            let err = WireMessage {
+                id: msg.id.clone(),
+                signature: None,
+                seq_num: None,
+                kind: WireMessageKind::Response(WireResponse::Error {
+                    code: 401,
+                    message: "First message must be Handshake".into(),
+                    peer_event_ref: None,
+                }),
+            };
+            write_framed_message(&mut writer, &err).await?;
+            anyhow::bail!("Unauthenticated connection attempt from {}", peer_addr);
+        }
+    };
     if let Some(digest) = &peer_constitution_digest {
         debug!(
             "OFP: peer {} advertised constitution_digest={}",
@@ -795,7 +795,8 @@ async fn handle_inbound_connection(
                         reason = Some(e.to_string());
                     }
                 }
-                let (peer_attestation, peer_public_key_b64) = if accepted && request_peer_attestation
+                let (peer_attestation, peer_public_key_b64) = if accepted
+                    && request_peer_attestation
                 {
                     match compose_local_chain_attestation(
                         &local_node_id,
@@ -807,10 +808,7 @@ async fn handle_inbound_connection(
                         }
                         Err(e) => {
                             accepted = false;
-                            reason = Some(format!(
-                                "cannot compose local chain attestation: {}",
-                                e
-                            ));
+                            reason = Some(format!("cannot compose local chain attestation: {}", e));
                             (None, None)
                         }
                     }
@@ -1094,7 +1092,7 @@ mod tests {
             &local_profile,
             Some(&peer_profile),
         )
-            .expect_err("strict mode must reject missing digest");
+        .expect_err("strict mode must reject missing digest");
         evaluate_constitution_compatibility(
             &permissive_config,
             "local-digest",
@@ -1102,7 +1100,7 @@ mod tests {
             &local_profile,
             Some(&peer_profile),
         )
-            .expect("permissive mode should accept missing digest");
+        .expect("permissive mode should accept missing digest");
     }
 
     #[test]

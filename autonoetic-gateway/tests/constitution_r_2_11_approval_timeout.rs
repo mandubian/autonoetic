@@ -7,7 +7,9 @@ use autonoetic_gateway::runtime::continuation::{
     continuation_path, save_continuation, PendingApprovalToolCall, TurnContinuation,
 };
 use autonoetic_gateway::runtime::guard::LoopGuardState;
-use autonoetic_gateway::scheduler::{gateway_store::GatewayStore, run_scheduler_tick, workflow_store};
+use autonoetic_gateway::scheduler::{
+    gateway_store::GatewayStore, run_scheduler_tick, workflow_store,
+};
 use autonoetic_gateway::GatewayExecutionService;
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRun, WorkflowRunStatus};
 use std::sync::Arc;
@@ -27,8 +29,8 @@ fn default_loop_guard_state() -> LoopGuardState {
 }
 
 #[tokio::test]
-async fn r_2_11_timed_out_approval_marks_task_failed_and_preserves_continuation() -> anyhow::Result<()>
-{
+async fn r_2_11_timed_out_approval_marks_task_failed_and_preserves_continuation(
+) -> anyhow::Result<()> {
     let workspace = support::TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.approval_timeout_secs = 1;
@@ -102,10 +104,14 @@ async fn r_2_11_timed_out_approval_marks_task_failed_and_preserves_continuation(
 
     run_scheduler_tick(execution).await?;
 
-    let updated = workflow_store::load_task_run(&config, Some(store.as_ref()), workflow_id, task_id)?
-        .expect("task should still exist");
+    let updated =
+        workflow_store::load_task_run(&config, Some(store.as_ref()), workflow_id, task_id)?
+            .expect("task should still exist");
     assert_eq!(updated.status, TaskRunStatus::Failed);
-    assert_eq!(updated.result_summary.as_deref(), Some("Approval timed out"));
+    assert_eq!(
+        updated.result_summary.as_deref(),
+        Some("Approval timed out")
+    );
 
     let cont_path = continuation_path(&config, task_id);
     assert!(

@@ -97,8 +97,17 @@ fn assert_decision_eq(
     b: &autonoetic_gateway::policy::PolicyDecision,
     context: &str,
 ) {
-    assert_eq!(a.is_allowed(), b.is_allowed(), "{}: allow/deny mismatch", context);
-    assert_eq!(a.enforced_rules, b.enforced_rules, "{}: enforced_rules mismatch", context);
+    assert_eq!(
+        a.is_allowed(),
+        b.is_allowed(),
+        "{}: allow/deny mismatch",
+        context
+    );
+    assert_eq!(
+        a.enforced_rules, b.enforced_rules,
+        "{}: enforced_rules mismatch",
+        context
+    );
     assert_eq!(
         a.security_analysis.as_ref().map(|s| &s.threats),
         b.security_analysis.as_ref().map(|s| &s.threats),
@@ -122,7 +131,13 @@ fn r_plus_plus_9_can_connect_net_idempotent() {
 #[test]
 fn r_plus_plus_9_can_exec_shell_idempotent() {
     let engine = PolicyEngine::new(code_exec_manifest(vec!["python3", "bash"]));
-    for cmd in &["python3 script.py", "bash -c 'echo hi'", "rm -rf /", "curl evil.com", ""] {
+    for cmd in &[
+        "python3 script.py",
+        "bash -c 'echo hi'",
+        "rm -rf /",
+        "curl evil.com",
+        "",
+    ] {
         let a = engine.can_exec_shell(cmd);
         let b = engine.can_exec_shell(cmd);
         assert_decision_eq(&a, &b, &format!("can_exec_shell({})", cmd));
@@ -254,8 +269,12 @@ fn r_plus_plus_9_verdict_is_pure_over_many_calls() {
 fn r_plus_plus_9_emergency_stop_requires_capability() {
     let with_cap = base_manifest(vec![Capability::EmergencyStop]);
     let without_cap = base_manifest(vec![]);
-    assert!(PolicyEngine::new(with_cap).can_request_emergency_stop().is_allowed());
-    assert!(!PolicyEngine::new(without_cap).can_request_emergency_stop().is_allowed());
+    assert!(PolicyEngine::new(with_cap)
+        .can_request_emergency_stop()
+        .is_allowed());
+    assert!(!PolicyEngine::new(without_cap)
+        .can_request_emergency_stop()
+        .is_allowed());
 }
 
 #[test]

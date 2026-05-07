@@ -153,7 +153,10 @@ impl ToolError {
     }
 
     /// Creates a new quota exceeded error.
-    pub fn quota_exceeded(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
+    pub fn quota_exceeded(
+        message: impl Into<String>,
+        repair_hint: Option<impl Into<String>>,
+    ) -> Self {
         Self {
             success: false,
             error_type: ToolErrorType::QuotaExceeded,
@@ -223,7 +226,9 @@ macro_rules! tool_error {
         return Ok($crate::tool_error::ToolError::validation($msg, Some($hint)).to_error_response());
     }};
     (validation, $msg:expr) => {{
-        return Ok($crate::tool_error::ToolError::validation($msg, None::<String>).to_error_response());
+        return Ok(
+            $crate::tool_error::ToolError::validation($msg, None::<String>).to_error_response(),
+        );
     }};
     (permission, $msg:expr) => {{
         return Ok($crate::tool_error::ToolError::permission($msg).to_error_response());
@@ -232,13 +237,17 @@ macro_rules! tool_error {
         return Ok($crate::tool_error::ToolError::resource($msg, Some($hint)).to_error_response());
     }};
     (resource, $msg:expr) => {{
-        return Ok($crate::tool_error::ToolError::resource($msg, None::<String>).to_error_response());
+        return Ok(
+            $crate::tool_error::ToolError::resource($msg, None::<String>).to_error_response(),
+        );
     }};
     (execution, $msg:expr, $hint:expr) => {{
         return Ok($crate::tool_error::ToolError::execution($msg, Some($hint)).to_error_response());
     }};
     (execution, $msg:expr) => {{
-        return Ok($crate::tool_error::ToolError::execution($msg, None::<String>).to_error_response());
+        return Ok(
+            $crate::tool_error::ToolError::execution($msg, None::<String>).to_error_response(),
+        );
     }};
     (fatal, $msg:expr, $details:expr) => {{
         return Ok($crate::tool_error::ToolError::fatal($msg, Some($details)).to_error_response());
@@ -250,19 +259,27 @@ macro_rules! tool_error {
         return Ok($crate::tool_error::ToolError::conflict($msg, Some($hint)).to_error_response());
     }};
     (conflict, $msg:expr) => {{
-        return Ok($crate::tool_error::ToolError::conflict($msg, None::<String>).to_error_response());
+        return Ok(
+            $crate::tool_error::ToolError::conflict($msg, None::<String>).to_error_response(),
+        );
     }};
     (quota_exceeded, $msg:expr, $hint:expr) => {{
-        return Ok($crate::tool_error::ToolError::quota_exceeded($msg, Some($hint)).to_error_response());
+        return Ok(
+            $crate::tool_error::ToolError::quota_exceeded($msg, Some($hint)).to_error_response(),
+        );
     }};
     (quota_exceeded, $msg:expr) => {{
-        return Ok($crate::tool_error::ToolError::quota_exceeded($msg, None::<String>).to_error_response());
+        return Ok(
+            $crate::tool_error::ToolError::quota_exceeded($msg, None::<String>).to_error_response(),
+        );
     }};
     (not_found, $msg:expr, $hint:expr) => {{
         return Ok($crate::tool_error::ToolError::not_found($msg, Some($hint)).to_error_response());
     }};
     (not_found, $msg:expr) => {{
-        return Ok($crate::tool_error::ToolError::not_found($msg, None::<String>).to_error_response());
+        return Ok(
+            $crate::tool_error::ToolError::not_found($msg, None::<String>).to_error_response(),
+        );
     }};
     (timeout, $msg:expr, $hint:expr) => {{
         return Ok($crate::tool_error::ToolError::timeout($msg, Some($hint)).to_error_response());

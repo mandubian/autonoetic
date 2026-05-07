@@ -364,7 +364,9 @@ impl SessionTracer {
             category,
             action,
             status.clone(),
-            payload.as_ref().map(|v| crate::log_redaction::RedactedPayload::from_redacted(v.clone())),
+            payload
+                .as_ref()
+                .map(|v| crate::log_redaction::RedactedPayload::from_redacted(v.clone())),
             &self.session_id,
             self.turn_id.as_deref(),
             event_seq,

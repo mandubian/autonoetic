@@ -220,7 +220,10 @@ fn r_plus_8_causal_event_emitted_on_not_configured() -> anyhow::Result<()> {
     assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
     assert!(probe.reason.is_some());
     let reason = probe.reason.as_deref().unwrap();
-    assert!(reason.contains("not configured"), "reason should explain the problem: {reason}");
+    assert!(
+        reason.contains("not configured"),
+        "reason should explain the problem: {reason}"
+    );
 
     Ok(())
 }
@@ -247,7 +250,10 @@ fn r_plus_8_causal_event_emitted_on_missing_file() -> anyhow::Result<()> {
     assert_eq!(probe.status, "ERROR");
     assert!(probe.enforced_rules.iter().any(|r| r == "R+8"));
     let reason = probe.reason.as_deref().unwrap();
-    assert!(reason.contains("missing"), "reason should explain the problem: {reason}");
+    assert!(
+        reason.contains("missing"),
+        "reason should explain the problem: {reason}"
+    );
     let payload: serde_json::Value =
         serde_json::from_str(probe.payload.as_deref().expect("payload present"))?;
     assert_eq!(payload["source"], "file_path");

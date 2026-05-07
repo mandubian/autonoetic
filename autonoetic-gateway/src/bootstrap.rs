@@ -290,7 +290,8 @@ pub fn bootstrap_constitution_snapshot(config: &GatewayConfig, gateway_dir: &Pat
     let version = crate::constitution_digest::constitution_version().to_string();
     let digest = crate::constitution_digest::constitution_digest().to_string();
     let source_rel = format!(".gateway/constitution/versions/{version}/constitution.md");
-    let lock_rel = format!(".gateway/constitution/versions/{version}/gateway-constitution.lock.json");
+    let lock_rel =
+        format!(".gateway/constitution/versions/{version}/gateway-constitution.lock.json");
 
     let constitution_root = gateway_dir.join("constitution");
     let version_dir = constitution_root.join("versions").join(&version);
@@ -301,11 +302,14 @@ pub fn bootstrap_constitution_snapshot(config: &GatewayConfig, gateway_dir: &Pat
         crate::constitution_digest::constitution_text().as_ref(),
     )?;
 
-    let mut lock_snapshot = crate::constitution_digest::constitution_lock().as_ref().clone();
+    let mut lock_snapshot = crate::constitution_digest::constitution_lock()
+        .as_ref()
+        .clone();
     lock_snapshot.constitution_source = source_rel.clone();
     let gateway_key = crate::runtime::crypto::GatewayIdentityKey::load_or_generate(gateway_dir)?;
     let lock_signer_id = format!("gateway:{}", gateway_key.fingerprint());
-    let signature_payload = crate::constitution_digest::constitution_lock_signature_payload(&lock_snapshot)?;
+    let signature_payload =
+        crate::constitution_digest::constitution_lock_signature_payload(&lock_snapshot)?;
     lock_snapshot.signature = Some(crate::constitution_digest::ConstitutionLockSignature {
         algorithm: "ed25519".to_string(),
         signer_id: lock_signer_id.clone(),

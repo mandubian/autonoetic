@@ -20,8 +20,14 @@ fn degraded_tier_filter_clamps_to_core_only() {
     assert!(!filter.allows("agent_spawn"), "workflow blocked");
     assert!(!filter.allows("web_search"), "specialized blocked");
     assert!(!filter.allows("promotion_record"), "specialized blocked");
-    assert!(!filter.allows("agent_revision_create"), "specialized blocked");
-    assert!(filter.allows("sandbox_exec"), "sandbox_exec is core tier — blocked by tool-level check instead");
+    assert!(
+        !filter.allows("agent_revision_create"),
+        "specialized blocked"
+    );
+    assert!(
+        filter.allows("sandbox_exec"),
+        "sandbox_exec is core tier — blocked by tool-level check instead"
+    );
 }
 
 #[test]
@@ -32,7 +38,10 @@ fn sub_trip_warning_triggers_at_80_percent_budget() {
     for _ in 0..3 {
         guard.check_loop().unwrap();
     }
-    assert!(!guard.is_sub_trip_warning(), "3/5 loops — below 80% threshold");
+    assert!(
+        !guard.is_sub_trip_warning(),
+        "3/5 loops — below 80% threshold"
+    );
 
     guard.check_loop().unwrap();
     assert!(guard.is_sub_trip_warning(), "4/5 loops — at 80% threshold");
@@ -47,7 +56,10 @@ fn sub_trip_warning_clears_after_trip() {
     assert!(guard.is_sub_trip_warning(), "at 80% threshold");
 
     guard.check_loop().unwrap(); // 5th loop still passes (4 < 5)
-    assert!(!guard.is_sub_trip_warning(), "at 5/5 — threshold is 4, current is 5");
+    assert!(
+        !guard.is_sub_trip_warning(),
+        "at 5/5 — threshold is 4, current is 5"
+    );
 
     assert!(guard.check_loop().is_err(), "6th loop trips (5 >= 5)");
 }
@@ -61,7 +73,10 @@ fn sub_trip_warning_on_tool_failures() {
     assert!(!guard.is_sub_trip_warning(), "3/5 failures — below 80%");
 
     guard.register_failure("failing_tool", "{}", None);
-    assert!(guard.is_sub_trip_warning(), "4/5 failures — at 80% threshold");
+    assert!(
+        guard.is_sub_trip_warning(),
+        "4/5 failures — at 80% threshold"
+    );
 }
 
 #[test]
@@ -71,7 +86,10 @@ fn sub_trip_ignores_permission_errors() {
     for _ in 0..10 {
         guard.register_failure("denied_tool", "{}", Some(&ToolErrorType::Permission));
     }
-    assert!(!guard.is_sub_trip_warning(), "permission errors excluded from budget");
+    assert!(
+        !guard.is_sub_trip_warning(),
+        "permission errors excluded from budget"
+    );
 }
 
 #[test]

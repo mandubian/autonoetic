@@ -81,8 +81,7 @@ async fn r_8_6_retention_applies_during_server_bootstrap() -> anyhow::Result<()>
         .expect_err("server should fail to bind due occupied OFP port");
     let err_text = err.to_string();
     assert!(
-        err_text.contains("Address already in use")
-            || err_text.contains("address already in use"),
+        err_text.contains("Address already in use") || err_text.contains("address already in use"),
         "expected bind failure after startup retention pass, got: {err_text}"
     );
 

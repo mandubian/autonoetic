@@ -53,10 +53,8 @@ fn build_executor_with_channel(
 ) -> (HookExecutor, mpsc::Receiver<HookSpawnRequest>) {
     let (tx, rx) = mpsc::channel::<HookSpawnRequest>(16);
     let mut exec = HookExecutor::new(
-        hooks,
-        None, // no gateway store needed for spawn-only tests
-        4000,
-        10,
+        hooks, None, // no gateway store needed for spawn-only tests
+        4000, 10,
     );
     exec.set_spawn_tx(tx);
     (exec, rx)
@@ -91,8 +89,7 @@ async fn test_agent_spawn_happy_path() {
 
     assert_eq!(req.agent_id, "evaluator.default");
     assert_eq!(
-        req.message,
-        "Evaluate approval apr-123 — approved",
+        req.message, "Evaluate approval apr-123 — approved",
         "template substitution should have applied"
     );
     assert!(
@@ -145,7 +142,10 @@ async fn test_agent_spawn_acl_block() {
     exec.dispatch_async(approval_resolved_ctx("apr-789", "approved"));
 
     let result = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
-    assert!(result.is_err(), "no HookSpawnRequest should be sent when ACL blocks");
+    assert!(
+        result.is_err(),
+        "no HookSpawnRequest should be sent when ACL blocks"
+    );
 }
 
 /// When `params.agent_id` is absent, no spawn is sent.
@@ -184,7 +184,9 @@ async fn test_agent_spawn_event_placeholder() {
     exec.dispatch_async(approval_resolved_ctx("apr-evt", "rejected"));
 
     let req = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await.expect("timed out").expect("closed");
+        .await
+        .expect("timed out")
+        .expect("closed");
 
     assert_eq!(req.message, "Event=approval.resolved req=apr-evt");
 }
@@ -209,7 +211,10 @@ async fn test_agent_spawn_sync_not_supported() {
     exec.dispatch_async(approval_resolved_ctx("apr-sync2", "approved"));
 
     let result = tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await;
-    assert!(result.is_err(), "sync agent.spawn should produce no HookSpawnRequest");
+    assert!(
+        result.is_err(),
+        "sync agent.spawn should produce no HookSpawnRequest"
+    );
 }
 
 /// When spawn channel is not wired, dispatching should not panic.
@@ -248,5 +253,8 @@ fn test_hook_event_serde_dotted_names() {
 
     let pd: HookEvent = serde_json::from_str("\"policy.decision\"").unwrap();
     assert_eq!(pd, HookEvent::PolicyDecision);
-    assert_eq!(serde_json::to_string(&HookEvent::PolicyDecision).unwrap(), "\"policy.decision\"");
+    assert_eq!(
+        serde_json::to_string(&HookEvent::PolicyDecision).unwrap(),
+        "\"policy.decision\""
+    );
 }

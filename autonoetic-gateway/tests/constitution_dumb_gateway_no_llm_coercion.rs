@@ -51,7 +51,8 @@ schema_enforcement:
   audit: true
 "#;
 
-    let parsed = serde_yaml::from_str::<GatewayConfig>(yaml).expect("deterministic mode should parse");
+    let parsed =
+        serde_yaml::from_str::<GatewayConfig>(yaml).expect("deterministic mode should parse");
     assert_eq!(
         parsed.schema_enforcement.mode,
         autonoetic_types::config::SchemaEnforcementMode::Deterministic

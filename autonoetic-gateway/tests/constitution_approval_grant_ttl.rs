@@ -63,7 +63,10 @@ fn r_plus_13_grant_roundtrip_with_expires_at() -> anyhow::Result<()> {
 
     let grants = store.get_session_grants_structured("root-1")?;
     assert_eq!(grants.len(), 1);
-    assert!(grants[0].expires_at.is_some(), "grant must have expires_at set");
+    assert!(
+        grants[0].expires_at.is_some(),
+        "grant must have expires_at set"
+    );
 
     Ok(())
 }
@@ -112,10 +115,7 @@ fn r_plus_13_valid_grant_covers_targets() -> anyhow::Result<()> {
     let targets = vec!["valid.example.com".to_string()];
     let covers = store.session_grants_cover_targets("root-3", &targets);
 
-    assert!(
-        covers,
-        "non-expired grant must cover targets"
-    );
+    assert!(covers, "non-expired grant must cover targets");
 
     Ok(())
 }
@@ -235,8 +235,7 @@ fn make_sandbox_exec_request(
 }
 
 #[test]
-fn r_plus_13_approval_resolution_auto_computes_expiry_when_default_ttl_set() -> anyhow::Result<()>
-{
+fn r_plus_13_approval_resolution_auto_computes_expiry_when_default_ttl_set() -> anyhow::Result<()> {
     let tempdir = tempfile::tempdir()?;
     let gateway_dir = tempdir.path().join(".gateway");
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
@@ -247,7 +246,8 @@ fn r_plus_13_approval_resolution_auto_computes_expiry_when_default_ttl_set() -> 
         ..Default::default()
     };
 
-    let mut req = make_sandbox_exec_request("apr-ttl-auto", "root-ttl-auto", vec!["api.example.com"]);
+    let mut req =
+        make_sandbox_exec_request("apr-ttl-auto", "root-ttl-auto", vec!["api.example.com"]);
     store.create_approval(&mut req)?;
 
     let before = chrono::Utc::now();
@@ -262,7 +262,10 @@ fn r_plus_13_approval_resolution_auto_computes_expiry_when_default_ttl_set() -> 
         None,
         ApproveOptions::default(),
     )?;
-    assert_eq!(decision.status, autonoetic_types::background::ApprovalStatus::Approved);
+    assert_eq!(
+        decision.status,
+        autonoetic_types::background::ApprovalStatus::Approved
+    );
 
     let grants = store.get_session_grants_structured("root-ttl-auto")?;
     assert_eq!(grants.len(), 1, "approval should auto-insert one grant");
@@ -297,7 +300,8 @@ fn r_plus_13_approval_resolution_no_expiry_when_default_ttl_zero() -> anyhow::Re
         ..Default::default()
     };
 
-    let mut req = make_sandbox_exec_request("apr-ttl-zero", "root-ttl-zero", vec!["api.example.com"]);
+    let mut req =
+        make_sandbox_exec_request("apr-ttl-zero", "root-ttl-zero", vec!["api.example.com"]);
     store.create_approval(&mut req)?;
 
     let decision = approve_request_with_options(
@@ -311,7 +315,10 @@ fn r_plus_13_approval_resolution_no_expiry_when_default_ttl_zero() -> anyhow::Re
         None,
         ApproveOptions::default(),
     )?;
-    assert_eq!(decision.status, autonoetic_types::background::ApprovalStatus::Approved);
+    assert_eq!(
+        decision.status,
+        autonoetic_types::background::ApprovalStatus::Approved
+    );
 
     let grants = store.get_session_grants_structured("root-ttl-zero")?;
     assert_eq!(grants.len(), 1);
@@ -335,7 +342,11 @@ fn r_plus_13_approval_resolution_explicit_ttl_overrides_default() -> anyhow::Res
         ..Default::default()
     };
 
-    let mut req = make_sandbox_exec_request("apr-ttl-explicit", "root-ttl-explicit", vec!["api.example.com"]);
+    let mut req = make_sandbox_exec_request(
+        "apr-ttl-explicit",
+        "root-ttl-explicit",
+        vec!["api.example.com"],
+    );
     store.create_approval(&mut req)?;
 
     let explicit_expiry = (chrono::Utc::now() + chrono::Duration::seconds(600)).to_rfc3339();
@@ -353,7 +364,10 @@ fn r_plus_13_approval_resolution_explicit_ttl_overrides_default() -> anyhow::Res
             ..Default::default()
         },
     )?;
-    assert_eq!(decision.status, autonoetic_types::background::ApprovalStatus::Approved);
+    assert_eq!(
+        decision.status,
+        autonoetic_types::background::ApprovalStatus::Approved
+    );
 
     let grants = store.get_session_grants_structured("root-ttl-explicit")?;
     assert_eq!(grants.len(), 1);

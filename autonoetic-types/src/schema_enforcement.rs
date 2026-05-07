@@ -82,9 +82,7 @@ impl DeterministicCoercionEnforcer {
         let mut errors = Vec::new();
 
         if let Some(obj) = payload.as_object_mut() {
-            let schema_obj = target_schema
-                .get("properties")
-                .and_then(|p| p.as_object());
+            let schema_obj = target_schema.get("properties").and_then(|p| p.as_object());
 
             if let Some(schema_obj) = schema_obj {
                 let fields: Vec<(String, serde_json::Value)> = schema_obj
@@ -140,10 +138,7 @@ impl DeterministicCoercionEnforcer {
                 .chain(errors.iter().map(|e| e.field_path.clone()))
                 .collect();
 
-            if let Some(required_arr) = target_schema
-                .get("required")
-                .and_then(|r| r.as_array())
-            {
+            if let Some(required_arr) = target_schema.get("required").and_then(|r| r.as_array()) {
                 for req in required_arr {
                     if let Some(field_name) = req.as_str() {
                         if handled.contains(field_name) {
@@ -326,7 +321,9 @@ mod tests {
             EnforcementResult::Reject(details) => {
                 assert_eq!(details.fields_with_errors.len(), 1);
                 assert_eq!(details.fields_with_errors[0].field_path, "data");
-                assert!(details.fields_with_errors[0].error.contains("unsupported type"));
+                assert!(details.fields_with_errors[0]
+                    .error
+                    .contains("unsupported type"));
             }
             _ => panic!("Expected Reject result, got {:?}", result),
         }
@@ -408,7 +405,9 @@ mod tests {
             EnforcementResult::Reject(details) => {
                 assert_eq!(details.fields_with_errors.len(), 1);
                 assert_eq!(details.fields_with_errors[0].field_path, "name");
-                assert!(details.fields_with_errors[0].error.contains("not declared in properties"));
+                assert!(details.fields_with_errors[0]
+                    .error
+                    .contains("not declared in properties"));
             }
             _ => panic!("Expected Reject result, got {:?}", result),
         }
@@ -431,7 +430,9 @@ mod tests {
             EnforcementResult::Reject(details) => {
                 assert_eq!(details.fields_with_errors.len(), 1);
                 assert_eq!(details.fields_with_errors[0].field_path, "data");
-                assert!(details.fields_with_errors[0].error.contains("missing a type"));
+                assert!(details.fields_with_errors[0]
+                    .error
+                    .contains("missing a type"));
             }
             _ => panic!("Expected Reject result, got {:?}", result),
         }

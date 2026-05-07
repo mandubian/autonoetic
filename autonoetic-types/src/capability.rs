@@ -189,7 +189,10 @@ impl CapabilityDelta {
     }
 }
 
-pub fn compute_capability_delta(previous: &[Capability], current: &[Capability]) -> CapabilityDelta {
+pub fn compute_capability_delta(
+    previous: &[Capability],
+    current: &[Capability],
+) -> CapabilityDelta {
     let mut added = Vec::new();
     let mut broadened = Vec::new();
     let mut narrowed = Vec::new();
@@ -274,9 +277,10 @@ fn capability_broadening(
         (Capability::WriteAccess { scopes: a }, Capability::WriteAccess { scopes: b }) => {
             scope_broadening(capability_type, a, b)
         }
-        (Capability::SandboxFunctions { allowed: a }, Capability::SandboxFunctions { allowed: b }) => {
-            scope_broadening(capability_type, a, b)
-        }
+        (
+            Capability::SandboxFunctions { allowed: a },
+            Capability::SandboxFunctions { allowed: b },
+        ) => scope_broadening(capability_type, a, b),
         (Capability::AgentMessage { patterns: a }, Capability::AgentMessage { patterns: b }) => {
             scope_broadening(capability_type, a, b)
         }
@@ -289,29 +293,33 @@ fn capability_broadening(
         (Capability::ApprovalQueue { patterns: a }, Capability::ApprovalQueue { patterns: b }) => {
             scope_broadening(capability_type, a, b)
         }
-        (Capability::SchedulerSignal { patterns: a }, Capability::SchedulerSignal { patterns: b }) => {
-            scope_broadening(capability_type, a, b)
-        }
-        (Capability::SchedulerAccess { patterns: a }, Capability::SchedulerAccess { patterns: b }) => {
-            scope_broadening(capability_type, a, b)
-        }
-        (Capability::CredentialAccess { services: a }, Capability::CredentialAccess { services: b }) => {
-            scope_broadening(capability_type, a, b)
-        }
-        (Capability::UserProfileAccess { scopes: a }, Capability::UserProfileAccess { scopes: b }) => {
-            scope_broadening(capability_type, a, b)
-        }
-        (Capability::SkillInstall { allowed_sources: a }, Capability::SkillInstall { allowed_sources: b }) => {
-            scope_broadening(capability_type, a, b)
-        }
+        (
+            Capability::SchedulerSignal { patterns: a },
+            Capability::SchedulerSignal { patterns: b },
+        ) => scope_broadening(capability_type, a, b),
+        (
+            Capability::SchedulerAccess { patterns: a },
+            Capability::SchedulerAccess { patterns: b },
+        ) => scope_broadening(capability_type, a, b),
+        (
+            Capability::CredentialAccess { services: a },
+            Capability::CredentialAccess { services: b },
+        ) => scope_broadening(capability_type, a, b),
+        (
+            Capability::UserProfileAccess { scopes: a },
+            Capability::UserProfileAccess { scopes: b },
+        ) => scope_broadening(capability_type, a, b),
+        (
+            Capability::SkillInstall { allowed_sources: a },
+            Capability::SkillInstall { allowed_sources: b },
+        ) => scope_broadening(capability_type, a, b),
         (
             Capability::ConstitutionalProposal { patterns: a },
             Capability::ConstitutionalProposal { patterns: b },
         ) => scope_broadening(capability_type, a, b),
-        (
-            Capability::ReasoningAudit { targets: a },
-            Capability::ReasoningAudit { targets: b },
-        ) => scope_broadening(capability_type, a, b),
+        (Capability::ReasoningAudit { targets: a }, Capability::ReasoningAudit { targets: b }) => {
+            scope_broadening(capability_type, a, b)
+        }
         (
             Capability::CodeExecution {
                 patterns: ap,
@@ -433,9 +441,10 @@ fn capability_narrowed(previous: &Capability, current: &Capability) -> bool {
         (Capability::WriteAccess { scopes: a }, Capability::WriteAccess { scopes: b }) => {
             is_scope_narrowed(a, b)
         }
-        (Capability::SandboxFunctions { allowed: a }, Capability::SandboxFunctions { allowed: b }) => {
-            is_scope_narrowed(a, b)
-        }
+        (
+            Capability::SandboxFunctions { allowed: a },
+            Capability::SandboxFunctions { allowed: b },
+        ) => is_scope_narrowed(a, b),
         _ => false,
     }
 }
@@ -553,7 +562,10 @@ mod tests {
             max_spawn_depth: 3,
         }];
         let d = compute_capability_delta(&prev, &curr);
-        assert!(d.broadened.is_empty(), "0→3 should not be broadening (0 = system default)");
+        assert!(
+            d.broadened.is_empty(),
+            "0→3 should not be broadening (0 = system default)"
+        );
         assert!(!d.has_broadening());
     }
 

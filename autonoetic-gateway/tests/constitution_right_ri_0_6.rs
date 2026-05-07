@@ -22,7 +22,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-fn setup() -> (GatewayConfig, Arc<GatewayStore>, Arc<GatewayExecutionService>) {
+fn setup() -> (
+    GatewayConfig,
+    Arc<GatewayStore>,
+    Arc<GatewayExecutionService>,
+) {
     let temp = tempdir().unwrap();
     let agents_dir = temp.keep().join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -34,7 +38,10 @@ fn setup() -> (GatewayConfig, Arc<GatewayStore>, Arc<GatewayExecutionService>) {
         ..GatewayConfig::default()
     };
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
     (config, store, execution)
 }
 
@@ -127,7 +134,10 @@ async fn ri_0_6_rejects_silent_mid_session_narrowing_without_degraded_event() {
 
     // Simulate an unauthorized mid-session narrowing: degraded set flips without
     // the required `session.degraded` causal event.
-    degraded_sessions.lock().await.insert(session_id.to_string());
+    degraded_sessions
+        .lock()
+        .await
+        .insert(session_id.to_string());
     history.push(Message::user("Turn two".to_string()));
 
     let err = runtime
@@ -182,7 +192,9 @@ async fn ri_0_6_operator_degrade_allows_narrowing_and_records_event() {
     let second = runtime.execute_with_history(&mut history).await.unwrap();
     assert!(matches!(second, TurnOutcome::Completed(_)));
 
-    let events = store.search_causal_events(Some(session_id), None, 128).unwrap();
+    let events = store
+        .search_causal_events(Some(session_id), None, 128)
+        .unwrap();
     let narrowed = events
         .iter()
         .find(|e| e.action == "session.capability_narrowed")
@@ -198,7 +210,10 @@ async fn ri_0_6_operator_degrade_allows_narrowing_and_records_event() {
         payload["previous_allowed_tiers"],
         serde_json::json!(["core", "specialized", "workflow"])
     );
-    assert_eq!(payload["current_allowed_tiers"], serde_json::json!(["core"]));
+    assert_eq!(
+        payload["current_allowed_tiers"],
+        serde_json::json!(["core"])
+    );
 }
 
 #[tokio::test]
@@ -252,13 +267,18 @@ async fn ri_0_6_rule_driven_degrade_path_is_accepted() {
             reason: Some("loop_guard_sub_trip_warning".to_string()),
         })
         .unwrap();
-    degraded_sessions.lock().await.insert(session_id.to_string());
+    degraded_sessions
+        .lock()
+        .await
+        .insert(session_id.to_string());
 
     history.push(Message::user("Turn two".to_string()));
     let second = runtime.execute_with_history(&mut history).await.unwrap();
     assert!(matches!(second, TurnOutcome::Completed(_)));
 
-    let events = store.search_causal_events(Some(session_id), None, 128).unwrap();
+    let events = store
+        .search_causal_events(Some(session_id), None, 128)
+        .unwrap();
     let narrowed = events
         .iter()
         .find(|e| e.action == "session.capability_narrowed")

@@ -95,7 +95,8 @@ fn assert_rules_are_constitutional(label: &str, rules: &[&'static str]) {
         assert!(
             s.starts_with('R') || s.starts_with('§'),
             "{}: enforced rule '{}' must start with R or § (Ri-0.3)",
-            label, s
+            label,
+            s
         );
     }
 }
@@ -134,6 +135,33 @@ fn ri_0_3_spawn_rejection_carries_rule_ids() {
     let decision = policy.can_spawn_agent();
     assert!(!decision.is_allowed());
     assert_rules_are_constitutional("AgentSpawn", &decision.enforced_rules);
+}
+
+#[test]
+fn ri_0_3_scheduler_rejection_carries_rule_ids() {
+    let manifest = minimal_manifest_with_caps(vec![]);
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest);
+    let decision = policy.can_schedule("scheduler_cron_create");
+    assert!(!decision.is_allowed());
+    assert_rules_are_constitutional("SchedulerAccess", &decision.enforced_rules);
+}
+
+#[test]
+fn ri_0_3_evaluation_rejection_carries_rule_ids() {
+    let manifest = minimal_manifest_with_caps(vec![]);
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest);
+    let decision = policy.can_evaluate_suite("eval.security", "subject.agent");
+    assert!(!decision.is_allowed());
+    assert_rules_are_constitutional("Evaluation", &decision.enforced_rules);
+}
+
+#[test]
+fn ri_0_3_write_path_rejection_carries_rule_ids() {
+    let manifest = minimal_manifest_with_caps(vec![]);
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest);
+    let decision = policy.can_write_path("shared/forbidden.txt");
+    assert!(!decision.is_allowed());
+    assert_rules_are_constitutional("WriteAccess", &decision.enforced_rules);
 }
 
 #[test]

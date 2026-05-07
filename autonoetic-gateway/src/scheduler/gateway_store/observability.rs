@@ -76,17 +76,13 @@ impl GatewayStore {
 
         let traces_cutoff = if retention.execution_traces_days > 0 {
             Some(
-                (now - chrono::Duration::days(retention.execution_traces_days as i64))
-                    .to_rfc3339(),
+                (now - chrono::Duration::days(retention.execution_traces_days as i64)).to_rfc3339(),
             )
         } else {
             None
         };
         let events_cutoff = if retention.causal_events_days > 0 {
-            Some(
-                (now - chrono::Duration::days(retention.causal_events_days as i64))
-                    .to_rfc3339(),
-            )
+            Some((now - chrono::Duration::days(retention.causal_events_days as i64)).to_rfc3339())
         } else {
             None
         };
@@ -128,8 +124,8 @@ impl GatewayStore {
                     "causal_events_days": retention.causal_events_days,
                 },
             });
-            if let Err(e) = self.create_causal_event(
-                &autonoetic_types::causal_chain::CausalEventRecord {
+            if let Err(e) =
+                self.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
                     event_id: uuid::Uuid::new_v4().to_string(),
                     agent_id: "gateway".to_string(),
                     session_id: "system".to_string(),
@@ -145,8 +141,8 @@ impl GatewayStore {
                     payload_ref: None,
                     evidence_ref: None,
                     reason: None,
-                },
-            ) {
+                })
+            {
                 tracing::warn!(
                     target: "gateway_store",
                     error = %e,
@@ -158,10 +154,7 @@ impl GatewayStore {
         Ok(())
     }
 
-    pub fn emit_vault_key_probe_event(
-        &self,
-        result: &crate::vault::KeyProbeResult,
-    ) {
+    pub fn emit_vault_key_probe_event(&self, result: &crate::vault::KeyProbeResult) {
         let now = chrono::Utc::now();
         let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
         rules.push("R+8".to_string());
@@ -222,8 +215,8 @@ impl GatewayStore {
             ),
         };
 
-        if let Err(e) = self.create_causal_event(
-            &autonoetic_types::causal_chain::CausalEventRecord {
+        if let Err(e) =
+            self.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
                 event_id: uuid::Uuid::new_v4().to_string(),
                 agent_id: "gateway".to_string(),
                 session_id: "system".to_string(),
@@ -239,8 +232,8 @@ impl GatewayStore {
                 payload_ref: None,
                 evidence_ref: None,
                 reason: Some(reason),
-            },
-        ) {
+            })
+        {
             tracing::warn!(
                 target: "gateway_store",
                 error = %e,
@@ -987,9 +980,7 @@ impl GatewayStore {
     /// for each orphaned child. A child is "active" if its transcript status is 'active'
     /// and its parent (derived from session_id path) has a terminal transcript
     /// (`completed` or `failed`). `suspended` parents are NOT terminal (resumable).
-    pub fn find_orphaned_sessions(
-        &self,
-    ) -> Result<Vec<(String, String, String, String)>> {
+    pub fn find_orphaned_sessions(&self) -> Result<Vec<(String, String, String, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT session_id, root_session_id, agent_id
@@ -1022,7 +1013,12 @@ impl GatewayStore {
                 .ok();
             match parent_status.as_deref() {
                 Some("completed") | Some("failed") => {
-                    orphans.push((child_session_id, parent_session_id, root_session_id, agent_id));
+                    orphans.push((
+                        child_session_id,
+                        parent_session_id,
+                        root_session_id,
+                        agent_id,
+                    ));
                 }
                 _ => {}
             }

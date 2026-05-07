@@ -285,20 +285,46 @@ fn same_agent_identity_rejected_even_if_both_passed() {
     let same_policy = PolicyEngine::new(same_agent.clone());
 
     record_promotion(
-        &registry, &same_agent, &same_policy, &builder_dir,
-        &gateway_dir, &config, &artifact_id, "evaluator", true, "session-eval",
+        &registry,
+        &same_agent,
+        &same_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        &artifact_id,
+        "evaluator",
+        true,
+        "session-eval",
     );
     record_promotion(
-        &registry, &same_agent, &same_policy, &builder_dir,
-        &gateway_dir, &config, &artifact_id, "auditor", true, "session-audit",
+        &registry,
+        &same_agent,
+        &same_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        &artifact_id,
+        "auditor",
+        true,
+        "session-audit",
     );
 
     let result = try_promote(
-        &registry, &builder, &builder_policy, &builder_dir,
-        &gateway_dir, &config, store, agent_id, &revision_id,
+        &registry,
+        &builder,
+        &builder_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        store,
+        agent_id,
+        &revision_id,
     );
 
-    assert!(result.is_err(), "promote should fail when evaluator and auditor share identity");
+    assert!(
+        result.is_err(),
+        "promote should fail when evaluator and auditor share identity"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("R-2.17"),
@@ -349,23 +375,50 @@ fn distinct_identities_allowed() {
     let evaluator = manifest_for("evaluator.default");
     let eval_policy = PolicyEngine::new(evaluator.clone());
     record_promotion(
-        &registry, &evaluator, &eval_policy, &builder_dir,
-        &gateway_dir, &config, &artifact_id, "evaluator", true, "session-eval",
+        &registry,
+        &evaluator,
+        &eval_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        &artifact_id,
+        "evaluator",
+        true,
+        "session-eval",
     );
 
     let auditor = manifest_for("auditor.default");
     let audit_policy = PolicyEngine::new(auditor.clone());
     record_promotion(
-        &registry, &auditor, &audit_policy, &builder_dir,
-        &gateway_dir, &config, &artifact_id, "auditor", true, "session-audit",
+        &registry,
+        &auditor,
+        &audit_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        &artifact_id,
+        "auditor",
+        true,
+        "session-audit",
     );
 
     let result = try_promote(
-        &registry, &builder, &builder_policy, &builder_dir,
-        &gateway_dir, &config, store, agent_id, &revision_id,
+        &registry,
+        &builder,
+        &builder_policy,
+        &builder_dir,
+        &gateway_dir,
+        &config,
+        store,
+        agent_id,
+        &revision_id,
     );
 
-    assert!(result.is_ok(), "promote should succeed with distinct identities, got err: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "promote should succeed with distinct identities, got err: {:?}",
+        result.unwrap_err()
+    );
     let promoted = result.unwrap();
     assert_eq!(promoted["ok"], true);
 }

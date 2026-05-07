@@ -109,9 +109,12 @@ fn ri_0_2_agent_with_read_access_can_search_own_traces() {
         })
         .unwrap();
 
-    let manifest = manifest_with(agent_id, vec![Capability::ReadAccess {
-        scopes: vec!["*".to_string()],
-    }]);
+    let manifest = manifest_with(
+        agent_id,
+        vec![Capability::ReadAccess {
+            scopes: vec!["*".to_string()],
+        }],
+    );
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
     let config = GatewayConfig::default();
@@ -364,10 +367,58 @@ fn ri_0_11_every_event_carries_agent_id() {
 
     let logger = CausalLogger::new(&path).unwrap();
 
-    logger.log(agent_id, session_id, None, 0, "session", "start", EntryStatus::Success, None).unwrap();
-    logger.log(agent_id, session_id, None, 1, "tool", "sandbox_exec", EntryStatus::Success, Some(RedactedPayload::from_redacted(serde_json::json!({"cmd": "ls"})))).unwrap();
-    logger.log(agent_id, session_id, None, 2, "tool", "content_write", EntryStatus::Denied, Some(RedactedPayload::from_redacted(serde_json::json!({"name": "secret"})))).unwrap();
-    logger.log(agent_id, session_id, None, 3, "session", "end", EntryStatus::Success, None).unwrap();
+    logger
+        .log(
+            agent_id,
+            session_id,
+            None,
+            0,
+            "session",
+            "start",
+            EntryStatus::Success,
+            None,
+        )
+        .unwrap();
+    logger
+        .log(
+            agent_id,
+            session_id,
+            None,
+            1,
+            "tool",
+            "sandbox_exec",
+            EntryStatus::Success,
+            Some(RedactedPayload::from_redacted(
+                serde_json::json!({"cmd": "ls"}),
+            )),
+        )
+        .unwrap();
+    logger
+        .log(
+            agent_id,
+            session_id,
+            None,
+            2,
+            "tool",
+            "content_write",
+            EntryStatus::Denied,
+            Some(RedactedPayload::from_redacted(
+                serde_json::json!({"name": "secret"}),
+            )),
+        )
+        .unwrap();
+    logger
+        .log(
+            agent_id,
+            session_id,
+            None,
+            3,
+            "session",
+            "end",
+            EntryStatus::Success,
+            None,
+        )
+        .unwrap();
 
     let entries = CausalLogger::read_entries(&path).unwrap();
     assert_eq!(entries.len(), 4, "should have 4 events");
@@ -396,12 +447,50 @@ fn ri_0_11_hash_chain_integrity() {
 
     let logger = CausalLogger::new(&path).unwrap();
 
-    logger.log(agent_id, session_id, None, 0, "session", "start", EntryStatus::Success, None).unwrap();
-    logger.log(agent_id, session_id, None, 1, "tool", "sandbox_exec", EntryStatus::Success, Some(RedactedPayload::from_redacted(serde_json::json!({"cmd": "echo hello"})))).unwrap();
-    logger.log(agent_id, session_id, None, 2, "session", "end", EntryStatus::Success, None).unwrap();
+    logger
+        .log(
+            agent_id,
+            session_id,
+            None,
+            0,
+            "session",
+            "start",
+            EntryStatus::Success,
+            None,
+        )
+        .unwrap();
+    logger
+        .log(
+            agent_id,
+            session_id,
+            None,
+            1,
+            "tool",
+            "sandbox_exec",
+            EntryStatus::Success,
+            Some(RedactedPayload::from_redacted(
+                serde_json::json!({"cmd": "echo hello"}),
+            )),
+        )
+        .unwrap();
+    logger
+        .log(
+            agent_id,
+            session_id,
+            None,
+            2,
+            "session",
+            "end",
+            EntryStatus::Success,
+            None,
+        )
+        .unwrap();
 
     let entries = CausalLogger::read_entries(&path).unwrap();
-    assert!(entries.len() >= 2, "need at least 2 entries for chain verification");
+    assert!(
+        entries.len() >= 2,
+        "need at least 2 entries for chain verification"
+    );
 
     for i in 1..entries.len() {
         assert_eq!(
@@ -415,10 +504,7 @@ fn ri_0_11_hash_chain_integrity() {
     }
 
     for (i, entry) in entries.iter().enumerate() {
-        assert!(
-            !entry.entry_hash.is_empty(),
-            "entry_hash must be non-empty"
-        );
+        assert!(!entry.entry_hash.is_empty(), "entry_hash must be non-empty");
         if i > 0 {
             assert_ne!(
                 entry.entry_hash, entry.prev_hash,
@@ -440,7 +526,20 @@ fn ri_0_11_tampered_actor_id_leaves_stale_hash() {
 
     let logger = CausalLogger::new(&path).unwrap();
 
-    logger.log(real_agent, session_id, None, 0, "tool", "sandbox_exec", EntryStatus::Success, Some(RedactedPayload::from_redacted(serde_json::json!({"cmd": "ls"})))).unwrap();
+    logger
+        .log(
+            real_agent,
+            session_id,
+            None,
+            0,
+            "tool",
+            "sandbox_exec",
+            EntryStatus::Success,
+            Some(RedactedPayload::from_redacted(
+                serde_json::json!({"cmd": "ls"}),
+            )),
+        )
+        .unwrap();
 
     let entries = CausalLogger::read_entries(&path).unwrap();
     let original = entries[0].clone();

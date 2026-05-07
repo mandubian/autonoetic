@@ -19,8 +19,8 @@ use tokio::time::Duration;
 
 fn canonical_profile() -> ConstitutionProfile {
     ConstitutionProfile {
-        rules_enforcement: autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table(
-        ),
+        rules_enforcement:
+            autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table(),
         rights_enforcement:
             autonoetic_gateway::constitution_digest::canonical_right_enforcement_table(),
     }
@@ -171,7 +171,10 @@ async fn round_trip_peer_refs_and_chain_attestation_tamper_rejection() {
             peer_event_ref,
             ..
         }) => {
-            assert!(code >= 400, "expected an error status code for missing target");
+            assert!(
+                code >= 400,
+                "expected an error status code for missing target"
+            );
             peer_event_ref.expect("error response must include peer_event_ref")
         }
         other => panic!("expected AgentResponse/Error, got {:?}", other),
@@ -237,7 +240,10 @@ async fn round_trip_peer_refs_and_chain_attestation_tamper_rejection() {
                 reason
             );
         }
-        other => panic!("expected ChainAttestationAck for tampered request, got {:?}", other),
+        other => panic!(
+            "expected ChainAttestationAck for tampered request, got {:?}",
+            other
+        ),
     }
 
     server.abort();

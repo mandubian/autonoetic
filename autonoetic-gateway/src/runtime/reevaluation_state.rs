@@ -129,6 +129,15 @@ pub fn execute_scheduled_action(
         ScheduledAction::CredentialRequest { .. } => anyhow::bail!(
             "CredentialRequest is not directly executable from reevaluation state; it is resumed via approval continuation"
         ),
+        ScheduledAction::WebFetch { .. } => anyhow::bail!(
+            "WebFetch is not directly executable from reevaluation state; it is resumed via approval continuation"
+        ),
+        ScheduledAction::WebCall { .. } => anyhow::bail!(
+            "WebCall is not directly executable from reevaluation state; it is resumed via approval continuation"
+        ),
+        ScheduledAction::WebSearch { .. } => anyhow::bail!(
+            "WebSearch is not directly executable from reevaluation state; it is resumed via approval continuation"
+        ),
         ScheduledAction::SessionContinue { .. } => anyhow::bail!(
             "SessionContinue is not directly executable; it only gates session continuation by approval"
         ),

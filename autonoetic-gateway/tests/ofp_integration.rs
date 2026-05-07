@@ -936,7 +936,10 @@ async fn test_handshake_rejects_constitution_mismatch_in_exact_mode() {
             assert_eq!(code, 409);
             assert!(message.contains("constitutional_incompatibility"));
         }
-        other => panic!("Expected constitutional incompatibility error, got {:?}", other),
+        other => panic!(
+            "Expected constitutional incompatibility error, got {:?}",
+            other
+        ),
     }
 
     let events = gateway_store
@@ -1022,7 +1025,10 @@ async fn test_handshake_accepts_known_compatible_digest() {
     let response = read_framed_message(&mut reader).await.unwrap();
     match response.kind {
         WireMessageKind::Response(WireResponse::HandshakeAck { .. }) => {}
-        other => panic!("Expected HandshakeAck for allowlisted digest, got {:?}", other),
+        other => panic!(
+            "Expected HandshakeAck for allowlisted digest, got {:?}",
+            other
+        ),
     }
 
     server.abort();
@@ -1057,8 +1063,12 @@ async fn test_handshake_accepts_superset_profile_in_superset_mode() {
     ));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut peer_rules = autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table();
-    peer_rules.insert("R-99.1".to_string(), "peer_extra_rule_enforcement".to_string());
+    let mut peer_rules =
+        autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table();
+    peer_rules.insert(
+        "R-99.1".to_string(),
+        "peer_extra_rule_enforcement".to_string(),
+    );
     let mut peer_rights =
         autonoetic_gateway::constitution_digest::canonical_right_enforcement_table();
     peer_rights.insert(
@@ -1134,7 +1144,8 @@ async fn test_handshake_rejects_non_superset_profile_in_superset_mode() {
     ));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut peer_rules = autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table();
+    let mut peer_rules =
+        autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table();
     let removed_rule = peer_rules
         .keys()
         .next()

@@ -57,7 +57,10 @@ fn manifest(agent_id: &str) -> AgentManifest {
     }
 }
 
-fn write_skill_with_loop_guard(agent_dir: &std::path::Path, loop_guard_yaml: &str) -> anyhow::Result<()> {
+fn write_skill_with_loop_guard(
+    agent_dir: &std::path::Path,
+    loop_guard_yaml: &str,
+) -> anyhow::Result<()> {
     let skill = format!(
         r#"---
 metadata:

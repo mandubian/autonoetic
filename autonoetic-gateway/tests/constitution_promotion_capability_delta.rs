@@ -232,9 +232,11 @@ fn approve_without_acknowledgement_is_rejected() {
     let gateway_dir = temp.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = GatewayStore::open(&gateway_dir).expect("store");
-    let stored = store_revision_promote_approval(&store, "ar-no-ack", vec!["NetworkAccess"], vec![]);
+    let stored =
+        store_revision_promote_approval(&store, "ar-no-ack", vec!["NetworkAccess"], vec![]);
 
-    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
+    let mut cfg = GatewayConfig::default();
+    cfg.approval_dwell_multiplier = 0.0;
     let result = approve_request_with_options(
         &cfg,
         Some(&store),
@@ -273,7 +275,8 @@ fn approve_with_partial_acknowledgement_is_rejected() {
         vec!["SandboxFunctions"],
     );
 
-    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
+    let mut cfg = GatewayConfig::default();
+    cfg.approval_dwell_multiplier = 0.0;
     let result = approve_request_with_options(
         &cfg,
         Some(&store),
@@ -301,7 +304,8 @@ fn approve_with_extra_acknowledgement_is_rejected() {
     let store = GatewayStore::open(&gateway_dir).expect("store");
     let stored = store_revision_promote_approval(&store, "ar-extra", vec!["NetworkAccess"], vec![]);
 
-    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
+    let mut cfg = GatewayConfig::default();
+    cfg.approval_dwell_multiplier = 0.0;
     let result = approve_request_with_options(
         &cfg,
         Some(&store),
@@ -337,7 +341,8 @@ fn approve_with_exact_acknowledgement_succeeds() {
         vec!["SandboxFunctions"],
     );
 
-    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
+    let mut cfg = GatewayConfig::default();
+    cfg.approval_dwell_multiplier = 0.0;
     let decision = approve_request_with_options(
         &cfg,
         Some(&store),
@@ -482,7 +487,8 @@ fn approval_ref_bypass_is_invalidated_when_alias_moves() {
     );
     let approval_ref = first["approval_ref"].as_str().unwrap().to_string();
 
-    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
+    let mut cfg = GatewayConfig::default();
+    cfg.approval_dwell_multiplier = 0.0;
     let apr_row = h.store.get_approval(&approval_ref).unwrap().unwrap();
     approve_request_with_options(
         &cfg,
@@ -565,7 +571,8 @@ fn approval_ref_bypasses_gate_after_approval() {
     let approval_ref = first["approval_ref"].as_str().unwrap().to_string();
 
     // Operator approves with the matching acknowledgement.
-    let mut cfg = GatewayConfig::default(); cfg.approval_dwell_multiplier = 0.0;
+    let mut cfg = GatewayConfig::default();
+    cfg.approval_dwell_multiplier = 0.0;
     let apr_row = h.store.get_approval(&approval_ref).unwrap().unwrap();
     approve_request_with_options(
         &cfg,

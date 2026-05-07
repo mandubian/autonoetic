@@ -36,7 +36,10 @@ pub enum YieldReason {
     /// Agent escalated to human operator for guidance.
     HumanEscalation { escalation_request_id: String },
     /// Parent session terminated (crash, emergency stop, exit); child is orphaned.
-    ParentTerminated { parent_session_id: String, reason: String },
+    ParentTerminated {
+        parent_session_id: String,
+        reason: String,
+    },
 }
 
 /// Snapshot of LLM configuration needed for reproducible execution.

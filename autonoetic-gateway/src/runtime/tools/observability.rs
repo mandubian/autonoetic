@@ -204,7 +204,10 @@ impl NativeTool for ObservabilityReadReasoningTool {
             return Ok(ToolError::validation("target_session_id contains invalid path characters", None::<String>).to_error_response());
         }
 
-        if !policy.can_audit_reasoning(&args.target_agent_id).is_allowed() {
+        if !policy
+            .can_audit_reasoning(&args.target_agent_id)
+            .is_allowed()
+        {
             return serde_json::to_string(&serde_json::json!({
                 "ok": false,
                 "error_type": "capability",

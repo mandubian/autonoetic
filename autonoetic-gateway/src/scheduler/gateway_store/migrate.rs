@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 29;
+const SCHEMA_VERSION_LATEST: i64 = 30;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -513,6 +513,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_sentinel_disagreements_v27(conn)?;
     apply_eval_suite_ownership_v28(conn)?;
     apply_attack_patterns_v29(conn)?;
+    apply_user_interaction_resume_claim_v30(conn)?;
 
     Ok(())
 }
@@ -1684,6 +1685,39 @@ fn apply_attack_patterns_v29(conn: &mut Connection) -> Result<()> {
         params![
             29_i64,
             "proposed_attack_patterns",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_user_interaction_resume_claim_v30(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 30 {
+        return Ok(());
+    }
+
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('user_interactions') WHERE name = 'resumed_at'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute(
+            "ALTER TABLE user_interactions ADD COLUMN resumed_at TEXT",
+            [],
+        )?;
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            30_i64,
+            "user_interaction_resume_claim",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

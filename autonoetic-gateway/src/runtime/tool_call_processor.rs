@@ -1304,17 +1304,10 @@ mod tests {
         let mut mcp_runtime = Box::leak(Box::new(crate::runtime::mcp::McpToolRuntime::empty()));
         let manifest = Box::leak(Box::new(test_manifest()));
         let registry = Box::leak(Box::new(default_registry()));
-        let ds = Box::leak(Box::new(crate::runtime::disclosure::DisclosureState::default()));
-        ToolCallProcessor::new(
-            mcp_runtime,
-            registry,
-            manifest,
-            ds,
-            None,
-            None,
-            None,
-            None,
-        )
+        let ds = Box::leak(Box::new(
+            crate::runtime::disclosure::DisclosureState::default(),
+        ));
+        ToolCallProcessor::new(mcp_runtime, registry, manifest, ds, None, None, None, None)
     }
 
     #[test]

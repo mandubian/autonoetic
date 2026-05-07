@@ -7,8 +7,8 @@
 use regex::Regex;
 use std::collections::HashSet;
 
-use autonoetic_types::agent::{RemoteAccessDeclaration, RemoteAccessLanguage};
 use crate::runtime::network_policy::declaration_allows_target;
+use autonoetic_types::agent::{RemoteAccessDeclaration, RemoteAccessLanguage};
 
 /// Result of analyzing code for remote access patterns.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -306,14 +306,8 @@ impl ImportLanguageDetector for GoImportDetector {
     fn detect(&self, code: &str) -> Vec<DetectedPattern> {
         let mut patterns = Vec::new();
         let regexes = vec![
-            (
-                r#"(?m)^\s*(?:\w+\s+)?"net/http"\s*$"#,
-                "Go net/http import",
-            ),
-            (
-                r#"(?m)^\s*(?:\w+\s+)?"net"\s*$"#,
-                "Go net import",
-            ),
+            (r#"(?m)^\s*(?:\w+\s+)?"net/http"\s*$"#, "Go net/http import"),
+            (r#"(?m)^\s*(?:\w+\s+)?"net"\s*$"#, "Go net import"),
             (
                 r#"(?m)^\s*(?:\w+\s+)?"golang\.org/x/net/websocket"\s*$"#,
                 "Go x/net/websocket import",
@@ -522,10 +516,9 @@ impl RemoteAccessAnalyzer {
             };
             if detector_enabled {
                 for p in detector.detect(code) {
-                    if !patterns
-                        .iter()
-                        .any(|existing| existing.pattern == p.pattern && existing.line_number == p.line_number)
-                    {
+                    if !patterns.iter().any(|existing| {
+                        existing.pattern == p.pattern && existing.line_number == p.line_number
+                    }) {
                         patterns.push(p);
                     }
                 }
@@ -561,7 +554,10 @@ impl RemoteAccessAnalyzer {
                 r"axios\.(get|post|put|delete|patch|head|options)\s*\(",
                 "Axios HTTP request",
             ),
-            (r"(http|https)\.(get|request)\s*\(", "Node HTTP/HTTPS request"),
+            (
+                r"(http|https)\.(get|request)\s*\(",
+                "Node HTTP/HTTPS request",
+            ),
             (r"net\.connect\s*\(", "Node net.connect call"),
             (r"WebSocket\s*\(", "WebSocket connection"),
             (r"connect\s*\(.*ws://", "WebSocket connection"),
@@ -1112,7 +1108,8 @@ import axios from "axios";
             shell_commands: vec![],
             package_manager_commands: vec![],
         };
-        let analysis = RemoteAccessAnalyzer::analyze_code_with_declaration(code, Some(&declaration));
+        let analysis =
+            RemoteAccessAnalyzer::analyze_code_with_declaration(code, Some(&declaration));
         assert!(analysis
             .detected_patterns
             .iter()
@@ -1633,7 +1630,10 @@ mymod.do_thing()
             package_manager_commands: vec![],
         };
         let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
-        assert!(undeclared.is_empty(), "expected non-python import declarations to match");
+        assert!(
+            undeclared.is_empty(),
+            "expected non-python import declarations to match"
+        );
     }
 
     #[test]
@@ -1685,7 +1685,11 @@ mymod.do_thing()
             package_manager_commands: vec![],
         };
         let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
-        assert_eq!(undeclared.len(), 1, "expected undeclared URL target to fail shut");
+        assert_eq!(
+            undeclared.len(),
+            1,
+            "expected undeclared URL target to fail shut"
+        );
         assert_eq!(undeclared[0].category, "url_literal");
     }
 
@@ -1712,7 +1716,10 @@ mymod.do_thing()
             package_manager_commands: vec![],
         };
         let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
-        assert!(undeclared.is_empty(), "expected wildcard suffix to allow target");
+        assert!(
+            undeclared.is_empty(),
+            "expected wildcard suffix to allow target"
+        );
     }
 
     #[test]
@@ -1736,7 +1743,10 @@ mymod.do_thing()
             package_manager_commands: vec![],
         };
         let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
-        assert!(undeclared.is_empty(), "expected wildcard allowlist to allow IP target");
+        assert!(
+            undeclared.is_empty(),
+            "expected wildcard allowlist to allow IP target"
+        );
     }
 }
 

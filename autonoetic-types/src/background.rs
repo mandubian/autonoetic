@@ -144,6 +144,70 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+    /// Approval subject + executable continuation: web.fetch blocked by network policy.
+    /// After operator approval, runtime retries the same request with `approval_ref`.
+    WebFetch {
+        url: String,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        max_chars: Option<usize>,
+        /// Concrete host targets inferred from `url` for session grants.
+        #[serde(default)]
+        detected_hosts: Option<Vec<String>>,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
+    /// Approval subject + executable continuation: web.call blocked by network policy.
+    /// After operator approval, runtime retries the same request with `approval_ref`.
+    WebCall {
+        url: String,
+        #[serde(default)]
+        method: Option<String>,
+        #[serde(default)]
+        headers: Option<std::collections::HashMap<String, String>>,
+        #[serde(default)]
+        body: Option<serde_json::Value>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        max_chars: Option<usize>,
+        /// Concrete host targets inferred from `url` for session grants.
+        #[serde(default)]
+        detected_hosts: Option<Vec<String>>,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
+    /// Approval subject + executable continuation: web.search blocked by network policy.
+    /// After operator approval, runtime retries the same request with `approval_ref`.
+    WebSearch {
+        query: String,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        max_results: Option<usize>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        engine_url: Option<String>,
+        #[serde(default)]
+        duckduckgo_engine_url: Option<String>,
+        #[serde(default)]
+        google_engine_url: Option<String>,
+        #[serde(default)]
+        google_engine_id: Option<String>,
+        #[serde(default)]
+        google_api_key_env: Option<String>,
+        #[serde(default)]
+        google_engine_id_env: Option<String>,
+        #[serde(default)]
+        cache_ttl_secs: Option<u64>,
+        /// Concrete host targets inferred from the resolved engine URL for session grants.
+        #[serde(default)]
+        detected_hosts: Option<Vec<String>>,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
     /// Approval subject only: continue a session after max-turn circuit breaker trips.
     /// Not executed by the scheduler; once approved, the next resume attempt proceeds.
     SessionContinue {
@@ -240,6 +304,9 @@ impl ScheduledAction {
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
             | Self::CredentialRequest { .. }
+            | Self::WebFetch { .. }
+            | Self::WebCall { .. }
+            | Self::WebSearch { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }
@@ -255,6 +322,9 @@ impl ScheduledAction {
             Self::AgentInstall { .. } => "agent_install",
             Self::CredentialPrompt { .. } => "credential_prompt",
             Self::CredentialRequest { .. } => "credential_request",
+            Self::WebFetch { .. } => "web_fetch",
+            Self::WebCall { .. } => "web_call",
+            Self::WebSearch { .. } => "web_search",
             Self::SessionContinue { .. } => "session_continue",
             Self::ProfileShare { .. } => "profile_share",
             Self::SessionEscalate { .. } => "session_escalate",
@@ -270,6 +340,9 @@ impl ScheduledAction {
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
             | Self::CredentialRequest { .. }
+            | Self::WebFetch { .. }
+            | Self::WebCall { .. }
+            | Self::WebSearch { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }
@@ -289,6 +362,9 @@ impl ScheduledAction {
             Self::AgentInstall { .. }
             | Self::CredentialPrompt { .. }
             | Self::CredentialRequest { .. }
+            | Self::WebFetch { .. }
+            | Self::WebCall { .. }
+            | Self::WebSearch { .. }
             | Self::SessionContinue { .. }
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }

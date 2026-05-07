@@ -14,7 +14,10 @@ use autonoetic_types::capability::Capability;
 fn promotion_gate_overrides_force_network_off() {
     let overrides = BwrapIsolationOverrides::promotion_gate_overrides();
     assert!(!overrides.share_net, "share_net must be false");
-    assert!(overrides.force_network_off, "force_network_off must be true");
+    assert!(
+        overrides.force_network_off,
+        "force_network_off must be true"
+    );
 }
 
 #[test]
@@ -38,7 +41,10 @@ fn evaluation_capability_forces_network_off() {
     overrides.share_net = false;
 
     assert!(overrides.force_network_off);
-    assert!(!overrides.share_net, "R+16 overrides NetworkAccess for evaluation agents");
+    assert!(
+        !overrides.share_net,
+        "R+16 overrides NetworkAccess for evaluation agents"
+    );
 
     let mut argv = vec!["--unshare-all".to_string()];
     autonoetic_gateway::sandbox::append_bwrap_isolation_flags(&mut argv, Some(&overrides));
@@ -54,7 +60,10 @@ fn non_evaluation_agents_keep_network() {
         hosts: vec!["api.example.com".to_string()],
     }];
     let overrides = BwrapIsolationOverrides::from_capabilities(&caps);
-    assert!(overrides.share_net, "NetworkAccess without Evaluation keeps share_net");
+    assert!(
+        overrides.share_net,
+        "NetworkAccess without Evaluation keeps share_net"
+    );
     assert!(!overrides.force_network_off);
 }
 

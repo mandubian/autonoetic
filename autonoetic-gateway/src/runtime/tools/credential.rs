@@ -47,6 +47,88 @@ where
     }
 }
 
+fn resolve_approval_execution_context(
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    session_id: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let root_session_id = run_context
+        .map(|rc| rc.root_session_id.clone())
+        .or_else(|| {
+            if session_id.is_empty() {
+                None
+            } else {
+                Some(crate::runtime::content_store::root_session_id(session_id).to_string())
+            }
+        });
+
+    let workflow_id = run_context
+        .and_then(|rc| rc.workflow_id.clone())
+        .or_else(|| {
+            let (Some(cfg), Some(root_sid)) = (config, root_session_id.as_ref()) else {
+                return None;
+            };
+            crate::scheduler::resolve_workflow_id_for_root_session(cfg, root_sid)
+                .ok()
+                .flatten()
+        });
+
+    let task_id = run_context.and_then(|rc| rc.task_id.clone()).or_else(|| {
+        if session_id.is_empty() {
+            return None;
+        }
+        let (Some(cfg), Some(workflow)) = (config, workflow_id.as_ref()) else {
+            return None;
+        };
+        crate::scheduler::resolve_task_id_for_session(cfg, None, workflow, session_id)
+            .ok()
+            .flatten()
+    });
+
+    (root_session_id, workflow_id, task_id)
+}
+
+fn create_credential_request_approval(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    manifest: &AgentManifest,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    session_id: Option<&str>,
+    action: ScheduledAction,
+    reason: String,
+) -> anyhow::Result<String> {
+    let sid = session_id.unwrap_or("");
+    let (root_session_id, workflow_id, task_id) =
+        resolve_approval_execution_context(config, run_context, sid);
+    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let mut req = ApprovalRequest {
+        request_id: request_id.clone(),
+        agent_id: manifest.agent.id.clone(),
+        session_id: sid.to_string(),
+        root_session_id,
+        workflow_id,
+        task_id,
+        action: action.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        reason: Some(reason),
+        evidence_ref: None,
+        decision_reason: None,
+        approval_level: config
+            .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
+            .unwrap_or(ApprovalLevel::Operator),
+        similar_to_request_id: None,
+        similarity_score: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+    };
+
+    store.create_approval(&mut req)?;
+    Ok(request_id)
+}
+
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(CredentialCheckTool));
     registry.register(Box::new(CredentialRequestTool));
@@ -360,58 +442,70 @@ impl NativeTool for CredentialRequestTool {
             false
         };
 
-        if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
-            manifest,
-            agent_dir,
-            &url_host,
-            Some(&args.url),
-            DeclarationRequirement::Required,
-        ) {
-            return Ok(json!({
-                "ok": false,
-                "error_type": violation.error_type,
-                "message": violation.message,
-                "repair_hint": violation.repair_hint,
-                "error": "remote access target policy violation",
-                "approval_required": false,
-            })
-            .to_string());
+        if !approval_validated {
+            if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
+                manifest,
+                agent_dir,
+                &url_host,
+                Some(&args.url),
+                DeclarationRequirement::Required,
+            ) {
+                let action = ScheduledAction::CredentialRequest {
+                    credential_id: args.credential_id.clone(),
+                    url: args.url.clone(),
+                    method: args.method.clone(),
+                    headers: args.headers.clone(),
+                    body: args.body.clone(),
+                    inject_secret_as: args.inject_secret_as.clone(),
+                    payload: Some(json!({
+                        "host": url_host.clone(),
+                        "retry_field": "approval_ref",
+                        "source_tool": "credential_request",
+                        "policy_violation": violation.error_type,
+                    })),
+                };
+                let reason = format!(
+                    "Credential request to {} requires approval (policy: {})",
+                    url_host, violation.error_type
+                );
+                let request_id = create_credential_request_approval(
+                    &store,
+                    manifest,
+                    _config,
+                    _run_context,
+                    _session_id,
+                    action,
+                    reason.clone(),
+                )?;
+                return Ok(json!({
+                    "ok": false,
+                    "error_type": violation.error_type,
+                    "message": format!(
+                        "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
+                        request_id
+                    ),
+                    "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                    "error": violation.message,
+                    "approval_required": true,
+                    "request_id": request_id,
+                    "suspended": true,
+                    "reason": reason,
+                    "approval": {
+                        "kind": "credential_request",
+                        "summary": format!("Credential request to {}", url_host),
+                        "reason": format!(
+                            "Credential request to {} requires approval because remote target policy is not declared for this host.",
+                            url_host
+                        ),
+                        "retry_field": "approval_ref"
+                    }
+                })
+                .to_string());
+            }
         }
 
         // Check network policy unless this exact request has been explicitly approved.
         if !policy.can_connect_net(&url_host).is_allowed() && !approval_validated {
-            let Some(cfg) = _config else {
-                let message = format!("Network access denied for host: {}", url_host);
-                return Ok(json!({
-                    "ok": false,
-                    "error_type": "permission",
-                    "message": message,
-                    "repair_hint": "Request network approval for this host and retry with approval_ref.",
-                    "error": message,
-                    "approval_required": true,
-                    "reason": format!("HTTP request to {} requires approval", url_host),
-                })
-                .to_string());
-            };
-            let sid = _session_id.unwrap_or("");
-            let root_session_id = _run_context
-                .map(|rc| rc.root_session_id.clone())
-                .unwrap_or_else(|| crate::runtime::content_store::root_session_id(sid).to_string());
-            let workflow_id = _run_context
-                .and_then(|rc| rc.workflow_id.clone())
-                .or_else(|| {
-                    crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root_session_id)
-                        .ok()
-                        .flatten()
-                });
-            let task_id = _run_context.and_then(|rc| rc.task_id.clone()).or_else(|| {
-                workflow_id.as_ref().and_then(|wf| {
-                    crate::scheduler::resolve_task_id_for_session(cfg, None, wf, sid)
-                        .ok()
-                        .flatten()
-                })
-            });
-            let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
             let action = ScheduledAction::CredentialRequest {
                 credential_id: args.credential_id.clone(),
                 url: args.url.clone(),
@@ -419,31 +513,23 @@ impl NativeTool for CredentialRequestTool {
                 headers: args.headers.clone(),
                 body: args.body.clone(),
                 inject_secret_as: args.inject_secret_as.clone(),
-                payload: Some(json!({ "host": url_host, "retry_field": "approval_ref" })),
+                payload: Some(json!({
+                    "host": url_host.clone(),
+                    "retry_field": "approval_ref",
+                    "source_tool": "credential_request",
+                    "policy_violation": "network_access_denied",
+                })),
             };
-            let mut req = ApprovalRequest {
-                request_id: request_id.clone(),
-                agent_id: manifest.agent.id.clone(),
-                session_id: sid.to_string(),
-                root_session_id: Some(root_session_id),
-                workflow_id: workflow_id.clone(),
-                task_id,
-                action: action.clone(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                status: None,
-                decided_at: None,
-                decided_by: None,
-                reason: Some(format!("HTTP request to {} requires approval", url_host)),
-                evidence_ref: None,
-                decision_reason: None,
-                approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
-                similar_to_request_id: None,
-                similarity_score: None,
-                min_dwell_ms: None,
-                confirm_phrase: None,
-            };
-
-            store.create_approval(&mut req)?;
+            let reason = format!("HTTP request to {} requires approval", url_host);
+            let request_id = create_credential_request_approval(
+                &store,
+                manifest,
+                _config,
+                _run_context,
+                _session_id,
+                action,
+                reason.clone(),
+            )?;
             let message = format!(
                 "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
                 request_id
@@ -457,7 +543,7 @@ impl NativeTool for CredentialRequestTool {
                 "approval_required": true,
                 "request_id": request_id,
                 "suspended": true,
-                "reason": format!("HTTP request to {} requires approval", url_host),
+                "reason": reason,
                 "approval": {
                     "kind": "credential_request",
                     "summary": format!("Credential request to {}", url_host),
@@ -1215,7 +1301,7 @@ impl NativeTool for CredentialSetupTool {
                     },
                     "approval_ref": {
                         "type": "string",
-                        "description": "Approval request ID from a completed UserPrompt approval."
+                        "description": "Approval request ID from a completed credential.setup approval (UserPrompt or remote-access gate)."
                     }
                 }
             }),
@@ -1252,36 +1338,54 @@ impl NativeTool for CredentialSetupTool {
             .to_error_response());
         };
 
+        let mut approved_setup_remote_url: Option<String> = None;
+
         // ------------------------------------------------------------------
-        // Path 1: resume after approval (UserPrompt flow — unchanged)
+        // Path 1: resume after approval
         // ------------------------------------------------------------------
         if let Some(ref approval_ref) = args.approval_ref {
             if let Some(approval) = store.get_approval(approval_ref)? {
-                if let autonoetic_types::background::ScheduledAction::CredentialPrompt {
-                    credential_id,
-                    ..
-                } = &approval.action
-                {
-                    if approval.status
-                        == Some(autonoetic_types::background::ApprovalStatus::Approved)
-                    {
-                        if let Some(cred) = store.get_credential(credential_id)? {
-                            return Ok(json!({
-                                "ok": true,
-                                "credential_id": cred.credential_id,
-                                "service": cred.service,
-                                "secrets_stored": 1,
-                                "resumed_from_approval": true,
-                            })
-                            .to_string());
+                if approval.status == Some(autonoetic_types::background::ApprovalStatus::Approved) {
+                    match &approval.action {
+                        autonoetic_types::background::ScheduledAction::CredentialPrompt {
+                            credential_id,
+                            ..
+                        } => {
+                            if let Some(cred) = store.get_credential(credential_id)? {
+                                return Ok(json!({
+                                    "ok": true,
+                                    "credential_id": cred.credential_id,
+                                    "service": cred.service,
+                                    "secrets_stored": 1,
+                                    "resumed_from_approval": true,
+                                })
+                                .to_string());
+                            }
                         }
+                        autonoetic_types::background::ScheduledAction::CredentialRequest {
+                            url,
+                            payload,
+                            ..
+                        } => {
+                            let is_setup_remote_gate = payload
+                                .as_ref()
+                                .and_then(|p| p.get("source_tool"))
+                                .and_then(|v| v.as_str())
+                                == Some("credential_setup");
+                            if is_setup_remote_gate {
+                                approved_setup_remote_url = Some(url.clone());
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
-            return Ok(autonoetic_types::tool_error::ToolError::not_found(
-                format!("approval '{}' for credential setup", approval_ref),
-                Some("The approval reference may be invalid, not yet approved, or not for a credential setup flow.".to_string()),
-            ).to_error_response());
+            if approved_setup_remote_url.is_none() {
+                return Ok(autonoetic_types::tool_error::ToolError::not_found(
+                    format!("approval '{}' for credential setup", approval_ref),
+                    Some("The approval reference may be invalid, not yet approved, or not for a credential setup flow.".to_string()),
+                ).to_error_response());
+            }
         }
 
         // ------------------------------------------------------------------
@@ -1358,35 +1462,114 @@ impl NativeTool for CredentialSetupTool {
         {
             // Policy-check the skill_url host.
             let url_host = extract_host(url)?;
-            if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
-                manifest,
-                _agent_dir,
-                &url_host,
-                Some(url),
-                DeclarationRequirement::Required,
-            ) {
-                return Ok(json!({
-                        "ok": false,
-                        "error_type": violation.error_type,
-                        "message": violation.message,
-                        "repair_hint": violation.repair_hint,
-                        "error": "remote access target policy violation",
-                        "approval_required": false,
-                    })
-                    .to_string());
-            }
-            if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
-                let message = format!("Network access denied for skill_url host: {}", url_host);
-                return Ok(json!({
-                        "ok": false,
-                        "error_type": "permission",
-                        "message": message,
-                        "repair_hint": "Request network approval for this host or use a skill_url on an allowed host.",
-                        "error": message,
-                        "approval_required": true,
-                        "reason": format!("Fetching skill.md from {} requires approval", url_host),
-                    })
-                    .to_string());
+            let skill_url_is_approved = approved_setup_remote_url.as_deref() == Some(url.as_str());
+            if !skill_url_is_approved {
+                if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
+                    manifest,
+                    _agent_dir,
+                    &url_host,
+                    Some(url),
+                    DeclarationRequirement::Required,
+                ) {
+                    let action = ScheduledAction::CredentialRequest {
+                        credential_id: args.credential_id.clone().unwrap_or_default(),
+                        url: url.clone(),
+                        method: Some("GET".to_string()),
+                        headers: None,
+                        body: None,
+                        inject_secret_as: None,
+                        payload: Some(json!({
+                            "host": url_host.clone(),
+                            "retry_field": "approval_ref",
+                            "source_tool": "credential_setup",
+                            "setup_phase": "skill_url",
+                            "policy_violation": violation.error_type,
+                        })),
+                    };
+                    let reason = format!(
+                        "Fetching skill.md from {} requires approval (policy: {})",
+                        url_host, violation.error_type
+                    );
+                    let request_id = create_credential_request_approval(
+                        &store,
+                        manifest,
+                        _config,
+                        _run_context,
+                        _session_id,
+                        action,
+                        reason.clone(),
+                    )?;
+                    return Ok(json!({
+                            "ok": false,
+                            "error_type": violation.error_type,
+                            "message": format!(
+                                "Execution suspended pending operator approval ({}). Retry credential.setup with approval_ref after approval.",
+                                request_id
+                            ),
+                            "repair_hint": "Wait for approval and retry credential.setup with the same skill_url plus approval_ref.",
+                            "error": violation.message,
+                            "approval_required": true,
+                            "request_id": request_id,
+                            "suspended": true,
+                            "reason": reason,
+                            "approval": {
+                                "kind": "credential_setup_remote_access",
+                                "summary": format!("Fetch skill.md from {}", url_host),
+                                "reason": format!("Remote target policy is undeclared for {}", url_host),
+                                "retry_field": "approval_ref"
+                            }
+                        })
+                        .to_string());
+                }
+                if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
+                    let reason = format!("Fetching skill.md from {} requires approval", url_host);
+                    let action = ScheduledAction::CredentialRequest {
+                        credential_id: args.credential_id.clone().unwrap_or_default(),
+                        url: url.clone(),
+                        method: Some("GET".to_string()),
+                        headers: None,
+                        body: None,
+                        inject_secret_as: None,
+                        payload: Some(json!({
+                            "host": url_host.clone(),
+                            "retry_field": "approval_ref",
+                            "source_tool": "credential_setup",
+                            "setup_phase": "skill_url",
+                            "policy_violation": "network_access_denied",
+                        })),
+                    };
+                    let request_id = create_credential_request_approval(
+                        &store,
+                        manifest,
+                        _config,
+                        _run_context,
+                        _session_id,
+                        action,
+                        reason.clone(),
+                    )?;
+                    let message = format!("Network access denied for skill_url host: {}", url_host);
+                    return Ok(json!({
+                            "ok": false,
+                            "error_type": "permission",
+                            "message": format!(
+                                "Execution suspended pending operator approval ({}). Retry credential.setup with approval_ref after approval.",
+                                request_id
+                            ),
+                            "repair_hint": "Wait for approval and retry credential.setup with the same skill_url plus approval_ref.",
+                            "error": message,
+                            "approval_required": true,
+                            "request_id": request_id,
+                            "suspended": true,
+                            "reason": reason,
+                            "approval": {
+                                "kind": "credential_setup_remote_access",
+                                "summary": format!("Fetch skill.md from {}", url_host),
+                                "reason": format!("Fetching skill.md from {} requires approval", url_host),
+                                "retry_field": "approval_ref"
+                            }
+                        })
+                        .to_string());
+                }
             }
 
             // Fetch and parse the skill.md.
@@ -1514,40 +1697,144 @@ impl NativeTool for CredentialSetupTool {
 
         // Network policy pre-check for all ApiCall step URLs.
         for step in &steps {
-            if let CredentialSetupStep::ApiCall { url, .. } = step {
+            if let CredentialSetupStep::ApiCall {
+                method,
+                url,
+                headers,
+                body,
+                ..
+            } = step
+            {
                 let host = extract_host(url)?;
-                if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
-                    manifest,
-                    _agent_dir,
-                    &host,
-                    Some(url),
-                    DeclarationRequirement::Required,
-                ) {
-                    return Ok(json!({
-                        "ok": false,
-                        "error_type": violation.error_type,
-                        "message": violation.message,
-                        "repair_hint": violation.repair_hint,
-                        "error": "remote access target policy violation",
-                        "approval_required": false,
-                    })
-                    .to_string());
-                }
-                if host.is_empty() || !policy.can_connect_net(&host).is_allowed() {
-                    let denied_host = if host.is_empty() { "<empty>" } else { &host };
-                    return Ok(json!({
-                        "ok": false,
-                        "error_type": "permission",
-                        "message": format!("Network access denied for host: {}", denied_host),
-                        "repair_hint": "Request network approval for this host or remove the blocked ApiCall step.",
-                        "error": format!("Network access denied for host: {}", denied_host),
-                        "approval_required": true,
-                        "reason": format!(
+                let step_url_is_approved =
+                    approved_setup_remote_url.as_deref() == Some(url.as_str());
+                if !step_url_is_approved {
+                    if let Err(violation) =
+                        crate::runtime::network_policy::enforce_remote_target_policy(
+                            manifest,
+                            _agent_dir,
+                            &host,
+                            Some(url),
+                            DeclarationRequirement::Required,
+                        )
+                    {
+                        let action = ScheduledAction::CredentialRequest {
+                            credential_id: args.credential_id.clone().unwrap_or_default(),
+                            url: url.clone(),
+                            method: method.clone(),
+                            headers: Some(headers.clone()),
+                            body: body.clone(),
+                            inject_secret_as: None,
+                            payload: Some(json!({
+                                "host": host.clone(),
+                                "retry_field": "approval_ref",
+                                "source_tool": "credential_setup",
+                                "setup_phase": "api_call_precheck",
+                                "policy_violation": violation.error_type,
+                            })),
+                        };
+                        let reason = format!(
+                            "API call to {} requires approval (policy: {})",
+                            if host.is_empty() {
+                                "<empty host>"
+                            } else {
+                                &host
+                            },
+                            violation.error_type
+                        );
+                        let request_id = create_credential_request_approval(
+                            &store,
+                            manifest,
+                            _config,
+                            _run_context,
+                            _session_id,
+                            action,
+                            reason.clone(),
+                        )?;
+                        return Ok(json!({
+                            "ok": false,
+                            "error_type": violation.error_type,
+                            "message": format!(
+                                "Execution suspended pending operator approval ({}). Retry credential.setup with approval_ref after approval.",
+                                request_id
+                            ),
+                            "repair_hint": "Wait for approval and retry credential.setup with approval_ref.",
+                            "error": violation.message,
+                            "approval_required": true,
+                            "request_id": request_id,
+                            "suspended": true,
+                            "reason": reason,
+                            "approval": {
+                                "kind": "credential_setup_remote_access",
+                                "summary": format!(
+                                    "Credential setup API call to {}",
+                                    if host.is_empty() { "<empty host>" } else { &host }
+                                ),
+                                "reason": format!(
+                                    "Remote target policy is undeclared for {}",
+                                    if host.is_empty() { "<empty host>" } else { &host }
+                                ),
+                                "retry_field": "approval_ref"
+                            }
+                        })
+                        .to_string());
+                    }
+                    if host.is_empty() || !policy.can_connect_net(&host).is_allowed() {
+                        let denied_host = if host.is_empty() { "<empty>" } else { &host };
+                        let reason = format!(
                             "API call to {} requires approval",
-                            if host.is_empty() { "<empty host>" } else { &host }
-                        ),
-                    })
-                    .to_string());
+                            if host.is_empty() {
+                                "<empty host>"
+                            } else {
+                                &host
+                            }
+                        );
+                        let action = ScheduledAction::CredentialRequest {
+                            credential_id: args.credential_id.clone().unwrap_or_default(),
+                            url: url.clone(),
+                            method: method.clone(),
+                            headers: Some(headers.clone()),
+                            body: body.clone(),
+                            inject_secret_as: None,
+                            payload: Some(json!({
+                                "host": host.clone(),
+                                "retry_field": "approval_ref",
+                                "source_tool": "credential_setup",
+                                "setup_phase": "api_call_precheck",
+                                "policy_violation": "network_access_denied",
+                            })),
+                        };
+                        let request_id = create_credential_request_approval(
+                            &store,
+                            manifest,
+                            _config,
+                            _run_context,
+                            _session_id,
+                            action,
+                            reason.clone(),
+                        )?;
+                        return Ok(json!({
+                            "ok": false,
+                            "error_type": "permission",
+                            "message": format!(
+                                "Execution suspended pending operator approval ({}). Retry credential.setup with approval_ref after approval.",
+                                request_id
+                            ),
+                            "repair_hint": "Wait for approval and retry credential.setup with approval_ref.",
+                            "error": format!("Network access denied for host: {}", denied_host),
+                            "approval_required": true,
+                            "request_id": request_id,
+                            "suspended": true,
+                            "reason": reason,
+                            "approval": {
+                                "kind": "credential_setup_remote_access",
+                                "summary": format!("Credential setup API call to {}", denied_host),
+                                "reason": format!("API call to {} requires approval", denied_host),
+                                "retry_field": "approval_ref"
+                            }
+                        })
+                        .to_string());
+                    }
                 }
             }
         }

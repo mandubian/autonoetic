@@ -287,8 +287,11 @@ fn missing_declaration_fails_shut_across_outbound_tools() -> anyhow::Result<()> 
         "unexpected web error: {web_err}"
     );
 
-    let credential_request =
-        run_credential_request(&credential_manifest("parity.cred.request.missing"), None, url)?;
+    let credential_request = run_credential_request(
+        &credential_manifest("parity.cred.request.missing"),
+        None,
+        url,
+    )?;
     assert_eq!(credential_request["ok"], false);
     assert_eq!(
         credential_request["error_type"],
@@ -319,7 +322,11 @@ fn undeclared_target_fails_shut_across_outbound_tools() -> anyhow::Result<()> {
     assert_eq!(sandbox["ok"], false);
     assert_eq!(sandbox["error_type"], "undeclared_remote_pattern");
 
-    let web = run_web_fetch(&web_manifest("parity.web.target"), Some(skill.as_str()), url)?;
+    let web = run_web_fetch(
+        &web_manifest("parity.web.target"),
+        Some(skill.as_str()),
+        url,
+    )?;
     let web_err = web.expect_err("web_fetch should fail shut");
     assert!(
         web_err.contains("is not covered by metadata.autonoetic.remote_access target declarations"),

@@ -226,7 +226,10 @@ fn ri_0_13c_execute_rejects_path_traversal() -> anyhow::Result<()> {
         Some(store.clone()),
         None,
     );
-    assert!(result.is_err(), "path traversal in session_id must be rejected");
+    assert!(
+        result.is_err(),
+        "path traversal in session_id must be rejected"
+    );
 
     let result2 = tool.execute(
         &manifest,
@@ -240,7 +243,10 @@ fn ri_0_13c_execute_rejects_path_traversal() -> anyhow::Result<()> {
         Some(store.clone()),
         None,
     );
-    assert!(result2.is_err(), "path traversal in agent_id must be rejected");
+    assert!(
+        result2.is_err(),
+        "path traversal in agent_id must be rejected"
+    );
 
     Ok(())
 }
@@ -303,11 +309,7 @@ fn ri_0_13c_execute_reads_and_discloses() -> anyhow::Result<()> {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["reasoning_sha256"], "abc123");
 
-    let events = store.search_causal_events(
-        Some("target-sess-1"),
-        Some("target.agent"),
-        50,
-    )?;
+    let events = store.search_causal_events(Some("target-sess-1"), Some("target.agent"), 50)?;
     let disclosed = events
         .iter()
         .find(|e| e.category == "reasoning" && e.action == "disclosed");
@@ -381,11 +383,7 @@ fn ri_0_13c_execute_no_disclosure_when_no_capability() -> anyhow::Result<()> {
     assert_eq!(json["ok"], false);
     assert_eq!(json["error_type"], "capability");
 
-    let events = store.search_causal_events(
-        Some("target-sess-2"),
-        Some("target.agent"),
-        50,
-    )?;
+    let events = store.search_causal_events(Some("target-sess-2"), Some("target.agent"), 50)?;
     let disclosed = events
         .iter()
         .find(|e| e.category == "reasoning" && e.action == "disclosed");
@@ -430,7 +428,10 @@ fn ri_0_13c_execute_empty_when_no_evidence() -> anyhow::Result<()> {
     assert_eq!(json["ok"], true);
     assert_eq!(json["count"], 0);
     assert!(
-        json["message"].as_str().unwrap_or_default().contains("No reasoning evidence"),
+        json["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No reasoning evidence"),
         "empty result should explain: {:?}",
         json
     );

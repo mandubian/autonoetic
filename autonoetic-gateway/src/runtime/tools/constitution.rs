@@ -8,14 +8,14 @@
 //!   proposals through a declared, durable channel. Proposals receive a
 //!   durable ID, enter a review queue, and cannot be silently dropped.
 
+use crate::constitution_digest::{
+    constitution_digest, constitution_format_version, constitution_text, constitution_version,
+};
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
-use crate::constitution_digest::{
-    constitution_digest, constitution_format_version, constitution_text, constitution_version,
-};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::notification::{NotificationRecord, NotificationType};
@@ -100,7 +100,9 @@ impl NativeTool for ConstitutionReadTool {
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let config = config.ok_or_else(|| {
-            anyhow::anyhow!("constitution_read requires GatewayConfig to resolve constitution paths")
+            anyhow::anyhow!(
+                "constitution_read requires GatewayConfig to resolve constitution paths"
+            )
         })?;
         crate::constitution_digest::initialize_constitution(config)?;
 
@@ -489,8 +491,8 @@ mod tests {
     #[test]
     fn extract_section_zero() {
         init_default_constitution();
-        let extract =
-            extract_section(constitution_text().as_ref(), "§0").expect("section 0 (Rights) must exist");
+        let extract = extract_section(constitution_text().as_ref(), "§0")
+            .expect("section 0 (Rights) must exist");
         assert!(extract.starts_with("## 0. "));
         // Should include the Ri-0.10 row but stop before the next `## ` section.
         assert!(extract.contains("Ri-0.10"));
@@ -508,7 +510,8 @@ mod tests {
     fn extract_pending_rule() {
         init_default_constitution();
         // R+++3 is in the constitution as a pending constitutional rule.
-        let extract = extract_section(constitution_text().as_ref(), "R+++3").expect("R+++3 must exist");
+        let extract =
+            extract_section(constitution_text().as_ref(), "R+++3").expect("R+++3 must exist");
         assert!(extract.contains("R+++3"));
     }
 

@@ -103,7 +103,9 @@ impl LoopGuard {
     /// sub-trip warnings.
     pub fn is_sub_trip_warning(&self) -> bool {
         let loop_threshold = ((self.max_loops_without_progress as u64 * 4 + 4) / 5) as u32;
-        if self.current_loops >= loop_threshold && self.current_loops < self.max_loops_without_progress {
+        if self.current_loops >= loop_threshold
+            && self.current_loops < self.max_loops_without_progress
+        {
             return true;
         }
         let failure_threshold = ((self.max_tool_failures as u64 * 4 + 4) / 5) as u32;
@@ -277,9 +279,7 @@ mod tests {
             assert!(guard.check_loop().is_ok(), "epoch {}", epoch);
             guard.register_progress(
                 "agent_exists",
-                &format!(
-                    r#"{{"agent_id":"weather.default","intent":"check-{epoch}"}}"#
-                ),
+                &format!(r#"{{"agent_id":"weather.default","intent":"check-{epoch}"}}"#),
             );
         }
         unreachable!("check_loop did not trip");
