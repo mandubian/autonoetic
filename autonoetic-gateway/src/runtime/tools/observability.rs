@@ -5,6 +5,7 @@ use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
+use autonoetic_types::tool_error::ToolError;
 use chrono::Utc;
 use serde::Deserialize;
 use std::path::Path;
@@ -81,7 +82,7 @@ impl NativeTool for ObservabilitySearchTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            anyhow::bail!("observability.search requires GatewayStore to be configured");
+            return Ok(ToolError::resource("observability.search requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let limit = args.limit.clamp(1, 100);
@@ -194,13 +195,13 @@ impl NativeTool for ObservabilityReadReasoningTool {
             || args.target_agent_id.contains('\\')
             || args.target_agent_id.contains("..")
         {
-            anyhow::bail!("target_agent_id contains invalid path characters");
+            return Ok(ToolError::validation("target_agent_id contains invalid path characters", None::<String>).to_error_response());
         }
         if args.target_session_id.contains('/')
             || args.target_session_id.contains('\\')
             || args.target_session_id.contains("..")
         {
-            anyhow::bail!("target_session_id contains invalid path characters");
+            return Ok(ToolError::validation("target_session_id contains invalid path characters", None::<String>).to_error_response());
         }
 
         if !policy.can_audit_reasoning(&args.target_agent_id).is_allowed() {
@@ -216,7 +217,7 @@ impl NativeTool for ObservabilityReadReasoningTool {
         let caller_session_id = session_id.unwrap_or("unknown");
 
         let Some(store) = gateway_store else {
-            anyhow::bail!("observability_read_reasoning requires GatewayStore to be configured");
+            return Ok(ToolError::resource("observability_read_reasoning requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let agents_dir = agent_dir
@@ -396,14 +397,17 @@ impl NativeTool for ObservabilityReadTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            anyhow::bail!("observability.read requires GatewayStore to be configured");
+            return Ok(ToolError::resource("observability.read requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let root_session_id = match parse_root_from_uri(&args.uri) {
             Some(root) => root,
-            None => anyhow::bail!(
-                "Invalid observability URI. Expected format: autonoetic://observability/roots/<root>/..."
-            ),
+            None => {
+                return Ok(ToolError::validation(
+                    "Invalid observability URI. Expected format: autonoetic://observability/roots/<root>/...",
+                    None::<String>,
+                ).to_error_response());
+            }
         };
 
         let sub_path = parse_sub_path(&args.uri);

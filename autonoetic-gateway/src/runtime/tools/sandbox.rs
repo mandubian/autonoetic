@@ -17,6 +17,7 @@ use autonoetic_types::capability::Capability;
 use autonoetic_types::layer::LayerApprovalScope;
 use autonoetic_types::runtime_lock::LockedLayerMount;
 use autonoetic_types::tool_error::tagged;
+use autonoetic_types::tool_error::ToolError;
 use secrecy::ExposeSecret;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -1279,9 +1280,10 @@ impl NativeTool for SandboxExecTool {
                             ..
                         } => (command.clone(), dependencies),
                         _ => {
-                            anyhow::bail!(
+                            return Err(tagged::Tagged::fatal(anyhow::anyhow!(
                                 "internal: pending sandbox approval has wrong action type"
-                            )
+                            ))
+                            .into());
                         }
                     };
                     let summary = sandbox_approval_summary_line(&manifest.agent.id, &cmd, None);
@@ -1470,30 +1472,31 @@ impl NativeTool for SandboxExecTool {
                                 command,
                                 dependencies,
                                 ..
-                            } => (command.clone(), dependencies),
-                            _ => {
-                                anyhow::bail!(
-                                    "internal: pending sandbox approval has wrong action type"
-                                )
-                            }
-                        };
-                        let summary = sandbox_approval_summary_line(&manifest.agent.id, &cmd, None);
-                        let approval = build_approval_details(
-                            primary,
-                            "sandbox_exec",
-                            summary.clone(),
-                            "approval_ref",
-                            serde_json::json!({
-                                "command": cmd,
-                                "dependencies": cmd_deps.as_ref().map(|d| serde_json::json!({
-                                    "runtime": d.runtime,
-                                    "packages": d.packages,
-                                })),
-                                "approval_already_pending": true,
-                                "note": "A sandbox approval is already pending for this session. After operator approval, retry with approval_ref. The approved command will be used automatically.",
-                            }),
-                        );
-                        let dup_note = if existing.len() > 1 {
+                        } => (command.clone(), dependencies),
+                        _ => {
+                            return Err(tagged::Tagged::fatal(anyhow::anyhow!(
+                                "internal: pending sandbox approval has wrong action type"
+                            ))
+                            .into());
+                        }
+                    };
+                    let summary = sandbox_approval_summary_line(&manifest.agent.id, &cmd, None);
+                    let approval = build_approval_details(
+                        primary,
+                        "sandbox_exec",
+                        summary.clone(),
+                        "approval_ref",
+                        serde_json::json!({
+                            "command": cmd,
+                            "dependencies": cmd_deps.as_ref().map(|d| serde_json::json!({
+                                "runtime": d.runtime,
+                                "packages": d.packages,
+                            })),
+                            "approval_already_pending": true,
+                            "note": "A sandbox approval is already pending for this session. After operator approval, retry with approval_ref. The approved command will be used automatically.",
+                        }),
+                    );
+                    let dup_note = if existing.len() > 1 {
                             format!(
                                 " ({} pending sandbox requests for this session; resolve or reject them.)",
                                 existing.len()
@@ -1606,10 +1609,11 @@ impl NativeTool for SandboxExecTool {
                             )
                         })?;
                     } else {
-                        anyhow::bail!(
+                        return Err(tagged::Tagged::resource(anyhow::anyhow!(
                             "GatewayStore missing; cannot persist sandbox approval request '{}'",
                             request_id
-                        );
+                        ))
+                        .into());
                     }
 
                     let approval = build_approval_details(
@@ -1899,10 +1903,11 @@ impl NativeTool for SandboxExecTool {
                                     )
                                 })?;
                             } else {
-                                anyhow::bail!(
-                                "GatewayStore missing; cannot persist layer mount approval request '{}'",
-                                request_id
-                            );
+                                return Err(tagged::Tagged::resource(anyhow::anyhow!(
+                                    "GatewayStore missing; cannot persist layer mount approval request '{}'",
+                                    request_id
+                                ))
+                                .into());
                             }
                             let approval = build_approval_details(
                                 &request,
@@ -1972,7 +1977,10 @@ impl NativeTool for SandboxExecTool {
         let mut layer_python_paths: Vec<String> = Vec::new();
         let session_content_mounts = if let Some(artifact_id) = effective_artifact_id {
             let Some(gw_dir) = gateway_dir else {
-                anyhow::bail!("artifact_id requires gateway directory to be configured");
+                return Err(tagged::Tagged::resource(anyhow::anyhow!(
+                    "artifact_id requires gateway directory to be configured"
+                ))
+                .into());
             };
             let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
             let resolved_files = artifact_store.resolve_files(artifact_id)?;

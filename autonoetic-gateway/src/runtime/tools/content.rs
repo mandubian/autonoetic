@@ -4,6 +4,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -93,14 +94,16 @@ impl NativeTool for ContentWriteTool {
             Some("private") => crate::runtime::content_store::ContentVisibility::Private,
             Some("session") | None => crate::runtime::content_store::ContentVisibility::Session,
             Some("global") => crate::runtime::content_store::ContentVisibility::Global,
-            Some(other) => anyhow::bail!(
-                "Invalid visibility '{}'. Must be one of: private, session, global",
-                other
-            ),
+            Some(other) => {
+                return Ok(ToolError::validation(
+                    format!("Invalid visibility '{}'. Must be one of: private, session, global", other),
+                    None::<String>,
+                ).to_error_response());
+            }
         };
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Content store requires gateway directory to be configured");
+            return Ok(ToolError::resource("Content store requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let sid = _session_id.unwrap_or(&_manifest.agent.id);
@@ -202,7 +205,7 @@ impl NativeTool for ContentReadTool {
         );
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Content store requires gateway directory to be configured");
+            return Ok(ToolError::resource("Content store requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let sid = _session_id.unwrap_or(&_manifest.agent.id);
@@ -215,11 +218,14 @@ impl NativeTool for ContentReadTool {
             match try_read_artifact_ref_file(gw_dir, gateway_store.as_deref(), input, sid) {
                 Ok(c) => c,
                 Err(e) => {
-                    anyhow::bail!(
-                        "Content '{}' not found: {}. Use `artifact_inspect` with the artifact_ref to verify the file list. Format: `ar.<ref>:<filename>`.",
-                        input,
-                        e
-                    );
+                    return Ok(ToolError::not_found(
+                        format!(
+                            "Content '{}' not found: {}. Use `artifact_inspect` with the artifact_ref to verify the file list. Format: `ar.<ref>:<filename>`.",
+                            input,
+                            e
+                        ),
+                        None::<String>,
+                    ).to_error_response());
                 }
             }
         } else {
@@ -243,7 +249,10 @@ impl NativeTool for ContentReadTool {
                         }
                     }
 
-                    anyhow::bail!("Content '{}' not found in session '{}': {}", input, sid, e);
+                    return Ok(ToolError::not_found(
+                        format!("Content '{}' not found in session '{}': {}", input, sid, e),
+                        None::<String>,
+                    ).to_error_response());
                 }
             }
         };
@@ -292,13 +301,13 @@ fn try_read_artifact_ref_file(
 ) -> anyhow::Result<Vec<u8>> {
     // Format: ar.<ref_id>:<filename>
     if !name_or_handle.starts_with("ar.") {
-        anyhow::bail!("not an artifact ref");
+        return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!("not an artifact ref")).into());
     }
 
     let Some(colon_idx) = name_or_handle.find(':') else {
-        anyhow::bail!(
+        return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(
             "artifact ref must be in format `ar.<ref>:<filename>` (colon separator required)"
-        );
+        )).into());
     };
     let ref_id = &name_or_handle[..colon_idx];
     let filename = &name_or_handle[colon_idx + 1..];

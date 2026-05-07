@@ -9,6 +9,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{extract_host, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::capability::Capability;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -329,9 +330,11 @@ fn apply_trust_mode(trust_mode: &str, parsed: &AgentManifest) -> anyhow::Result<
                 },
             ])
         }
-        other => anyhow::bail!(
-            "Unknown trust_mode '{}'; valid values: generous, strict, audit",
-            other
-        ),
+        other => {
+            return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(
+                "Unknown trust_mode '{}'; valid values: generous, strict, audit",
+                other
+            )).into());
+        }
     }
 }

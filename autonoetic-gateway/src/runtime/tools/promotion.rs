@@ -4,6 +4,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::promotion_store::PromotionStore;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::tool_error::ToolError;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::promotion::{
     PromotionQueryArgs, PromotionQueryResponse, PromotionRecordArgs, PromotionRecordResponse,
@@ -126,10 +127,13 @@ impl NativeTool for PromotionRecordTool {
             })
             .collect();
         if !findings_with_errors.is_empty() {
-            anyhow::bail!(
-                "Findings schema validation failed:\n  - {}",
-                findings_with_errors.join("\n  - ")
-            );
+            return Ok(ToolError::validation(
+                format!(
+                    "Findings schema validation failed:\n  - {}",
+                    findings_with_errors.join("\n  - ")
+                ),
+                None::<String>,
+            ).to_error_response());
         }
 
         let has_error_or_critical = args.findings.iter().any(|f| {
@@ -141,10 +145,10 @@ impl NativeTool for PromotionRecordTool {
         });
 
         if args.pass && has_error_or_critical {
-            anyhow::bail!(
-                "Cannot set pass=true when findings contain 'error' or 'critical' severity. \
-                 Fix the issues and re-evaluate, or set pass=false."
-            );
+            return Ok(ToolError::validation(
+                "Cannot set pass=true when findings contain 'error' or 'critical' severity. Fix the issues and re-evaluate, or set pass=false.",
+                None::<String>,
+            ).to_error_response());
         }
 
         if args.pass {
@@ -167,17 +171,20 @@ impl NativeTool for PromotionRecordTool {
                 })
                 .collect();
             if !warnings_without_evidence.is_empty() {
-                anyhow::bail!(
-                    "Cannot set pass=true when warning findings lack evidence. \
-                     The following warnings need concrete evidence (e.g., sandbox output, test results) \
-                     to prove the issue was investigated:\n  - {}",
-                    warnings_without_evidence.join("\n  - ")
-                );
+                return Ok(ToolError::validation(
+                    format!(
+                        "Cannot set pass=true when warning findings lack evidence. \
+                         The following warnings need concrete evidence (e.g., sandbox output, test results) \
+                         to prove the issue was investigated:\n  - {}",
+                        warnings_without_evidence.join("\n  - ")
+                    ),
+                    None::<String>,
+                ).to_error_response());
             }
         }
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Promotion store requires gateway directory to be configured");
+            return Ok(ToolError::resource("Promotion store requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let causal_log_path = gw_dir.join("history").join("causal_chain.jsonl");
@@ -282,7 +289,7 @@ impl NativeTool for PromotionQueryTool {
         );
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Promotion store requires gateway directory to be configured");
+            return Ok(ToolError::resource("Promotion store requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let store = PromotionStore::new(gw_dir)?;

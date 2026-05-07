@@ -4,6 +4,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -102,7 +103,7 @@ impl NativeTool for ArtifactBuildTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Artifact store requires gateway directory to be configured");
+            return Ok(ToolError::resource("Artifact store requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let sid = _session_id.unwrap_or(&_manifest.agent.id);
@@ -118,12 +119,15 @@ impl NativeTool for ArtifactBuildTool {
                     )
                 })?;
                 if manifest.digest != layer.digest {
-                    anyhow::bail!(
-                        "Layer digest mismatch for '{}': artifact.build references digest '{}' but layer store has '{}'",
-                        layer.layer_id,
-                        layer.digest,
-                        manifest.digest
-                    );
+                    return Ok(ToolError::fatal(
+                        format!(
+                            "Layer digest mismatch for '{}': artifact.build references digest '{}' but layer store has '{}'",
+                            layer.layer_id,
+                            layer.digest,
+                            manifest.digest
+                        ),
+                        None::<String>,
+                    ).to_error_response());
                 }
             }
         }
@@ -325,10 +329,10 @@ impl NativeTool for ArtifactInspectTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Artifact store requires gateway directory to be configured");
+            return Ok(ToolError::resource("Artifact store requires gateway directory to be configured", None::<String>).to_error_response());
         };
         let Some(gs) = gateway_store else {
-            anyhow::bail!("artifact_inspect requires GatewayStore to be configured");
+            return Ok(ToolError::resource("artifact_inspect requires GatewayStore to be configured", None::<String>).to_error_response());
         };
         let sid = session_id.unwrap_or_default();
 
@@ -345,12 +349,15 @@ impl NativeTool for ArtifactInspectTool {
         let bundle = store.inspect(&ref_record.artifact_id)?;
 
         if bundle.artifact_manifest_digest != ref_record.artifact_manifest_digest {
-            anyhow::bail!(
-                "artifact_ref '{}' digest mismatch — possible tampering. Ref claims '{}', manifest has '{}'.",
-                args.artifact_ref,
-                ref_record.artifact_manifest_digest,
-                bundle.artifact_manifest_digest,
-            );
+            return Ok(ToolError::fatal(
+                format!(
+                    "artifact_ref '{}' digest mismatch — possible tampering. Ref claims '{}', manifest has '{}'.",
+                    args.artifact_ref,
+                    ref_record.artifact_manifest_digest,
+                    bundle.artifact_manifest_digest,
+                ),
+                None::<String>,
+            ).to_error_response());
         }
 
         serde_json::to_string(&serde_json::json!({
@@ -457,7 +464,7 @@ impl NativeTool for ArtifactResolveRefTool {
                 })?;
 
         let Some(store) = gateway_store else {
-            anyhow::bail!("artifact.resolve_ref requires GatewayStore to be configured");
+            return Ok(ToolError::resource("artifact.resolve_ref requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let Some(ref_record) =
@@ -475,7 +482,7 @@ impl NativeTool for ArtifactResolveRefTool {
         };
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("artifact.resolve_ref requires gateway directory to be configured");
+            return Ok(ToolError::resource("artifact.resolve_ref requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
