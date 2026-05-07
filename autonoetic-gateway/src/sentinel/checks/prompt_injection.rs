@@ -13,6 +13,10 @@
 //! - Tool-call suggestion via prose (raw `<function_calls>` or JSON tool syntax)
 //! - System-prompt bypass phrases ("override your constraints")
 //!
+//! **Code-fence stripping:** Fenced code blocks (``` or ~~~) are stripped from
+//! the instructions body before pattern matching so that legitimate examples
+//! documented inside code blocks do not produce false positives.
+//!
 //! **False-positive guidance:** An agent whose *instructions* reference these
 //! patterns for defensive purposes (e.g., "detect if a user tries to ignore
 //! previous instructions") will be flagged. Triage as false-positive with a
@@ -62,16 +66,21 @@ static SYSTEM_PROMPT_BYPASS_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid system-prompt bypass regex")
 });
 
-/// Tool-call injection in prose: raw `<function_calls>` or JSON tool syntax outside code fences.
+/// Tool-call injection in prose: raw `<function_calls>` or JSON tool syntax.
+/// Applied after code-fence stripping so documented examples don't trigger this.
 static TOOL_CALL_PROSE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)<function_calls?\s*>|"tool_call"\s*:|"name"\s*:\s*"\w+"\s*,\s*"arguments"\s*:"#)
         .expect("valid tool-call prose regex")
 });
 
 /// Unframed content interpolation: `{{variable_name}}` in instruction prose.
-/// Double-brace templates are a common injection vector when rendered without structural framing.
 static UNFRAMED_INTERP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\{\{[A-Za-z_][A-Za-z0-9_ ]{0,80}\}\}").expect("valid unframed interpolation regex")
+});
+
+/// Strips fenced code blocks (``` or ~~~, with optional language tag) from text.
+static CODE_FENCE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)(?:```|~~~)[^\n]*\n.*?(?:```|~~~)").expect("valid code fence regex")
 });
 
 // ── Pattern catalogue ─────────────────────────────────────────────────────────
@@ -120,7 +129,7 @@ static PATTERNS: &[InjectionPattern] = &[
     },
 ];
 
-// ── Frontmatter stripper ──────────────────────────────────────────────────────
+// ── Text preprocessing ────────────────────────────────────────────────────────
 
 /// Extract only the instructions body (after the YAML frontmatter) from SKILL.md text.
 ///
@@ -142,13 +151,19 @@ pub fn instructions_body(skill_md: &str) -> &str {
     }
 }
 
+/// Strip fenced code blocks from `text` so patterns are not matched against
+/// documented examples or code that happens to contain injection-like strings.
+fn strip_code_fences(text: &str) -> std::borrow::Cow<'_, str> {
+    CODE_FENCE_RE.replace_all(text, "")
+}
+
 // ── Per-body scan ─────────────────────────────────────────────────────────────
 
 /// An agent's SKILL.md content plus its identifying metadata, ready for scanning.
 pub struct SkillMdEntry {
     pub agent_id: String,
     pub revision_id: String,
-    /// `content_digest` from `agent_revisions` (SHA-256 hex of the full SKILL.md).
+    /// SHA-256 hex digest of the full SKILL.md text (used as `SkillMdDigest` anchor).
     pub content_digest: String,
     pub body: String,
 }
@@ -165,9 +180,12 @@ pub fn check_prompt_injection_surfaces<'a>(
 
     for entry in entries {
         let instructions = instructions_body(&entry.body);
+        // Strip fenced code blocks before scanning to avoid false positives
+        // from legitimate examples documented inside ``` blocks.
+        let scanned = strip_code_fences(instructions);
 
         for pat in PATTERNS {
-            if pat.re.is_match(instructions) {
+            if pat.re.is_match(&scanned) {
                 let finding = SecurityFinding::new(
                     FindingType::PromptInjectionSurface,
                     FindingSeverity::Warning,
@@ -187,14 +205,12 @@ pub fn check_prompt_injection_surfaces<'a>(
                     revision_id: Some(entry.revision_id.clone()),
                     ..Default::default()
                 })
-                .with_anchors(vec![
-                    EvidenceAnchor::SkillMdDigest {
-                        value: entry.content_digest.clone(),
-                    },
-                    EvidenceAnchor::RevisionId {
-                        id: entry.revision_id.clone(),
-                    },
-                ]);
+                // Only anchor to the content digest — the revision_id in `entry` is
+                // a real DB revision for registry-backed scans. For live-file scans
+                // there is no authoritative revision_id so only SkillMdDigest is emitted.
+                .with_anchors(vec![EvidenceAnchor::SkillMdDigest {
+                    value: entry.content_digest.clone(),
+                }]);
                 findings.push(finding);
             }
         }
@@ -205,14 +221,58 @@ pub fn check_prompt_injection_surfaces<'a>(
 
 // ── Filesystem-backed scanner ─────────────────────────────────────────────────
 
-/// Scan all agents under `agents_dir` for prompt-injection surface patterns.
+/// Collect all SKILL.md paths under `root` by recursively walking directories.
 ///
-/// For each agent directory that contains a `SKILL.md`, the body is loaded
-/// from disk and passed to [`check_prompt_injection_surfaces`]. The
-/// `content_digest` is derived from the live file content using SHA-256.
+/// Stops after `limit` SKILL.md files are found. Returns `(agent_id, path)`
+/// pairs where `agent_id` is the name of the directory immediately containing
+/// the SKILL.md file.
+fn collect_skill_md_paths(root: &Path, limit: usize) -> std::io::Result<Vec<(String, std::path::PathBuf)>> {
+    let mut results = Vec::new();
+    collect_skill_md_paths_inner(root, limit, &mut results)?;
+    Ok(results)
+}
+
+fn collect_skill_md_paths_inner(
+    dir: &Path,
+    limit: usize,
+    results: &mut Vec<(String, std::path::PathBuf)>,
+) -> std::io::Result<()> {
+    if results.len() >= limit {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let skill_path = path.join("SKILL.md");
+        if skill_path.exists() {
+            let agent_id = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            results.push((agent_id, skill_path));
+            if results.len() >= limit {
+                return Ok(());
+            }
+        } else {
+            // Recurse into tier subdirectories (e.g. agents/specialists/, agents/system/).
+            collect_skill_md_paths_inner(&path, limit, results)?;
+        }
+    }
+    Ok(())
+}
+
+/// Scan all SKILL.md files reachable under `agents_dir` for prompt-injection
+/// surface patterns. The walk is recursive so it handles tier subdirectories
+/// (e.g. `agents/specialists/<id>/SKILL.md`, `agents/system/<id>/SKILL.md`).
 ///
-/// When `agents_dir` does not exist or is not a directory, returns an empty
-/// vec (the sentinel should not fail a sweep because of a missing agents root).
+/// The `content_digest` anchor is the SHA-256 of the live file content.
+/// A `RevisionId` anchor is **not** emitted for live-file scans because the
+/// path-based scan has no authoritative entry in `agent_revisions`.
+///
+/// Returns an empty vec when `agents_dir` does not exist or is not a directory.
 pub fn scan_prompt_injection(
     agents_dir: &Path,
     sentinel_revision_id: &str,
@@ -222,52 +282,30 @@ pub fn scan_prompt_injection(
         return Ok(Vec::new());
     }
 
+    let paths = collect_skill_md_paths(agents_dir, limit)?;
+
     let mut entries: Vec<SkillMdEntry> = Vec::new();
-
-    for entry in std::fs::read_dir(agents_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let skill_path = path.join("SKILL.md");
-        if !skill_path.exists() {
-            continue;
-        }
-
+    for (agent_id, skill_path) in paths {
         let body = match std::fs::read_to_string(&skill_path) {
             Ok(s) => s,
             Err(_) => continue,
         };
-
-        let agent_id = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        // Compute a SHA-256 digest of the live SKILL.md content so the finding
-        // anchor is stable across re-scans of the same unmodified file.
         let content_digest = sha256_hex(body.as_bytes());
-
-        // Use the agent_id as a synthetic revision_id for live (non-versioned)
-        // scans. This is overridden when the runner queries agent_revisions.
+        // For live-file scans there is no authoritative revision_id; use the
+        // content digest as a stable synthetic revision_id so the `affected`
+        // field is non-empty, but do not emit a RevisionId evidence anchor.
         entries.push(SkillMdEntry {
             agent_id: agent_id.clone(),
-            revision_id: format!("live:{}", agent_id),
+            revision_id: format!("digest:{}", content_digest),
             content_digest,
             body,
         });
-
-        if entries.len() >= limit {
-            break;
-        }
     }
 
     Ok(check_prompt_injection_surfaces(&entries, sentinel_revision_id))
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    // The gateway workspace already depends on sha2 (via artifact hashing).
     use sha2::Digest as _;
     let mut h = sha2::Sha256::new();
     h.update(data);
@@ -356,13 +394,31 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_inside_code_fence_not_flagged() {
+        // The tool-call syntax is inside a fenced code block — must not be flagged.
+        let body = "---\nname: x\n---\n\
+            # Examples\n\
+            Do NOT do this:\n\
+            ```\n\
+            <function_calls>execute</function_calls>\n\
+            ```\n\
+            Always use the structured tool interface instead.";
+        let entries = [make_entry("x", body)];
+        let findings = check_prompt_injection_surfaces(&entries, "rev");
+        assert!(
+            findings.is_empty(),
+            "tool-call inside code fence must not be flagged; got: {:?}",
+            findings.iter().map(|f| &f.proposed_remediation).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn pattern_in_frontmatter_not_flagged() {
         // The authority-override phrase is in the YAML frontmatter, not in the body.
         let body = "---\nname: x\ndescription: Detect ignore previous instructions patterns\n---\n\
             # Defensive Sentinel\nYou audit other agents for adversarial content.";
         let entries = [make_entry("x", body)];
         let findings = check_prompt_injection_surfaces(&entries, "rev");
-        // The frontmatter is stripped before scanning, so this should produce no findings.
         assert!(
             findings.is_empty(),
             "patterns in frontmatter must not be flagged; got: {:?}",
@@ -383,12 +439,6 @@ mod tests {
                 .any(|a| matches!(a, EvidenceAnchor::SkillMdDigest { .. })),
             "finding must include SkillMdDigest anchor"
         );
-        assert!(
-            f.evidence_anchors
-                .iter()
-                .any(|a| matches!(a, EvidenceAnchor::RevisionId { .. })),
-            "finding must include RevisionId anchor"
-        );
     }
 
     #[test]
@@ -397,5 +447,36 @@ mod tests {
         let instructions = instructions_body(body);
         assert!(instructions.starts_with("# Body"), "body should start after frontmatter");
         assert!(!instructions.contains("yaml"), "frontmatter content must be stripped");
+    }
+
+    #[test]
+    fn recursive_walk_finds_nested_agents() {
+        // Verify collect_skill_md_paths descends into tier subdirectories.
+        use std::fs;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Simulate: agents/specialists/coder.default/SKILL.md
+        fs::create_dir_all(root.join("specialists").join("coder.default")).unwrap();
+        fs::write(
+            root.join("specialists").join("coder.default").join("SKILL.md"),
+            "---\nname: coder.default\n---\n# Coder\nHelps with code.",
+        )
+        .unwrap();
+        // Simulate: agents/system/security_sentinel.default/SKILL.md
+        fs::create_dir_all(root.join("system").join("security_sentinel.default")).unwrap();
+        fs::write(
+            root.join("system").join("security_sentinel.default").join("SKILL.md"),
+            "---\nname: security_sentinel.default\n---\n# Sentinel\nAudits agents.",
+        )
+        .unwrap();
+
+        let paths = collect_skill_md_paths(root, 100).unwrap();
+        let agent_ids: Vec<&str> = paths.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(agent_ids.contains(&"coder.default"), "must find coder.default");
+        assert!(
+            agent_ids.contains(&"security_sentinel.default"),
+            "must find security_sentinel.default"
+        );
     }
 }

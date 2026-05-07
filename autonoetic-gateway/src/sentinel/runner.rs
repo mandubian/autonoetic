@@ -164,11 +164,10 @@ impl SentinelRunner {
                 approval_bypass::scan_exec_without_grant(conn, rev_id, since, scan_limit),
                 sandbox_escape::scan_escape_attempt_records(conn, rev_id, since, scan_limit),
                 sandbox_escape::scan_escape_patterns_in_events(conn, rev_id, since, scan_limit),
-                // Phase 2a — cluster heuristics
+                // Phase 2a — cluster heuristics (always use rolling window, not `since`)
                 session_cluster::scan_failure_bursts(
                     conn,
                     rev_id,
-                    since,
                     cluster_window_minutes,
                     failure_burst_threshold,
                     scan_limit,
@@ -176,7 +175,6 @@ impl SentinelRunner {
                 session_cluster::scan_exec_repeats(
                     conn,
                     rev_id,
-                    since,
                     cluster_window_minutes,
                     exec_repeat_threshold,
                     scan_limit,
