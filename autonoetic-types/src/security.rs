@@ -61,11 +61,20 @@ pub enum Reproducibility {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EvidenceAnchor {
+    /// A row from `causal_events` identified by its `event_id`.
     CausalEvent { id: String },
+    /// A SKILL.md content digest (sha256 hex).
     SkillMdDigest { value: String },
+    /// A layer content digest (sha256 hex).
     LayerDigest { value: String },
+    /// An artifact in the content-addressed store.
     ArtifactId { id: String },
+    /// An agent revision ID from `agent_revisions`.
     RevisionId { id: String },
+    /// A row from `promotion_history` identified by its `promotion_id`.
+    PromotionRecord { promotion_id: String },
+    /// A row from `sandbox_escape_attempts` identified by its integer rowid.
+    SandboxEscapeRecord { rowid: i64 },
 }
 
 /// Which entities are implicated in a finding.

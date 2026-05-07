@@ -20,7 +20,10 @@ use rusqlite::Connection;
 struct AccretionCandidate {
     agent_id: String,
     promotion_count: i64,
+    /// The `promotion_id` of the most recent promotion (by `created_at`).
     latest_promotion_id: String,
+    /// The `new_revision_id` corresponding to the most recent promotion.
+    latest_revision_id: String,
 }
 
 /// Flag agents that have received more than `threshold` promotions in the
@@ -35,12 +38,28 @@ pub fn scan_capability_accretion(
     let cutoff_str = cutoff.to_rfc3339();
     let threshold_i = threshold as i64;
 
+    // Two-step approach: first count promotions per agent in the window, then
+    // fetch the most recent promotion separately to anchor the finding.
+    // Using a scalar subquery for the anchor avoids JOIN multiplication when
+    // multiple rows share the same MAX(created_at) timestamp.
     let mut stmt = conn.prepare(
-        "SELECT agent_id, COUNT(*) AS cnt,
-                MAX(promotion_id) AS latest_promotion_id
-         FROM promotion_history
-         WHERE created_at > ?1
-         GROUP BY agent_id
+        "SELECT ph.agent_id,
+                COUNT(*) AS cnt,
+                (SELECT p2.promotion_id
+                 FROM promotion_history p2
+                 WHERE p2.agent_id = ph.agent_id
+                   AND p2.created_at > ?1
+                 ORDER BY p2.created_at DESC, p2.promotion_id DESC
+                 LIMIT 1) AS latest_promotion_id,
+                (SELECT p2.new_revision_id
+                 FROM promotion_history p2
+                 WHERE p2.agent_id = ph.agent_id
+                   AND p2.created_at > ?1
+                 ORDER BY p2.created_at DESC, p2.promotion_id DESC
+                 LIMIT 1) AS latest_revision_id
+         FROM promotion_history ph
+         WHERE ph.created_at > ?1
+         GROUP BY ph.agent_id
          HAVING cnt > ?2
          ORDER BY cnt DESC",
     )?;
@@ -51,6 +70,7 @@ pub fn scan_capability_accretion(
                 agent_id: row.get(0)?,
                 promotion_count: row.get(1)?,
                 latest_promotion_id: row.get(2)?,
+                latest_revision_id: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -72,11 +92,17 @@ pub fn scan_capability_accretion(
         )
         .with_affected(AffectedEntities {
             agent_alias: Some(c.agent_id.clone()),
+            revision_id: Some(c.latest_revision_id.clone()),
             ..Default::default()
         })
-        .with_anchors(vec![EvidenceAnchor::RevisionId {
-            id: c.latest_promotion_id.clone(),
-        }]);
+        .with_anchors(vec![
+            EvidenceAnchor::PromotionRecord {
+                promotion_id: c.latest_promotion_id.clone(),
+            },
+            EvidenceAnchor::RevisionId {
+                id: c.latest_revision_id.clone(),
+            },
+        ]);
         findings.push(finding);
     }
     Ok(findings)
@@ -120,8 +146,8 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
         for i in 0..6u32 {
             conn.execute(
-                "INSERT INTO promotion_history VALUES (?1,'promote','alias','coder.default',NULL,'rev','eval',NULL,?2,'agent','eval-runner','local')",
-                rusqlite::params![format!("promo_{}", i), now],
+                "INSERT INTO promotion_history VALUES (?1,'promote','alias','coder.default',NULL,?3,'eval',NULL,?2,'agent','eval-runner','local')",
+                rusqlite::params![format!("promo_{}", i), now, format!("rev_{}", i)],
             )
             .unwrap();
         }
@@ -130,6 +156,11 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].finding_type, FindingType::CapabilityAccretion);
         assert_eq!(findings[0].severity, FindingSeverity::Warning);
+        // Verify the anchor uses PromotionRecord, not RevisionId
+        let has_promotion_anchor = findings[0].evidence_anchors.iter().any(|a| {
+            matches!(a, EvidenceAnchor::PromotionRecord { .. })
+        });
+        assert!(has_promotion_anchor, "must anchor to a PromotionRecord");
     }
 
     #[test]

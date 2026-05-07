@@ -1,6 +1,6 @@
 ---
 name: "security_sentinel_baseline.default"
-description: "Frozen baseline sentinel — deterministic-only checks, no LLM. Runs alongside the current sentinel on every sweep to detect regression."
+description: "Frozen baseline sentinel — runs deterministic-only checks. The gateway-side SentinelRunner executes the checks without LLM calls; the llm_config here is a thin orchestrator fallback for structured output formatting only."
 metadata:
   autonoetic:
     version: "1.0"
@@ -19,6 +19,10 @@ metadata:
       provider: "openrouter"
       model: "anthropic/claude-haiku-4-5-20251001"
       temperature: 0.0
+      # NOTE: The gateway-side SentinelRunner executes all Phase 1 deterministic
+      # checks without LLM calls. This llm_config is retained for the thin
+      # orchestration layer that formats structured findings output. The baseline
+      # does NOT perform LLM-judgment checks (Phase 2+).
     capabilities:
       - type: "ReadAccess"
         scopes: ["*"]

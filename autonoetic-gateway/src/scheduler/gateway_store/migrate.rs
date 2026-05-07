@@ -1521,7 +1521,39 @@ fn apply_security_findings_v26(conn: &mut Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_security_findings_triage
             ON security_findings(triage_state);
         CREATE INDEX IF NOT EXISTS idx_security_findings_created
-            ON security_findings(created_at);",
+            ON security_findings(created_at);
+
+        -- Append-only enforcement: allow UPDATE only when the only changed
+        -- columns are triage_state and/or triage_reason. Any attempt to
+        -- mutate the immutable finding body raises an error.
+        CREATE TRIGGER IF NOT EXISTS security_findings_no_body_update
+        BEFORE UPDATE ON security_findings
+        FOR EACH ROW
+        WHEN (
+            NEW.finding_id        != OLD.finding_id        OR
+            NEW.severity          != OLD.severity          OR
+            NEW.confidence        != OLD.confidence        OR
+            NEW.finding_type      != OLD.finding_type      OR
+            NEW.affected_json     != OLD.affected_json     OR
+            NEW.evidence_json     != OLD.evidence_json     OR
+            NEW.reproducibility   != OLD.reproducibility   OR
+            NEW.proposed_remediation != OLD.proposed_remediation OR
+            NEW.sentinel_revision_id != OLD.sentinel_revision_id OR
+            NEW.baseline_agreed   != OLD.baseline_agreed   OR
+            IFNULL(NEW.ensemble_agreed,-1) != IFNULL(OLD.ensemble_agreed,-1) OR
+            NEW.created_at        != OLD.created_at
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'security_findings is append-only: only triage_state and triage_reason may be updated');
+        END;
+
+        -- Prevent all DELETEs unconditionally.
+        CREATE TRIGGER IF NOT EXISTS security_findings_no_delete
+        BEFORE DELETE ON security_findings
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'security_findings is append-only: rows cannot be deleted');
+        END;",
     )?;
 
     conn.execute(

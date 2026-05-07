@@ -190,6 +190,64 @@ fn count_pending_by_severity() {
     assert_eq!(warning, Some(1));
 }
 
+// ── Trigger: append-only body enforcement ────────────────────────────────────
+
+#[test]
+fn trigger_rejects_body_mutation() {
+    use rusqlite::Connection;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = GatewayStore::open(dir.path()).expect("open store");
+
+    let f = SecurityFinding::new(
+        FindingType::CredentialLeak,
+        FindingSeverity::Critical,
+        1.0,
+        Reproducibility::Deterministic,
+        "original remediation",
+        "sentinel-rev-001",
+    );
+    store.insert_security_finding(&f).expect("insert");
+
+    // Attempt to mutate the severity (immutable field) via a raw SQL UPDATE.
+    // The trigger must reject this.
+    let conn = Connection::open(dir.path().join("gateway.db")).expect("open conn");
+    let result = conn.execute(
+        "UPDATE security_findings SET severity = 'info' WHERE finding_id = ?1",
+        rusqlite::params![f.finding_id],
+    );
+    assert!(
+        result.is_err(),
+        "trigger must reject updates to immutable finding body fields"
+    );
+}
+
+#[test]
+fn trigger_rejects_delete() {
+    use rusqlite::Connection;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = GatewayStore::open(dir.path()).expect("open store");
+
+    let f = SecurityFinding::new(
+        FindingType::SandboxEscapeAttempt,
+        FindingSeverity::Critical,
+        1.0,
+        Reproducibility::Deterministic,
+        "investigate",
+        "sentinel-rev-001",
+    );
+    store.insert_security_finding(&f).expect("insert");
+
+    let conn = Connection::open(dir.path().join("gateway.db")).expect("open conn");
+    let result = conn.execute(
+        "DELETE FROM security_findings WHERE finding_id = ?1",
+        rusqlite::params![f.finding_id],
+    );
+    assert!(
+        result.is_err(),
+        "trigger must reject all DELETEs from security_findings"
+    );
+}
+
 // ── Phase 1: SentinelRunner deterministic sweep ──────────────────────────────
 
 #[test]

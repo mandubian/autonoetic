@@ -66,7 +66,7 @@ Findings without evidence anchors are not findings; they are opinions.
 
 ## Output contract
 
-Always produce findings in the `SecurityFinding` schema. Use the `security_finding.record` tool to persist each finding. The gateway handles the causal chain emission and triage routing.
+Always produce findings in the `SecurityFinding` schema. Return findings as structured JSON in your response — the gateway runtime (Phase 5 scheduling integration) will call `GatewayStore::insert_security_finding` on each finding and emit `security_finding_recorded` events to the causal chain. Do not attempt to call a `security_finding.record` tool; no such gateway tool exists yet.
 
 ## What you must NOT do
 

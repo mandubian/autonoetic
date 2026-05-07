@@ -102,9 +102,7 @@ pub fn scan_escape_attempt_records(
             session_id: Some(r.session_id.clone()),
             ..Default::default()
         })
-        .with_anchors(vec![EvidenceAnchor::CausalEvent {
-            id: format!("escape_attempt:{}", r.id),
-        }]);
+        .with_anchors(vec![EvidenceAnchor::SandboxEscapeRecord { rowid: r.id }]);
         findings.push(finding);
     }
     Ok(findings)

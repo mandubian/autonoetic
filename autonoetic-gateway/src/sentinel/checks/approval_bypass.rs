@@ -3,8 +3,9 @@
 //! Checks for:
 //! 1. Sessions with an unusually high count of denied approvals — may indicate
 //!    an agent repeatedly attempting disallowed operations.
-//! 2. `sandbox.exec` causal events where no corresponding approval grant was
-//!    present — suggests the approval gate was bypassed or mis-configured.
+//! 2. Approved `sandbox_exec` approvals in root sessions with no matching
+//!    `session_approval_grants` row (structural gap indicating a potential
+//!    grant-recording failure or bypass).
 
 use anyhow::Result;
 use autonoetic_types::security::{
@@ -14,7 +15,8 @@ use autonoetic_types::security::{
 use rusqlite::Connection;
 
 /// Flag root sessions that have more than `denial_threshold` denied approvals
-/// in the past `window_days` days. One finding per offending session.
+/// in the past `window_days` days. One finding per offending (root_session_id,
+/// agent_id) pair, using the most-recently-denied session_id for attribution.
 pub fn scan_approval_denials(
     conn: &Connection,
     sentinel_revision_id: &str,
@@ -25,43 +27,56 @@ pub fn scan_approval_denials(
     let cutoff_str = cutoff.to_rfc3339();
     let threshold_i = denial_threshold as i64;
 
+    // Group by (root_session_id, agent_id) so every selected column is
+    // part of the group key — avoids SQLite returning arbitrary values for
+    // non-aggregated columns that were previously projected without grouping.
+    // The most-recent session_id is fetched via a correlated subquery.
     let mut stmt = conn.prepare(
-        "SELECT root_session_id, session_id, agent_id, COUNT(*) AS cnt
-         FROM approvals
-         WHERE status = 'denied'
-           AND created_at > ?1
-         GROUP BY root_session_id
+        "SELECT ap.root_session_id,
+                ap.agent_id,
+                COUNT(*) AS cnt,
+                (SELECT session_id FROM approvals a2
+                 WHERE a2.root_session_id = ap.root_session_id
+                   AND a2.agent_id = ap.agent_id
+                   AND a2.status = 'denied'
+                   AND a2.created_at > ?1
+                 ORDER BY a2.created_at DESC LIMIT 1) AS latest_session_id
+         FROM approvals ap
+         WHERE ap.status = 'denied'
+           AND ap.created_at > ?1
+         GROUP BY ap.root_session_id, ap.agent_id
          HAVING cnt > ?2
          ORDER BY cnt DESC",
     )?;
 
     struct DenialRow {
         root_session_id: String,
-        session_id: String,
         agent_id: String,
         count: i64,
+        latest_session_id: Option<String>,
     }
 
     let rows = stmt
         .query_map(rusqlite::params![cutoff_str, threshold_i], |row| {
             Ok(DenialRow {
                 root_session_id: row.get(0)?,
-                session_id: row.get(1)?,
-                agent_id: row.get(2)?,
-                count: row.get(3)?,
+                agent_id: row.get(1)?,
+                count: row.get(2)?,
+                latest_session_id: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut findings = Vec::new();
     for r in rows {
+        let session_id = r.latest_session_id.unwrap_or_else(|| r.root_session_id.clone());
         let finding = SecurityFinding::new(
             FindingType::ApprovalBypass,
             FindingSeverity::Warning,
             0.8,
             Reproducibility::Deterministic,
             format!(
-                "Session '{}' (agent '{}') accumulated {} denied approval requests \
+                "Root session '{}' (agent '{}') accumulated {} denied approval requests \
                  in the past {} days. Review the session's causal chain for repeated \
                  attempts to perform disallowed operations.",
                 r.root_session_id, r.agent_id, r.count, window_days
@@ -70,7 +85,7 @@ pub fn scan_approval_denials(
         )
         .with_affected(AffectedEntities {
             agent_alias: Some(r.agent_id.clone()),
-            session_id: Some(r.session_id.clone()),
+            session_id: Some(session_id),
             ..Default::default()
         })
         .with_anchors(vec![EvidenceAnchor::CausalEvent {
@@ -81,12 +96,15 @@ pub fn scan_approval_denials(
     Ok(findings)
 }
 
-/// Flag root sessions that have approved network-access operations but no
-/// corresponding `session_approval_grants` row — a structural gap that suggests
-/// the approval grant may not have been recorded properly.
+/// Flag root sessions that have approved `sandbox_exec` actions but no
+/// matching `session_approval_grants` row. This is a structural check:
+/// every approved sandbox_exec should produce a grant; its absence may
+/// indicate a grant-recording failure or a bypass.
 ///
-/// This checks approved approvals in the `approvals` table against the
-/// `session_approval_grants` table using `root_session_id`.
+/// The check is scoped to `action_type = 'sandbox_exec'` and requires that
+/// the NOT EXISTS matches on both `root_session_id` and `agent_id` to avoid
+/// false positives from grants belonging to a different agent in the same
+/// root session.
 pub fn scan_exec_without_grant(
     conn: &Connection,
     sentinel_revision_id: &str,
@@ -96,17 +114,17 @@ pub fn scan_exec_without_grant(
     let since = since_rfc3339.unwrap_or("1970-01-01T00:00:00Z");
     let lim = limit as i64;
 
-    // Find approved approvals in root sessions that have NO grant recorded.
-    // This can happen if an approval was granted but the grant write failed.
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT ap.root_session_id, ap.session_id, ap.agent_id, ap.action_type
+        "SELECT DISTINCT ap.root_session_id, ap.session_id, ap.agent_id
          FROM approvals ap
          WHERE ap.status = 'approved'
+           AND ap.action_type = 'sandbox_exec'
            AND ap.created_at > ?1
            AND ap.root_session_id IS NOT NULL
            AND NOT EXISTS (
                SELECT 1 FROM session_approval_grants sg
                WHERE sg.root_session_id = ap.root_session_id
+                 AND sg.agent_id = ap.agent_id
            )
          ORDER BY ap.created_at ASC
          LIMIT ?2",
@@ -116,7 +134,6 @@ pub fn scan_exec_without_grant(
         root_session_id: String,
         session_id: String,
         agent_id: String,
-        action_type: String,
     }
 
     let rows = stmt
@@ -125,7 +142,6 @@ pub fn scan_exec_without_grant(
                 root_session_id: row.get(0)?,
                 session_id: row.get(1)?,
                 agent_id: row.get(2)?,
-                action_type: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -138,11 +154,11 @@ pub fn scan_exec_without_grant(
             0.75,
             Reproducibility::Deterministic,
             format!(
-                "Root session '{}' (agent '{}') has an approved '{}' action but no \
-                 corresponding session_approval_grant record. \
+                "Root session '{}' (agent '{}') has an approved sandbox_exec action \
+                 but no corresponding session_approval_grant for that agent. \
                  This may indicate a grant-recording failure or a bypass. \
-                 Review the approvals table and session_approval_grants for this root session.",
-                r.root_session_id, r.agent_id, r.action_type
+                 Review approvals and session_approval_grants for this root session.",
+                r.root_session_id, r.agent_id
             ),
             sentinel_revision_id,
         )
@@ -152,7 +168,7 @@ pub fn scan_exec_without_grant(
             ..Default::default()
         })
         .with_anchors(vec![EvidenceAnchor::CausalEvent {
-            id: format!("approval_grant_gap:{}", r.root_session_id),
+            id: format!("approval_grant_gap:{}:{}", r.root_session_id, r.agent_id),
         }]);
         findings.push(finding);
     }
@@ -183,24 +199,6 @@ mod tests {
                 decided_at TEXT,
                 decided_by TEXT,
                 approval_level TEXT NOT NULL DEFAULT 'operator'
-            );
-            CREATE TABLE IF NOT EXISTS causal_events (
-                event_id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                root_session_id TEXT,
-                turn_id TEXT,
-                event_seq INTEGER NOT NULL,
-                timestamp TEXT NOT NULL,
-                category TEXT NOT NULL,
-                action TEXT NOT NULL,
-                status TEXT NOT NULL,
-                enforced_rules TEXT NOT NULL DEFAULT '[\"R+++3\"]',
-                target TEXT,
-                payload TEXT,
-                payload_ref TEXT,
-                evidence_ref TEXT,
-                reason TEXT
             );
             CREATE TABLE IF NOT EXISTS session_approval_grants (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,6 +234,46 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, FindingSeverity::Warning);
         assert_eq!(findings[0].finding_type, FindingType::ApprovalBypass);
+        // Verify agent attribution is correct
+        assert_eq!(
+            findings[0].affected.agent_alias.as_deref(),
+            Some("coder.default")
+        );
+    }
+
+    #[test]
+    fn does_not_mix_agents_in_same_root_session() {
+        let conn = setup_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        // agent_a gets 6 denials, agent_b gets 3 — only agent_a should be flagged
+        for i in 0..6u32 {
+            conn.execute(
+                "INSERT INTO approvals (request_id, agent_id, session_id, root_session_id,
+                          action_type, action_payload, status, created_at, approval_level)
+                 VALUES (?1, 'agent_a', 'sess_a', 'root_1',
+                         'network', '{}', 'denied', ?2, 'operator')",
+                rusqlite::params![format!("req_a_{}", i), now],
+            )
+            .unwrap();
+        }
+        for i in 0..3u32 {
+            conn.execute(
+                "INSERT INTO approvals (request_id, agent_id, session_id, root_session_id,
+                          action_type, action_payload, status, created_at, approval_level)
+                 VALUES (?1, 'agent_b', 'sess_b', 'root_1',
+                         'network', '{}', 'denied', ?2, 'operator')",
+                rusqlite::params![format!("req_b_{}", i), now],
+            )
+            .unwrap();
+        }
+
+        let findings = scan_approval_denials(&conn, "sentinel-rev-1", 7, 5).unwrap();
+        assert_eq!(findings.len(), 1, "only agent_a should be flagged");
+        assert_eq!(
+            findings[0].affected.agent_alias.as_deref(),
+            Some("agent_a"),
+            "finding must attribute to agent_a, not agent_b"
+        );
     }
 
     #[test]

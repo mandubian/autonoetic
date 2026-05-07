@@ -58,8 +58,8 @@ struct EventRow {
 
 /// Scan recent causal-event payloads for credential-pattern matches.
 ///
-/// `since_event_id` allows incremental sweeps — pass the last checked event ID
-/// to avoid re-scanning the full history. Pass `None` for a full sweep.
+/// `since_rfc3339` allows incremental sweeps — pass an RFC-3339 timestamp to
+/// scan only events after that point. Pass `None` for a full history sweep.
 pub fn scan_credential_leaks(
     conn: &Connection,
     sentinel_revision_id: &str,
@@ -91,18 +91,18 @@ pub fn scan_credential_leaks(
 
     let mut findings = Vec::new();
     for row in rows {
-        if let Some((pattern_name, matched)) = detect_credential(&row.payload) {
+        if let Some((pattern_name, match_len)) = detect_credential(&row.payload) {
             let finding = SecurityFinding::new(
                 FindingType::CredentialLeak,
                 FindingSeverity::Critical,
                 1.0,
                 Reproducibility::Deterministic,
                 format!(
-                    "Credential pattern '{}' matched in causal event payload. \
-                     Rotate any matching credential immediately. \
-                     Matched text (redacted here): {}",
-                    pattern_name,
-                    redact_match(&matched)
+                    "Credential pattern '{}' matched in causal event payload \
+                     (match length: {} chars). Rotate any matching credential \
+                     immediately. Use the evidence anchor to retrieve the event \
+                     under controlled access.",
+                    pattern_name, match_len
                 ),
                 sentinel_revision_id,
             )
@@ -122,37 +122,30 @@ pub fn scan_credential_leaks(
 
 // ── internals ────────────────────────────────────────────────────────────────
 
-fn detect_credential(text: &str) -> Option<(&'static str, String)> {
+/// Returns `(pattern_name, match_length)` — intentionally no matched text to
+/// prevent re-introducing credential material into the findings store.
+fn detect_credential(text: &str) -> Option<(&'static str, usize)> {
     if let Some(m) = ANTHROPIC_KEY_RE.find(text) {
-        return Some(("anthropic_api_key", m.as_str().to_string()));
+        return Some(("anthropic_api_key", m.len()));
     }
     if let Some(m) = OPENAI_KEY_RE.find(text) {
-        return Some(("openai_api_key", m.as_str().to_string()));
+        return Some(("openai_api_key", m.len()));
     }
     if let Some(m) = AWS_ACCESS_KEY_RE.find(text) {
-        return Some(("aws_access_key", m.as_str().to_string()));
+        return Some(("aws_access_key", m.len()));
     }
     if let Some(m) = GITHUB_PAT_RE.find(text) {
-        return Some(("github_pat", m.as_str().to_string()));
+        return Some(("github_pat", m.len()));
     }
     if let Some(m) = BEARER_RE.find(text) {
-        return Some(("bearer_token", m.as_str().to_string()));
+        return Some(("bearer_token", m.len()));
     }
     if let Some(m) = HIGH_ENTROPY_HEX_RE.find(text) {
-        // Only flag hex strings that look like they're in a value position.
-        let s = m.as_str();
-        if s.len() >= 40 {
-            return Some(("high_entropy_hex", s.to_string()));
+        if m.len() >= 40 {
+            return Some(("high_entropy_hex", m.len()));
         }
     }
     None
-}
-
-fn redact_match(s: &str) -> String {
-    if s.len() <= 8 {
-        return "***".to_string();
-    }
-    format!("{}***", &s[..4])
 }
 
 #[cfg(test)]
