@@ -3,12 +3,16 @@
 //! Registers two internal cron jobs for the security sentinel at gateway startup:
 //!
 //! - `sentinel.sweep.full`        — full history sweep (Phase 1 + Phase 2), daily by default.
-//! - `sentinel.sweep.incremental` — last-24-h sweep (Phase 1 + Phase 2), every 6 h by default.
+//! - `sentinel.sweep.incremental` — last-25-h sweep (Phase 1 + Phase 2), every 6 h by default.
 //!
 //! These jobs are owned by the sentinel pseudo-agent `"security_sentinel"` and
-//! are never dispatched to a real agent runtime. The scheduler's
-//! `run_due_sentinel_jobs` function is called by the gateway scheduler loop to
-//! execute sweeps directly, bypassing the agent session machinery.
+//! are **never dispatched to a real agent runtime** — the gateway scheduler loop
+//! skips jobs with this owner ID and instead calls [`run_due_sentinel_jobs`]
+//! directly on each tick.
+//!
+//! Scheduled sweeps use [`super::dual_sweep::DualSweepRunner`] so that
+//! `baseline_agreed` is annotated and `security_sentinel_disagreements` are
+//! recorded in the same way as manually triggered dual sweeps.
 //!
 //! Job metadata encodes the sweep mode:
 //! ```json
@@ -24,7 +28,8 @@ use std::sync::Arc;
 
 use crate::scheduler::cron_parser;
 use crate::scheduler::gateway_store::GatewayStore;
-use super::runner::{SentinelRunner, SweepConfig};
+use super::dual_sweep::DualSweepRunner;
+use super::runner::SweepConfig;
 
 pub const SENTINEL_OWNER: &str = "security_sentinel";
 pub const JOB_ID_FULL: &str = "sentinel.sweep.full";
@@ -120,9 +125,12 @@ pub fn ensure_sentinel_scheduled_jobs(
 
 /// Execute any due sentinel sweep jobs.
 ///
-/// Called from the gateway scheduler loop on each tick. For each due sentinel
-/// job claimed from the store, runs the appropriate sweep synchronously on the
-/// current thread (sweeps are fast I/O-bound operations against local SQLite).
+/// Called from the gateway scheduler loop on each tick. Loads due jobs using a
+/// **owner-filtered SQL query** so sentinel jobs are never starved by a backlog
+/// of non-sentinel jobs (see `load_due_scheduled_jobs_for_owner`).
+///
+/// Each sweep uses [`DualSweepRunner`] so `baseline_agreed` annotation and
+/// `security_sentinel_disagreements` recording match the Phase-3 contract.
 ///
 /// Returns the number of jobs executed.
 pub fn run_due_sentinel_jobs(
@@ -137,19 +145,17 @@ pub fn run_due_sentinel_jobs(
     let now = chrono::Utc::now();
     let now_str = now.to_rfc3339();
 
-    let due = match store.load_due_scheduled_jobs(&now_str, 32) {
+    // Owner-filtered query prevents starvation by non-sentinel due jobs.
+    let due = match store.load_due_scheduled_jobs_for_owner(SENTINEL_OWNER, &now_str, 8) {
         Ok(jobs) => jobs,
         Err(e) => {
-            tracing::warn!(target: "sentinel.scheduler", error = %e, "Failed to load due jobs");
+            tracing::warn!(target: "sentinel.scheduler", error = %e, "Failed to load due sentinel jobs");
             return 0;
         }
     };
 
-    // Filter to sentinel-owned jobs only.
-    let sentinel_due: Vec<_> = due.into_iter().filter(|j| j.owner_agent_id == SENTINEL_OWNER).collect();
-
     let mut executed = 0;
-    for job in &sentinel_due {
+    for job in &due {
         let cron = match cron_parser::parse_schedule(&job.cron_expr) {
             Ok(c) => c,
             Err(_) => continue,
@@ -159,9 +165,26 @@ pub fn run_due_sentinel_jobs(
             None => now_str.clone(),
         };
 
-        // Claim atomically; skip if lost the race.
-        if store.claim_and_advance_due_job(&job.job_id, &now_str, &next_run).is_err() {
-            continue;
+        // Claim atomically; skip on lost race (Ok(None)) or error.
+        match store.claim_and_advance_due_job(&job.job_id, &now_str, &next_run) {
+            Ok(Some(_)) => {} // successfully claimed — proceed
+            Ok(None) => {
+                tracing::debug!(
+                    target: "sentinel.scheduler",
+                    job_id = %job.job_id,
+                    "Sentinel job already claimed or not due — skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "sentinel.scheduler",
+                    job_id = %job.job_id,
+                    error = %e,
+                    "Failed to claim sentinel job"
+                );
+                continue;
+            }
         }
 
         let mode = job
@@ -171,32 +194,42 @@ pub fn run_due_sentinel_jobs(
             .and_then(|v| v["mode"].as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "full".to_string());
 
-        let since = if mode == "incremental" {
-            Some((now - chrono::Duration::hours(25)).to_rfc3339())
+        // Incremental: last 25 h (25 h overlap guards against boundary gaps).
+        // Both `since_rfc3339` and `window_days` are set so all checks stay scoped.
+        let (since, window_days) = if mode == "incremental" {
+            (Some((now - chrono::Duration::hours(25)).to_rfc3339()), 1u32)
         } else {
-            None
+            (None, 30u32)
         };
 
-        let sweep_cfg = SweepConfig {
+        let baseline_cfg = SweepConfig {
+            sentinel_revision_id: config.baseline_revision_id.clone(),
+            phase1_only: true,
+            since_rfc3339: since.clone(),
+            window_days,
+            ..SweepConfig::default()
+        };
+        let current_cfg = SweepConfig {
             sentinel_revision_id: config.sentinel_revision_id.clone(),
             since_rfc3339: since,
+            window_days,
             ..SweepConfig::default()
         };
 
-        let mut runner = SentinelRunner::new(Arc::clone(store));
+        let mut dual = DualSweepRunner::new(Arc::clone(store));
         if let Some(dir) = agents_dir {
-            runner = runner.with_agents_dir(dir.clone());
+            dual = dual.with_agents_dir(dir.clone());
         }
 
-        match runner.collect_findings(&sweep_cfg) {
-            Ok(raw) => {
-                let result = runner.persist_findings(raw);
+        match dual.run(&baseline_cfg, &current_cfg) {
+            Ok(result) => {
                 tracing::info!(
                     target: "sentinel.scheduler",
                     job_id = %job.job_id,
                     mode = %mode,
-                    total = result.total_findings(),
-                    errors = result.persist_errors.len(),
+                    total = result.current.total_findings(),
+                    baseline_agreed = result.baseline_agreed_count,
+                    disagreements = result.disagreements.len(),
                     "Sentinel sweep completed"
                 );
             }

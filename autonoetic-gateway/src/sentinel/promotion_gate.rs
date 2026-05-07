@@ -1,16 +1,20 @@
 //! Pre-promotion sentinel gate.
 //!
-//! Before `atomic_promote` is called the gateway runs a scoped Phase-1
-//! sentinel sweep restricted to the agent being promoted. If any `critical`
-//! findings are produced the promotion is blocked (fail-closed). The sweep is
-//! time-boxed: if it does not complete within `timeout_secs` the gate returns
-//! `Err` and the promotion is also blocked.
+//! Before `atomic_promote` is called the gateway runs a Phase-1-only sentinel
+//! sweep of the **full store** (not restricted to the promoting agent — any
+//! critical finding in the system blocks promotion, providing a conservative
+//! fail-closed posture). Per-agent scoping is planned for a future phase.
 //!
-//! Phase-2 (LLM-judgment) checks are skipped — the gate is on the hot path of
-//! an operator action and must be fast and deterministic.
+//! If any `critical` findings exist the promotion is blocked. Scan errors also
+//! block promotion (fail-closed). The sweep is time-boxed: if it does not
+//! complete within `timeout_secs` the gate returns `Err` and the promotion is
+//! also blocked.
+//!
+//! **No findings are persisted by the gate.** Persistence is the job of the
+//! scheduled sweeps so that promotion attempts don't bloat `security_findings`
+//! with duplicate rows. The gate is a read-evaluate-only check.
 
 use anyhow::{anyhow, Result};
-use autonoetic_types::security::FindingSeverity;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,17 +30,17 @@ pub enum GateOutcome {
     Blocked {
         /// Human-readable summary of the blocking findings.
         reason: String,
-        /// Number of critical findings.
+        /// Number of critical Phase-1 findings found.
         critical_count: usize,
     },
 }
 
-/// Run a pre-promotion Phase-1 sentinel sweep for `agent_id`.
+/// Run a pre-promotion Phase-1 sentinel sweep against the full store.
 ///
-/// Returns `Ok(GateOutcome::Passed)` if no critical findings were produced
-/// within `timeout_secs`. Returns `Ok(GateOutcome::Blocked)` if critical
-/// findings were found. Returns `Err` if the sweep timed out or panicked
-/// (fail-closed in both cases).
+/// Returns `Ok(GateOutcome::Passed)` when no critical findings exist and no
+/// scan errors occurred within `timeout_secs`. Returns `Ok(GateOutcome::Blocked)`
+/// if critical findings were detected. Returns `Err` on timeout, scan errors, or
+/// sweep panic — all are fail-closed.
 pub fn check_pre_promotion(
     store: Arc<GatewayStore>,
     sentinel_revision_id: &str,
@@ -49,32 +53,30 @@ pub fn check_pre_promotion(
     std::thread::spawn(move || {
         let runner = SentinelRunner::new(store_clone);
         let outcome = runner
-            .collect_findings(&SweepConfig {
+            .scan_phase1_critical(&SweepConfig {
                 sentinel_revision_id: rev_id,
-                phase1_only: true,
-                // Scan the last 90 days for the promoting agent's findings.
+                // Scan the full history — window_days controls capability-accretion
+                // and approval-denial lookback (90 days).
                 window_days: 90,
-                since_rfc3339: None,
                 ..SweepConfig::default()
             })
-            .and_then(|raw| {
-                // Persist findings to the DB before evaluating (append-only).
-                let result = runner.persist_findings(raw);
-                let critical: Vec<_> = result
-                    .all_findings()
-                    .filter(|f| f.severity == FindingSeverity::Critical)
-                    .collect();
-                if critical.is_empty() {
+            .and_then(|(critical_count, scan_errors)| {
+                // Any scan error is fail-closed: treat as a blocking gate failure.
+                if !scan_errors.is_empty() {
+                    return Err(anyhow!(
+                        "Sentinel scan errors (fail-closed): {}",
+                        scan_errors.join("; ")
+                    ));
+                }
+                if critical_count == 0 {
                     Ok(GateOutcome::Passed)
                 } else {
-                    let reason = critical
-                        .iter()
-                        .map(|f| format!("{} ({})", f.finding_type, f.finding_id))
-                        .collect::<Vec<_>>()
-                        .join(", ");
                     Ok(GateOutcome::Blocked {
-                        reason,
-                        critical_count: critical.len(),
+                        reason: format!(
+                            "{} critical Phase-1 finding(s) in the store",
+                            critical_count
+                        ),
+                        critical_count,
                     })
                 }
             });
@@ -94,8 +96,6 @@ pub fn check_pre_promotion(
 mod tests {
     use super::*;
 
-    // A short timeout test uses a mock that immediately returns Passed.
-    // Full integration is covered in security_sentinel_integration.rs.
     #[test]
     fn gate_outcome_debug() {
         let o = GateOutcome::Passed;
