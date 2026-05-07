@@ -157,6 +157,22 @@ The planner is not "done" when it delegates:
 6. On approval resolution: task becomes `Runnable`; on next execution the gateway loads continuation, executes approved action, and resumes turn history
 7. When join condition is satisfied: workflow becomes `Resumable`
 8. Planner observes task state via `workflow_wait` and continues
+9. When planner session closes normally: workflow becomes `Completed` (if all join tasks terminal and no active/queued work remains)
+
+### Workflow Completion
+
+A workflow transitions from `Resumable` to `Completed` when the root (planner)
+session closes with a non-suspended reason and all of these hold:
+
+- All `join_task_ids` are in a terminal status (`Succeeded` | `Failed` | `Cancelled` | `Aborted`)
+- `active_task_ids` is empty
+- `queued_task_ids` is empty
+
+This is handled by `try_complete_workflow` in `workflow_store.rs`, called from
+`close_session` in `lifecycle.rs`. The transition emits a `workflow.completed` event.
+
+If the planner closes due to suspension (e.g. `jsonrpc_spawn_suspended_approval`),
+the workflow stays `Resumable` so it can be woken again later.
 
 ## Join Policies
 

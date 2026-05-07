@@ -1648,6 +1648,22 @@ impl GatewayExecutionService {
                                         result_preview = %r.chars().take(100).collect::<String>(),
                                         "Approved action executed successfully"
                                     );
+                                    let gateway_dir = self.config.agents_dir.join(".gateway");
+                                    if let Ok(mut report) = SessionReportWriter::open(
+                                        &gateway_dir,
+                                        &cont.session_id,
+                                        &runtime.manifest.agent.id,
+                                    ) {
+                                        let summary = format!(
+                                            "Approved action executed: {}",
+                                            r.chars().take(100).collect::<String>()
+                                        );
+                                        let _ = report.record_approval_resolved(
+                                            &cont.approval_request_id,
+                                            "approved",
+                                            &summary,
+                                        );
+                                    }
                                     r
                                 },
                                 Err(e) => {
@@ -1657,6 +1673,18 @@ impl GatewayExecutionService {
                                         error = %e,
                                         "Failed to execute approved action"
                                     );
+                                    let gateway_dir = self.config.agents_dir.join(".gateway");
+                                    if let Ok(mut report) = SessionReportWriter::open(
+                                        &gateway_dir,
+                                        &cont.session_id,
+                                        &runtime.manifest.agent.id,
+                                    ) {
+                                        let _ = report.record_approval_resolved(
+                                            &cont.approval_request_id,
+                                            "approved",
+                                            &format!("Approved but execution failed: {}", e),
+                                        );
+                                    }
                                     serde_json::json!({
                                         "ok": false,
                                         "error": e.to_string(),
@@ -1667,6 +1695,18 @@ impl GatewayExecutionService {
                         }
                         Some(_) => {
                             // Rejected
+                            let gateway_dir = self.config.agents_dir.join(".gateway");
+                            if let Ok(mut report) = SessionReportWriter::open(
+                                &gateway_dir,
+                                &cont.session_id,
+                                &runtime.manifest.agent.id,
+                            ) {
+                                let _ = report.record_approval_resolved(
+                                    &cont.approval_request_id,
+                                    "rejected",
+                                    "Approval rejected by operator",
+                                );
+                            }
                             serde_json::json!({
                                 "ok": false,
                                 "approval_rejected": true,
@@ -1807,6 +1847,18 @@ impl GatewayExecutionService {
                                         approval_request_id = %rid,
                                         "Resuming session from approval-required checkpoint"
                                     );
+                                    let gateway_dir = self.config.agents_dir.join(".gateway");
+                                    if let Ok(mut report) = SessionReportWriter::open(
+                                        &gateway_dir,
+                                        session_id,
+                                        &runtime.manifest.agent.id,
+                                    ) {
+                                        let _ = report.record_approval_resolved(
+                                            rid,
+                                            "approved",
+                                            "Resumed from approval-required checkpoint",
+                                        );
+                                    }
                                     runtime.guard = crate::runtime::guard::LoopGuard::restore(
                                         checkpoint.loop_guard_state.clone(),
                                     );
@@ -1909,6 +1961,18 @@ impl GatewayExecutionService {
                                         escalation_request_id = %esc_rid,
                                         "Resuming session from human escalation checkpoint"
                                     );
+                                    let gateway_dir = self.config.agents_dir.join(".gateway");
+                                    if let Ok(mut report) = SessionReportWriter::open(
+                                        &gateway_dir,
+                                        session_id,
+                                        &runtime.manifest.agent.id,
+                                    ) {
+                                        let _ = report.record_approval_resolved(
+                                            esc_rid,
+                                            "approved",
+                                            "Resumed from human escalation checkpoint",
+                                        );
+                                    }
                                     runtime.guard = crate::runtime::guard::LoopGuard::restore(
                                         checkpoint.loop_guard_state.clone(),
                                     );
@@ -2057,6 +2121,18 @@ impl GatewayExecutionService {
                                     approval_request_id = %rid,
                                     "Resuming session from approval-required checkpoint"
                                 );
+                                let gateway_dir = self.config.agents_dir.join(".gateway");
+                                if let Ok(mut report) = SessionReportWriter::open(
+                                    &gateway_dir,
+                                    session_id,
+                                    &runtime.manifest.agent.id,
+                                ) {
+                                    let _ = report.record_approval_resolved(
+                                        rid,
+                                        "approved",
+                                        "Resumed from approval-required checkpoint",
+                                    );
+                                }
                                 runtime.guard = crate::runtime::guard::LoopGuard::restore(
                                     checkpoint.loop_guard_state.clone(),
                                 );
@@ -2160,6 +2236,18 @@ impl GatewayExecutionService {
                                     escalation_request_id = %esc_rid,
                                     "Resuming session from human escalation checkpoint"
                                 );
+                                let gateway_dir = self.config.agents_dir.join(".gateway");
+                                if let Ok(mut report) = SessionReportWriter::open(
+                                    &gateway_dir,
+                                    session_id,
+                                    &runtime.manifest.agent.id,
+                                ) {
+                                    let _ = report.record_approval_resolved(
+                                        esc_rid,
+                                        "approved",
+                                        "Resumed from human escalation checkpoint",
+                                    );
+                                }
                                 runtime.guard = crate::runtime::guard::LoopGuard::restore(
                                     checkpoint.loop_guard_state.clone(),
                                 );

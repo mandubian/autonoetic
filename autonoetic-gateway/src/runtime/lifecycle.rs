@@ -238,11 +238,13 @@ pub(crate) fn compose_system_instructions_with_user_context(
     let contract_section = {
         let mut lines: Vec<String> = Vec::new();
 
-        if let Some(schema) = manifest.io.as_ref().and_then(|io| io.returns.as_ref()) {
+        if let Some(schema) = manifest
+            .io
+            .as_ref()
+            .and_then(|io| io.returns.as_ref())
+        {
             if let Ok(compact) = serde_json::to_string(schema) {
-                lines.push(format!(
-                    "- **io.returns** (your reply must conform): `{compact}`"
-                ));
+                lines.push(format!("- **io.returns** (your reply must conform): `{compact}`"));
             }
         }
 
@@ -677,10 +679,7 @@ fn effective_loop_guard_config(
     effective
 }
 
-fn loop_guard_from_config_and_manifest(
-    config: Option<&GatewayConfig>,
-    agent_dir: &Path,
-) -> LoopGuard {
+fn loop_guard_from_config_and_manifest(config: Option<&GatewayConfig>, agent_dir: &Path) -> LoopGuard {
     match config {
         Some(cfg) => {
             let declaration = load_manifest_loop_guard_declaration(agent_dir);
@@ -823,10 +822,7 @@ impl AgentExecutor {
         self
     }
 
-    pub fn with_degraded_sessions(
-        mut self,
-        set: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
-    ) -> Self {
+    pub fn with_degraded_sessions(mut self, set: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>) -> Self {
         self.degraded_sessions = set;
         self
     }
@@ -1033,6 +1029,26 @@ impl AgentExecutor {
         }
         let mut tracer = SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?;
         tracer.log_session_end(reason);
+
+        // Attempt workflow completion when root session closes normally.
+        let is_root = crate::runtime::content_store::root_session_id(&session_id) == session_id;
+        if !reason.contains("suspended") && is_root {
+            if let Some(cfg) = self.config.as_deref() {
+                if let Err(e) = crate::scheduler::workflow_store::try_complete_workflow(
+                    cfg,
+                    self.gateway_store.as_deref(),
+                    &session_id,
+                ) {
+                    tracing::warn!(
+                        target: "workflow",
+                        error = %e,
+                        session_id = %session_id,
+                        "Failed to attempt workflow completion on session close"
+                    );
+                }
+            }
+        }
+
         self.session_started = false;
         self.session_id = None;
         self.turn_counter = 0;
@@ -1328,11 +1344,7 @@ impl AgentExecutor {
         })
     }
 
-    fn check_ri_0_6_turn_snapshot(
-        &mut self,
-        session_id: &str,
-        turn_id: &str,
-    ) -> anyhow::Result<()> {
+    fn check_ri_0_6_turn_snapshot(&mut self, session_id: &str, turn_id: &str) -> anyhow::Result<()> {
         let current = self.build_ri_0_6_capability_snapshot();
         let Some(previous) = self.ri_0_6_previous_snapshot.clone() else {
             self.ri_0_6_previous_snapshot = Some(current);
@@ -1634,7 +1646,8 @@ impl AgentExecutor {
                     agent_id,
                     self.task_id.as_deref(),
                     self.workflow_id.as_deref(),
-                ) {
+                )
+                {
                     Ok(w) => {
                         self.live_digest = Some(Arc::new(std::sync::Mutex::new(w)));
                     }
@@ -1796,8 +1809,7 @@ impl AgentExecutor {
         if let Some(store) = self.gateway_store.as_ref() {
             if let Ok(msgs) = store.fetch_undelivered_messages(&session_id) {
                 for msg in msgs {
-                    if msg.sender_agent_id == "gateway"
-                        && msg.message.contains("[Gateway Notice Ri-0.9]")
+                    if msg.sender_agent_id == "gateway" && msg.message.contains("[Gateway Notice Ri-0.9]")
                     {
                         ri_0_9_notice_message_ids.push(msg.message_id.clone());
                     }
@@ -1896,10 +1908,7 @@ impl AgentExecutor {
                         status: "active".to_string(),
                         enforced_rules: vec!["R++6".to_string()],
                         target: None,
-                        payload: Some(
-                            serde_json::json!({"reason": "loop_guard_sub_trip_warning"})
-                                .to_string(),
-                        ),
+                        payload: Some(serde_json::json!({"reason": "loop_guard_sub_trip_warning"}).to_string()),
                         payload_ref: None,
                         evidence_ref: None,
                         reason: Some("loop_guard_sub_trip_warning".to_string()),
@@ -1915,9 +1924,7 @@ impl AgentExecutor {
                 let in_set = ds.lock().await.contains(&session_id);
                 if in_set && self.session_state == autonoetic_types::agent::SessionState::Normal {
                     self.session_state = autonoetic_types::agent::SessionState::Degraded;
-                } else if !in_set
-                    && self.session_state == autonoetic_types::agent::SessionState::Degraded
-                {
+                } else if !in_set && self.session_state == autonoetic_types::agent::SessionState::Degraded {
                     self.session_state = autonoetic_types::agent::SessionState::Normal;
                 }
             }
@@ -2418,12 +2425,8 @@ impl AgentExecutor {
                     .enforce_cost_catalog_preflight(&actual_model, allow_unpriced_budget)
                     .await
                 {
-                    let cp = self.build_checkpoint(
-                        history,
-                        &turn_id,
-                        YieldReason::BudgetExhausted,
-                        None,
-                    );
+                    let cp =
+                        self.build_checkpoint(history, &turn_id, YieldReason::BudgetExhausted, None);
                     self.save_checkpoint_if_possible(&cp);
                     return Err(e);
                 }
@@ -3636,6 +3639,7 @@ fn input_tokens_as_context_pct(input_tokens: u64, context_window: Option<u32>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use autonoetic_types::agent::SessionState;
     use crate::llm::{
         CompletionRequest, CompletionResponse, LlmDriver, StopReason, TokenUsage, ToolCall,
         ToolDefinition,
@@ -3643,7 +3647,6 @@ mod tests {
     use crate::policy::PolicyEngine;
     use crate::runtime::reevaluation_state::execute_scheduled_action;
     use crate::runtime::tools::{NativeTool, NativeToolRegistry};
-    use autonoetic_types::agent::SessionState;
     use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
     use autonoetic_types::background::ScheduledAction;
     use autonoetic_types::capability::Capability;
@@ -5479,9 +5482,7 @@ mod loop_guard_tests {
 #[cfg(test)]
 mod tier_filter_tests {
     use super::determine_tool_tier_filter;
-    use autonoetic_types::agent::{
-        AgentIdentity, AgentManifest, RuntimeDeclaration, SessionState, ToolTier,
-    };
+    use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration, SessionState, ToolTier};
 
     fn test_manifest() -> AgentManifest {
         AgentManifest {
@@ -5520,12 +5521,7 @@ mod tier_filter_tests {
     #[test]
     fn test_root_session_no_pending_approvals_allows_all() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(
-            &manifest,
-            Some("root-session"),
-            false,
-            SessionState::Normal,
-        );
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Normal);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("web_search"));
         assert!(filter.allows("agent_spawn"));
@@ -5535,12 +5531,7 @@ mod tier_filter_tests {
     #[test]
     fn test_child_session_core_only_by_default() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(
-            &manifest,
-            Some("root/child-session"),
-            false,
-            SessionState::Normal,
-        );
+        let filter = determine_tool_tier_filter(&manifest, Some("root/child-session"), false, SessionState::Normal);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("sandbox_exec"));
         assert!(!filter.allows("web_search"));
@@ -5551,8 +5542,7 @@ mod tier_filter_tests {
     #[test]
     fn test_pending_approvals_restricts_to_core_and_workflow() {
         let manifest = test_manifest();
-        let filter =
-            determine_tool_tier_filter(&manifest, Some("root-session"), true, SessionState::Normal);
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), true, SessionState::Normal);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("sandbox_exec"));
         assert!(filter.allows("agent_spawn"));
@@ -5567,8 +5557,7 @@ mod tier_filter_tests {
     fn test_manifest_declared_tiers_override_runtime_inference() {
         let mut manifest = test_manifest();
         manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
-        let filter =
-            determine_tool_tier_filter(&manifest, Some("root/child"), true, SessionState::Normal);
+        let filter = determine_tool_tier_filter(&manifest, Some("root/child"), true, SessionState::Normal);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("web_search"));
         assert!(!filter.allows("agent_spawn"));
@@ -5585,53 +5574,22 @@ mod tier_filter_tests {
     #[test]
     fn test_degraded_session_clamps_to_core_only() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(
-            &manifest,
-            Some("root-session"),
-            false,
-            SessionState::Degraded,
-        );
-        assert!(
-            filter.allows("content_write"),
-            "core content tools allowed in degraded"
-        );
-        assert!(
-            filter.allows("sandbox_exec"),
-            "sandbox_exec is core tier, allowed by tier filter"
-        );
-        assert!(
-            !filter.allows("web_search"),
-            "web_search is specialized, blocked in degraded"
-        );
-        assert!(
-            !filter.allows("agent_spawn"),
-            "agent_spawn is workflow, blocked in degraded"
-        );
-        assert!(
-            !filter.allows("promotion_record"),
-            "promotion is specialized, blocked in degraded"
-        );
-        assert!(
-            !filter.allows("agent_revision_create"),
-            "agent_revision is specialized, blocked in degraded"
-        );
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded);
+        assert!(filter.allows("content_write"), "core content tools allowed in degraded");
+        assert!(filter.allows("sandbox_exec"), "sandbox_exec is core tier, allowed by tier filter");
+        assert!(!filter.allows("web_search"), "web_search is specialized, blocked in degraded");
+        assert!(!filter.allows("agent_spawn"), "agent_spawn is workflow, blocked in degraded");
+        assert!(!filter.allows("promotion_record"), "promotion is specialized, blocked in degraded");
+        assert!(!filter.allows("agent_revision_create"), "agent_revision is specialized, blocked in degraded");
     }
 
     #[test]
     fn test_degraded_overrides_manifest_declared_tiers() {
         let mut manifest = test_manifest();
         manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
-        let filter = determine_tool_tier_filter(
-            &manifest,
-            Some("root-session"),
-            false,
-            SessionState::Degraded,
-        );
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded);
         assert!(filter.allows("content_write"), "core allowed");
-        assert!(
-            !filter.allows("web_search"),
-            "specialized blocked despite manifest"
-        );
+        assert!(!filter.allows("web_search"), "specialized blocked despite manifest");
         assert!(!filter.allows("agent_spawn"), "workflow blocked");
     }
 }

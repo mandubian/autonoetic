@@ -126,6 +126,22 @@ async fn run_scheduler_tick_at(
     }
 
     let config = execution.config();
+
+    // Process due scheduled jobs before workflow drains (may enqueue follow-up work).
+    if let Err(e) = process_due_scheduled_jobs(execution.clone(), now).await {
+        tracing::warn!(error = %e, "Failed to process due scheduled jobs");
+    }
+
+    // Drain runnable + queued workflow work *before* background-agent wakes. `handle_due_wake`
+    // may await a full reasoning `spawn_agent_once` turn (minutes of LLM); when it runs first,
+    // async `agent_spawn` children starve with no queue processing until it returns.
+    if let Err(e) = process_runnable_workflow_tasks(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to process runnable workflow tasks");
+    }
+    if let Err(e) = process_queued_workflow_tasks(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to process queued workflow tasks");
+    }
+
     let repo = crate::agent::AgentRepository::from_config(&config);
     let gateway_dir = crate::execution::gateway_root_dir(&config);
     let mut loaded_agents: Vec<crate::agent::LoadedAgent> = Vec::new();
@@ -220,27 +236,6 @@ async fn run_scheduler_tick_at(
         .await?;
     }
 
-    // Run due sentinel sweeps directly (not via workflow dispatch).
-    {
-        let cfg = execution.config();
-        if cfg.sentinel.enabled {
-            if let Some(store) = execution.gateway_store() {
-                let agents_dir = cfg.agents_dir.clone();
-                crate::sentinel::run_due_sentinel_jobs(&store, &cfg.sentinel, Some(&agents_dir));
-            }
-        }
-    }
-
-    // Process due scheduled jobs (sentinel-owned jobs are excluded below).
-    if let Err(e) = process_due_scheduled_jobs(execution.clone(), now).await {
-        tracing::warn!(error = %e, "Failed to process due scheduled jobs");
-    }
-
-    // Process Runnable tasks (approval-unblocked tasks that need execution)
-    if let Err(e) = process_runnable_workflow_tasks(execution.clone()).await {
-        tracing::warn!(error = %e, "Failed to process runnable workflow tasks");
-    }
-
     // Fail tasks that have been AwaitingApproval longer than the configured timeout.
     if let Err(e) = check_approval_timeouts(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to check approval timeouts");
@@ -249,11 +244,6 @@ async fn run_scheduler_tick_at(
     // Detect and resolve tasks stuck in Running state (child session completed but task status not updated).
     if let Err(e) = check_stuck_running_tasks(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to check stuck running tasks");
-    }
-
-    // Process queued async workflow tasks (Phase 2)
-    if let Err(e) = process_queued_workflow_tasks(execution.clone()).await {
-        tracing::warn!(error = %e, "Failed to process queued workflow tasks");
     }
 
     // Orphan-child reaper: cancel children of terminated parent sessions (R+12)
@@ -325,7 +315,7 @@ async fn check_approval_timeouts(
                     workflow_id = %wf_id,
                     task_id = %task.task_id,
                     timeout_secs = timeout_secs,
-                    "Approval timeout expired; marking task as suspended (not crashed)"
+                    "Approval timeout expired; marking task as failed (continuation preserved)"
                 );
 
                 let reason = "Approval timed out".to_string();
@@ -353,7 +343,7 @@ async fn check_approval_timeouts(
                     }),
                 );
                 // DO NOT delete the continuation file — it can be resumed if
-                // the operator approves later. Just emit workflow event.
+                // the operator approves later (R-2.11, R-7.11). Just emit workflow event.
                 let timeout_event = autonoetic_types::workflow::WorkflowEventRecord {
                     event_id: format!("wevt-approval-t-{}", &task.task_id),
                     workflow_id: wf_id.clone(),
@@ -368,6 +358,22 @@ async fn check_approval_timeouts(
                 };
                 let _ = workflow_store::append_workflow_event(&config, store, &timeout_event);
                 let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
+
+                // Record timeout in session report so overview stays consistent.
+                if let Some(ref c) = cont {
+                    let gateway_dir = config.agents_dir.join(".gateway");
+                    if let Ok(mut report) = crate::runtime::session_report::SessionReportWriter::open(
+                        &gateway_dir,
+                        &task.session_id,
+                        &task.agent_id,
+                    ) {
+                        let _ = report.record_approval_resolved(
+                            &c.approval_request_id,
+                            "timed_out",
+                            &format!("Approval timed out after {}s (continuation preserved)", timeout_secs),
+                        );
+                    }
+                }
             }
         }
     }
@@ -726,48 +732,73 @@ async fn resume_answered_standalone_interactions(
     }
 
     for interaction in answered {
+        if !store.try_claim_answered_standalone_interaction_resume(&interaction.interaction_id)? {
+            tracing::debug!(
+                target: "scheduler",
+                interaction_id = %interaction.interaction_id,
+                "Standalone interaction already claimed or resumed"
+            );
+            continue;
+        }
+
         tracing::info!(
             target: "scheduler",
             interaction_id = %interaction.interaction_id,
             session_id = %interaction.session_id,
             agent_id = %interaction.agent_id,
-            "Resuming standalone session after answered user interaction"
+            "Scheduling standalone session resume after answered user interaction"
         );
 
-        match execution
-            .resume_from_user_interaction(
-                &interaction.interaction_id,
-                Some("[scheduler] User answered the pending question; resuming from gateway tick."),
-            )
-            .await
-        {
-            Ok(_) => {
-                tracing::info!(
-                    target: "scheduler",
-                    interaction_id = %interaction.interaction_id,
-                    "Standalone session resumed successfully"
-                );
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.starts_with("session_waiting_for_approval:") {
-                    // Session moved to an ApprovalRequired checkpoint during the resume turn.
-                    // The approval path owns the next resume; stop retrying this interaction.
-                    tracing::debug!(
+        let exec = execution.clone();
+        let store = store.clone();
+        let interaction_id = interaction.interaction_id.clone();
+        tokio::spawn(async move {
+            let result = exec
+                .resume_from_user_interaction(
+                    &interaction_id,
+                    Some("[scheduler] User answered the pending question; resuming from gateway tick."),
+                )
+                .await;
+
+            match result {
+                Ok(_) => {
+                    tracing::info!(
                         target: "scheduler",
-                        interaction_id = %interaction.interaction_id,
-                        "Standalone interaction deferred: session is now waiting for approval"
-                    );
-                } else {
-                    tracing::warn!(
-                        target: "scheduler",
-                        interaction_id = %interaction.interaction_id,
-                        error = %e,
-                        "Failed to resume standalone session"
+                        interaction_id = %interaction_id,
+                        "Standalone session resumed successfully"
                     );
                 }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.starts_with("session_waiting_for_approval:") {
+                        // Session moved to an ApprovalRequired checkpoint during the resume turn.
+                        // The approval path owns the next resume; stop retrying this interaction.
+                        tracing::debug!(
+                            target: "scheduler",
+                            interaction_id = %interaction_id,
+                            "Standalone interaction deferred: session is now waiting for approval"
+                        );
+                    } else {
+                        if let Err(release_err) =
+                            store.release_answered_standalone_interaction_resume_claim(&interaction_id)
+                        {
+                            tracing::warn!(
+                                target: "scheduler",
+                                interaction_id = %interaction_id,
+                                error = %release_err,
+                                "Failed to release standalone interaction resume claim"
+                            );
+                        }
+                        tracing::warn!(
+                            target: "scheduler",
+                            interaction_id = %interaction_id,
+                            error = %e,
+                            "Failed to resume standalone session"
+                        );
+                    }
+                }
             }
-        }
+        });
     }
 
     Ok(())
@@ -1673,17 +1704,6 @@ async fn process_due_scheduled_jobs(
                 continue;
             }
         };
-
-        // Sentinel-owned jobs are executed directly by run_due_sentinel_jobs;
-        // skip them here to avoid spurious workflow dispatch attempts.
-        if claimed.owner_agent_id == crate::sentinel::scheduler::SENTINEL_OWNER {
-            tracing::debug!(
-                target: "scheduler",
-                job_id = %claimed.job_id,
-                "Skipping sentinel job — handled by sentinel scheduler"
-            );
-            continue;
-        }
 
         tracing::info!(
             target: "scheduler",

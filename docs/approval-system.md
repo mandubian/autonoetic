@@ -323,8 +323,9 @@ When a `sandbox_exec` approval is resolved:
 2. Router extracts `task_id` from the approval request
 3. `spawn_agent_once` finds the continuation file on disk
 4. `execute_approved_action` runs the approved command with real sandbox isolation
-5. Real output (stdout/stderr/exit_code) is injected into the LLM conversation
-6. LLM continues with actual results, not re-deriving what to do
+5. `SessionReportWriter::record_approval_resolved` marks the approval as resolved in session reports
+6. Real output (stdout/stderr/exit_code) is injected into the LLM conversation
+7. LLM continues with actual results, not re-deriving what to do
 
 ### Continuation-Based Resume (agent_revision_promote)
 
@@ -334,8 +335,9 @@ When an `agent_revision_promote` approval is resolved:
 2. Router extracts `task_id` from the approval request
 3. `spawn_agent_once` finds the continuation file on disk
 4. `execute_approved_action` runs the approved promotion
-5. Real promotion result is injected into the LLM conversation
-6. Agent continues with actual result — no retry or payload re-submission needed
+5. `SessionReportWriter::record_approval_resolved` marks the approval as resolved in session reports
+6. Real promotion result is injected into the LLM conversation
+7. Agent continues with actual result — no retry or payload re-submission needed
 
 ## Approval Deduplication
 
@@ -476,7 +478,7 @@ autonoetic gateway grants revoke --root-session <id> --host api.example.com
 | `autonoetic-gateway/src/runtime/remote_access.rs` | URL/domain extraction from code (`RemoteAccessAnalyzer`) |
 | `autonoetic-gateway/src/runtime/approved_exec_cache.rs` | Domain normalization (`normalize_targets`), fingerprinting, host normalization (lowercase + trailing dot stripping) |
 | `autonoetic-gateway/src/runtime/lifecycle.rs` | Session close — grant cleanup for non-suspended sessions |
-| `autonoetic-gateway/src/execution.rs` | Emergency stop — grant cleanup during circuit breaker |
+| `autonoetic-gateway/src/execution.rs` | Emergency stop — grant cleanup during circuit breaker; approval resolution in session reports on continuation resume |
 | `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Database migrations v4: `session_approval_grants` table; v16: scope + session_id; v17: `session_approval_grant_targets` table; v18: `expires_at`; v19: `similar_to_request_id` + `similarity_score` |
 | `autonoetic-gateway/src/scheduler/hooks.rs` | Hook system — configurable reactive dispatch (`publish_report`, `deliver_signal`). Future: hook-based approval auto-resolution |
 | `autonoetic-gateway/src/scheduler/gateway_store/migrate.rs` | Database migration v7: `published_session_reports`, `published_session_reports_fts`, `hook_deliveries` tables |

@@ -287,7 +287,7 @@ Loop guard in `runtime/guard.rs`, emergency stop in
 | R-7.8 | Concurrent spawns beyond capability limit return `quota_exceeded`. | agent-capabilities.md | `policy.rs:543` + `agent_spawn` tool | ENFORCED |
 | R-7.9 | `AgentSpawn.max_children` is enforced per agent. | agent-capabilities.md | same | ENFORCED |
 | R-7.10 | Scheduler rejects sub-threshold intervals (`min_interval_secs`); sub-10s requires script-mode target. | ARCHITECTURE.md | `runtime/tools/scheduler.rs` | ENFORCED |
-| R-7.11 | Approval timeout fails the task and cleans the continuation. | ARCHITECTURE.md | scheduler tick | PARTIAL |
+| R-7.11 | Approval timeout fails the task while preserving the continuation for operator-driven resume. | ARCHITECTURE.md | `scheduler.rs::check_approval_timeouts`, `constitution_r_2_11_approval_timeout.rs` | ENFORCED |
 | R-7.12 | Promotion gate has no escape hatch; passes require real evaluator + auditor records. | spec-install-pipeline-hardening.md §3.1 | `agent_revision.rs::promote` | ENFORCED |
 | R-7.13 | Unresolved dependencies block promotion for high-risk agents. | spec-install-pipeline-hardening.md §3.2 | `install_contract.rs` + `promote` | ENFORCED |
 | R-7.14 | `force_complete` refuses `Succeeded` without real child-session evidence. | spec-install-pipeline-hardening.md §A.1 | `workflow.rs::force_complete` | ENFORCED |

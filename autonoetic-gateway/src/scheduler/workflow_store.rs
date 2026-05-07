@@ -755,6 +755,66 @@ pub fn update_task_run_status(
     Ok(())
 }
 
+/// Attempt to transition a workflow from `Resumable` to `Completed`.
+///
+/// Called when the root (planner) session closes normally. The transition fires
+/// only when the workflow is `Resumable` AND all join tasks are terminal AND no
+/// active or queued tasks remain. Returns `true` if the transition occurred.
+pub fn try_complete_workflow(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    root_session_id: &str,
+) -> anyhow::Result<bool> {
+    let wf_id = match resolve_workflow_id_for_root_session(config, root_session_id)? {
+        Some(id) => id,
+        None => return Ok(false),
+    };
+    let run = match load_workflow_run(config, store, &wf_id)? {
+        Some(r) => r,
+        None => return Ok(false),
+    };
+    if run.status != WorkflowRunStatus::Resumable {
+        return Ok(false);
+    }
+    if !run.active_task_ids.is_empty() || !run.queued_task_ids.is_empty() {
+        return Ok(false);
+    }
+    if !check_join_condition(config, store, &wf_id)? {
+        return Ok(false);
+    }
+
+    let mut wf = run;
+    wf.status = WorkflowRunStatus::Completed;
+    wf.updated_at = now_rfc3339();
+    save_workflow_run(config, store, &wf)?;
+
+    append_workflow_event(
+        config,
+        store,
+        &WorkflowEventRecord {
+            event_id: new_event_id(),
+            workflow_id: wf_id.clone(),
+            task_id: None,
+            event_type: "workflow.completed".to_string(),
+            agent_id: None,
+            payload: serde_json::json!({
+                "root_session_id": root_session_id,
+                "join_task_ids": wf.join_task_ids,
+            }),
+            occurred_at: now_rfc3339(),
+        },
+    )?;
+
+    tracing::info!(
+        target: "workflow",
+        workflow_id = %wf_id,
+        root_session_id = %root_session_id,
+        "Workflow completed — all join tasks terminal, no active/queued work"
+    );
+
+    Ok(true)
+}
+
 /// Creates an implicit artifact reference for a completed task.
 ///
 /// Per spec (spec-implicit-artifacts-agent-evolution.md §4.2), the implicit
