@@ -15,6 +15,7 @@ mod row_decode;
 mod runtime_control;
 mod scheduled_jobs;
 pub mod security_findings;
+pub mod sentinel_disagreements;
 mod user_interactions;
 mod user_profiles;
 mod util;

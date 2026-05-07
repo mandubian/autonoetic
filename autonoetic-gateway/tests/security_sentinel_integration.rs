@@ -1,9 +1,11 @@
-//! Integration tests for Phase 0 and Phase 1 of the security sentinel.
+//! Integration tests for the security sentinel (Phases 0–3).
 //!
 //! Covers:
 //! - `SecurityFinding` serialization and DB round-trip
 //! - `security_findings` SQL migration (append-only enforcement)
 //! - Deterministic checks via `SentinelRunner::run_sweep`
+//! - Phase 2 heuristic checks (prompt injection, session cluster)
+//! - Phase 3 dual-sweep: baseline annotation and disagreement recording
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::security::{
@@ -445,4 +447,204 @@ fn session_cluster_failure_burst_flagged_by_runner() {
             .any(|f| f.finding_type == FindingType::BehavioralAnomaly),
         "finding_type must be BehavioralAnomaly"
     );
+}
+
+// ── Phase 3: Dual-sweep (frozen baseline + current sentinel) ──────────────────
+
+#[test]
+fn dual_sweep_on_empty_db_produces_no_findings_or_disagreements() {
+    use autonoetic_gateway::sentinel::{DualSweepResult, DualSweepRunner};
+    use autonoetic_gateway::sentinel::runner::SweepConfig;
+
+    let (_dir, store) = open_store();
+    let runner = DualSweepRunner::new(Arc::clone(&store));
+    let baseline_config = SweepConfig {
+        sentinel_revision_id: "sentinel.baseline".to_string(),
+        ..SweepConfig::default()
+    };
+    let current_config = SweepConfig {
+        sentinel_revision_id: "sentinel.current".to_string(),
+        ..SweepConfig::default()
+    };
+    let result: DualSweepResult = runner.run(&baseline_config, &current_config).expect("dual sweep");
+    assert_eq!(result.current.total_findings(), 0);
+    assert_eq!(result.baseline_agreed_count, 0);
+    assert!(result.disagreements.is_empty());
+    assert!(result.current.persist_errors.is_empty());
+}
+
+#[test]
+fn dual_sweep_sets_baseline_agreed_when_both_find_same_anchor() {
+    use autonoetic_gateway::sentinel::{DualSweepRunner};
+    use autonoetic_gateway::sentinel::runner::SweepConfig;
+
+    let (dir, store) = open_store();
+
+    // Insert a credential-pattern event that BOTH baseline and current will flag.
+    // Use a real Anthropic key pattern so the credential scanner fires.
+    {
+        let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let fake_key = format!("sk-ant-api03-{}-{}", "A".repeat(92), "A".repeat(10));
+        db.execute(
+            "INSERT INTO causal_events
+                (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
+             VALUES ('evt_cred_001', 'coder.default', 'sess_001', 0, ?1, 'tool', 'tool_call', 'success', ?2)",
+            rusqlite::params![now, fake_key],
+        ).unwrap();
+    }
+
+    let runner = DualSweepRunner::new(Arc::clone(&store));
+    let baseline_config = SweepConfig {
+        sentinel_revision_id: "sentinel.baseline".to_string(),
+        ..SweepConfig::default()
+    };
+    let current_config = SweepConfig {
+        sentinel_revision_id: "sentinel.current".to_string(),
+        ..SweepConfig::default()
+    };
+    let result = runner.run(&baseline_config, &current_config).expect("dual sweep");
+
+    // Both baseline and current must have flagged the credential.
+    // The current finding should have baseline_agreed = true.
+    assert!(
+        result.baseline_agreed_count > 0,
+        "both sweeps must find the credential — baseline_agreed_count must be > 0"
+    );
+    let agreed_finding = result
+        .current
+        .credential_findings
+        .iter()
+        .find(|f| f.baseline_agreed);
+    assert!(
+        agreed_finding.is_some(),
+        "at least one current finding must have baseline_agreed = true"
+    );
+    // No disagreements when both agree.
+    assert!(
+        result.disagreements.iter().all(|d| {
+            use autonoetic_gateway::scheduler::gateway_store::sentinel_disagreements::DisagreementDirection;
+            d.direction != DisagreementDirection::BaselineOnly
+        }),
+        "no baseline_only disagreements when both find the same anchor"
+    );
+}
+
+#[test]
+fn dual_sweep_records_baseline_only_disagreement() {
+    use autonoetic_gateway::sentinel::DualSweepRunner;
+    use autonoetic_gateway::sentinel::runner::SweepConfig;
+    use autonoetic_gateway::scheduler::gateway_store::sentinel_disagreements::DisagreementDirection;
+
+    let (dir, store) = open_store();
+
+    // Insert a credential event with a past timestamp so the baseline (no since cutoff)
+    // will find it, but the current sentinel's since_rfc3339 is set to the far future
+    // so it misses everything — producing a baseline_only disagreement.
+    {
+        let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+        let past = "2020-01-01T00:00:00Z";
+        let fake_key = format!("sk-ant-api03-{}-{}", "C".repeat(92), "C".repeat(10));
+        db.execute(
+            "INSERT INTO causal_events
+                (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
+             VALUES ('evt_cred_base_only', 'coder.default', 'sess_base_only', 0, ?1, 'tool', 'tool_call', 'success', ?2)",
+            rusqlite::params![past, fake_key],
+        ).unwrap();
+    }
+
+    let runner = DualSweepRunner::new(Arc::clone(&store));
+    // Baseline scans full history (since_rfc3339 = None).
+    let baseline_config = SweepConfig {
+        sentinel_revision_id: "sentinel.baseline".to_string(),
+        since_rfc3339: None,
+        ..SweepConfig::default()
+    };
+    // Current only looks at events from the far future — misses the past event.
+    let current_config = SweepConfig {
+        sentinel_revision_id: "sentinel.current".to_string(),
+        since_rfc3339: Some("2099-01-01T00:00:00Z".to_string()),
+        ..SweepConfig::default()
+    };
+
+    let result = runner.run(&baseline_config, &current_config).expect("dual sweep");
+
+    // Baseline must have found the credential.
+    assert!(
+        !result.baseline.credential_findings.is_empty(),
+        "baseline must find the credential event"
+    );
+    // Current must have found nothing.
+    assert!(
+        result.current.credential_findings.is_empty(),
+        "current must miss the credential event (future since cutoff)"
+    );
+    // A baseline_only disagreement must have been recorded.
+    let baseline_only = result
+        .disagreements
+        .iter()
+        .any(|d| d.direction == DisagreementDirection::BaselineOnly);
+    assert!(baseline_only, "must produce a baseline_only disagreement");
+
+    // Verify it is also in the DB.
+    let rows = store.list_sentinel_disagreements(None, 10).expect("list");
+    assert!(rows.iter().any(|r| r.direction == DisagreementDirection::BaselineOnly));
+
+    let counts = store.count_sentinel_disagreements_by_direction().expect("count");
+    let n = counts.iter().find(|(d, _)| d == "baseline_only").map(|(_, n)| *n);
+    assert_eq!(n, Some(1));
+}
+
+#[test]
+fn dual_sweep_disagreement_persisted_in_db() {
+    use autonoetic_gateway::sentinel::{DualSweepRunner};
+    use autonoetic_gateway::sentinel::runner::SweepConfig;
+    use autonoetic_gateway::scheduler::gateway_store::sentinel_disagreements::DisagreementDirection;
+
+    let (dir, store) = open_store();
+
+    // Insert a credential event ONLY reachable by the current sentinel's since_rfc3339=None
+    // but craft configs so one sentinel sees it and the other doesn't:
+    // Use baseline with a future `since` so it sees nothing; current sees everything.
+    {
+        let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let fake_key = format!("sk-ant-api03-{}-{}", "B".repeat(92), "B".repeat(10));
+        db.execute(
+            "INSERT INTO causal_events
+                (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
+             VALUES ('evt_cred_dis', 'coder.default', 'sess_dis', 0, ?1, 'tool', 'tool_call', 'success', ?2)",
+            rusqlite::params![now, fake_key],
+        ).unwrap();
+    }
+
+    // Give baseline a since_rfc3339 in the far future so it sees nothing.
+    let future = "2099-01-01T00:00:00Z";
+    let runner = DualSweepRunner::new(Arc::clone(&store));
+    let baseline_config = SweepConfig {
+        sentinel_revision_id: "sentinel.baseline".to_string(),
+        since_rfc3339: Some(future.to_string()),
+        ..SweepConfig::default()
+    };
+    let current_config = SweepConfig {
+        sentinel_revision_id: "sentinel.current".to_string(),
+        since_rfc3339: None,
+        ..SweepConfig::default()
+    };
+
+    let result = runner.run(&baseline_config, &current_config).expect("dual sweep");
+
+    // Current found a credential; baseline didn't (it was past its since cutoff).
+    assert!(!result.current.credential_findings.is_empty(), "current must find the credential");
+
+    // This should produce a current_only disagreement.
+    let current_only = result
+        .disagreements
+        .iter()
+        .any(|d| d.direction == DisagreementDirection::CurrentOnly);
+    assert!(current_only, "must record a current_only disagreement");
+
+    // The disagreement must be persisted in the DB.
+    let db_rows = store.list_sentinel_disagreements(None, 100).expect("list");
+    assert!(!db_rows.is_empty(), "disagreements must be persisted to DB");
 }

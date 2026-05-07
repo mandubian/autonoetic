@@ -37,6 +37,8 @@
 //! append-only `security_findings` table.
 
 pub mod checks;
+pub mod dual_sweep;
 pub mod runner;
 
+pub use dual_sweep::{DualSweepResult, DualSweepRunner};
 pub use runner::{SentinelRunner, SweepResult};
