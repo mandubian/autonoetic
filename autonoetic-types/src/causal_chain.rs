@@ -187,6 +187,7 @@ impl CausalEventRecord {
                 if let Some(ref payload) = self.payload {
                     out.payload = Some(redact_json_string(payload));
                 }
+                out.payload_ref = None;
                 out
             }
             super::disclosure::ViewerClass::Agent => Self {
@@ -202,7 +203,7 @@ impl CausalEventRecord {
                 enforced_rules: self.enforced_rules.clone(),
                 target: self.target.clone(),
                 payload: None,
-                payload_ref: self.payload_ref.clone(),
+                payload_ref: None,
                 evidence_ref: None,
                 reason: None,
             },
