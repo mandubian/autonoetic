@@ -1,4 +1,4 @@
-//! Integration tests for the security sentinel (Phases 0–5).
+//! Integration tests for the security sentinel (Phases 0–6).
 //!
 //! Covers:
 //! - `SecurityFinding` serialization and DB round-trip
@@ -8,6 +8,7 @@
 //! - Phase 3 dual-sweep: baseline annotation and disagreement recording
 //! - Phase 4 supply-chain auditing: scope violations and provenance gaps
 //! - Phase 5 scheduling and promotion-gate integration
+//! - Phase 6 triage store methods (count by triage state, filtered listing)
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::security::{
@@ -968,4 +969,146 @@ fn promotion_gate_blocks_on_critical_finding() {
             panic!("gate must block when critical findings exist in the store");
         }
     }
+}
+
+// ── Phase 6: Triage store methods ────────────────────────────────────────────
+
+#[test]
+fn count_by_triage_state_reflects_updates() {
+    let (_dir, store) = open_store();
+
+    // Insert 2 critical + 1 warning, then triage one.
+    for i in 0..2u32 {
+        store
+            .insert_security_finding(&SecurityFinding::new(
+                FindingType::CredentialLeak,
+                FindingSeverity::Critical,
+                1.0,
+                Reproducibility::Deterministic,
+                "rotate",
+                format!("rev-{}", i),
+            ))
+            .expect("insert");
+    }
+    let warning = SecurityFinding::new(
+        FindingType::CapabilityAccretion,
+        FindingSeverity::Warning,
+        0.7,
+        Reproducibility::Deterministic,
+        "review",
+        "rev-1",
+    );
+    let warning_id = warning.finding_id.clone();
+    store.insert_security_finding(&warning).expect("insert warning");
+
+    // All three should be pending initially.
+    let before = store.count_security_findings_by_triage_state().expect("count");
+    let pending = before.iter().find(|(s, _)| s == "pending").map(|(_, c)| *c);
+    assert_eq!(pending, Some(3));
+
+    // Mark the warning as false_positive.
+    store
+        .update_security_finding_triage(
+            &warning_id,
+            autonoetic_types::security::TriageState::FalsePositive,
+            Some("known CI pattern"),
+        )
+        .expect("triage");
+
+    let after = store.count_security_findings_by_triage_state().expect("count");
+    let pending_after = after.iter().find(|(s, _)| s == "pending").map(|(_, c)| *c);
+    let fp_after = after.iter().find(|(s, _)| s == "false_positive").map(|(_, c)| *c);
+    assert_eq!(pending_after, Some(2));
+    assert_eq!(fp_after, Some(1));
+}
+
+#[test]
+fn list_security_findings_filtered_by_type() {
+    let (_dir, store) = open_store();
+
+    store
+        .insert_security_finding(&SecurityFinding::new(
+            FindingType::CredentialLeak,
+            FindingSeverity::Critical,
+            1.0,
+            Reproducibility::Deterministic,
+            "rotate",
+            "rev-001",
+        ))
+        .expect("insert cred");
+    store
+        .insert_security_finding(&SecurityFinding::new(
+            FindingType::SandboxEscapeAttempt,
+            FindingSeverity::Warning,
+            0.8,
+            Reproducibility::Deterministic,
+            "investigate",
+            "rev-001",
+        ))
+        .expect("insert sandbox");
+
+    // Filter by finding_type only.
+    let cred_rows = store
+        .list_security_findings_filtered(None, Some("credential_leak"), None, 100)
+        .expect("filtered list");
+    assert_eq!(cred_rows.len(), 1);
+    assert_eq!(cred_rows[0].finding_type, "credential_leak");
+
+    // No filter — both returned.
+    let all_rows = store
+        .list_security_findings_filtered(None, None, None, 100)
+        .expect("unfiltered list");
+    assert_eq!(all_rows.len(), 2);
+
+    // Filter by severity + type.
+    let critical_cred = store
+        .list_security_findings_filtered(Some("critical"), Some("credential_leak"), None, 100)
+        .expect("severity+type list");
+    assert_eq!(critical_cred.len(), 1);
+}
+
+#[test]
+fn list_security_findings_filtered_by_triage_state() {
+    let (_dir, store) = open_store();
+
+    let f1 = SecurityFinding::new(
+        FindingType::CredentialLeak,
+        FindingSeverity::Critical,
+        1.0,
+        Reproducibility::Deterministic,
+        "rotate",
+        "rev-001",
+    );
+    let f2 = SecurityFinding::new(
+        FindingType::ApprovalBypass,
+        FindingSeverity::Warning,
+        0.7,
+        Reproducibility::Deterministic,
+        "investigate",
+        "rev-001",
+    );
+    store.insert_security_finding(&f1).expect("insert f1");
+    store.insert_security_finding(&f2).expect("insert f2");
+
+    store
+        .update_security_finding_triage(
+            &f1.finding_id,
+            autonoetic_types::security::TriageState::TruePositive,
+            Some("confirmed"),
+        )
+        .expect("triage f1");
+
+    // Query pending only.
+    let pending = store
+        .list_security_findings_filtered(None, None, Some("pending"), 100)
+        .expect("pending filter");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].finding_id, f2.finding_id);
+
+    // Query true_positive only.
+    let tp = store
+        .list_security_findings_filtered(None, None, Some("true_positive"), 100)
+        .expect("tp filter");
+    assert_eq!(tp.len(), 1);
+    assert_eq!(tp[0].finding_id, f1.finding_id);
 }
