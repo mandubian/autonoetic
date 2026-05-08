@@ -540,8 +540,8 @@ mod redaction_tests {
         let out = crate::redaction::redact_json_value(&v);
         // Bearer: in-place masking preserves the prefix, masks the value.
         assert_eq!(out["header"], "Bearer ***REDACTED***");
-        // PEM: can't be masked in place; fallback wholesale redact via
-        // `looks_like_secret_value` ⇒ `REDACTED`.
+        // PEM: can't be masked in place; fallback wholesale redact via the
+        // narrow `s.contains("-----BEGIN")` branch in `redact_json_value`.
         assert_eq!(out["key_blob"], "***REDACTED***");
         // Bare `sk-…`: handled by `redact_embedded_secrets`'s sk- prefix branch.
         assert_eq!(out["openai_key"], "***REDACTED***");

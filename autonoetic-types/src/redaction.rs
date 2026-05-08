@@ -195,7 +195,7 @@ pub fn redact_json_value(value: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
         Value::String(s) => {
             let masked = redact_embedded_secrets(s);
-            if masked != *s {
+            if masked != s.as_str() {
                 // In-place mask handled it (bearer, env-var, query secret, sk-).
                 Value::String(masked)
             } else if s.contains("-----BEGIN") {

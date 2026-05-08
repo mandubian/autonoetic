@@ -15,10 +15,8 @@ use serde_json::Value;
 
 pub use autonoetic_types::redaction::{
     looks_like_secret_collection_prompt, looks_like_secret_value, redact_embedded_secrets,
-    redact_json_value, redact_text_for_logs,
+    redact_json_value, redact_text_for_logs, REDACTED,
 };
-
-const REDACTED: &str = "***REDACTED***";
 
 #[derive(Debug, Clone)]
 pub struct RedactedPayload(Value);
