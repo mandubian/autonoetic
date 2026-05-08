@@ -110,6 +110,15 @@ impl NativeTool for AttackPatternProposeTool {
         let args: AttackPatternProposeArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
 
+        anyhow::ensure!(
+            args.evidence_anchors.is_array(),
+            "evidence_anchors must be a JSON array"
+        );
+        anyhow::ensure!(
+            args.synthetic_test_case.is_object(),
+            "synthetic_test_case must be a JSON object"
+        );
+
         let Some(gateway_store) = gateway_store else {
             return Err(anyhow::anyhow!("GatewayStore is required"));
         };
@@ -158,11 +167,11 @@ impl NativeTool for AttackPatternProposeTool {
 
         Ok(serde_json::json!({
             "ok": true,
-            "status": "pending_review",
+            "status": "pending",
             "pattern_id": pattern_id,
             "category": args.category,
             "message": "Pattern queued for operator review. \
-                Use 'autonoetic security pattern-accept' or 'pattern-reject' to review."
+                Use 'autonoetic security pattern-accept' or 'autonoetic security pattern-reject' to review."
         })
         .to_string())
     }
@@ -231,7 +240,7 @@ impl NativeTool for AttackPatternListTool {
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: AttackPatternListArgs = serde_json::from_str(arguments_json)
-            .unwrap_or_else(|_| AttackPatternListArgs { status: None, limit: 50 });
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
 
         let Some(gateway_store) = gateway_store else {
             return Err(anyhow::anyhow!("GatewayStore is required"));

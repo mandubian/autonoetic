@@ -20,7 +20,7 @@ metadata:
       model: "anthropic/claude-opus-4"
       temperature: 0.1
     capabilities:
-      - SecurityRedTeam
+      - type: "SecurityRedTeam"
       - type: "ReadAccess"
         scopes: ["*"]
       - type: "SandboxFunctions"

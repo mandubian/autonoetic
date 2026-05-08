@@ -77,6 +77,29 @@ impl GatewayStore {
         accepted_check_type: Option<&str>,
         operator_notes: Option<&str>,
     ) -> Result<()> {
+        const VALID_CHECK_TYPES: &[&str] = &["phase1", "phase2"];
+
+        let effective_check_type = match status {
+            AttackPatternStatus::Accepted => {
+                let ct = accepted_check_type.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "accepted_check_type is required when accepting a pattern (phase1 or phase2)"
+                    )
+                })?;
+                anyhow::ensure!(
+                    VALID_CHECK_TYPES.contains(&ct),
+                    "invalid accepted_check_type '{}'; must be one of: {}",
+                    ct,
+                    VALID_CHECK_TYPES.join(", ")
+                );
+                Some(ct)
+            }
+            AttackPatternStatus::Rejected => None,
+            AttackPatternStatus::Pending => {
+                return Err(anyhow::anyhow!("cannot review a pattern back to Pending status"));
+            }
+        };
+
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         let updated = conn.execute(
@@ -85,7 +108,7 @@ impl GatewayStore {
              WHERE pattern_id = ?5",
             params![
                 status.to_string(),
-                accepted_check_type,
+                effective_check_type,
                 operator_notes,
                 now,
                 pattern_id,
@@ -96,14 +119,30 @@ impl GatewayStore {
     }
 }
 
+#[derive(Debug)]
+struct UnknownStatusError(String);
+impl std::fmt::Display for UnknownStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown attack pattern status: '{}'", self.0)
+    }
+}
+impl std::error::Error for UnknownStatusError {}
+
 fn decode_attack_pattern_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ProposedAttackPattern> {
     let status_str: String = row.get(7)?;
     let status = match status_str.as_str() {
+        "pending" => AttackPatternStatus::Pending,
         "accepted" => AttackPatternStatus::Accepted,
         "rejected" => AttackPatternStatus::Rejected,
-        _ => AttackPatternStatus::Pending,
+        other => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                Box::new(UnknownStatusError(other.to_string())),
+            ))
+        }
     };
     Ok(ProposedAttackPattern {
         pattern_id: row.get(0)?,

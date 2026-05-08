@@ -135,7 +135,7 @@ fn propose_succeeds_for_redteam_agent() {
     assert!(result.is_ok(), "{:?}", result);
 
     let v: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
-    assert_eq!(v["status"], "pending_review");
+    assert_eq!(v["status"], "pending");
     assert!(v["pattern_id"].as_str().unwrap().starts_with("pattern-"));
 
     // Confirm it is stored.
