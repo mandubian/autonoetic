@@ -1029,7 +1029,7 @@ mod redaction_tests {
                 // Command is blanked for the Agent class (issue #158 fix).
                 // Approving agents rely on detected_hosts / dependencies /
                 // requires_approval for command shape, not the raw string.
-                assert_eq!(command, "***REDACTED***");
+                assert_eq!(command, ScheduledAction::REDACTED);
                 // Evidence ref is cleared (would resolve to a content-store blob).
                 assert_eq!(evidence_ref, None);
                 // Detected hosts and approval flag preserved.
@@ -1049,7 +1049,7 @@ mod redaction_tests {
             sandbox_exec_with_secret_bearing_command().redact_for_viewer(ViewerClass::Agent);
         match r {
             ScheduledAction::SandboxExec { command, .. } => {
-                assert_eq!(command, "***REDACTED***");
+                assert_eq!(command, ScheduledAction::REDACTED);
                 assert!(
                     !command.contains("Bearer"),
                     "regression: SandboxExec.command leaked Bearer prefix for Agent: {command}"
@@ -1092,7 +1092,7 @@ mod redaction_tests {
                 // Path is visible (operationally needed); content is redacted;
                 // evidence_ref cleared.
                 assert_eq!(path, "/tmp/keys.txt");
-                assert_eq!(content, "***REDACTED***");
+                assert_eq!(content, ScheduledAction::REDACTED);
                 assert!(requires_approval);
                 assert_eq!(evidence_ref, None);
             }
@@ -1129,7 +1129,7 @@ mod redaction_tests {
                 let headers = headers.expect("headers preserved structurally");
                 assert_eq!(
                     headers.get("Authorization").map(|s| s.as_str()),
-                    Some("***REDACTED***"),
+                    Some(ScheduledAction::REDACTED),
                     "Authorization header must be redacted for Operator"
                 );
                 assert_eq!(
