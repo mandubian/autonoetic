@@ -895,3 +895,311 @@ pub struct SessionApprovalGrant {
     pub expires_at: Option<String>,
     pub targets: Vec<GrantTarget>,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests for `ScheduledAction::redact_for_viewer`.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+    use crate::disclosure::ViewerClass;
+    use std::collections::HashMap;
+
+    /// Substrings that must never appear in any field of an Agent-class
+    /// redaction output. Same vocabulary as the causal_chain tests.
+    const SECRET_TOKENS: &[&str] = &[
+        "Bearer eyJhbGc",
+        "sk-test-12345",
+        "AKIAIOSFODNN",
+        "ghp_realtoken",
+        "-----BEGIN PRIVATE KEY-----",
+        "PASSWORD=hunter2",
+        "verysecret",
+    ];
+
+    fn blob_for(action: &ScheduledAction, viewer: ViewerClass) -> String {
+        let r = action.redact_for_viewer(viewer);
+        serde_json::to_string(&r).unwrap_or_default()
+    }
+
+    fn credential_request_with_secrets() -> ScheduledAction {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".into(), "Bearer eyJhbGc.foo.bar".into());
+        headers.insert("X-Custom".into(), "ordinary".into());
+        ScheduledAction::CredentialRequest {
+            credential_id: "github_token".into(),
+            url: "https://api.github.com/user".into(),
+            method: Some("GET".into()),
+            headers: Some(headers),
+            body: Some(serde_json::json!({
+                "client_secret": "verysecret",
+                "scope": "read:user",
+            })),
+            inject_secret_as: Some("Authorization".into()),
+            payload: Some(serde_json::json!({
+                "api_key": "sk-test-12345abcdefghij",
+                "ok": true,
+            })),
+        }
+    }
+
+    /// SandboxExec fixture with a benign command — used by the property test.
+    /// SandboxExec with a secret-bearing command is covered separately by
+    /// `agent_viewer_sandbox_exec_command_currently_preserves_secrets` which
+    /// pins the known leak documented in issue #158.
+    fn sandbox_exec_benign() -> ScheduledAction {
+        ScheduledAction::SandboxExec {
+            command: "ls -la /tmp".into(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: Some("evidence_handle_xyz".into()),
+            detected_hosts: Some(vec!["x.example.com".into()]),
+        }
+    }
+
+    fn sandbox_exec_with_secret_bearing_command() -> ScheduledAction {
+        ScheduledAction::SandboxExec {
+            command: "curl -H 'Authorization: Bearer eyJhbGc.foo' https://x".into(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: Some("evidence_handle_xyz".into()),
+            detected_hosts: Some(vec!["x.example.com".into()]),
+        }
+    }
+
+    fn write_file_with_secrets() -> ScheduledAction {
+        ScheduledAction::WriteFile {
+            path: "/tmp/keys.txt".into(),
+            content: "PASSWORD=hunter2\nAKIAIOSFODNN1234567X".into(),
+            requires_approval: true,
+            evidence_ref: Some("evidence_xyz".into()),
+        }
+    }
+
+    fn agent_install_payload() -> ScheduledAction {
+        ScheduledAction::AgentInstall {
+            agent_id: "coder.default".into(),
+            summary: "install coder".into(),
+            requested_by_agent_id: "planner.default".into(),
+            install_fingerprint: "fp_abc".into(),
+            payload: Some(serde_json::json!({
+                "secret_token": "verysecret",
+                "ok": true,
+            })),
+        }
+    }
+
+    // ── Admin: identity ──────────────────────────────────────────────────
+
+    #[test]
+    fn admin_viewer_round_trips_credential_request() {
+        let original = credential_request_with_secrets();
+        let r = original.redact_for_viewer(ViewerClass::Admin);
+        // Compare via JSON: PartialEq on ScheduledAction is derived but
+        // HashMap equality is order-independent, so JSON is the safest check.
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            serde_json::to_value(&original).unwrap(),
+        );
+    }
+
+    #[test]
+    fn admin_viewer_round_trips_sandbox_exec() {
+        let original = sandbox_exec_benign();
+        let r = original.redact_for_viewer(ViewerClass::Admin);
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            serde_json::to_value(&original).unwrap(),
+        );
+    }
+
+    #[test]
+    fn admin_viewer_round_trips_write_file() {
+        let original = write_file_with_secrets();
+        let r = original.redact_for_viewer(ViewerClass::Admin);
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            serde_json::to_value(&original).unwrap(),
+        );
+    }
+
+    // ── Agent: maximum redaction ─────────────────────────────────────────
+
+    #[test]
+    fn agent_viewer_credential_request_strips_headers_body_payload() {
+        let r = credential_request_with_secrets().redact_for_viewer(ViewerClass::Agent);
+        match r {
+            ScheduledAction::CredentialRequest {
+                credential_id,
+                url,
+                method,
+                headers,
+                body,
+                inject_secret_as,
+                payload,
+            } => {
+                // Identifying / structural fields preserved.
+                assert_eq!(credential_id, "github_token");
+                assert_eq!(url, "https://api.github.com/user");
+                assert_eq!(method.as_deref(), Some("GET"));
+                // Headers blanked to an empty map; body / payload / inject blanked.
+                assert!(headers.unwrap().is_empty(), "headers must be empty for Agent");
+                assert!(body.is_none(), "body must be None for Agent");
+                assert!(payload.is_none(), "payload must be None for Agent");
+                assert!(inject_secret_as.is_none(), "inject_secret_as must be None for Agent");
+            }
+            other => panic!("expected CredentialRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_viewer_sandbox_exec_clears_evidence_ref() {
+        let r = sandbox_exec_benign().redact_for_viewer(ViewerClass::Agent);
+        match r {
+            ScheduledAction::SandboxExec {
+                command,
+                evidence_ref,
+                detected_hosts,
+                requires_approval,
+                ..
+            } => {
+                // Command stays visible to the Agent class — see issue #158
+                // for the open question on whether this is correct.
+                assert!(command.contains("ls"));
+                // Evidence ref is cleared (would resolve to a content-store blob).
+                assert_eq!(evidence_ref, None);
+                // Detected hosts and approval flag preserved.
+                assert!(detected_hosts.is_some());
+                assert!(requires_approval);
+            }
+            other => panic!("expected SandboxExec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_viewer_sandbox_exec_command_currently_preserves_secrets() {
+        // KNOWN GAP (#158): SandboxExec.command is preserved verbatim for
+        // ViewerClass::Agent, so a command embedding a Bearer token, AWS key,
+        // or similar leaks to agent-class consumers (e.g. an approver agent
+        // looking at approval_summary). This pin documents the current
+        // behaviour. When #158 is fixed, this test FLIPS — assert the secret
+        // is NOT in the redacted command — and the SandboxExec fixture is
+        // re-included in `agent_viewer_no_secrets_leak_property`.
+        let r =
+            sandbox_exec_with_secret_bearing_command().redact_for_viewer(ViewerClass::Agent);
+        match r {
+            ScheduledAction::SandboxExec { command, .. } => {
+                assert!(
+                    command.contains("Bearer eyJhbGc"),
+                    "regression: SandboxExec.command no longer leaks the bearer token \
+                     for ViewerClass::Agent — flip this assertion and close issue #158"
+                );
+            }
+            other => panic!("expected SandboxExec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_viewer_write_file_redacts_content_only() {
+        let r = write_file_with_secrets().redact_for_viewer(ViewerClass::Agent);
+        match r {
+            ScheduledAction::WriteFile {
+                path,
+                content,
+                requires_approval,
+                evidence_ref,
+            } => {
+                // Path is visible (operationally needed); content is redacted;
+                // evidence_ref cleared.
+                assert_eq!(path, "/tmp/keys.txt");
+                assert_eq!(content, "***REDACTED***");
+                assert!(requires_approval);
+                assert_eq!(evidence_ref, None);
+            }
+            other => panic!("expected WriteFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_viewer_falls_through_for_agent_install_today() {
+        // Variants without explicit redaction in `redact_for_agent` fall through
+        // to `other.clone()`. AgentInstall is one of them today; this pin will
+        // FAIL if a future change exposes secrets via that path without explicit
+        // handling, prompting the author to add a redact arm.
+        let original = agent_install_payload();
+        let r = original.redact_for_viewer(ViewerClass::Agent);
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            serde_json::to_value(&original).unwrap(),
+            "AgentInstall currently falls through unmodified — when this pin breaks, \
+             explicitly redact the variant in ScheduledAction::redact_for_agent \
+             rather than weakening the test"
+        );
+    }
+
+    // ── Operator: targeted redaction in CredentialRequest ────────────────
+
+    #[test]
+    fn operator_viewer_credential_request_redacts_sensitive_headers() {
+        let r = credential_request_with_secrets().redact_for_viewer(ViewerClass::Operator);
+        match r {
+            ScheduledAction::CredentialRequest {
+                headers, body, payload, ..
+            } => {
+                let headers = headers.expect("headers preserved structurally");
+                assert_eq!(
+                    headers.get("Authorization").map(|s| s.as_str()),
+                    Some("***REDACTED***"),
+                    "Authorization header must be redacted for Operator"
+                );
+                assert_eq!(
+                    headers.get("X-Custom").map(|s| s.as_str()),
+                    Some("ordinary"),
+                    "non-sensitive header must survive: {headers:?}"
+                );
+                let body = body.expect("body preserved structurally");
+                assert_eq!(body["client_secret"], "***REDACTED***");
+                assert_eq!(body["scope"], "read:user");
+                let payload = payload.expect("payload preserved structurally");
+                assert_eq!(payload["api_key"], "***REDACTED***");
+                assert_eq!(payload["ok"], true);
+            }
+            other => panic!("expected CredentialRequest, got {other:?}"),
+        }
+    }
+
+    // ── Property: no secrets leak via Agent class ────────────────────────
+
+    #[test]
+    fn agent_viewer_no_secrets_leak_property() {
+        // SandboxExec is excluded from this assertion until issue #158 lands —
+        // its command field currently leaks. AgentInstall is excluded because
+        // it falls through unmodified today (pinned separately above).
+        let actions = [
+            credential_request_with_secrets(),
+            sandbox_exec_benign(), // benign command — exercises non-command fields only
+            write_file_with_secrets(),
+        ];
+        for action in actions.iter() {
+            let blob = blob_for(action, ViewerClass::Agent);
+            for token in SECRET_TOKENS {
+                assert!(
+                    !blob.contains(token),
+                    "Agent-class redacted {action:?} must not contain '{token}'\nblob: {blob}"
+                );
+            }
+        }
+    }
+
+    // ── Helper visibility ────────────────────────────────────────────────
+
+    #[test]
+    fn looks_like_secret_value_recognises_documented_patterns() {
+        assert!(looks_like_secret_value("Bearer eyJhbGc.foo"));
+        assert!(looks_like_secret_value("sk-abc12345"));
+        assert!(looks_like_secret_value("-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(!looks_like_secret_value("plain text"));
+        assert!(!looks_like_secret_value(""));
+        assert!(!looks_like_secret_value("   "));
+    }
+}
