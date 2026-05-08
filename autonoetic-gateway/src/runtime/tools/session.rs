@@ -498,20 +498,41 @@ impl NativeTool for SessionSummarizeTool {
 
         let caller_id = &manifest.agent.id;
 
-        let transcript_record = store
+        let transcript_record = match store
             .find_transcript_by_handle(&args.transcript_handle)?
             .or_else(|| {
                 store
                     .find_transcript_by_session_id(&args.transcript_handle)
                     .ok()
                     .flatten()
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
+            }) {
+            Some(r) => r,
+            None => {
+                let caller_root = session_id
+                    .map(crate::runtime::content_store::root_session_id)
+                    .unwrap_or("");
+                let target_root =
+                    crate::runtime::content_store::root_session_id(&args.transcript_handle);
+                if !caller_root.is_empty() && caller_root == target_root {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "session_not_ready",
+                        "message": format!(
+                            "Session '{}' exists but has no transcript yet — the child may still be initializing or queued. \
+                             Use workflow_wait with a short timeout instead of retrying session_peek.",
+                            args.transcript_handle
+                        ),
+                        "transcript_handle": args.transcript_handle,
+                        "repair_hint": "Call workflow_wait with a short timeout (30-60s) to wait for the child to start producing output."
+                    })
+                    .to_string());
+                }
+                anyhow::bail!(
                     "Transcript not found for handle or session_id: {}",
                     args.transcript_handle
-                )
-            })?;
+                );
+            }
+        };
 
         enforce_peek_acl(
             caller_id,

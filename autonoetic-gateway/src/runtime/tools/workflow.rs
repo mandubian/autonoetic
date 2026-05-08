@@ -533,6 +533,8 @@ impl NativeTool for WorkflowWaitTool {
     }
 }
 
+const STALL_GRACE_SECS: i64 = 30;
+
 async fn poll_until_join(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -585,6 +587,44 @@ async fn poll_until_join(
                 failed_task_count,
                 failure_summary,
             );
+        }
+
+        // Stall detection: if a Running task has no transcript after STALL_GRACE_SECS,
+        // return early so the caller can take action instead of burning the full timeout.
+        if waited_secs >= STALL_GRACE_SECS as u64 {
+            if let Some(gw_store) = store {
+                let mut stall_detected = false;
+                let mut enriched_status = tasks_status.clone();
+                for entry in enriched_status.iter_mut() {
+                    let status_str = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let task_session = entry.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if status_str == "Running" && !task_session.is_empty() {
+                        let has_transcript = gw_store
+                            .find_transcript_by_session_id(task_session)
+                            .ok()
+                            .flatten()
+                            .is_some();
+                        if !has_transcript {
+                            stall_detected = true;
+                            entry["stall_detected"] = serde_json::json!(true);
+                            entry["stall_reason"] = serde_json::json!(
+                                "Task is Running but has no transcript after grace period — child session may have failed to start"
+                            );
+                        }
+                    }
+                }
+                if stall_detected {
+                    return (
+                        enriched_status,
+                        false,
+                        any_failed,
+                        any_not_found,
+                        waited_secs,
+                        failed_task_count,
+                        failure_summary,
+                    );
+                }
+            }
         }
 
         let now = std::time::Instant::now();
