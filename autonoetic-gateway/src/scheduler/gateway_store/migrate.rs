@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 27;
+const SCHEMA_VERSION_LATEST: i64 = 28;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -511,6 +511,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_sandbox_escape_attempts_v25(conn)?;
     apply_security_findings_v26(conn)?;
     apply_sentinel_disagreements_v27(conn)?;
+    apply_eval_suite_ownership_v28(conn)?;
 
     Ok(())
 }
@@ -1605,6 +1606,41 @@ fn apply_sentinel_disagreements_v27(conn: &mut Connection) -> Result<()> {
         params![
             27_i64,
             "sentinel_disagreements",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_eval_suite_ownership_v28(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 28 {
+        return Ok(());
+    }
+
+    // Add ownership columns to eval_suites.
+    // evaluated_targets_json: JSON array of agent IDs this suite evaluates.
+    // author_agent_id: ID of the agent that published/updated this suite version.
+    // based_on_suite_id: lineage link — the suite_id this record supersedes.
+    conn.execute_batch(
+        "ALTER TABLE eval_suites ADD COLUMN evaluated_targets_json TEXT NOT NULL DEFAULT '[]';
+         ALTER TABLE eval_suites ADD COLUMN author_agent_id TEXT;
+         ALTER TABLE eval_suites ADD COLUMN based_on_suite_id TEXT;
+         CREATE INDEX IF NOT EXISTS idx_eval_suites_author
+             ON eval_suites(author_agent_id);
+         CREATE INDEX IF NOT EXISTS idx_eval_suites_lineage
+             ON eval_suites(based_on_suite_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            28_i64,
+            "eval_suite_ownership",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

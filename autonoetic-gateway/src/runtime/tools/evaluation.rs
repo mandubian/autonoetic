@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(EvalSuitePublishTool));
+    registry.register(Box::new(EvalSuiteUpdateTool));
     registry.register(Box::new(EvalRunTool));
     registry.register(Box::new(EvalCompareTool));
     registry.register(Box::new(EvalReportTool));
@@ -22,6 +23,10 @@ struct EvalSuitePublishArgs {
     name: String,
     description: String,
     spec: EvalSuiteSpec,
+    /// Agent IDs this suite is intended to evaluate.
+    /// The publishing agent's ID must not appear in this list.
+    #[serde(default)]
+    evaluated_targets: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -53,7 +58,8 @@ impl NativeTool for EvalSuitePublishTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Publish an evaluation suite defining test cases for agent validation."
+            description: "Publish an evaluation suite defining test cases for agent validation. \
+                The publishing agent must not appear in evaluated_targets (ownership invariant)."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -79,6 +85,13 @@ impl NativeTool for EvalSuitePublishTool {
                             }
                         },
                         "required": ["cases"]
+                    },
+                    "evaluated_targets": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Agent IDs this suite is intended to evaluate. \
+                            The publishing agent's ID must NOT appear here — \
+                            an agent cannot author a suite that evaluates itself (prevents self-bias drift)."
                     }
                 },
                 "required": ["name", "description", "spec"],
@@ -115,6 +128,15 @@ impl NativeTool for EvalSuitePublishTool {
             ));
         }
 
+        // Ownership invariant: an agent must not author a suite that evaluates itself.
+        if args.evaluated_targets.contains(&manifest.agent.id) {
+            return Err(anyhow::anyhow!(
+                "Ownership violation: agent '{}' cannot publish a suite that lists itself in evaluated_targets. \
+                 Eval suites must be authored by a different agent than the one being evaluated.",
+                manifest.agent.id
+            ));
+        }
+
         validate_suite_spec(&args.spec)?;
 
         let suite_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
@@ -134,6 +156,9 @@ impl NativeTool for EvalSuitePublishTool {
             created_by_type: "agent".to_string(),
             created_by_id: manifest.agent.id.clone(),
             origin_node_id: "gateway".to_string(),
+            evaluated_targets: args.evaluated_targets.clone(),
+            author_agent_id: Some(manifest.agent.id.clone()),
+            based_on_suite_id: None,
         };
 
         gateway_store.insert_eval_suite(&suite)?;
@@ -144,6 +169,163 @@ impl NativeTool for EvalSuitePublishTool {
             "suite_id": suite_id,
             "name": args.name,
             "case_count": args.spec.cases.len(),
+            "evaluated_targets": args.evaluated_targets,
+        })
+        .to_string())
+    }
+}
+
+// ─── EvalSuiteUpdateTool ───────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct EvalSuiteUpdateArgs {
+    /// Suite being superseded; the new record will link to it via based_on_suite_id.
+    based_on_suite_id: String,
+    name: String,
+    description: String,
+    spec: EvalSuiteSpec,
+    #[serde(default)]
+    evaluated_targets: Vec<String>,
+}
+
+pub struct EvalSuiteUpdateTool;
+
+impl NativeTool for EvalSuiteUpdateTool {
+    fn name(&self) -> &'static str {
+        "eval_suite_update"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::Evaluation { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Publish a new version of an existing eval suite, recording lineage. \
+                Creates a new suite_id that supersedes based_on_suite_id. \
+                The updating agent must not appear in evaluated_targets (same ownership invariant as publish)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "based_on_suite_id": {
+                        "type": "string",
+                        "description": "Suite ID this new version supersedes (lineage link)"
+                    },
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "spec": {
+                        "type": "object",
+                        "properties": {
+                            "cases": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "case_id": { "type": "string" },
+                                        "message": { "type": "string" },
+                                        "assertions": { "type": "object" }
+                                    },
+                                    "required": ["case_id", "message", "assertions"]
+                                }
+                            }
+                        },
+                        "required": ["cases"]
+                    },
+                    "evaluated_targets": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Agent IDs this suite evaluates. Updating agent must not appear here."
+                    }
+                },
+                "required": ["based_on_suite_id", "name", "description", "spec"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let args: EvalSuiteUpdateArgs = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+
+        let Some(gateway_store) = gateway_store else {
+            return Err(anyhow::anyhow!("GatewayStore is required"));
+        };
+
+        if !policy.can_evaluate_suite_publish(&args.name).is_allowed() {
+            return Err(anyhow::anyhow!(
+                "Permission Denied: agent '{}' lacks 'Evaluation' capability to update suite",
+                manifest.agent.id
+            ));
+        }
+
+        // Verify the suite being superseded exists.
+        gateway_store
+            .get_eval_suite(&args.based_on_suite_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Suite '{}' not found — cannot create a lineage update",
+                    args.based_on_suite_id
+                )
+            })?;
+
+        // Ownership invariant: same rule as publish.
+        if args.evaluated_targets.contains(&manifest.agent.id) {
+            return Err(anyhow::anyhow!(
+                "Ownership violation: agent '{}' cannot update a suite that lists itself in evaluated_targets.",
+                manifest.agent.id
+            ));
+        }
+
+        validate_suite_spec(&args.spec)?;
+
+        let suite_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
+            "suite-",
+            &format!("{}-{}", args.name, chrono::Utc::now().to_rfc3339()),
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        let spec_json = serde_json::to_value(&args.spec)?;
+
+        let suite = autonoetic_types::evaluation::EvalSuiteRecord {
+            suite_id: suite_id.clone(),
+            name: args.name.clone(),
+            description: args.description.clone(),
+            spec_json,
+            created_at: now,
+            created_by_type: "agent".to_string(),
+            created_by_id: manifest.agent.id.clone(),
+            origin_node_id: "gateway".to_string(),
+            evaluated_targets: args.evaluated_targets.clone(),
+            author_agent_id: Some(manifest.agent.id.clone()),
+            based_on_suite_id: Some(args.based_on_suite_id.clone()),
+        };
+
+        gateway_store.insert_eval_suite(&suite)?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "status": "updated",
+            "suite_id": suite_id,
+            "based_on_suite_id": args.based_on_suite_id,
+            "name": args.name,
+            "case_count": args.spec.cases.len(),
+            "evaluated_targets": args.evaluated_targets,
         })
         .to_string())
     }

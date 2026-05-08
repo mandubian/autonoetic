@@ -273,6 +273,9 @@ fn test_eval_run_persists_with_real_revision() {
         created_by_type: "test".to_string(),
         created_by_id: "test".to_string(),
         origin_node_id: "test".to_string(),
+        evaluated_targets: vec![],
+        author_agent_id: None,
+        based_on_suite_id: None,
     };
     store.insert_eval_suite(&suite).unwrap();
 
@@ -534,6 +537,9 @@ fn test_eval_compare_builds_completed_comparison_report() {
         created_by_type: "test".to_string(),
         created_by_id: "test".to_string(),
         origin_node_id: "test".to_string(),
+        evaluated_targets: vec![],
+        author_agent_id: None,
+        based_on_suite_id: None,
     };
     store.insert_eval_suite(&suite).unwrap();
 
