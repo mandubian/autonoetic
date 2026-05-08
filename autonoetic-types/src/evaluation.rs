@@ -41,6 +41,13 @@ pub struct EvalSuiteRecord {
     pub created_by_id: String,
     /// Origin node for provenance.
     pub origin_node_id: String,
+    /// Agent IDs this suite is intended to evaluate.
+    /// The publishing agent must not appear in this list (ownership invariant).
+    pub evaluated_targets: Vec<String>,
+    /// Agent ID of the author (set by the gateway from the calling agent's manifest).
+    pub author_agent_id: Option<String>,
+    /// Suite ID this record supersedes (lineage link for versioned updates).
+    pub based_on_suite_id: Option<String>,
 }
 
 /// Durable record of an eval run execution.

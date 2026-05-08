@@ -876,7 +876,7 @@ pub use crate::runtime::tools::agent_revision::{
 };
 pub use crate::runtime::tools::evaluation::{
     validate_suite_spec, EvalCompareTool, EvalReportTool, EvalRunTool, EvalSuiteCaseSpec,
-    EvalSuitePublishTool, EvalSuiteSpec,
+    EvalSuitePublishTool, EvalSuiteSpec, EvalSuiteUpdateTool,
 };
 
 pub fn default_registry() -> NativeToolRegistry {

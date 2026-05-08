@@ -20,11 +20,13 @@ impl GatewayStore {
     pub fn insert_eval_suite(&self, suite: &EvalSuiteRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let spec_json = serde_json::to_string(&suite.spec_json)?;
+        let evaluated_targets_json = serde_json::to_string(&suite.evaluated_targets)?;
         conn.execute(
             "INSERT INTO eval_suites (
                 suite_id, name, description, spec_json, created_at,
-                created_by_type, created_by_id, origin_node_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                created_by_type, created_by_id, origin_node_id,
+                evaluated_targets_json, author_agent_id, based_on_suite_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 &suite.suite_id,
                 &suite.name,
@@ -34,6 +36,9 @@ impl GatewayStore {
                 &suite.created_by_type,
                 &suite.created_by_id,
                 &suite.origin_node_id,
+                evaluated_targets_json,
+                suite.author_agent_id,
+                suite.based_on_suite_id,
             ],
         )?;
         Ok(())
@@ -43,28 +48,59 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT suite_id, name, description, spec_json, created_at,
-                    created_by_type, created_by_id, origin_node_id
+                    created_by_type, created_by_id, origin_node_id,
+                    COALESCE(evaluated_targets_json, '[]'),
+                    author_agent_id, based_on_suite_id
              FROM eval_suites WHERE suite_id = ?1",
         )?;
-        let rows = stmt.query_map(params![suite_id], |row| {
-            let spec_json: String = row.get(3)?;
-            let spec_json = serde_json::from_str(&spec_json).unwrap_or(serde_json::Value::Null);
-            Ok(EvalSuiteRecord {
-                suite_id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                spec_json,
-                created_at: row.get(4)?,
-                created_by_type: row.get(5)?,
-                created_by_id: row.get(6)?,
-                origin_node_id: row.get(7)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![suite_id], decode_eval_suite_row)?;
         let mut results = Vec::new();
         for r in rows {
             results.push(r?);
         }
         Ok(results.pop())
+    }
+
+    /// List eval suites authored by the given agent ID.
+    pub fn list_eval_suites_authored_by(&self, author_agent_id: &str) -> Result<Vec<EvalSuiteRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT suite_id, name, description, spec_json, created_at,
+                    created_by_type, created_by_id, origin_node_id,
+                    COALESCE(evaluated_targets_json, '[]'),
+                    author_agent_id, based_on_suite_id
+             FROM eval_suites WHERE author_agent_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![author_agent_id], decode_eval_suite_row)?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    /// List eval suites targeting the given agent ID in their evaluated_targets.
+    /// Used by the sentinel to audit ownership invariants.
+    pub fn list_eval_suites_targeting_agent(&self, agent_id: &str) -> Result<Vec<EvalSuiteRecord>> {
+        let conn = self.conn.lock().unwrap();
+        // JSON_EACH to check membership in the targets array.
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT s.suite_id, s.name, s.description, s.spec_json, s.created_at,
+                    s.created_by_type, s.created_by_id, s.origin_node_id,
+                    COALESCE(s.evaluated_targets_json, '[]'),
+                    s.author_agent_id, s.based_on_suite_id
+             FROM eval_suites s,
+                  json_each(COALESCE(s.evaluated_targets_json, '[]')) AS t
+             WHERE t.value = ?1
+             ORDER BY s.created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![agent_id], decode_eval_suite_row)?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
     }
 
     pub fn insert_eval_run(&self, run: &EvalRunRecord) -> Result<()> {
@@ -293,4 +329,25 @@ impl GatewayStore {
         )?;
         Ok(())
     }
+}
+
+fn decode_eval_suite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvalSuiteRecord> {
+    let spec_json: String = row.get(3)?;
+    let spec_json = serde_json::from_str(&spec_json).unwrap_or(serde_json::Value::Null);
+    let targets_json: String = row.get(8)?;
+    let evaluated_targets: Vec<String> =
+        serde_json::from_str(&targets_json).unwrap_or_default();
+    Ok(EvalSuiteRecord {
+        suite_id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        spec_json,
+        created_at: row.get(4)?,
+        created_by_type: row.get(5)?,
+        created_by_id: row.get(6)?,
+        origin_node_id: row.get(7)?,
+        evaluated_targets,
+        author_agent_id: row.get(9)?,
+        based_on_suite_id: row.get(10)?,
+    })
 }
