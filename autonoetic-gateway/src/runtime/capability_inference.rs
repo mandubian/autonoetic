@@ -268,6 +268,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal",
         Capability::ReasoningAudit { .. } => "ReasoningAudit",
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
+        Capability::SecurityRedTeam => "SecurityRedTeam",
     }
 }
 

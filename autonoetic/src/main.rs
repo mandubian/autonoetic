@@ -425,6 +425,33 @@ async fn main() -> anyhow::Result<()> {
                     *dry_run,
                 )?;
             }
+            cli::common::SecurityCommands::Patterns { status, limit, json } => {
+                cli::security::handle_security_patterns(
+                    &config_path,
+                    status.as_deref(),
+                    *limit,
+                    *json,
+                )?;
+            }
+            cli::common::SecurityCommands::PatternAccept {
+                pattern_id,
+                check_type,
+                notes,
+            } => {
+                cli::security::handle_security_pattern_accept(
+                    &config_path,
+                    pattern_id,
+                    check_type,
+                    notes.as_deref(),
+                )?;
+            }
+            cli::common::SecurityCommands::PatternReject { pattern_id, notes } => {
+                cli::security::handle_security_pattern_reject(
+                    &config_path,
+                    pattern_id,
+                    notes.as_deref(),
+                )?;
+            }
         },
     }
 

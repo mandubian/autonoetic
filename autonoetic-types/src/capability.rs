@@ -148,6 +148,12 @@ pub enum Capability {
     /// model price metadata is unavailable.
     #[serde(rename = "budget.no_price_available.allow")]
     BudgetNoPriceAvailableAllow,
+
+    /// Submit adversarial attack-pattern proposals via `attack_pattern_propose`.
+    /// Granted exclusively to the system-tier red-team agent. Intentionally
+    /// separate from `Evaluation` — the red-team agent must NOT also author eval
+    /// suites targeting itself (ownership invariant from #32 applies at tier boundary).
+    SecurityRedTeam,
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -249,6 +255,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal".to_string(),
         Capability::ReasoningAudit { .. } => "ReasoningAudit".to_string(),
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
+        Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
     }
 }
 

@@ -1228,6 +1228,51 @@ pub enum SecurityCommands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// List red-team attack-pattern proposals.
+    Patterns {
+        /// Filter by status: pending, accepted, rejected.
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum number of proposals to show (default: 50).
+        #[arg(long, default_value = "50")]
+        limit: u32,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Accept a red-team attack-pattern proposal.
+    ///
+    /// Example: autonoetic security pattern-accept pattern-abc123 \
+    ///   --type phase1 --notes "Clear regex, confirmed deterministic"
+    PatternAccept {
+        /// Pattern proposal ID.
+        pattern_id: String,
+
+        /// Target check layer: phase1 (deterministic) or phase2 (llm-judgment).
+        #[arg(long, name = "type")]
+        check_type: String,
+
+        /// Optional operator notes.
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
+    /// Reject a red-team attack-pattern proposal.
+    ///
+    /// Example: autonoetic security pattern-reject pattern-abc123 \
+    ///   --notes "Already covered by existing credential_leak check"
+    PatternReject {
+        /// Pattern proposal ID.
+        pattern_id: String,
+
+        /// Optional operator notes.
+        #[arg(long)]
+        notes: Option<String>,
+    },
 }
 
 #[cfg(test)]
