@@ -160,6 +160,53 @@ impl GatewayStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(result)
     }
+
+    /// Count all findings grouped by triage state.
+    pub fn count_security_findings_by_triage_state(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT triage_state, COUNT(*) FROM security_findings
+             GROUP BY triage_state ORDER BY triage_state",
+        )?;
+        let result = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(result)
+    }
+
+    /// List findings with optional severity, finding_type, and triage_state filters.
+    ///
+    /// Uses the `(col = ? OR ? IS NULL)` pattern so all three filters share a
+    /// single prepared statement with fixed parameter arity.
+    pub fn list_security_findings_filtered(
+        &self,
+        severity: Option<&str>,
+        finding_type: Option<&str>,
+        triage_state: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SecurityFindingRow>> {
+        let conn = self.conn.lock().unwrap();
+        let lim = limit as i64;
+        let mut stmt = conn.prepare(
+            "SELECT finding_id, severity, confidence, finding_type,
+                    affected_json, evidence_json, reproducibility,
+                    proposed_remediation, sentinel_revision_id,
+                    baseline_agreed, ensemble_agreed,
+                    triage_state, triage_reason, created_at
+             FROM security_findings
+             WHERE (severity = ?1 OR ?1 IS NULL)
+               AND (finding_type = ?2 OR ?2 IS NULL)
+               AND (triage_state = ?3 OR ?3 IS NULL)
+             ORDER BY created_at DESC LIMIT ?4",
+        )?;
+        let result = stmt
+            .query_map(
+                rusqlite::params![severity, finding_type, triage_state, lim],
+                decode_finding_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(result)
+    }
 }
 
 fn decode_finding_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecurityFindingRow> {

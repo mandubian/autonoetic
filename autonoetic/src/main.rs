@@ -376,6 +376,56 @@ async fn main() -> anyhow::Result<()> {
                 cli::mcp::handle_mcp_expose(agent_id, &config_path).await?;
             }
         },
+
+        Commands::Security(args) => match &args.command {
+            cli::common::SecurityCommands::Status { json } => {
+                cli::security::handle_security_status(&config_path, *json)?;
+            }
+            cli::common::SecurityCommands::Findings {
+                severity,
+                finding_type,
+                triage,
+                limit,
+                json,
+            } => {
+                cli::security::handle_security_findings(
+                    &config_path,
+                    severity.as_deref(),
+                    finding_type.as_deref(),
+                    triage.as_deref(),
+                    *limit,
+                    *json,
+                )?;
+            }
+            cli::common::SecurityCommands::Triage {
+                finding_id,
+                state,
+                reason,
+            } => {
+                cli::security::handle_security_triage(
+                    &config_path,
+                    finding_id,
+                    state,
+                    reason.as_deref(),
+                )?;
+            }
+            cli::common::SecurityCommands::BulkTriage {
+                state,
+                reason,
+                severity,
+                finding_type,
+                dry_run,
+            } => {
+                cli::security::handle_security_triage_bulk(
+                    &config_path,
+                    state,
+                    reason,
+                    severity.as_deref(),
+                    finding_type.as_deref(),
+                    *dry_run,
+                )?;
+            }
+        },
     }
 
     Ok(())

@@ -154,6 +154,8 @@ pub enum Commands {
     Federate(FederateArgs),
     /// MCP Integration management
     Mcp(McpArgs),
+    /// Security sentinel — status, findings, and triage
+    Security(SecurityArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,6 +1143,89 @@ pub async fn activate_registered_mcp_servers(config_path: &Path) -> anyhow::Resu
     }
 
     Ok(McpRuntime { servers: activated })
+}
+
+// ---------------------------------------------------------------------------
+// Security
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct SecurityArgs {
+    #[command(subcommand)]
+    pub command: SecurityCommands,
+}
+
+#[derive(Subcommand)]
+pub enum SecurityCommands {
+    /// Show sentinel health: finding counts, triage backlog, last sweep time.
+    Status {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List security findings with optional filters.
+    Findings {
+        /// Filter by severity (critical, warning, info).
+        #[arg(long)]
+        severity: Option<String>,
+
+        /// Filter by finding type (e.g. credential_leak, sandbox_escape_attempt).
+        #[arg(long, name = "type")]
+        finding_type: Option<String>,
+
+        /// Filter by triage state (pending, true_positive, false_positive, benign, deferred).
+        #[arg(long)]
+        triage: Option<String>,
+
+        /// Maximum number of findings to show (default: 50).
+        #[arg(long, default_value = "50")]
+        limit: u32,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Mark a single finding with a triage decision.
+    ///
+    /// Example: autonoetic security triage sec_abc123 false_positive --reason "CI test pattern"
+    Triage {
+        /// Finding ID to triage.
+        finding_id: String,
+
+        /// Triage state: pending, true_positive, false_positive, benign, deferred.
+        state: String,
+
+        /// Short reason for the decision (required for non-pending states).
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Bulk-triage all pending findings matching a filter.
+    ///
+    /// Example: autonoetic security bulk-triage false_positive \
+    ///   --reason "internal CI" --type credential_leak --dry-run
+    BulkTriage {
+        /// Triage state to apply: true_positive, false_positive, benign, deferred.
+        state: String,
+
+        /// Reason for the bulk decision (required).
+        #[arg(long)]
+        reason: String,
+
+        /// Restrict to findings of this severity.
+        #[arg(long)]
+        severity: Option<String>,
+
+        /// Restrict to findings of this type.
+        #[arg(long, name = "type")]
+        finding_type: Option<String>,
+
+        /// Print matching findings without updating them.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[cfg(test)]
