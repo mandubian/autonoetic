@@ -1,6 +1,31 @@
 # Security Sentinel: System-Tier Security Agent
 
-Status: design — implementation tracked in GitHub issues referenced at the end of this doc.
+Status: **implemented (Phases 0–7 merged)**. Phase mapping below.
+
+| Phase | Scope | PR |
+|---|---|---|
+| 0 + 1 | Foundation, types, append-only `security_findings` table, deterministic core (credentials, capability accretion, approval bypass, sandbox escape) | #140 |
+| 2 | LLM-judgment heuristics (prompt-injection surface, session-cluster anomalies) | #141 |
+| 3 | Frozen baseline, dual-sweep orchestrator, disagreement recording | #142 |
+| 4 | Supply-chain auditing (layer scope violations, provenance gaps) | #144 |
+| 5 | Cron scheduling + pre-promotion gate integration | #145 |
+| 6 | Triage CLI (`autonoetic security triage`), calibration feedback loop | #147 |
+| 7 | Red-team agent + adversarial co-evolution; `attack_pattern_propose` | #149 |
+
+Configuration knobs are documented in [`docs/config-reference.md`](config-reference.md) under "Security Sentinel".
+
+> **Caveat on the "frozen baseline" claim.** The dual-sweep runs the same in-process Rust check code on both passes — the baseline is forced to `phase1_only: true`, the current sentinel adds Phase-2 — rather than a separately-versioned baseline binary. What it actually provides today:
+>
+> - **`baseline_agreed` annotation on Phase-1 findings** when both passes flag the same evidence anchor.
+> - **Phase-1 disagreement records** in `security_sentinel_disagreements` (`baseline_only` / `current_only`).
+> - **Independent Phase-2 findings** from the current pass — these are *not* compared against the baseline (the baseline never runs Phase-2).
+>
+> What it does **not** do:
+>
+> - Detect deterministic-core regressions — a regex change in `checks/credential.rs` lands in both passes simultaneously.
+> - Detect Phase-2 regressions — the baseline has no Phase-2 layer to disagree with.
+>
+> Restoring the design's stronger recursive-trust claim requires a separately-versioned baseline module; tracked as a follow-up.
 
 ## Summary
 

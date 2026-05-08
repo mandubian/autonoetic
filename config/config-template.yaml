@@ -166,6 +166,42 @@ schema_enforcement:
 # full: all results (development) | errors: failures only (production) | off
 evidence_mode: full
 
+# ── Security Sentinel ────────────────────────────────────────────────
+# System-tier read-only auditor over causal events, promotion history,
+# approvals, layer mounts, and SKILL.md bodies. Produces append-only
+# `SecurityFinding` records. See docs/security-sentinel.md.
+#
+# Defaults are operator-friendly; uncomment to override:
+#
+# sentinel:
+#   # Master switch. When false, sweeps and the promotion gate are skipped.
+#   enabled: true
+#   # Cron for the full (non-incremental) dual sweep. Each check still
+#   # applies scan_limit (default 10000) and per-check window_days
+#   # (e.g. 30 days for capability-accretion); "full" means no since_rfc3339
+#   # cutoff is applied, not that every historical row is examined. UTC.
+#   full_sweep_schedule: "0 3 * * *"
+#   # Cron for the rolling 25 h incremental dual sweep
+#   # (sets since_rfc3339 = now-25h). UTC.
+#   incremental_sweep_schedule: "0 */6 * * *"
+#   # When true, agent_revision_promote runs an in-memory Phase-1 sentinel
+#   # scan first. Any `critical` finding the scan produces blocks promotion.
+#   # Fail-closed on scan errors and on timeout.
+#   #
+#   # IMPORTANT: the gate does NOT consult or persist to security_findings —
+#   # it re-evaluates the live event corpus on every promotion attempt.
+#   # Triaging existing rows in security_findings will NOT unblock the gate.
+#   # To unblock: resolve the signal in the underlying data, wait for windowed
+#   # checks to age past their cutoff, raise per-check thresholds, or disable
+#   # this gate.
+#   promotion_gate_enabled: true
+#   # Max seconds the gate waits for the in-memory sweep before fail-closing.
+#   promotion_gate_timeout_secs: 30
+#   # Revision label embedded in findings produced by the live sentinel.
+#   sentinel_revision_id: "sentinel.current"
+#   # Revision label for the frozen-baseline pass of the dual sweep.
+#   baseline_revision_id: "sentinel.baseline.frozen"
+
 # ── Code Analysis ─────────────────────────────────────────────────────
 # Capability and security analysis for tool execution and generated artifacts.
 # capability_provider: pattern | python_ast | llm | composite | none

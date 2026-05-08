@@ -526,6 +526,37 @@ retention:
 
 ---
 
+## Security Sentinel
+
+System-tier read-only auditor over causal events, promotion history, approvals, layer mounts, and SKILL.md bodies. Produces append-only `SecurityFinding` records. See [`docs/security-sentinel.md`](security-sentinel.md) for the full design and threat model.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sentinel.enabled` | bool | `true` | Master switch. When `false`, sweeps and the promotion gate are skipped. |
+| `sentinel.full_sweep_schedule` | string (cron) | `"0 3 * * *"` | Cron expression for the daily full (non-incremental) dual sweep. Each check still applies its own `scan_limit` (default 10 000 events) and per-check window (e.g. `window_days = 30` for capability accretion / approval denial); "full" means no `since_rfc3339` cutoff is applied, not that every historical row is examined. UTC. |
+| `sentinel.incremental_sweep_schedule` | string (cron) | `"0 */6 * * *"` | Cron expression for the rolling 25 h incremental dual sweep (sets `since_rfc3339 = now-25h`). UTC. |
+| `sentinel.promotion_gate_enabled` | bool | `true` | When `true`, `agent_revision_promote` runs an in-memory Phase-1 sentinel sweep first via `scan_phase1_critical`. Any `critical` finding the scan produces blocks promotion (fail-closed). The gate **does not consult or persist to `security_findings`** — it re-evaluates the live event corpus on every promotion attempt. Therefore triaging existing rows in `security_findings` will *not* unblock the gate; you must remove or age out the underlying data that the scan flags (or disable the gate). |
+| `sentinel.promotion_gate_timeout_secs` | u64 | `30` | Maximum seconds the gate waits for the in-memory sweep before fail-closing. |
+| `sentinel.sentinel_revision_id` | string | `"sentinel.current"` | Revision label embedded in findings produced by the live sentinel. Update when the sentinel logic changes to make findings filterable by version. |
+| `sentinel.baseline_revision_id` | string | `"sentinel.baseline.frozen"` | Revision label for the frozen-baseline pass of the dual sweep. Phase-1 disagreements between baseline and current are recorded in `security_sentinel_disagreements`. |
+
+**Promotion-gate semantics.** The gate is a fresh in-memory Phase-1 scan, not a query against the persisted `security_findings` table. On every promotion attempt it scans the live causal-event / promotion-history / approval / sandbox-escape data (subject to the same `scan_limit` and `window_days` defaults as scheduled sweeps), counts critical findings, and blocks if the count is non-zero or if any check errored. It does not write findings; persisted rows in `security_findings` from earlier scheduled sweeps are not consulted. Consequence: the only ways to unblock a stuck gate are (a) resolve the underlying signal in the data the scan reads, (b) wait for the windowed checks to age past their cutoff, (c) raise per-check thresholds in the gate's `SweepConfig`, or (d) set `promotion_gate_enabled: false`. Per-agent scoping of the scan is tracked as a follow-up.
+
+Example:
+
+```yaml
+sentinel:
+  enabled: true
+  full_sweep_schedule: "0 3 * * *"
+  incremental_sweep_schedule: "0 */6 * * *"
+  promotion_gate_enabled: true
+  promotion_gate_timeout_secs: 30
+  sentinel_revision_id: "sentinel.current"
+  baseline_revision_id: "sentinel.baseline.frozen"
+```
+
+---
+
 ## Hooks
 
 Reactive bindings from gateway events to actions. When an event fires (e.g., session closes, approval resolves), the matching hooks are dispatched.
