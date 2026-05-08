@@ -268,9 +268,9 @@ impl NativeTool for ArtifactExecTool {
                         gateway_store,
                     );
                 } else {
-                    return Ok(ToolError::not_found(
-                        format!("deployment_ticket '{}'", ticket_id),
-                        Some("The ticket may have expired. Re-run artifact.prepare to get a new deployment ticket.".to_string()),
+                    return Ok(ToolError::resource(
+                        format!("deployment_ticket '{}' not found or expired", ticket_id),
+                        Some("Re-run artifact.prepare to get a new deployment ticket.".to_string()),
                     ).to_error_response());
                 }
             }

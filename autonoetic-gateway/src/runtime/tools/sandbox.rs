@@ -17,7 +17,6 @@ use autonoetic_types::capability::Capability;
 use autonoetic_types::layer::LayerApprovalScope;
 use autonoetic_types::runtime_lock::LockedLayerMount;
 use autonoetic_types::tool_error::tagged;
-use autonoetic_types::tool_error::ToolError;
 use secrecy::ExposeSecret;
 use std::collections::BTreeSet;
 use std::path::Path;

@@ -4,7 +4,6 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 

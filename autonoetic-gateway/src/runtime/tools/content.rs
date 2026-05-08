@@ -218,13 +218,26 @@ impl NativeTool for ContentReadTool {
             match try_read_artifact_ref_file(gw_dir, gateway_store.as_deref(), input, sid) {
                 Ok(c) => c,
                 Err(e) => {
+                    let msg = e.to_string();
+                    let lower = msg.to_ascii_lowercase();
+                    if lower.contains("not an artifact ref") || lower.contains("colon separator") {
+                        return Ok(ToolError::validation(
+                            &msg,
+                            Some("Artifact refs must use format `ar.<ref>:<filename>`."),
+                        ).to_error_response());
+                    }
+                    if lower.contains("gatewaystore required") {
+                        return Ok(ToolError::resource(
+                            &msg,
+                            None::<String>,
+                        ).to_error_response());
+                    }
                     return Ok(ToolError::not_found(
                         format!(
-                            "Content '{}' not found: {}. Use `artifact_inspect` with the artifact_ref to verify the file list. Format: `ar.<ref>:<filename>`.",
-                            input,
-                            e
+                            "Content '{}' in session '{}'",
+                            input, sid
                         ),
-                        None::<String>,
+                        Some("Use `artifact_inspect` with the artifact_ref to verify the file list."),
                     ).to_error_response());
                 }
             }
