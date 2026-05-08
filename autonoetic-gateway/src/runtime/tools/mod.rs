@@ -8,6 +8,7 @@ use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::background::ApprovalRequest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::tagged;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -205,7 +206,9 @@ impl NativeToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("Unknown native tool '{}'", name))?;
 
         if !tool.is_available(manifest) {
-            anyhow::bail!("Native tool '{}' is not available or permitted", name);
+            return Ok(ToolError::permission(
+                format!("Native tool '{}' is not available or permitted", name),
+            ).to_error_response());
         }
 
         tool.execute(
@@ -787,7 +790,7 @@ fn parse_dependency_plan(runtime: &str, packages: Vec<String>) -> anyhow::Result
     let runtime = match runtime.to_ascii_lowercase().as_str() {
         "python" => DependencyRuntime::Python,
         "nodejs" | "node" => DependencyRuntime::NodeJs,
-        other => anyhow::bail!("Unsupported dependency runtime '{}'", other),
+        other => return Err(tagged::Tagged::validation(anyhow::anyhow!("Unsupported dependency runtime '{}'", other)).into()),
     };
     Ok(DependencyPlan { runtime, packages })
 }

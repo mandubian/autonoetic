@@ -613,12 +613,12 @@ fn enforce_peek_acl(
         }
     }
 
-    anyhow::bail!(
+    return Err(autonoetic_types::tool_error::tagged::Tagged::permission(anyhow::anyhow!(
         "Access denied: transcript belongs to agent '{}' (root '{}'), caller '{}' cannot access it",
         transcript_agent_id,
         transcript_root,
         caller_id
-    );
+    )).into());
 }
 
 #[cfg(test)]

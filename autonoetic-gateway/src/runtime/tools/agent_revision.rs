@@ -12,6 +12,7 @@ use autonoetic_types::runtime_lock::{
     LockedArtifact, LockedDependencySet, LockedLayerMount, RuntimeLock,
 };
 use autonoetic_types::tool_error::tagged;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -351,10 +352,11 @@ fn parse_frontmatter_capabilities(
         }
     }
     if !parse_errors.is_empty() {
-        anyhow::bail!(
+        return Err(tagged::Tagged::validation(anyhow::anyhow!(
             "Promotion gate: cannot parse one or more capability entries in SKILL.md: {}",
             parse_errors.join("; ")
-        );
+        ))
+        .into());
     }
     Ok(caps)
 }
@@ -727,10 +729,10 @@ fn resolve_revision_artifact_input(
     let artifact_ref = artifact_ref.map(str::trim);
 
     if matches!(artifact_id, Some("")) {
-        anyhow::bail!("artifact_id must not be empty");
+        return Err(tagged::Tagged::validation(anyhow::anyhow!("artifact_id must not be empty")).into());
     }
     if matches!(artifact_ref, Some("")) {
-        anyhow::bail!("artifact_ref must not be empty");
+        return Err(tagged::Tagged::validation(anyhow::anyhow!("artifact_ref must not be empty")).into());
     }
 
     let Some(direct_artifact_id) = artifact_id.filter(|value| !value.is_empty()) else {
@@ -1105,7 +1107,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         if matches!(args.execution_mode, Some(ExecutionMode::Reasoning))
             && args.llm_config.is_none()
         {
-            anyhow::bail!("llm_config is required when execution_mode is 'reasoning'");
+            return Ok(ToolError::validation("llm_config is required when execution_mode is 'reasoning'", None::<String>).to_error_response());
         }
 
         let Some(gateway_store) = gateway_store else {
@@ -1260,11 +1262,14 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 .iter()
                 .find(|cap| crate::runtime::install_contract::requires_artifact_review(cap));
             if let Some(cap) = forbidden_cap {
-                anyhow::bail!(
+                return Ok(ToolError::validation(
+                    format!(
                         "Capability '{:?}' requires an artifact_ref or artifact_id for code review and promotion gating. \
                          Pure reasoning agents (no artifact_id) may not use CodeExecution or AgentSpawn.",
                         cap
-                    );
+                    ),
+                    None::<String>,
+                ).to_error_response());
             }
 
             (

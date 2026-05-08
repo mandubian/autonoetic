@@ -329,9 +329,11 @@ fn apply_trust_mode(trust_mode: &str, parsed: &AgentManifest) -> anyhow::Result<
                 },
             ])
         }
-        other => anyhow::bail!(
-            "Unknown trust_mode '{}'; valid values: generous, strict, audit",
-            other
-        ),
+        other => {
+            return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(
+                "Unknown trust_mode '{}'; valid values: generous, strict, audit",
+                other
+            )).into());
+        }
     }
 }

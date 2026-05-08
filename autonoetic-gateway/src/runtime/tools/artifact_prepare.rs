@@ -14,6 +14,7 @@ use autonoetic_types::background::{
     ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
 };
 use autonoetic_types::capability::Capability;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -184,9 +185,10 @@ impl NativeTool for ArtifactPrepareTool {
                     anyhow::anyhow!("required_credentials: credential reference not found in store")
                 })?;
                 if vault.get_secret(&cred.secret_name).is_none() {
-                    anyhow::bail!(
-                        "required_credentials: secret for referenced credential not found in vault"
-                    );
+                    return Ok(ToolError::resource(
+                        "required_credentials: secret for referenced credential not found in vault",
+                        None::<String>,
+                    ).to_error_response());
                 }
                 tracing::info!(
                     target: "artifact_prepare",

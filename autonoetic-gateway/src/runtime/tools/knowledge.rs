@@ -6,6 +6,7 @@ use crate::runtime::tools::{
 };
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -19,10 +20,12 @@ fn knowledge_retention_expires_at(retention: &str) -> anyhow::Result<Option<Stri
         "ephemeral" => Ok(Some((now + chrono::Duration::hours(1)).to_rfc3339())),
         "1d" => Ok(Some((now + chrono::Duration::days(1)).to_rfc3339())),
         "30d" => Ok(Some((now + chrono::Duration::days(30)).to_rfc3339())),
-        other => anyhow::bail!(
-            "retention must be one of: stable, ephemeral, 1d, 30d (got {:?})",
-            other
-        ),
+        other => {
+            return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(
+                "retention must be one of: stable, ephemeral, 1d, 30d (got {:?})",
+                other
+            )).into());
+        }
     }
 }
 
@@ -47,10 +50,12 @@ fn parse_knowledge_store_visibility(
                 session_id: sid.to_string(),
             })
         }
-        other => anyhow::bail!(
-            "visibility must be private, session, or global (got {:?})",
-            other
-        ),
+        other => {
+            return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(
+                "visibility must be private, session, or global (got {:?})",
+                other
+            )).into());
+        }
     }
 }
 
@@ -150,7 +155,7 @@ impl NativeTool for KnowledgeStoreTool {
         );
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Knowledge requires gateway directory to be configured");
+            return Ok(ToolError::resource("Knowledge requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let sid = session_id.unwrap_or(&manifest.agent.id);
@@ -263,7 +268,7 @@ impl NativeTool for KnowledgeRecallTool {
         anyhow::ensure!(!args.id.trim().is_empty(), "id must not be empty");
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Knowledge requires gateway directory to be configured");
+            return Ok(ToolError::resource("Knowledge requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let mem = tier2_memory_for_native_tool(
@@ -342,7 +347,7 @@ impl NativeTool for KnowledgeSearchTool {
         anyhow::ensure!(!args.scope.trim().is_empty(), "scope must not be empty");
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Knowledge requires gateway directory to be configured");
+            return Ok(ToolError::resource("Knowledge requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let mem = tier2_memory_for_native_tool(
@@ -446,7 +451,7 @@ impl NativeTool for KnowledgeSearchByTagsTool {
         let limit = args.limit as usize;
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("Knowledge requires gateway directory to be configured");
+            return Ok(ToolError::resource("Knowledge requires gateway directory to be configured", None::<String>).to_error_response());
         };
 
         let mem = tier2_memory_for_native_tool(
@@ -584,7 +589,7 @@ impl NativeTool for DigestQueryTool {
         anyhow::ensure!((1..=100).contains(&args.limit), "limit must be 1–100");
 
         let Some(gw_dir) = gateway_dir else {
-            anyhow::bail!("digest.query requires gateway directory");
+            return Ok(ToolError::resource("digest.query requires gateway directory", None::<String>).to_error_response());
         };
 
         let reader_sid = args.session_id.as_deref().or(session_id);

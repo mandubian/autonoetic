@@ -937,7 +937,9 @@ fn try_auto_refresh(
     })?;
 
     if status >= 400 {
-        anyhow::bail!("Refresh endpoint returned HTTP {}", status);
+        return Err(autonoetic_types::tool_error::tagged::Tagged::execution(
+            anyhow::anyhow!("Refresh endpoint returned HTTP {}. The refresh endpoint rejected the request. Check if the refresh token is still valid.", status),
+        ).into());
     }
 
     let body_value: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
@@ -1130,7 +1132,11 @@ impl SkillStep {
                 instruction: self.instruction.unwrap_or_default(),
                 data_refs: self.data_refs,
             }),
-            t => anyhow::bail!("Unknown step type in skill.md onboarding: '{}'", t),
+            t => {
+                return Err(autonoetic_types::tool_error::tagged::Tagged::validation(
+                    anyhow::anyhow!("Unknown step type in skill.md onboarding: '{}'", t),
+                ).into());
+            }
         }
     }
 }

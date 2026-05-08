@@ -18,6 +18,7 @@ use autonoetic_types::background::{
     ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
 };
 use autonoetic_types::capability::Capability;
+use autonoetic_types::tool_error::ToolError;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -238,7 +239,7 @@ impl NativeTool for ArtifactExecTool {
                     )
                 })?
         } else {
-            anyhow::bail!("artifact_exec requires GatewayStore to be configured");
+            return Ok(ToolError::resource("artifact_exec requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         if let Some(ticket_id) = &args.deployment_ticket {
@@ -267,7 +268,10 @@ impl NativeTool for ArtifactExecTool {
                         gateway_store,
                     );
                 } else {
-                    anyhow::bail!("deployment_ticket '{}' not found or expired", ticket_id);
+                    return Ok(ToolError::resource(
+                        format!("deployment_ticket '{}' not found or expired", ticket_id),
+                        Some("Re-run artifact.prepare to get a new deployment ticket.".to_string()),
+                    ).to_error_response());
                 }
             }
         }
@@ -355,7 +359,15 @@ impl NativeTool for ArtifactExecTool {
         let command = build_command(entrypoint, &args.args);
         let decision = policy.can_exec_shell_detailed(&command);
         if !decision.is_allowed() {
-            anyhow::bail!(decision.explain_shell_denial("Artifact execution"));
+            return Err(autonoetic_types::tool_error::tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(decision.explain_shell_denial("Artifact execution")),
+                decision
+                    .enforced_rules
+                    .into_iter()
+                    .map(|rule| rule.to_string())
+                    .collect(),
+            )
+            .into());
         }
 
         let remote_analysis =
@@ -600,7 +612,7 @@ impl NativeTool for ArtifactExecTool {
                     if let Some(store) = &gateway_store {
                         store.create_approval(&mut request)?;
                     } else {
-                        anyhow::bail!("GatewayStore missing; cannot persist approval request");
+                        return Ok(ToolError::resource("GatewayStore missing; cannot persist approval request", None::<String>).to_error_response());
                     }
 
                     let approval = build_approval_details(

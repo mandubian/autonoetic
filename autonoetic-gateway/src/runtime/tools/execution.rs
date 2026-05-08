@@ -4,6 +4,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::disclosure::ViewerClass;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -99,7 +100,7 @@ impl NativeTool for ExecutionSearchTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            anyhow::bail!("execution.search requires GatewayStore to be configured");
+            return Ok(ToolError::resource("execution.search requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let limit = args.limit.unwrap_or(10).min(100) as i64;
