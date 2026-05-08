@@ -211,70 +211,13 @@ impl CausalEventRecord {
     }
 }
 
+// Redaction primitives are centralised in `crate::redaction`. This local
+// thin wrapper is the only call site needed in this module; the previous
+// inline copy used a wholesale-redaction fallback that nuked benign strings
+// like "tokenizer config" — see issue #156.
+
 fn redact_json_string(s: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(s) {
-        Ok(v) => serde_json::to_string(&redact_json_value(&v)).unwrap_or_else(|_| "***REDACTED***".to_string()),
-        Err(_) => {
-            let lower = s.to_ascii_lowercase();
-            if lower.contains("token")
-                || lower.contains("secret")
-                || lower.contains("authorization")
-                || lower.contains("api_key")
-                || lower.contains("apikey")
-            {
-                "***REDACTED***".to_string()
-            } else {
-                s.to_string()
-            }
-        }
-    }
-}
-
-fn redact_json_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (k, v) in map {
-                if is_sensitive_key(k) {
-                    out.insert(k.clone(), serde_json::Value::String("***REDACTED***".to_string()));
-                } else {
-                    out.insert(k.clone(), redact_json_value(v));
-                }
-            }
-            serde_json::Value::Object(out)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(redact_json_value).collect())
-        }
-        serde_json::Value::String(s) => {
-            let t = s.trim();
-            if !t.is_empty() {
-                let lower = t.to_ascii_lowercase();
-                if lower.contains("bearer ")
-                    || t.starts_with("sk-")
-                    || t.contains("-----BEGIN")
-                {
-                    return serde_json::Value::String("***REDACTED***".to_string());
-                }
-            }
-            serde_json::Value::String(s.clone())
-        }
-        other => other.clone(),
-    }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    k.contains("secret")
-        || k.contains("token")
-        || k.contains("password")
-        || k.contains("api_key")
-        || k.contains("apikey")
-        || k.contains("authorization")
-        || k.contains("access_key")
-        || k.contains("access_token")
-        || k.contains("refresh_token")
-        || k.contains("client_secret")
+    crate::redaction::redact_text_for_logs(s)
 }
 
 /// Session transcript record for storage in gateway.db session_transcripts table.
@@ -565,7 +508,11 @@ mod redaction_tests {
         }
     }
 
-    // ── redact_json_string / redact_json_value internals ─────────────────
+    // ── Direct delegation to canonical helpers ───────────────────────────
+    // These tests pin the integration: `causal_chain::redact_for_viewer`
+    // now routes string redaction through `crate::redaction`. The canonical
+    // module's own unit tests (`crate::redaction::tests`) cover finer-grained
+    // behavior; the assertions here verify the wiring stays correct.
 
     #[test]
     fn redact_json_value_redacts_object_keys_named_like_secrets() {
@@ -575,7 +522,7 @@ mod redaction_tests {
             "refresh_token": "ghi",
             "ok": true,
         });
-        let out = redact_json_value(&v);
+        let out = crate::redaction::redact_json_value(&v);
         assert_eq!(out["client_secret"], "***REDACTED***");
         assert_eq!(out["access_token"], "***REDACTED***");
         assert_eq!(out["refresh_token"], "***REDACTED***");
@@ -583,27 +530,27 @@ mod redaction_tests {
     }
 
     #[test]
-    fn redact_json_value_redacts_string_values_that_look_like_secrets() {
+    fn redact_json_value_handles_each_secret_shape_appropriately() {
         let v = serde_json::json!({
             "header": "Bearer eyJhbGc.tail",
             "key_blob": "-----BEGIN RSA PRIVATE KEY-----\nXXX\n-----END RSA PRIVATE KEY-----",
             "openai_key": "sk-abc123def456ghi789",
             "innocuous": "tokenizer config",
         });
-        let out = redact_json_value(&v);
-        assert_eq!(out["header"], "***REDACTED***");
+        let out = crate::redaction::redact_json_value(&v);
+        // Bearer: in-place masking preserves the prefix, masks the value.
+        assert_eq!(out["header"], "Bearer ***REDACTED***");
+        // PEM: can't be masked in place; fallback wholesale redact via the
+        // narrow `s.contains("-----BEGIN")` branch in `redact_json_value`.
         assert_eq!(out["key_blob"], "***REDACTED***");
+        // Bare `sk-…`: handled by `redact_embedded_secrets`'s sk- prefix branch.
         assert_eq!(out["openai_key"], "***REDACTED***");
-        // Note: the current implementation over-redacts the substring "token"
-        // via the non-JSON fallback path; tracked in issue #156. This direct
-        // value-path is more precise — the literal "tokenizer config" does NOT
-        // start with sk-, contain bearer, or contain BEGIN, so it survives.
+        // Benign `tokenizer config`: no in-place mask, no secret shape ⇒ kept.
         assert_eq!(out["innocuous"], "tokenizer config");
     }
 
     #[test]
     fn is_sensitive_key_matches_documented_substrings() {
-        // Underscore-form keys: covered by the substring match.
         for k in &[
             "secret",
             "TOKEN",
@@ -615,27 +562,51 @@ mod redaction_tests {
             "refresh_token",
             "client_secret",
         ] {
-            assert!(is_sensitive_key(k), "expected sensitive: {k}");
+            assert!(crate::redaction::is_sensitive_key(k), "expected sensitive: {k}");
         }
         for k in &["user_id", "agent_id", "session_id", "items", "ok"] {
-            assert!(!is_sensitive_key(k), "expected non-sensitive: {k}");
+            assert!(!crate::redaction::is_sensitive_key(k), "expected non-sensitive: {k}");
         }
     }
 
     #[test]
     fn is_sensitive_key_misses_hyphenated_api_key() {
-        // KNOWN GAP: `X-API-Key` (hyphenated) does NOT match — `is_sensitive_key`
-        // looks for `api_key` and `apikey`, neither of which is a substring of
-        // `x-api-key`. Hyphenated `*-Token` names do match (substring `token`)
-        // and hyphenated `*-Authorization`/`*-Password` would match too.
-        // This pin documents the specific gap that should be closed in issue #156.
+        // KNOWN GAP: `X-API-Key` (hyphenated) does NOT match — the substring
+        // catalogue uses `api_key` (underscore). Hyphenated `*-Token` does
+        // match via the `token` substring. This pin documents the gap.
         assert!(
-            !is_sensitive_key("X-API-Key"),
-            "regression: X-API-Key is now matched — update both \
-             is_sensitive_key (add 'api-key' substring) and this pin together"
+            !crate::redaction::is_sensitive_key("X-API-Key"),
+            "regression: X-API-Key now matches — update is_sensitive_key in \
+             autonoetic-types::redaction and this pin together"
         );
-        // Counter-cases that already work via existing substrings:
-        assert!(is_sensitive_key("X-Auth-Token"), "contains 'token'");
-        assert!(is_sensitive_key("X-Access-Token"), "contains 'token'");
+        assert!(crate::redaction::is_sensitive_key("X-Auth-Token"));
+        assert!(crate::redaction::is_sensitive_key("X-Access-Token"));
+    }
+
+    // ── Bug-fix coverage for issue #156 (delegated path) ─────────────────
+
+    #[test]
+    fn benign_substrings_do_not_nuke_full_string_via_redact_json_string() {
+        // The bug: `redact_json_string("Updated tokenizer config")` used to
+        // return "***REDACTED***" wholesale because the string contained the
+        // substring "token". After the migration to `redact_text_for_logs`
+        // it round-trips.
+        for input in &[
+            "Updated tokenizer config in v2",
+            "secretary-general announcement",
+            "the authorization process is documented in section 4",
+        ] {
+            let out = redact_json_string(input);
+            assert_eq!(out, *input, "benign string '{input}' must round-trip");
+        }
+    }
+
+    #[test]
+    fn real_secrets_still_masked_via_redact_json_string() {
+        // Bearer token in a non-JSON string — masked in place, prose preserved.
+        let out = redact_json_string("Authorization: Bearer eyJhbGc.foo plus context");
+        assert!(out.contains("Bearer ***REDACTED***"));
+        assert!(out.contains("plus context"));
+        assert!(!out.contains("eyJhbGc"));
     }
 }

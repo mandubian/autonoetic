@@ -19,6 +19,7 @@ pub mod layer;
 pub mod memory;
 pub mod notification;
 pub mod promotion;
+pub mod redaction;
 pub mod runtime_lock;
 pub mod scheduled_job;
 pub mod schema_enforcement;

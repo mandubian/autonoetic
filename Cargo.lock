@@ -274,6 +274,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "hex",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
