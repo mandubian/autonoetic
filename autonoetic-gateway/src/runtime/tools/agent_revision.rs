@@ -2045,13 +2045,15 @@ impl NativeTool for AgentRevisionPromoteTool {
         }
 
         // Security sentinel pre-promotion gate (fail-closed).
-        // Runs a full-store Phase-1 sweep — any critical finding in the system
-        // blocks promotion. Per-agent scoping is planned for a future phase.
+        // Runs a Phase-1 sweep scoped to the agent being promoted — only
+        // critical findings attributable to this agent block its promotion
+        // (issue #155). Findings against other agents do not interfere.
         if let Some(cfg) = config {
             if cfg.sentinel.enabled && cfg.sentinel.promotion_gate_enabled {
                 match crate::sentinel::check_pre_promotion(
                     Arc::clone(&gateway_store),
                     &cfg.sentinel.sentinel_revision_id,
+                    &args.agent_id,
                     cfg.sentinel.promotion_gate_timeout_secs,
                 ) {
                     Ok(crate::sentinel::GateOutcome::Passed) => {

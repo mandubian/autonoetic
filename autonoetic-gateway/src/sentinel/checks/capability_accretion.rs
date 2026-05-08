@@ -28,11 +28,15 @@ struct AccretionCandidate {
 
 /// Flag agents that have received more than `threshold` promotions in the
 /// past `window_days` days. Returns one finding per flagged agent.
+///
+/// `scope_agent_id` restricts to a single agent (used by the pre-promotion
+/// gate so a sibling agent's accretion doesn't block this promotion).
 pub fn scan_capability_accretion(
     conn: &Connection,
     sentinel_revision_id: &str,
     window_days: u32,
     threshold: u32,
+    scope_agent_id: Option<&str>,
 ) -> Result<Vec<SecurityFinding>> {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(window_days as i64);
     let cutoff_str = cutoff.to_rfc3339();
@@ -59,20 +63,24 @@ pub fn scan_capability_accretion(
                  LIMIT 1) AS latest_revision_id
          FROM promotion_history ph
          WHERE ph.created_at > ?1
+           AND (?3 IS NULL OR ph.agent_id = ?3)
          GROUP BY ph.agent_id
          HAVING cnt > ?2
          ORDER BY cnt DESC",
     )?;
 
     let candidates = stmt
-        .query_map(rusqlite::params![cutoff_str, threshold_i], |row| {
-            Ok(AccretionCandidate {
-                agent_id: row.get(0)?,
-                promotion_count: row.get(1)?,
-                latest_promotion_id: row.get(2)?,
-                latest_revision_id: row.get(3)?,
-            })
-        })?
+        .query_map(
+            rusqlite::params![cutoff_str, threshold_i, scope_agent_id],
+            |row| {
+                Ok(AccretionCandidate {
+                    agent_id: row.get(0)?,
+                    promotion_count: row.get(1)?,
+                    latest_promotion_id: row.get(2)?,
+                    latest_revision_id: row.get(3)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut findings = Vec::new();
@@ -152,7 +160,7 @@ mod tests {
             .unwrap();
         }
 
-        let findings = scan_capability_accretion(&conn, "sentinel-rev-1", 7, 5).unwrap();
+        let findings = scan_capability_accretion(&conn, "sentinel-rev-1", 7, 5, None).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].finding_type, FindingType::CapabilityAccretion);
         assert_eq!(findings[0].severity, FindingSeverity::Warning);
@@ -175,7 +183,7 @@ mod tests {
             .unwrap();
         }
 
-        let findings = scan_capability_accretion(&conn, "sentinel-rev-1", 7, 5).unwrap();
+        let findings = scan_capability_accretion(&conn, "sentinel-rev-1", 7, 5, None).unwrap();
         assert!(findings.is_empty());
     }
 }

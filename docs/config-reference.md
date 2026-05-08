@@ -535,12 +535,27 @@ System-tier read-only auditor over causal events, promotion history, approvals, 
 | `sentinel.enabled` | bool | `true` | Master switch. When `false`, sweeps and the promotion gate are skipped. |
 | `sentinel.full_sweep_schedule` | string (cron) | `"0 3 * * *"` | Cron expression for the daily full (non-incremental) dual sweep. Each check still applies its own `scan_limit` (default 10 000 events) and per-check window (e.g. `window_days = 30` for capability accretion / approval denial); "full" means no `since_rfc3339` cutoff is applied, not that every historical row is examined. UTC. |
 | `sentinel.incremental_sweep_schedule` | string (cron) | `"0 */6 * * *"` | Cron expression for the rolling 25 h incremental dual sweep (sets `since_rfc3339 = now-25h`). UTC. |
-| `sentinel.promotion_gate_enabled` | bool | `true` | When `true`, `agent_revision_promote` runs an in-memory Phase-1 sentinel sweep first via `scan_phase1_critical`. Any `critical` finding the scan produces blocks promotion (fail-closed). The gate **does not consult or persist to `security_findings`** — it re-evaluates the live event corpus on every promotion attempt. Therefore triaging existing rows in `security_findings` will *not* unblock the gate; you must remove or age out the underlying data that the scan flags (or disable the gate). |
+| `sentinel.promotion_gate_enabled` | bool | `true` | When `true`, `agent_revision_promote` runs an in-memory Phase-1 sentinel sweep first via `scan_phase1_critical`, **scoped to the agent being promoted**: every Phase-1 check filters its query by `agent_id = <agent_being_promoted>`, so a critical finding attributed to a different agent does not block this promotion (issue #155). Any `critical` finding for the scoped agent blocks promotion (fail-closed). The gate **does not consult or persist to `security_findings`** — it re-evaluates the live event corpus on every promotion attempt. Therefore triaging existing rows in `security_findings` will *not* unblock the gate; you must remove or age out the underlying data that the scan flags (or disable the gate). |
 | `sentinel.promotion_gate_timeout_secs` | u64 | `30` | Maximum seconds the gate waits for the in-memory sweep before fail-closing. |
 | `sentinel.sentinel_revision_id` | string | `"sentinel.current"` | Revision label embedded in findings produced by the live sentinel. Update when the sentinel logic changes to make findings filterable by version. |
 | `sentinel.baseline_revision_id` | string | `"sentinel.baseline.frozen"` | Revision label for the frozen-baseline pass of the dual sweep. Phase-1 disagreements between baseline and current are recorded in `security_sentinel_disagreements`. |
 
-**Promotion-gate semantics.** The gate is a fresh in-memory Phase-1 scan, not a query against the persisted `security_findings` table. On every promotion attempt it scans the live causal-event / promotion-history / approval / sandbox-escape data (subject to the same `scan_limit` and `window_days` defaults as scheduled sweeps), counts critical findings, and blocks if the count is non-zero or if any check errored. It does not write findings; persisted rows in `security_findings` from earlier scheduled sweeps are not consulted. Consequence: the only ways to unblock a stuck gate are (a) resolve the underlying signal in the data the scan reads, (b) wait for the windowed checks to age past their cutoff, (c) raise per-check thresholds in the gate's `SweepConfig`, or (d) set `promotion_gate_enabled: false`. Per-agent scoping of the scan is tracked as a follow-up.
+**Promotion-gate semantics.** The gate is a fresh in-memory Phase-1 scan **scoped to the agent being promoted**, not a query against the persisted `security_findings` table. On every promotion attempt it scans the live causal-event / promotion-history / approval / sandbox-escape / layer-mount data filtered by the agent's ID (subject to the same `scan_limit` and `window_days` defaults as scheduled sweeps), counts critical findings, and blocks if the count is non-zero or if any check errored. It does not write findings; persisted rows in `security_findings` from earlier scheduled sweeps are not consulted.
+
+Per-agent scope (issue #155, fixed). Each Phase-1 check applies the scope to the most relevant agent attribution column:
+
+| Check | Scope column |
+|---|---|
+| `scan_credential_leaks` | `causal_events.agent_id` |
+| `scan_capability_accretion` | `promotion_history.agent_id` |
+| `scan_approval_denials`, `scan_exec_without_grant` | `approvals.agent_id` |
+| `scan_escape_attempt_records` | `sandbox_escape_attempts.agent_id` |
+| `scan_escape_patterns_in_events` | `causal_events.agent_id` |
+| `scan_layer_scope_violations`, `scan_layer_provenance_gaps` | `approvals.agent_id` (the *mounting* agent) |
+
+Consequence: a critical finding for agent A no longer blocks promotion of agent B. Cross-agent isolation is verified by the `promotion_gate_does_not_block_unrelated_agent`, `promotion_gate_blocks_same_agent_after_unrelated_findings`, and `promotion_gate_layer_mount_finding_anchors_to_mounting_agent` integration tests.
+
+If the gate blocks for the agent being promoted, the unblock paths remain: (a) resolve the underlying signal in the data the scan reads, (b) wait for the windowed checks to age past their cutoff, (c) raise per-check thresholds in the gate's `SweepConfig`, or (d) set `promotion_gate_enabled: false`.
 
 Example:
 

@@ -148,7 +148,7 @@ Three scheduling modes, all expressible with the existing scheduler:
 
 1. **Periodic sweeps** — daily full audit; hourly incremental over the new causal-event range. Default cadence tunable; findings batched.
 
-2. **Pre-promotion gate** — on `agent_revision_promote`, the gateway synchronously invokes the sentinel for a bounded review of the candidate revision. Critical findings block the promotion. This generalizes the `promotion_record` severity-gating pattern that already exists for evaluator/auditor evidence.
+2. **Pre-promotion gate** — on `agent_revision_promote`, the gateway synchronously invokes the sentinel for a bounded review of the candidate revision, **scoped to the agent being promoted**. Each Phase-1 check filters its query by `agent_id`, so a critical finding for agent A does not block promotion of agent B (issue #155, fixed). Critical findings for the scoped agent block the promotion. This generalizes the `promotion_record` severity-gating pattern that already exists for evaluator/auditor evidence.
 
 3. **Event-triggered** — new layer captured, capability declared, approval grant escalation. The gateway emits an event; the sentinel runs a scoped sweep covering only the affected scope.
 
