@@ -381,13 +381,19 @@ impl ScheduledAction {
                 payload: None,
             },
             Self::SandboxExec {
-                command,
                 dependencies,
                 requires_approval,
                 detected_hosts,
                 ..
             } => Self::SandboxExec {
-                command: command.clone(),
+                // Command is blanked for the Agent class because shell strings
+                // routinely embed secrets — `Authorization: Bearer …`, env-var
+                // assignments, URL query params. Consistent with the Agent
+                // redaction of `ExecutionTraceRecord::command` (commit 7f8525d).
+                // Approving agents retain shape via `detected_hosts`,
+                // `dependencies`, and `requires_approval`; operators see the
+                // raw command (Operator class is identity for SandboxExec).
+                command: Self::REDACTED.to_string(),
                 dependencies: dependencies.clone(),
                 requires_approval: *requires_approval,
                 evidence_ref: None,
@@ -900,10 +906,10 @@ mod redaction_tests {
         }
     }
 
-    /// SandboxExec fixture with a benign command — used by the property test.
-    /// SandboxExec with a secret-bearing command is covered separately by
-    /// `agent_viewer_sandbox_exec_command_currently_preserves_secrets` which
-    /// pins the known leak documented in issue #158.
+    /// SandboxExec fixture with a benign command — used by tests that
+    /// exercise the structural-redaction outcome (evidence_ref clearing,
+    /// detected_hosts preservation) without dragging secret-bearing
+    /// command material into the assertions.
     fn sandbox_exec_benign() -> ScheduledAction {
         ScheduledAction::SandboxExec {
             command: "ls -la /tmp".into(),
@@ -1010,7 +1016,7 @@ mod redaction_tests {
     }
 
     #[test]
-    fn agent_viewer_sandbox_exec_clears_evidence_ref() {
+    fn agent_viewer_sandbox_exec_redacts_command_and_clears_evidence_ref() {
         let r = sandbox_exec_benign().redact_for_viewer(ViewerClass::Agent);
         match r {
             ScheduledAction::SandboxExec {
@@ -1020,9 +1026,10 @@ mod redaction_tests {
                 requires_approval,
                 ..
             } => {
-                // Command stays visible to the Agent class — see issue #158
-                // for the open question on whether this is correct.
-                assert!(command.contains("ls"));
+                // Command is blanked for the Agent class (issue #158 fix).
+                // Approving agents rely on detected_hosts / dependencies /
+                // requires_approval for command shape, not the raw string.
+                assert_eq!(command, ScheduledAction::REDACTED);
                 // Evidence ref is cleared (would resolve to a content-store blob).
                 assert_eq!(evidence_ref, None);
                 // Detected hosts and approval flag preserved.
@@ -1034,23 +1041,39 @@ mod redaction_tests {
     }
 
     #[test]
-    fn agent_viewer_sandbox_exec_command_currently_preserves_secrets() {
-        // KNOWN GAP (#158): SandboxExec.command is preserved verbatim for
-        // ViewerClass::Agent, so a command embedding a Bearer token, AWS key,
-        // or similar leaks to agent-class consumers (e.g. an approver agent
-        // looking at approval_summary). This pin documents the current
-        // behaviour. When #158 is fixed, this test FLIPS — assert the secret
-        // is NOT in the redacted command — and the SandboxExec fixture is
-        // re-included in `agent_viewer_no_secrets_leak_property`.
+    fn agent_viewer_sandbox_exec_does_not_leak_command_secrets() {
+        // Issue #158 fix: a command embedding a Bearer token must NOT survive
+        // Agent-class redaction. The command is replaced with "***REDACTED***"
+        // wholesale, regardless of content.
         let r =
             sandbox_exec_with_secret_bearing_command().redact_for_viewer(ViewerClass::Agent);
         match r {
             ScheduledAction::SandboxExec { command, .. } => {
+                assert_eq!(command, ScheduledAction::REDACTED);
                 assert!(
-                    command.contains("Bearer eyJhbGc"),
-                    "regression: SandboxExec.command no longer leaks the bearer token \
-                     for ViewerClass::Agent — flip this assertion and close issue #158"
+                    !command.contains("Bearer"),
+                    "regression: SandboxExec.command leaked Bearer prefix for Agent: {command}"
                 );
+                assert!(
+                    !command.contains("eyJ"),
+                    "regression: SandboxExec.command leaked JWT-like prefix for Agent: {command}"
+                );
+            }
+            other => panic!("expected SandboxExec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn operator_viewer_sandbox_exec_preserves_command() {
+        // Operator class is identity for SandboxExec — the command is needed
+        // for human approval review. Pinning this so a future change that
+        // tightens Operator redaction doesn't accidentally hide commands from
+        // operators.
+        let original = sandbox_exec_with_secret_bearing_command();
+        let r = original.redact_for_viewer(ViewerClass::Operator);
+        match r {
+            ScheduledAction::SandboxExec { command, .. } => {
+                assert!(command.contains("Bearer"));
             }
             other => panic!("expected SandboxExec, got {other:?}"),
         }
@@ -1069,7 +1092,7 @@ mod redaction_tests {
                 // Path is visible (operationally needed); content is redacted;
                 // evidence_ref cleared.
                 assert_eq!(path, "/tmp/keys.txt");
-                assert_eq!(content, "***REDACTED***");
+                assert_eq!(content, ScheduledAction::REDACTED);
                 assert!(requires_approval);
                 assert_eq!(evidence_ref, None);
             }
@@ -1106,7 +1129,7 @@ mod redaction_tests {
                 let headers = headers.expect("headers preserved structurally");
                 assert_eq!(
                     headers.get("Authorization").map(|s| s.as_str()),
-                    Some("***REDACTED***"),
+                    Some(ScheduledAction::REDACTED),
                     "Authorization header must be redacted for Operator"
                 );
                 assert_eq!(
@@ -1129,12 +1152,13 @@ mod redaction_tests {
 
     #[test]
     fn agent_viewer_no_secrets_leak_property() {
-        // SandboxExec is excluded from this assertion until issue #158 lands —
-        // its command field currently leaks. AgentInstall is excluded because
-        // it falls through unmodified today (pinned separately above).
+        // After #158, SandboxExec is included with a secret-bearing command —
+        // the redaction must blank the command string entirely. AgentInstall
+        // is excluded because it falls through unmodified today (pinned
+        // separately above).
         let actions = [
             credential_request_with_secrets(),
-            sandbox_exec_benign(), // benign command — exercises non-command fields only
+            sandbox_exec_with_secret_bearing_command(),
             write_file_with_secrets(),
         ];
         for action in actions.iter() {
