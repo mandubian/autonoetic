@@ -24,7 +24,8 @@ pub fn handle_security_status(config_path: &Path, json: bool) -> Result<()> {
     let by_severity = store.count_pending_security_findings_by_severity()?;
     let by_triage = store.count_security_findings_by_triage_state()?;
 
-    // Last sentinel sweep time (from the full-sweep scheduled job).
+    // Most-recent sentinel sweep of any kind: take the max last_run_at across
+    // both full-sweep and incremental jobs owned by security_sentinel.
     let last_sweep = store
         .list_scheduled_jobs_for_owner("security_sentinel", None, None)?
         .into_iter()
@@ -65,8 +66,8 @@ pub fn handle_security_status(config_path: &Path, json: bool) -> Result<()> {
     }
 
     match &last_sweep {
-        Some(ts) => println!("\nLast sweep:   {}", ts),
-        None => println!("\nLast sweep:   (never — no sweep has completed yet)"),
+        Some(ts) => println!("\nLast sentinel sweep:   {}", ts),
+        None => println!("\nLast sentinel sweep:   (never — no sweep has completed yet)"),
     }
 
     Ok(())
@@ -143,6 +144,10 @@ pub fn handle_security_triage(
 ) -> Result<()> {
     let triage_state = parse_triage_state(state)?;
 
+    if triage_state != autonoetic_types::security::TriageState::Pending && reason.is_none() {
+        anyhow::bail!("--reason is required when setting a non-pending triage state");
+    }
+
     let store = open_store(config_path)?;
     store.update_security_finding_triage(finding_id, triage_state, reason)?;
     println!(
@@ -163,6 +168,12 @@ pub fn handle_security_triage_bulk(
     dry_run: bool,
 ) -> Result<()> {
     let triage_state = parse_triage_state(state)?;
+
+    if triage_state == autonoetic_types::security::TriageState::Pending {
+        anyhow::bail!(
+            "Cannot bulk-triage to 'pending'. Valid states: true_positive, false_positive, benign, deferred"
+        );
+    }
 
     let store = open_store(config_path)?;
 

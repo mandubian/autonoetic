@@ -1197,7 +1197,8 @@ pub enum SecurityCommands {
         /// Triage state: pending, true_positive, false_positive, benign, deferred.
         state: String,
 
-        /// Short reason for the decision (required for non-pending states).
+        /// Short reason for the decision.
+        /// Required when state is not 'pending'; validated at runtime.
         #[arg(long)]
         reason: Option<String>,
     },
@@ -1208,6 +1209,7 @@ pub enum SecurityCommands {
     ///   --reason "internal CI" --type credential_leak --dry-run
     BulkTriage {
         /// Triage state to apply: true_positive, false_positive, benign, deferred.
+        /// 'pending' is not accepted; use individual triage to reset a single finding.
         state: String,
 
         /// Reason for the bulk decision (required).

@@ -10,6 +10,14 @@ use rusqlite::params;
 
 use super::GatewayStore;
 
+const SELECT_FINDING_COLUMNS: &str =
+    "SELECT finding_id, severity, confidence, finding_type,
+            affected_json, evidence_json, reproducibility,
+            proposed_remediation, sentinel_revision_id,
+            baseline_agreed, ensemble_agreed,
+            triage_state, triage_reason, created_at
+     FROM security_findings";
+
 impl GatewayStore {
     /// Persist a new `SecurityFinding`. Returns an error if the finding_id
     /// already exists (the table is append-only).
@@ -95,18 +103,11 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         let lim = limit as i64;
 
-        const SELECT: &str = "SELECT finding_id, severity, confidence, finding_type,
-                    affected_json, evidence_json, reproducibility,
-                    proposed_remediation, sentinel_revision_id,
-                    baseline_agreed, ensemble_agreed,
-                    triage_state, triage_reason, created_at
-             FROM security_findings";
-
         let rows = match (severity, triage_state) {
             (None, None) => {
                 let mut stmt = conn.prepare(&format!(
                     "{} ORDER BY created_at DESC LIMIT ?1",
-                    SELECT
+                    SELECT_FINDING_COLUMNS
                 ))?;
                 let result = stmt
                     .query_map(params![lim], decode_finding_row)?
@@ -116,7 +117,7 @@ impl GatewayStore {
             (Some(sev), None) => {
                 let mut stmt = conn.prepare(&format!(
                     "{} WHERE severity = ?1 ORDER BY created_at DESC LIMIT ?2",
-                    SELECT
+                    SELECT_FINDING_COLUMNS
                 ))?;
                 let result = stmt
                     .query_map(params![sev, lim], decode_finding_row)?
@@ -126,7 +127,7 @@ impl GatewayStore {
             (None, Some(ts)) => {
                 let mut stmt = conn.prepare(&format!(
                     "{} WHERE triage_state = ?1 ORDER BY created_at DESC LIMIT ?2",
-                    SELECT
+                    SELECT_FINDING_COLUMNS
                 ))?;
                 let result = stmt
                     .query_map(params![ts, lim], decode_finding_row)?
@@ -136,7 +137,7 @@ impl GatewayStore {
             (Some(sev), Some(ts)) => {
                 let mut stmt = conn.prepare(&format!(
                     "{} WHERE severity = ?1 AND triage_state = ?2 ORDER BY created_at DESC LIMIT ?3",
-                    SELECT
+                    SELECT_FINDING_COLUMNS
                 ))?;
                 let result = stmt
                     .query_map(params![sev, ts, lim], decode_finding_row)?
@@ -187,18 +188,13 @@ impl GatewayStore {
     ) -> Result<Vec<SecurityFindingRow>> {
         let conn = self.conn.lock().unwrap();
         let lim = limit as i64;
-        let mut stmt = conn.prepare(
-            "SELECT finding_id, severity, confidence, finding_type,
-                    affected_json, evidence_json, reproducibility,
-                    proposed_remediation, sentinel_revision_id,
-                    baseline_agreed, ensemble_agreed,
-                    triage_state, triage_reason, created_at
-             FROM security_findings
-             WHERE (severity = ?1 OR ?1 IS NULL)
+        let mut stmt = conn.prepare(&format!(
+            "{} WHERE (severity = ?1 OR ?1 IS NULL)
                AND (finding_type = ?2 OR ?2 IS NULL)
                AND (triage_state = ?3 OR ?3 IS NULL)
              ORDER BY created_at DESC LIMIT ?4",
-        )?;
+            SELECT_FINDING_COLUMNS
+        ))?;
         let result = stmt
             .query_map(
                 rusqlite::params![severity, finding_type, triage_state, lim],
