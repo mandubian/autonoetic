@@ -97,28 +97,46 @@ pub fn scan_credential_leaks(
     let mut findings = Vec::new();
     for row in rows {
         if let Some((pattern_name, match_len)) = detect_credential(&row.payload) {
-            // `high_entropy_hex` is a heuristic and lands at Warning so it can
-            // never single-handedly block a promotion via the sentinel gate.
-            // All other patterns (specific key formats, bearer tokens) stay at
-            // Critical because the regex shape is highly specific.
-            let severity = if pattern_name == "high_entropy_hex" {
+            // `high_entropy_hex` is a heuristic — its regex matches any 64+
+            // hex string (sha256, AES-256 keys, but also legitimate digests).
+            // It lands at Warning so it cannot single-handedly block a
+            // promotion via the sentinel gate, and its remediation message
+            // calls for verification first rather than immediate rotation.
+            // All other patterns (specific key formats, bearer tokens) stay
+            // at Critical because the regex shape is highly specific to a
+            // known credential format.
+            let is_heuristic = pattern_name == "high_entropy_hex";
+            let severity = if is_heuristic {
                 FindingSeverity::Warning
             } else {
                 FindingSeverity::Critical
             };
-            let confidence = if pattern_name == "high_entropy_hex" { 0.6 } else { 1.0 };
+            let confidence = if is_heuristic { 0.6 } else { 1.0 };
+            let remediation = if is_heuristic {
+                format!(
+                    "Heuristic credential pattern '{}' matched in causal event payload \
+                     (match length: {} chars). This regex matches any high-entropy hex \
+                     string and may be a legitimate sha256 digest, content hash, or \
+                     symmetric key in transit. Investigate via the evidence anchor: \
+                     retrieve the event, identify the matched value, and rotate only \
+                     if it is a real secret. Mark as false_positive otherwise.",
+                    pattern_name, match_len
+                )
+            } else {
+                format!(
+                    "Credential pattern '{}' matched in causal event payload \
+                     (match length: {} chars). The regex shape is specific to a known \
+                     credential format. Rotate any matching credential immediately. \
+                     Use the evidence anchor to retrieve the event under controlled access.",
+                    pattern_name, match_len
+                )
+            };
             let finding = SecurityFinding::new(
                 FindingType::CredentialLeak,
                 severity,
                 confidence,
                 Reproducibility::Deterministic,
-                format!(
-                    "Credential pattern '{}' matched in causal event payload \
-                     (match length: {} chars). Rotate any matching credential \
-                     immediately. Use the evidence anchor to retrieve the event \
-                     under controlled access.",
-                    pattern_name, match_len
-                ),
+                remediation,
                 sentinel_revision_id,
             )
             .with_affected(AffectedEntities {

@@ -77,8 +77,10 @@ impl NativeTool for AttackPatternProposeTool {
                     "evidence_anchors": {
                         "type": "array",
                         "description": "Evidence anchors (causal_event IDs, skill_md digests, etc.) \
-                            the sentinel should look for when this pattern is present.",
-                        "items": { "type": "object" }
+                            the sentinel should look for when this pattern is present. \
+                            Must be non-empty — a proposal without anchors is not testable.",
+                        "items": { "type": "object" },
+                        "minItems": 1
                     },
                     "synthetic_test_case": {
                         "type": "object",
