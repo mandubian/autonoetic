@@ -38,6 +38,7 @@
 //! The sentinel *reads* from state; it does not mutate anything except the
 //! append-only `security_findings` table.
 
+pub mod baseline;
 pub mod checks;
 pub mod dual_sweep;
 pub mod promotion_gate;

@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::scheduler::gateway_store::GatewayStore;
+use super::baseline;
 use super::checks::{approval_bypass, capability_accretion, credential, prompt_injection, sandbox_escape, session_cluster, supply_chain};
 
 /// Configuration for a sentinel sweep (Phase 1 + Phase 2).
@@ -65,6 +66,19 @@ pub struct SweepConfig {
     /// pre-promotion gate so a critical finding from agent A does not block
     /// promotion of agent B (issue #155). `None` = full-store sweep.
     pub scope_agent_id: Option<String>,
+    /// When `true`, dispatch Phase-1 checks to `super::baseline::*` instead of
+    /// `super::checks::*`. The baseline module is a frozen snapshot that does
+    /// not change when `super::checks::*` is refined; the dual-sweep uses this
+    /// to detect regressions in the canonical sentinel by comparing the two
+    /// sets of findings (issue #153).
+    ///
+    /// **Implies `phase1_only`.** The baseline never runs Phase-2 (the cluster
+    /// heuristics and prompt-injection scan have no baseline copy). Setting
+    /// `phase1_use_baseline = true` with `phase1_only = false` is a config
+    /// error; `collect_findings` enforces the implication and skips Phase-2
+    /// regardless of `phase1_only`'s value, with a debug assertion to catch
+    /// the misconfiguration in tests.
+    pub phase1_use_baseline: bool,
 }
 
 impl Default for SweepConfig {
@@ -81,6 +95,7 @@ impl Default for SweepConfig {
             exec_repeat_threshold: 10,
             phase1_only: false,
             scope_agent_id: None,
+            phase1_use_baseline: false,
         }
     }
 }
@@ -210,29 +225,73 @@ impl SentinelRunner {
         let exec_repeat_threshold = config.exec_repeat_threshold;
         let scope = config.scope_agent_id.as_deref();
 
+        // `phase1_use_baseline => phase1_only`. The baseline contract is
+        // Phase-1 only — the cluster heuristics and prompt-injection scan
+        // have no baseline copy. A debug assertion catches the
+        // misconfiguration in tests; release builds silently enforce it.
+        let phase1_use_baseline = config.phase1_use_baseline;
+        debug_assert!(
+            !(phase1_use_baseline && !config.phase1_only),
+            "phase1_use_baseline=true requires phase1_only=true (baseline is Phase-1 only)"
+        );
+        let phase1_only_effective = config.phase1_only || phase1_use_baseline;
+
         // All DB checks in a single connection borrow.
         let db_results: Vec<Result<Vec<SecurityFinding>>> = self.store.with_conn(|conn| {
-            let mut checks = vec![
-                // Phase 1 — deterministic
-                credential::scan_credential_leaks(conn, rev_id, since, scan_limit, scope),
-                capability_accretion::scan_capability_accretion(
-                    conn, rev_id, window_days, accretion_threshold, scope,
-                ),
-                approval_bypass::scan_approval_denials(
-                    conn, rev_id, window_days, denial_threshold, scope,
-                ),
-                approval_bypass::scan_exec_without_grant(conn, rev_id, since, scan_limit, scope),
-                sandbox_escape::scan_escape_attempt_records(conn, rev_id, since, scan_limit, scope),
-                sandbox_escape::scan_escape_patterns_in_events(conn, rev_id, since, scan_limit, scope),
-                // Phase 1 — supply-chain auditing
-                supply_chain::scan_layer_scope_violations(conn, rev_id, since, scan_limit, scope),
-                supply_chain::scan_layer_provenance_gaps(conn, rev_id, since, scan_limit, scope),
-            ];
+            // Phase-1 checks dispatch to either the canonical `super::checks`
+            // module or the frozen `super::baseline` snapshot. The baseline is
+            // a hand-frozen copy (issue #153) so a regression in `super::checks`
+            // surfaces as a `baseline_only` disagreement in the dual-sweep.
+            let mut checks = if phase1_use_baseline {
+                vec![
+                    baseline::credential::scan_credential_leaks(conn, rev_id, since, scan_limit, scope),
+                    baseline::capability_accretion::scan_capability_accretion(
+                        conn, rev_id, window_days, accretion_threshold, scope,
+                    ),
+                    baseline::approval_bypass::scan_approval_denials(
+                        conn, rev_id, window_days, denial_threshold, scope,
+                    ),
+                    baseline::approval_bypass::scan_exec_without_grant(
+                        conn, rev_id, since, scan_limit, scope,
+                    ),
+                    baseline::sandbox_escape::scan_escape_attempt_records(
+                        conn, rev_id, since, scan_limit, scope,
+                    ),
+                    baseline::sandbox_escape::scan_escape_patterns_in_events(
+                        conn, rev_id, since, scan_limit, scope,
+                    ),
+                    baseline::supply_chain::scan_layer_scope_violations(
+                        conn, rev_id, since, scan_limit, scope,
+                    ),
+                    baseline::supply_chain::scan_layer_provenance_gaps(
+                        conn, rev_id, since, scan_limit, scope,
+                    ),
+                ]
+            } else {
+                vec![
+                    // Phase 1 — deterministic
+                    credential::scan_credential_leaks(conn, rev_id, since, scan_limit, scope),
+                    capability_accretion::scan_capability_accretion(
+                        conn, rev_id, window_days, accretion_threshold, scope,
+                    ),
+                    approval_bypass::scan_approval_denials(
+                        conn, rev_id, window_days, denial_threshold, scope,
+                    ),
+                    approval_bypass::scan_exec_without_grant(conn, rev_id, since, scan_limit, scope),
+                    sandbox_escape::scan_escape_attempt_records(conn, rev_id, since, scan_limit, scope),
+                    sandbox_escape::scan_escape_patterns_in_events(conn, rev_id, since, scan_limit, scope),
+                    // Phase 1 — supply-chain auditing
+                    supply_chain::scan_layer_scope_violations(conn, rev_id, since, scan_limit, scope),
+                    supply_chain::scan_layer_provenance_gaps(conn, rev_id, since, scan_limit, scope),
+                ]
+            };
             // Phase 2a — cluster heuristics (always rolling window, not `since`).
             // Skipped when phase1_only is set (e.g. frozen baseline runner).
             // Cluster heuristics are not scoped — they are diagnostic across
-            // sessions and the gate only consumes Phase-1 findings.
-            if !config.phase1_only {
+            // sessions and the gate only consumes Phase-1 findings. The
+            // `phase1_only_effective` value above bakes in
+            // `phase1_use_baseline => phase1_only`.
+            if !phase1_only_effective {
                 checks.push(session_cluster::scan_failure_bursts(
                     conn, rev_id, cluster_window_minutes, failure_burst_threshold, scan_limit,
                 ));
@@ -260,13 +319,13 @@ impl SentinelRunner {
         take_check!(sandbox_escape, "escape_patterns");
         take_check!(supply_chain, "supply_chain_scope");
         take_check!(supply_chain, "supply_chain_provenance");
-        if !config.phase1_only {
+        if !phase1_only_effective {
             take_check!(behavioral_anomaly, "failure_burst");
             take_check!(behavioral_anomaly, "exec_repeat");
         }
 
         // Phase 2b — prompt injection (filesystem, optional). Skipped for baseline.
-        if !config.phase1_only {
+        if !phase1_only_effective {
             if let Some(ref agents_dir) = self.agents_dir {
                 match prompt_injection::scan_prompt_injection(agents_dir, rev_id, scan_limit as usize) {
                     Ok(v) => raw.prompt_injection = v,
@@ -324,6 +383,7 @@ impl SentinelRunner {
                 accretion_threshold: config.accretion_threshold,
                 denial_threshold: config.denial_threshold,
                 scope_agent_id: config.scope_agent_id.clone(),
+                phase1_use_baseline: config.phase1_use_baseline,
                 ..SweepConfig::default()
             }
         })?;
