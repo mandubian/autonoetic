@@ -71,6 +71,13 @@ pub struct SweepConfig {
     /// not change when `super::checks::*` is refined; the dual-sweep uses this
     /// to detect regressions in the canonical sentinel by comparing the two
     /// sets of findings (issue #153).
+    ///
+    /// **Implies `phase1_only`.** The baseline never runs Phase-2 (the cluster
+    /// heuristics and prompt-injection scan have no baseline copy). Setting
+    /// `phase1_use_baseline = true` with `phase1_only = false` is a config
+    /// error; `collect_findings` enforces the implication and skips Phase-2
+    /// regardless of `phase1_only`'s value, with a debug assertion to catch
+    /// the misconfiguration in tests.
     pub phase1_use_baseline: bool,
 }
 
@@ -218,8 +225,18 @@ impl SentinelRunner {
         let exec_repeat_threshold = config.exec_repeat_threshold;
         let scope = config.scope_agent_id.as_deref();
 
-        // All DB checks in a single connection borrow.
+        // `phase1_use_baseline => phase1_only`. The baseline contract is
+        // Phase-1 only — the cluster heuristics and prompt-injection scan
+        // have no baseline copy. A debug assertion catches the
+        // misconfiguration in tests; release builds silently enforce it.
         let phase1_use_baseline = config.phase1_use_baseline;
+        debug_assert!(
+            !(phase1_use_baseline && !config.phase1_only),
+            "phase1_use_baseline=true requires phase1_only=true (baseline is Phase-1 only)"
+        );
+        let phase1_only_effective = config.phase1_only || phase1_use_baseline;
+
+        // All DB checks in a single connection borrow.
         let db_results: Vec<Result<Vec<SecurityFinding>>> = self.store.with_conn(|conn| {
             // Phase-1 checks dispatch to either the canonical `super::checks`
             // module or the frozen `super::baseline` snapshot. The baseline is
@@ -272,8 +289,9 @@ impl SentinelRunner {
             // Skipped when phase1_only is set (e.g. frozen baseline runner).
             // Cluster heuristics are not scoped — they are diagnostic across
             // sessions and the gate only consumes Phase-1 findings. The
-            // baseline never runs Phase-2 (the baseline contract is Phase-1 only).
-            if !config.phase1_only {
+            // `phase1_only_effective` value above bakes in
+            // `phase1_use_baseline => phase1_only`.
+            if !phase1_only_effective {
                 checks.push(session_cluster::scan_failure_bursts(
                     conn, rev_id, cluster_window_minutes, failure_burst_threshold, scan_limit,
                 ));
@@ -301,13 +319,13 @@ impl SentinelRunner {
         take_check!(sandbox_escape, "escape_patterns");
         take_check!(supply_chain, "supply_chain_scope");
         take_check!(supply_chain, "supply_chain_provenance");
-        if !config.phase1_only {
+        if !phase1_only_effective {
             take_check!(behavioral_anomaly, "failure_burst");
             take_check!(behavioral_anomaly, "exec_repeat");
         }
 
         // Phase 2b — prompt injection (filesystem, optional). Skipped for baseline.
-        if !config.phase1_only {
+        if !phase1_only_effective {
             if let Some(ref agents_dir) = self.agents_dir {
                 match prompt_injection::scan_prompt_injection(agents_dir, rev_id, scan_limit as usize) {
                     Ok(v) => raw.prompt_injection = v,

@@ -5,7 +5,8 @@
 //! Frozen snapshot of `super::checks::approval_bypass` (issue #153).
 //! See `super::baseline::credential` for the full editing-rules rationale.
 //!
-//! Last frozen: PR landing #153.
+//! Last frozen at `BASELINE_VERSION = 1.0.0` (issue #153, initial freeze).
+//! See `super::BASELINE_VERSION` for the version pin and bump policy.
 
 #![allow(dead_code)]
 

@@ -21,8 +21,10 @@
 //!   change. PRs that touch both `checks/` and `baseline/` for the same
 //!   pattern defeat the purpose of having a baseline.
 //!
-//! Last frozen: PR landing #153. Pattern vocabulary mirrors
-//! `super::checks::credential` at the time this file was created.
+//! Last frozen at `BASELINE_VERSION = 1.0.0` (issue #153, initial freeze).
+//! Pattern vocabulary mirrors `super::checks::credential` at the time this
+//! file was created. See `super::BASELINE_VERSION` for the version pin and
+//! the bump policy.
 
 #![allow(dead_code)]
 

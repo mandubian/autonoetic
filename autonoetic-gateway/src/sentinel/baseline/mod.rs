@@ -39,8 +39,13 @@
 //!   2. Land as a *separate PR* from any concurrent change to
 //!      `super::checks`. PRs that touch both `checks/` and `baseline/` for
 //!      the same pattern defeat the disagreement-detection contract.
-//!   3. Document the rationale in the PR description and bump the
-//!      "Last frozen:" line in each touched baseline file.
+//!   3. Bump [`BASELINE_VERSION`] following the convention documented on
+//!      that constant.
+//!   4. Document the rationale in the PR description.
+//!
+//! Today these rules are enforced solely by code review. An automated CI
+//! guard rejecting concurrent edits without `[baseline-update]` is tracked
+//! as issue #165.
 //!
 //! ## Why duplicate the code instead of generating it?
 //!
@@ -49,6 +54,27 @@
 //! reflection) would propagate into the baseline. Hand-written, hand-frozen
 //! copies are the strongest separation we have without a separate crate or
 //! versioned binary, both of which would add far more workspace machinery.
+
+/// Version pin for the frozen baseline.
+///
+/// Bump on each `[baseline-update]` PR. The version is referenced from every
+/// baseline file's header and surfaced as the `BASELINE_VERSION` constant
+/// for tooling (CLI, docs, future CI guards) so the pin is unambiguous —
+/// PR numbers can collide across forks/renames, dates do not uniquely
+/// identify the snapshot, and commit SHAs are not known until merge time.
+///
+/// **Versioning convention:** semver-style `MAJOR.MINOR.PATCH`.
+///
+/// - `MAJOR` bumps when a check is added or removed (the *shape* of what
+///   the baseline detects changes).
+/// - `MINOR` bumps when a check's detection logic is updated (a regex
+///   tightened, a threshold adjusted) without changing what categories
+///   are detected.
+/// - `PATCH` bumps for purely mechanical changes (rename, doc tweak,
+///   refactor that does not alter SQL or regex literals).
+///
+/// Initial freeze for issue #153: `1.0.0`.
+pub const BASELINE_VERSION: &str = "1.0.0";
 
 pub mod approval_bypass;
 pub mod capability_accretion;

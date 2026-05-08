@@ -7,7 +7,8 @@
 //! summary: changes to detection logic go to `super::checks`, not here, so the
 //! dual-sweep can detect a regression in the canonical sentinel.
 //!
-//! Last frozen: PR landing #153.
+//! Last frozen at `BASELINE_VERSION = 1.0.0` (issue #153, initial freeze).
+//! See `super::BASELINE_VERSION` for the version pin and bump policy.
 
 #![allow(dead_code)]
 

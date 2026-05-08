@@ -1276,7 +1276,7 @@ fn list_security_findings_filtered_by_triage_state() {
 fn baseline_dispatch_runs_and_produces_findings() {
     use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
 
-    let (dir, store) = open_store();
+    let (dir, _store) = open_store();
     insert_credential_leak_event(&dir, "coder.default", "evt_baseline_dispatch");
 
     // Re-open so the runner sees the inserted row.
