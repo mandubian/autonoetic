@@ -630,6 +630,11 @@ fn resume_session_after_approval(
             | autonoetic_types::background::ScheduledAction::SandboxExec { .. }
             | autonoetic_types::background::ScheduledAction::SessionEscalate { .. }
             | autonoetic_types::background::ScheduledAction::SessionContinue { .. }
+            | autonoetic_types::background::ScheduledAction::CredentialRequest { .. }
+            | autonoetic_types::background::ScheduledAction::CredentialPrompt { .. }
+            | autonoetic_types::background::ScheduledAction::WebFetch { .. }
+            | autonoetic_types::background::ScheduledAction::WebCall { .. }
+            | autonoetic_types::background::ScheduledAction::WebSearch { .. }
     );
 
     if !is_supported_action {
@@ -729,6 +734,43 @@ fn resume_session_after_approval(
                 }
                 ApprovalStatus::Cancelled => format!(
                     "session_continue_cancelled:{}:cancelled",
+                    decision.request_id
+                ),
+            };
+            (decision.agent_id.clone(), msg)
+        }
+        autonoetic_types::background::ScheduledAction::CredentialRequest { .. }
+        | autonoetic_types::background::ScheduledAction::CredentialPrompt { .. } => {
+            let msg = match decision.status {
+                ApprovalStatus::Approved => format!(
+                    "approval_resumed:credential:{}:approved",
+                    decision.request_id
+                ),
+                ApprovalStatus::Rejected => format!(
+                    "approval_rejected:credential:{}:rejected",
+                    decision.request_id
+                ),
+                ApprovalStatus::Cancelled => format!(
+                    "approval_cancelled:credential:{}:cancelled",
+                    decision.request_id
+                ),
+            };
+            (decision.agent_id.clone(), msg)
+        }
+        autonoetic_types::background::ScheduledAction::WebFetch { .. }
+        | autonoetic_types::background::ScheduledAction::WebCall { .. }
+        | autonoetic_types::background::ScheduledAction::WebSearch { .. } => {
+            let msg = match decision.status {
+                ApprovalStatus::Approved => format!(
+                    "approval_resumed:web:{}:approved",
+                    decision.request_id
+                ),
+                ApprovalStatus::Rejected => format!(
+                    "approval_rejected:web:{}:rejected",
+                    decision.request_id
+                ),
+                ApprovalStatus::Cancelled => format!(
+                    "approval_cancelled:web:{}:cancelled",
                     decision.request_id
                 ),
             };
