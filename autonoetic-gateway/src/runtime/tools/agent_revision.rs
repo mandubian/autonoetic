@@ -2065,9 +2065,9 @@ impl NativeTool for AgentRevisionPromoteTool {
                         "message": format!(
                             "Agent '{}' is protected (issue #21). Promotion requires a passed eval run as evidence. \
                              Provide `required_eval_run_id` referencing a successful eval run for this revision.",
-                            args.agent_id
+                            &args.agent_id
                         ),
-                        "protected_agent": args.agent_id,
+                        "protected_agent": &args.agent_id,
                         "repair_hint": "Run an eval suite against this revision, then retry promotion with `required_eval_run_id` pointing to the passed run.",
                     })
                     .to_string());

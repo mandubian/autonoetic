@@ -85,40 +85,43 @@ autonoetic agent revision rollback agent-factory.default --to <revision-id>
 
 Rollback is the **preferred path** — it's atomic, reversible, and recorded in the causal chain.
 
-#### 3. If rollback is insufficient: direct edit + revision create
+#### 3. If rollback is insufficient: direct edit + bootstrap
 
 If the agent needs changes (not just a rollback), edit the SKILL.md directly:
 
 ```bash
 # 1. Edit the agent's SKILL.md directly
-vim agents/evolution/agent-factory.default/SKILL.md
+#    The path is relative to config.agents_dir (e.g. ./agents/agent-factory.default/SKILL.md)
+vim agents/agent-factory.default/SKILL.md
 
 # 2. Re-bootstrap the agent (creates a new revision from the edited files)
-autonoetic agent bootstrap --agent-id agent-factory.default
+autonoetic agent bootstrap
 
 # 3. The new revision is auto-promoted to active
 ```
 
-`agent bootstrap` computes the content digest, creates a revision record, signs it with the gateway identity key, and atomically promotes it — bypassing the eval-run requirement since it's a CLI-initiated operation.
+`agent bootstrap` scans all agent directories under `agents_dir`, computes content digests, creates revision records, signs them with the gateway identity key, and atomically promotes them — bypassing the eval-run requirement since it's a CLI-initiated operation.
 
-#### 4. If bootstrap is unavailable: manual revision creation
+#### 4. If bootstrap is unavailable: seed a known-good revision
 
-In extreme cases (broken `bootstrap` command, corrupted store):
+In extreme cases (broken `bootstrap` command, corrupted store), use `agent seed` to
+directly move the alias to a specific revision. This bypasses all gates including the
+protected-agent eval gate:
 
 ```bash
-# 1. Edit the SKILL.md
-vim agents/evolution/agent-factory.default/SKILL.md
+# 1. Find a known-good revision ID (from promotion history or git)
+autonoetic agent alias --agent-id agent-factory.default
 
-# 2. Create a revision from the agent directory
-autonoetic agent revision create \
-  --agent-id agent-factory.default \
-  --from-dir agents/evolution/agent-factory.default
+# 2. Seed the alias directly to that revision (bypasses all gates)
+autonoetic agent seed agent-factory.default <revision-id> --reason "manual recovery: agent-factory regression"
 
-# 3. Promote (CLI does not enforce the protected-agent gate)
-autonoetic agent revision promote <new-revision-id> --alias agent-factory.default
+# Or: create a fresh revision from an artifact, then seed
+autonoetic agent revision create agent-factory.default <artifact-id>
+autonoetic agent seed agent-factory.default <new-revision-id> --reason "manual recovery"
 ```
 
-The CLI `revision promote` command does **not** enforce the protected-agent eval gate — it's a direct operator action, equivalent to the manual alias pin.
+`agent seed` calls `store.atomic_promote()` directly — it is the operator-level escape hatch
+that bypasses the protected-agent eval gate, capability-delta gate, and sentinel gate.
 
 #### 5. Verify the fix
 

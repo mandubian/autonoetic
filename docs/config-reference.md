@@ -202,12 +202,14 @@ protected_agents:
 ```
 
 For manual recovery of a protected agent (e.g. when the eval suite is
-unavailable), use the CLI:
+unavailable), use the CLI escape hatch:
 
 ```bash
-# Direct alias pin bypasses the programmatic gate
+# Rollback to previous revision (bypasses eval gate)
 autonoetic agent revision rollback agent-factory.default
-autonoetic agent revision promote <rev-id> --alias agent-factory.default
+
+# Or: seed a specific revision directly (bypasses all gates)
+autonoetic agent seed agent-factory.default <revision-id> --reason "manual recovery"
 ```
 
 See `docs/protected-agents.md` for the full manual recovery procedure.

@@ -803,8 +803,9 @@ pub struct GatewayConfig {
     pub sentinel: SentinelConfig,
 
     /// Protected agents configuration (issue #21).
-    /// Agents listed here require an eval run + sentinel gate pass before
-    /// programmatic promotion is allowed.
+    /// Agents listed here require a passed eval run before programmatic
+    /// promotion is allowed. The sentinel gate (if enabled) still fires
+    /// independently for all promotions.
     #[serde(default)]
     pub protected_agents: ProtectedAgentsConfig,
 }
