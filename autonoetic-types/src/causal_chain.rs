@@ -314,3 +314,328 @@ pub struct PublishedSessionReportRecord {
     pub generated_at: String,
     pub report_version: i32,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests for `redact_for_viewer` on ExecutionTraceRecord and CausalEventRecord.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+    use crate::disclosure::ViewerClass;
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    /// Substrings that must never appear in any field of an `Agent`-class
+    /// redaction output. Used by property-style assertions.
+    const SECRET_TOKENS: &[&str] = &[
+        "Bearer eyJhbGc",
+        "sk-test-12345",
+        "sk-ant-secret",
+        "AKIAIOSFODNN",
+        "ghp_realtoken",
+        "-----BEGIN PRIVATE KEY-----",
+        "PASSWORD=hunter2",
+        "api_key=verysecret",
+    ];
+
+    /// A trace fixture stuffed with every secret-bearing string we care about.
+    fn trace_with_secrets() -> ExecutionTraceRecord {
+        ExecutionTraceRecord {
+            trace_id: "trc_001".into(),
+            event_id: Some("evt_001".into()),
+            agent_id: "coder.default".into(),
+            session_id: "sess_001".into(),
+            turn_id: Some("turn_001".into()),
+            timestamp: "2026-05-08T12:00:00Z".into(),
+            tool_name: "sandbox_exec".into(),
+            command: Some("curl -H 'Authorization: Bearer eyJhbGc.foo.bar' https://api".into()),
+            exit_code: Some(0),
+            stdout: Some("PASSWORD=hunter2 was set".into()),
+            stderr: Some("warning: -----BEGIN PRIVATE KEY----- detected".into()),
+            duration_ms: 42,
+            success: 1,
+            error_type: None,
+            error_summary: Some("benign error message".into()),
+            approval_required: Some(0),
+            approval_request_id: None,
+            arguments: Some(
+                r#"{"token":"sk-test-12345abcdefghij","host":"github.com"}"#.into(),
+            ),
+            result: Some(
+                r#"{"api_key":"verysecret","ok":true,"items":["a","b"]}"#.into(),
+            ),
+        }
+    }
+
+    /// A causal-event fixture stuffed with every secret-bearing string we care about.
+    fn event_with_secrets() -> CausalEventRecord {
+        CausalEventRecord {
+            event_id: "evt_001".into(),
+            agent_id: "coder.default".into(),
+            session_id: "sess_001".into(),
+            turn_id: Some("turn_001".into()),
+            event_seq: 7,
+            timestamp: "2026-05-08T12:00:00Z".into(),
+            category: "tool".into(),
+            action: "sandbox_exec".into(),
+            status: "SUCCESS".into(),
+            enforced_rules: vec!["R+++3".into()],
+            target: Some("api.github.com".into()),
+            payload: Some(
+                r#"{"authorization":"Bearer eyJhbGc.foo.bar","user_id":42}"#.into(),
+            ),
+            payload_ref: Some("artifact_handle_xyz".into()),
+            evidence_ref: Some("evidence_xyz".into()),
+            reason: Some("contains AKIAIOSFODNN1234567 in error".into()),
+        }
+    }
+
+    /// Stringify a record's redacted form into a single blob for property
+    /// assertions — any secret leaking into any field will show up here.
+    fn trace_blob_for(record: &ExecutionTraceRecord, viewer: ViewerClass) -> String {
+        let r = record.redact_for_viewer(viewer);
+        serde_json::to_string(&r).unwrap_or_default()
+    }
+
+    fn event_blob_for(record: &CausalEventRecord, viewer: ViewerClass) -> String {
+        let r = record.redact_for_viewer(viewer);
+        serde_json::to_string(&r).unwrap_or_default()
+    }
+
+    // ── ExecutionTraceRecord ─────────────────────────────────────────────
+
+    #[test]
+    fn trace_admin_viewer_round_trips() {
+        let original = trace_with_secrets();
+        let redacted = original.redact_for_viewer(ViewerClass::Admin);
+        // Every field must equal the original — Admin is identity.
+        assert_eq!(redacted.command, original.command);
+        assert_eq!(redacted.stdout, original.stdout);
+        assert_eq!(redacted.stderr, original.stderr);
+        assert_eq!(redacted.arguments, original.arguments);
+        assert_eq!(redacted.result, original.result);
+    }
+
+    #[test]
+    fn trace_agent_viewer_blanks_secret_bearing_fields() {
+        let r = trace_with_secrets().redact_for_viewer(ViewerClass::Agent);
+        assert_eq!(r.command.as_deref(), Some("***REDACTED***"));
+        assert_eq!(r.stdout, None);
+        assert_eq!(r.stderr, None);
+        assert_eq!(r.arguments, None);
+        assert_eq!(r.result, None);
+    }
+
+    #[test]
+    fn trace_agent_viewer_preserves_metadata() {
+        let original = trace_with_secrets();
+        let r = original.redact_for_viewer(ViewerClass::Agent);
+        // Structural / metadata fields are visible to the Agent class.
+        assert_eq!(r.trace_id, original.trace_id);
+        assert_eq!(r.agent_id, original.agent_id);
+        assert_eq!(r.session_id, original.session_id);
+        assert_eq!(r.tool_name, original.tool_name);
+        assert_eq!(r.exit_code, original.exit_code);
+        assert_eq!(r.success, original.success);
+        assert_eq!(r.duration_ms, original.duration_ms);
+        assert_eq!(r.error_summary, original.error_summary);
+    }
+
+    #[test]
+    fn trace_operator_viewer_redacts_arguments_and_result_json_secrets() {
+        let r = trace_with_secrets().redact_for_viewer(ViewerClass::Operator);
+        let args = r.arguments.expect("arguments preserved structurally");
+        let result = r.result.expect("result preserved structurally");
+        assert!(
+            !args.contains("sk-test-12345"),
+            "operator must not see openai-style key in arguments: {args}"
+        );
+        assert!(
+            args.contains("github.com"),
+            "operator must keep non-secret arg fields: {args}"
+        );
+        assert!(
+            !result.contains("verysecret"),
+            "operator must not see api_key value in result: {result}"
+        );
+        assert!(
+            result.contains("\"items\""),
+            "operator must keep non-secret result fields: {result}"
+        );
+    }
+
+    #[test]
+    fn trace_command_field_is_visible_to_operator() {
+        // The Operator class shows the command structure (only Agent class
+        // blanks it). This is intentional: operators triage commands;
+        // the redaction layer for command secrets is log_redaction at write time.
+        let original = trace_with_secrets();
+        let r = original.redact_for_viewer(ViewerClass::Operator);
+        assert_eq!(r.command, original.command);
+    }
+
+    #[test]
+    fn trace_agent_viewer_property_no_secrets_leak() {
+        let blob = trace_blob_for(&trace_with_secrets(), ViewerClass::Agent);
+        for token in SECRET_TOKENS {
+            assert!(
+                !blob.contains(token),
+                "Agent-class redacted trace must not contain '{token}' — full blob: {blob}"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_to_json_for_viewer_omits_command_for_agent() {
+        let v = trace_with_secrets().to_json_for_viewer(ViewerClass::Agent);
+        assert_eq!(v["command"].as_str(), Some("***REDACTED***"));
+        assert_eq!(v["stdout"].as_str(), None);
+        assert_eq!(v["stderr"].as_str(), None);
+    }
+
+    // ── CausalEventRecord ────────────────────────────────────────────────
+
+    #[test]
+    fn event_admin_viewer_round_trips() {
+        let original = event_with_secrets();
+        let redacted = original.redact_for_viewer(ViewerClass::Admin);
+        assert_eq!(redacted.payload, original.payload);
+        assert_eq!(redacted.payload_ref, original.payload_ref);
+        assert_eq!(redacted.evidence_ref, original.evidence_ref);
+        assert_eq!(redacted.reason, original.reason);
+    }
+
+    #[test]
+    fn event_agent_viewer_blanks_payload_and_refs() {
+        let r = event_with_secrets().redact_for_viewer(ViewerClass::Agent);
+        assert_eq!(r.payload, None);
+        assert_eq!(r.payload_ref, None);
+        assert_eq!(r.evidence_ref, None);
+        assert_eq!(r.reason, None);
+    }
+
+    #[test]
+    fn event_agent_viewer_preserves_attribution_and_action() {
+        let original = event_with_secrets();
+        let r = original.redact_for_viewer(ViewerClass::Agent);
+        // Attribution and action fields must remain so agents can correlate
+        // their own causal chain; redaction strips only the contents.
+        assert_eq!(r.event_id, original.event_id);
+        assert_eq!(r.agent_id, original.agent_id);
+        assert_eq!(r.session_id, original.session_id);
+        assert_eq!(r.turn_id, original.turn_id);
+        assert_eq!(r.event_seq, original.event_seq);
+        assert_eq!(r.timestamp, original.timestamp);
+        assert_eq!(r.category, original.category);
+        assert_eq!(r.action, original.action);
+        assert_eq!(r.status, original.status);
+        assert_eq!(r.target, original.target);
+        assert_eq!(r.enforced_rules, original.enforced_rules);
+    }
+
+    #[test]
+    fn event_operator_viewer_redacts_payload_keys_and_clears_payload_ref() {
+        // The fix in commit 4ea9df0 (#4): payload_ref must be cleared for
+        // non-Admin viewers because resolving it would expose the underlying
+        // artifact body. This test pins that contract.
+        let r = event_with_secrets().redact_for_viewer(ViewerClass::Operator);
+        let payload = r.payload.expect("payload preserved structurally for Operator");
+        assert!(
+            !payload.contains("Bearer eyJhbGc"),
+            "operator must not see authorization value: {payload}"
+        );
+        assert!(
+            payload.contains("user_id"),
+            "operator must keep non-secret payload keys: {payload}"
+        );
+        assert_eq!(
+            r.payload_ref, None,
+            "payload_ref must be cleared for Operator (issue #4 fix)"
+        );
+    }
+
+    #[test]
+    fn event_agent_viewer_property_no_secrets_leak() {
+        let blob = event_blob_for(&event_with_secrets(), ViewerClass::Agent);
+        for token in SECRET_TOKENS {
+            assert!(
+                !blob.contains(token),
+                "Agent-class redacted event must not contain '{token}' — full blob: {blob}"
+            );
+        }
+    }
+
+    // ── redact_json_string / redact_json_value internals ─────────────────
+
+    #[test]
+    fn redact_json_value_redacts_object_keys_named_like_secrets() {
+        let v = serde_json::json!({
+            "client_secret": "abc",
+            "access_token": "def",
+            "refresh_token": "ghi",
+            "ok": true,
+        });
+        let out = redact_json_value(&v);
+        assert_eq!(out["client_secret"], "***REDACTED***");
+        assert_eq!(out["access_token"], "***REDACTED***");
+        assert_eq!(out["refresh_token"], "***REDACTED***");
+        assert_eq!(out["ok"], true);
+    }
+
+    #[test]
+    fn redact_json_value_redacts_string_values_that_look_like_secrets() {
+        let v = serde_json::json!({
+            "header": "Bearer eyJhbGc.tail",
+            "key_blob": "-----BEGIN RSA PRIVATE KEY-----\nXXX\n-----END RSA PRIVATE KEY-----",
+            "openai_key": "sk-abc123def456ghi789",
+            "innocuous": "tokenizer config",
+        });
+        let out = redact_json_value(&v);
+        assert_eq!(out["header"], "***REDACTED***");
+        assert_eq!(out["key_blob"], "***REDACTED***");
+        assert_eq!(out["openai_key"], "***REDACTED***");
+        // Note: the current implementation over-redacts the substring "token"
+        // via the non-JSON fallback path; tracked in issue #156. This direct
+        // value-path is more precise — the literal "tokenizer config" does NOT
+        // start with sk-, contain bearer, or contain BEGIN, so it survives.
+        assert_eq!(out["innocuous"], "tokenizer config");
+    }
+
+    #[test]
+    fn is_sensitive_key_matches_documented_substrings() {
+        // Underscore-form keys: covered by the substring match.
+        for k in &[
+            "secret",
+            "TOKEN",
+            "user_password",
+            "api_key",
+            "Authorization",
+            "AWS_ACCESS_KEY_ID",
+            "access_token",
+            "refresh_token",
+            "client_secret",
+        ] {
+            assert!(is_sensitive_key(k), "expected sensitive: {k}");
+        }
+        for k in &["user_id", "agent_id", "session_id", "items", "ok"] {
+            assert!(!is_sensitive_key(k), "expected non-sensitive: {k}");
+        }
+    }
+
+    #[test]
+    fn is_sensitive_key_misses_hyphenated_api_key() {
+        // KNOWN GAP: `X-API-Key` (hyphenated) does NOT match — `is_sensitive_key`
+        // looks for `api_key` and `apikey`, neither of which is a substring of
+        // `x-api-key`. Hyphenated `*-Token` names do match (substring `token`)
+        // and hyphenated `*-Authorization`/`*-Password` would match too.
+        // This pin documents the specific gap that should be closed in issue #156.
+        assert!(
+            !is_sensitive_key("X-API-Key"),
+            "regression: X-API-Key is now matched — update both \
+             is_sensitive_key (add 'api-key' substring) and this pin together"
+        );
+        // Counter-cases that already work via existing substrings:
+        assert!(is_sensitive_key("X-Auth-Token"), "contains 'token'");
+        assert!(is_sensitive_key("X-Access-Token"), "contains 'token'");
+    }
+}
