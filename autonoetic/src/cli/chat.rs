@@ -3129,8 +3129,10 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             Ok(_decision) => {
                                                 app.pending_approval_ids
                                                     .retain(|id| id != &apr_id);
-                                                app.announced_store_approval_ids
-                                                    .remove(&apr_id);
+                                                // Keep apr_id in announced_store_approval_ids
+                                                // so the next merge_gateway_store_pending_approvals
+                                                // poll won't re-announce this card if the DB row
+                                                // is still transiently visible as "pending".
                                                 app.add_message(
                                                     MessageRole::System,
                                                     format!("Approved: {}", apr_id),

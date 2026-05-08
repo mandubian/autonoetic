@@ -1764,32 +1764,124 @@ impl GatewayExecutionService {
                         vec![]
                     };
 
-                    // Reconstruct conversation history and restore guard state.
-                    let mut history = crate::runtime::continuation::reconstruct_history(
-                        &cont,
-                        approved_result,
-                        remaining_results,
-                    );
+                    // Check if a remaining tool call also hit an approval gate.
+                    // process_tool_calls stops at the first approval-required
+                    // result, so if the last remaining result has
+                    // approval_required=true, we must save a new continuation
+                    // and suspend — otherwise the user sees a "duplicate"
+                    // approval that requires a second Ctrl+A.
+                    let nested_approval = remaining_results.last().and_then(|(id, _name, result_json)| {
+                        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                        if parsed.get("approval_required").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            let request_id = parsed.get("request_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_default();
+                            Some((id.clone(), request_id, result_json.clone()))
+                        } else {
+                            None
+                        }
+                    });
 
-                    let initial_msg = cont.history
-                        .iter()
-                        .find(|m| matches!(m.role, crate::llm::Role::User))
-                        .map(|m| m.content.clone())
-                        .unwrap_or_default();
+                    if let Some((nested_call_id, nested_request_id, nested_approval_response)) = nested_approval {
+                        // A remaining tool call also needs approval. Build a
+                        // chained continuation so the next approval resume
+                        // picks up where we left off.
+                        let results_before_gate = remaining_results[..remaining_results.len() - 1].to_vec();
+                        let calls_after_gate = cont.remaining_tool_calls[remaining_results.len()..].to_vec();
 
-                    runtime.guard = crate::runtime::guard::LoopGuard::restore(cont.loop_guard_state.clone());
-                    runtime.session_id = Some(cont.session_id.clone());
-                    runtime.session_started = true;
-                    runtime.turn_counter = cont.turn_id
-                        .trim_start_matches("turn-")
-                        .parse()
-                        .unwrap_or(0);
+                        let nested_tc = cont.remaining_tool_calls
+                            .iter()
+                            .find(|tc| tc.id == nested_call_id)
+                            .expect("nested approval call id must match a remaining tool call");
 
-                    // Delete the continuation file — we are now live.
-                    let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
+                        // Merge all prior results into completed_tool_results:
+                        // original completed + the now-approved result + remaining results before this gate
+                        let mut merged_completed = cont.completed_tool_results.clone();
+                        merged_completed.push((
+                            cont.pending_tool_call.call_id.clone(),
+                            cont.pending_tool_call.tool_name.clone(),
+                            approved_result,
+                        ));
+                        merged_completed.extend(results_before_gate);
 
-                    let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
-                    (outcome, initial_msg, None)
+                        let nested_action = self.gateway_store.as_ref().and_then(|store| {
+                            store.get_approval(&nested_request_id).ok().flatten().map(|a| a.action)
+                        });
+
+                        let nested_continuation = crate::runtime::continuation::TurnContinuation {
+                            history: cont.history.clone(),
+                            assistant_message: cont.assistant_message.clone(),
+                            completed_tool_results: merged_completed,
+                            pending_tool_call: crate::runtime::continuation::PendingApprovalToolCall {
+                                call_id: nested_call_id,
+                                tool_name: nested_tc.name.clone(),
+                                arguments: nested_tc.arguments.clone(),
+                                approval_response: nested_approval_response,
+                            },
+                            remaining_tool_calls: calls_after_gate,
+                            approval_request_id: nested_request_id.clone(),
+                            pending_action: nested_action,
+                            workflow_id: cont.workflow_id.clone(),
+                            task_id: cont.task_id.clone(),
+                            session_id: cont.session_id.clone(),
+                            turn_id: cont.turn_id.clone(),
+                            suspended_at: chrono::Utc::now().to_rfc3339(),
+                            loop_guard_state: cont.loop_guard_state.clone(),
+                            session_state: runtime.session_state,
+                        };
+
+                        crate::runtime::continuation::save_continuation(
+                            &self.config,
+                            t_id,
+                            &nested_continuation,
+                        )?;
+
+                        tracing::info!(
+                            target: "continuation",
+                            task_id = %t_id,
+                            original_request_id = %cont.approval_request_id,
+                            nested_request_id = %nested_request_id,
+                            "Chained continuation: remaining tool call also requires approval"
+                        );
+
+                        let initial_msg = cont.history
+                            .iter()
+                            .find(|m| matches!(m.role, crate::llm::Role::User))
+                            .map(|m| m.content.clone())
+                            .unwrap_or_default();
+                        (TurnOutcome::Suspended {
+                            approval_request_id: nested_request_id,
+                            continuation: Some(Box::new(nested_continuation)),
+                        }, initial_msg, None)
+                    } else {
+                        // No nested approval — normal resume path.
+                        let mut history = crate::runtime::continuation::reconstruct_history(
+                            &cont,
+                            approved_result,
+                            remaining_results,
+                        );
+
+                        let initial_msg = cont.history
+                            .iter()
+                            .find(|m| matches!(m.role, crate::llm::Role::User))
+                            .map(|m| m.content.clone())
+                            .unwrap_or_default();
+
+                        runtime.guard = crate::runtime::guard::LoopGuard::restore(cont.loop_guard_state.clone());
+                        runtime.session_id = Some(cont.session_id.clone());
+                        runtime.session_started = true;
+                        runtime.turn_counter = cont.turn_id
+                            .trim_start_matches("turn-")
+                            .parse()
+                            .unwrap_or(0);
+
+                        // Delete the continuation file — we are now live.
+                        let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
+
+                        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
+                        (outcome, initial_msg, None)
+                    }
                 } else {
                     // No continuation on disk — optionally resume from latest checkpoint.
                     let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint(
