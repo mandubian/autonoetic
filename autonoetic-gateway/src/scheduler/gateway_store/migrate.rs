@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 28;
+const SCHEMA_VERSION_LATEST: i64 = 29;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -512,6 +512,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_security_findings_v26(conn)?;
     apply_sentinel_disagreements_v27(conn)?;
     apply_eval_suite_ownership_v28(conn)?;
+    apply_attack_patterns_v29(conn)?;
 
     Ok(())
 }
@@ -1641,6 +1642,48 @@ fn apply_eval_suite_ownership_v28(conn: &mut Connection) -> Result<()> {
         params![
             28_i64,
             "eval_suite_ownership",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_attack_patterns_v29(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 29 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS proposed_attack_patterns (
+            pattern_id              TEXT PRIMARY KEY,
+            proposed_by_agent_id    TEXT NOT NULL,
+            category                TEXT NOT NULL,
+            description             TEXT NOT NULL,
+            how_sentinel_should_catch TEXT NOT NULL,
+            evidence_anchors_json   TEXT NOT NULL,
+            synthetic_test_case_json TEXT NOT NULL,
+            status                  TEXT NOT NULL DEFAULT 'pending',
+            accepted_check_type     TEXT,
+            operator_notes          TEXT,
+            created_at              TEXT NOT NULL,
+            reviewed_at             TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_attack_patterns_status
+            ON proposed_attack_patterns(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_attack_patterns_proposer
+            ON proposed_attack_patterns(proposed_by_agent_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            29_i64,
+            "proposed_attack_patterns",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

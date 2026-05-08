@@ -187,6 +187,69 @@ impl std::fmt::Display for TriageState {
     }
 }
 
+// ── Red-team attack-pattern proposal ─────────────────────────────────────────
+
+/// Lifecycle of an operator-reviewed attack-pattern proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttackPatternStatus {
+    /// Awaiting operator review.
+    Pending,
+    /// Operator accepted; the pattern will become a sentinel check.
+    Accepted,
+    /// Operator rejected; the pattern will not be added.
+    Rejected,
+}
+
+impl std::fmt::Display for AttackPatternStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            AttackPatternStatus::Pending => "pending",
+            AttackPatternStatus::Accepted => "accepted",
+            AttackPatternStatus::Rejected => "rejected",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+/// A proposed attack pattern submitted by the red-team agent.
+///
+/// Each proposal is operator-gated: it waits in `Pending` state until an
+/// operator explicitly accepts or rejects it. Accepted patterns are tagged
+/// with the target check layer (`phase1` for deterministic or `phase2` for
+/// LLM-judgment) and their synthetic test case is expected to become a
+/// permanent regression test in the sentinel eval suite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposedAttackPattern {
+    /// Unique proposal ID (e.g., `pattern-abc123`).
+    pub pattern_id: String,
+    /// Agent ID of the red-team agent that submitted this proposal.
+    pub proposed_by_agent_id: String,
+    /// Category that maps to an existing sentinel check type.
+    /// One of: credential_leak, capability_accretion, sandbox_escape_attempt,
+    /// approval_bypass, prompt_injection_surface, supply_chain_scope_violation,
+    /// supply_chain_provenance_gap, behavioral_anomaly.
+    pub category: String,
+    /// Human-readable description of the attack pattern.
+    pub description: String,
+    /// Step-by-step explanation of how the sentinel should detect this pattern.
+    pub how_sentinel_should_catch: String,
+    /// JSON-serialized evidence anchors the sentinel should look for.
+    pub evidence_anchors_json: String,
+    /// JSON-serialized synthetic test case the sentinel can be run against.
+    pub synthetic_test_case_json: String,
+    /// Current review status.
+    pub status: AttackPatternStatus,
+    /// Sentinel check layer this maps to once accepted: "phase1" or "phase2".
+    pub accepted_check_type: Option<String>,
+    /// Operator notes recorded at review time.
+    pub operator_notes: Option<String>,
+    /// RFC3339 timestamp when the proposal was submitted.
+    pub created_at: String,
+    /// RFC3339 timestamp when the proposal was reviewed (accepted or rejected).
+    pub reviewed_at: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

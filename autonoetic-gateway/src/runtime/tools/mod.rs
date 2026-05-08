@@ -508,6 +508,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::BudgetNoPriceAvailableAllow => {
             "budget.no_price_available.allow".to_string()
         }
+        Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
     }
 }
 
@@ -865,6 +866,7 @@ pub mod observability;
 pub mod promotion;
 pub mod sandbox;
 pub mod scheduler;
+pub mod security_redteam;
 pub mod session;
 pub mod skill;
 pub mod user_interaction;
@@ -880,6 +882,9 @@ pub use crate::runtime::tools::agent_revision::{
 pub use crate::runtime::tools::evaluation::{
     validate_suite_spec, EvalCompareTool, EvalReportTool, EvalRunTool, EvalSuiteCaseSpec,
     EvalSuitePublishTool, EvalSuiteSpec, EvalSuiteUpdateTool,
+};
+pub use crate::runtime::tools::security_redteam::{
+    AttackPatternListTool, AttackPatternProposeTool,
 };
 
 pub fn default_registry() -> NativeToolRegistry {
@@ -908,6 +913,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::skill::register_tools(&mut registry);
     crate::runtime::tools::admin_proposal::register_tools(&mut registry);
     crate::runtime::tools::constitution::register_tools(&mut registry);
+    crate::runtime::tools::security_redteam::register_tools(&mut registry);
     registry
 }
 

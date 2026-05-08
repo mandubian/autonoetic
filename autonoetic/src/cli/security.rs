@@ -1,11 +1,14 @@
 //! Security sentinel CLI commands.
 //!
-//! `autonoetic security status`   — snapshot of finding counts and sentinel health.
-//! `autonoetic security findings` — list findings with filters.
-//! `autonoetic security triage`   — mark a finding or bulk-mark a class of findings.
+//! `autonoetic security status`         — snapshot of finding counts and sentinel health.
+//! `autonoetic security findings`       — list findings with filters.
+//! `autonoetic security triage`         — mark a finding or bulk-mark a class of findings.
+//! `autonoetic security patterns`       — list red-team attack-pattern proposals.
+//! `autonoetic security pattern-accept` — operator accepts a proposed pattern.
+//! `autonoetic security pattern-reject` — operator rejects a proposed pattern.
 
 use anyhow::Result;
-use autonoetic_types::security::TriageState;
+use autonoetic_types::security::{AttackPatternStatus, TriageState};
 use std::path::Path;
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -243,4 +246,106 @@ fn truncate(s: &str, max: usize) -> &str {
     } else {
         &s[..max]
     }
+}
+
+// ── attack-pattern proposals ───────────────────────────────────────────────────
+
+pub fn handle_security_patterns(
+    config_path: &Path,
+    status: Option<&str>,
+    limit: u32,
+    json: bool,
+) -> Result<()> {
+    let store = open_store(config_path)?;
+    let patterns = store.list_attack_patterns(status, limit)?;
+
+    if json {
+        let out: Vec<_> = patterns
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "pattern_id": p.pattern_id,
+                    "category": p.category,
+                    "status": p.status.to_string(),
+                    "proposed_by_agent_id": p.proposed_by_agent_id,
+                    "description": p.description,
+                    "accepted_check_type": p.accepted_check_type,
+                    "operator_notes": p.operator_notes,
+                    "created_at": p.created_at,
+                    "reviewed_at": p.reviewed_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if patterns.is_empty() {
+        println!("No attack pattern proposals match the given filters.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<22} {:<30} {:<10} {:<14} CREATED AT",
+        "PATTERN ID", "CATEGORY", "STATUS", "PROPOSER"
+    );
+    println!("{}", "─".repeat(100));
+    for p in &patterns {
+        println!(
+            "{:<22} {:<30} {:<10} {:<14} {}",
+            truncate(&p.pattern_id, 22),
+            truncate(&p.category, 30),
+            p.status.to_string(),
+            truncate(&p.proposed_by_agent_id, 14),
+            p.created_at,
+        );
+    }
+    println!("\n{} proposal(s) shown.", patterns.len());
+    Ok(())
+}
+
+pub fn handle_security_pattern_accept(
+    config_path: &Path,
+    pattern_id: &str,
+    check_type: &str,
+    notes: Option<&str>,
+) -> Result<()> {
+    if check_type != "phase1" && check_type != "phase2" {
+        anyhow::bail!("--type must be 'phase1' (deterministic) or 'phase2' (llm-judgment)");
+    }
+    let store = open_store(config_path)?;
+    store.review_attack_pattern(
+        pattern_id,
+        AttackPatternStatus::Accepted,
+        Some(check_type),
+        notes,
+    )?;
+    println!(
+        "Pattern {} → accepted ({}){}",
+        pattern_id,
+        check_type,
+        notes.map(|n| format!(" — {}", n)).unwrap_or_default()
+    );
+    println!("Next step: implement the sentinel check and add the synthetic test case to the sentinel eval suite.");
+    Ok(())
+}
+
+pub fn handle_security_pattern_reject(
+    config_path: &Path,
+    pattern_id: &str,
+    notes: Option<&str>,
+) -> Result<()> {
+    let store = open_store(config_path)?;
+    store.review_attack_pattern(
+        pattern_id,
+        AttackPatternStatus::Rejected,
+        None,
+        notes,
+    )?;
+    println!(
+        "Pattern {} → rejected{}",
+        pattern_id,
+        notes.map(|n| format!(" — {}", n)).unwrap_or_default()
+    );
+    Ok(())
 }
