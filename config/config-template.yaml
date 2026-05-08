@@ -185,15 +185,17 @@ evidence_mode: full
 #   # (sets since_rfc3339 = now-25h). UTC.
 #   incremental_sweep_schedule: "0 */6 * * *"
 #   # When true, agent_revision_promote runs an in-memory Phase-1 sentinel
-#   # scan first. Any `critical` finding the scan produces blocks promotion.
-#   # Fail-closed on scan errors and on timeout.
+#   # scan first, SCOPED TO THE AGENT BEING PROMOTED. Each Phase-1 check
+#   # filters its query by agent_id so a critical finding for agent A does
+#   # not block promotion of agent B (issue #155). Any critical finding for
+#   # the scoped agent blocks promotion. Fail-closed on scan errors and timeout.
 #   #
 #   # IMPORTANT: the gate does NOT consult or persist to security_findings —
 #   # it re-evaluates the live event corpus on every promotion attempt.
 #   # Triaging existing rows in security_findings will NOT unblock the gate.
-#   # To unblock: resolve the signal in the underlying data, wait for windowed
-#   # checks to age past their cutoff, raise per-check thresholds, or disable
-#   # this gate.
+#   # To unblock: resolve the signal in the underlying data for this agent,
+#   # wait for windowed checks to age past their cutoff, raise per-check
+#   # thresholds, or disable this gate.
 #   promotion_gate_enabled: true
 #   # Max seconds the gate waits for the in-memory sweep before fail-closing.
 #   promotion_gate_timeout_secs: 30

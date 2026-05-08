@@ -1,18 +1,32 @@
 //! Pre-promotion sentinel gate.
 //!
 //! Before `atomic_promote` is called the gateway runs a Phase-1-only sentinel
-//! sweep of the **full store** (not restricted to the promoting agent — any
-//! critical finding in the system blocks promotion, providing a conservative
-//! fail-closed posture). Per-agent scoping is planned for a future phase.
+//! sweep **scoped to the agent being promoted** — every Phase-1 check filters
+//! its query by `agent_id = <agent being promoted>`. A critical finding from
+//! agent A no longer blocks promotion of agent B (issue #155).
 //!
-//! If any `critical` findings exist the promotion is blocked. Scan errors also
-//! block promotion (fail-closed). The sweep is time-boxed: if it does not
-//! complete within `timeout_secs` the gate returns `Err` and the promotion is
-//! also blocked.
+//! If any `critical` findings exist for the scoped agent the promotion is
+//! blocked. Scan errors also block promotion (fail-closed). The sweep is
+//! time-boxed: if it does not complete within `timeout_secs` the gate
+//! returns `Err` and the promotion is also blocked.
 //!
 //! **No findings are persisted by the gate.** Persistence is the job of the
 //! scheduled sweeps so that promotion attempts don't bloat `security_findings`
 //! with duplicate rows. The gate is a read-evaluate-only check.
+//!
+//! ### Filter semantics
+//!
+//! Each Phase-1 check applies the scope to the agent attribution column most
+//! relevant to its finding type:
+//!
+//! - `causal_events.agent_id` for credential-leak and sandbox-escape pattern checks.
+//! - `promotion_history.agent_id` for capability-accretion checks.
+//! - `approvals.agent_id` for approval-bypass and supply-chain checks.
+//! - `sandbox_escape_attempts.agent_id` for the recorded-attempt drain.
+//!
+//! Layer-mount findings filter on the *mounting* agent (`approvals.agent_id`),
+//! not the layer's originating build agent — findings are remediated by
+//! whoever approved the mount.
 
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
@@ -35,29 +49,37 @@ pub enum GateOutcome {
     },
 }
 
-/// Run a pre-promotion Phase-1 sentinel sweep against the full store.
+/// Run a pre-promotion Phase-1 sentinel sweep scoped to the agent being promoted.
 ///
-/// Returns `Ok(GateOutcome::Passed)` when no critical findings exist and no
-/// scan errors occurred within `timeout_secs`. Returns `Ok(GateOutcome::Blocked)`
-/// if critical findings were detected. Returns `Err` on timeout, scan errors, or
-/// sweep panic — all are fail-closed.
+/// Every Phase-1 check filters its query by `agent_id = scope_agent_id`, so a
+/// critical finding from a different agent does not block this promotion.
+///
+/// Returns `Ok(GateOutcome::Passed)` when no critical findings exist for the
+/// scoped agent and no scan errors occurred within `timeout_secs`. Returns
+/// `Ok(GateOutcome::Blocked)` if critical findings were detected. Returns
+/// `Err` on timeout, scan errors, or sweep panic — all fail-closed.
 pub fn check_pre_promotion(
     store: Arc<GatewayStore>,
     sentinel_revision_id: &str,
+    scope_agent_id: &str,
     timeout_secs: u64,
 ) -> Result<GateOutcome> {
     let (tx, rx) = std::sync::mpsc::channel::<Result<GateOutcome>>();
     let store_clone = Arc::clone(&store);
     let rev_id = sentinel_revision_id.to_string();
+    let scope = scope_agent_id.to_string();
 
     std::thread::spawn(move || {
         let runner = SentinelRunner::new(store_clone);
+        let scope_for_msg = scope.clone();
         let outcome = runner
             .scan_phase1_critical(&SweepConfig {
                 sentinel_revision_id: rev_id,
-                // Scan the full history — window_days controls capability-accretion
-                // and approval-denial lookback (90 days).
+                // Scan the full history for the scoped agent — window_days
+                // controls capability-accretion and approval-denial lookback
+                // (90 days).
                 window_days: 90,
+                scope_agent_id: Some(scope),
                 ..SweepConfig::default()
             })
             .and_then(|(critical_count, scan_errors)| {
@@ -73,8 +95,8 @@ pub fn check_pre_promotion(
                 } else {
                     Ok(GateOutcome::Blocked {
                         reason: format!(
-                            "{} critical Phase-1 finding(s) in the store",
-                            critical_count
+                            "{} critical Phase-1 finding(s) for agent '{}'",
+                            critical_count, scope_for_msg
                         ),
                         critical_count,
                     })

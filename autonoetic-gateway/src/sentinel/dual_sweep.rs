@@ -91,6 +91,7 @@ impl DualSweepRunner {
             cluster_window_minutes: baseline_config.cluster_window_minutes,
             failure_burst_threshold: baseline_config.failure_burst_threshold,
             exec_repeat_threshold: baseline_config.exec_repeat_threshold,
+            scope_agent_id: baseline_config.scope_agent_id.clone(),
         };
 
         // 1. Collect baseline findings (Phase 1 only, no prompt-injection scan).

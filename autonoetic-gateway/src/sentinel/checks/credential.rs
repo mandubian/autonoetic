@@ -65,11 +65,15 @@ struct EventRow {
 ///
 /// `since_rfc3339` allows incremental sweeps — pass an RFC-3339 timestamp to
 /// scan only events after that point. Pass `None` for a full history sweep.
+/// `scope_agent_id` filters to events attributed to a specific agent (used
+/// by the pre-promotion gate so a leak in agent A's history does not block
+/// promotion of agent B). `None` = no filter.
 pub fn scan_credential_leaks(
     conn: &Connection,
     sentinel_revision_id: &str,
     since_rfc3339: Option<&str>,
     limit: u32,
+    scope_agent_id: Option<&str>,
 ) -> Result<Vec<SecurityFinding>> {
     let since = since_rfc3339.unwrap_or("1970-01-01T00:00:00Z");
     let lim = limit as i64;
@@ -79,12 +83,13 @@ pub fn scan_credential_leaks(
          FROM causal_events
          WHERE payload IS NOT NULL
            AND timestamp > ?1
+           AND (?3 IS NULL OR agent_id = ?3)
          ORDER BY timestamp ASC
          LIMIT ?2",
     )?;
 
     let rows = stmt
-        .query_map(rusqlite::params![since, lim], |row| {
+        .query_map(rusqlite::params![since, lim, scope_agent_id], |row| {
             Ok(EventRow {
                 event_id: row.get(0)?,
                 agent_id: row.get(1)?,

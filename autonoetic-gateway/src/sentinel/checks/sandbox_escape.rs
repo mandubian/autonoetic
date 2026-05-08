@@ -44,11 +44,14 @@ static MOUNT_BIND_ROOT_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Drain new rows from `sandbox_escape_attempts` since `since_rfc3339`.
 /// Each row becomes a `critical` `SandboxEscapeAttempt` finding.
+///
+/// `scope_agent_id` filters to a single agent (used by the pre-promotion gate).
 pub fn scan_escape_attempt_records(
     conn: &Connection,
     sentinel_revision_id: &str,
     since_rfc3339: Option<&str>,
     limit: u32,
+    scope_agent_id: Option<&str>,
 ) -> Result<Vec<SecurityFinding>> {
     let since = since_rfc3339.unwrap_or("1970-01-01T00:00:00Z");
     let lim = limit as i64;
@@ -57,6 +60,7 @@ pub fn scan_escape_attempt_records(
         "SELECT id, session_id, root_session_id, agent_id, indicator, detail, detected_at
          FROM sandbox_escape_attempts
          WHERE detected_at > ?1
+           AND (?3 IS NULL OR agent_id = ?3)
          ORDER BY detected_at ASC
          LIMIT ?2",
     )?;
@@ -70,7 +74,7 @@ pub fn scan_escape_attempt_records(
     }
 
     let rows = stmt
-        .query_map(rusqlite::params![since, lim], |row| {
+        .query_map(rusqlite::params![since, lim, scope_agent_id], |row| {
             Ok(EscapeRow {
                 id: row.get(0)?,
                 session_id: row.get(1)?,
@@ -110,11 +114,14 @@ pub fn scan_escape_attempt_records(
 
 /// Scan recent causal-event payloads for known-bad sandbox-escape command
 /// patterns that may have slipped through runtime detection.
+///
+/// `scope_agent_id` filters to a single agent (used by the pre-promotion gate).
 pub fn scan_escape_patterns_in_events(
     conn: &Connection,
     sentinel_revision_id: &str,
     since_rfc3339: Option<&str>,
     limit: u32,
+    scope_agent_id: Option<&str>,
 ) -> Result<Vec<SecurityFinding>> {
     let since = since_rfc3339.unwrap_or("1970-01-01T00:00:00Z");
     let lim = limit as i64;
@@ -124,6 +131,7 @@ pub fn scan_escape_patterns_in_events(
          FROM causal_events
          WHERE payload IS NOT NULL
            AND timestamp > ?1
+           AND (?3 IS NULL OR agent_id = ?3)
          ORDER BY timestamp ASC
          LIMIT ?2",
     )?;
@@ -136,7 +144,7 @@ pub fn scan_escape_patterns_in_events(
     }
 
     let rows = stmt
-        .query_map(rusqlite::params![since, lim], |row| {
+        .query_map(rusqlite::params![since, lim, scope_agent_id], |row| {
             Ok(EventRow {
                 event_id: row.get(0)?,
                 agent_id: row.get(1)?,

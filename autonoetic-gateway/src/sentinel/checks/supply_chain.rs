@@ -71,11 +71,18 @@ fn artifact_id_from_source(source: &str) -> Option<String> {
 /// Severity:
 /// - `critical` when `source = "runtime.lock"` (scope embedded in agent definition)
 /// - `warning` for artifact layers (scope was explicitly approved for a single mount)
+///
+/// `scope_agent_id` filters to a single mounting agent — used by the pre-promotion
+/// gate so a layer-scope finding from agent A does not block promotion of agent B.
+/// The filter keys on the *mounting* agent (`approvals.agent_id`), not the layer's
+/// originating agent, since findings are attributed to and remediated by whoever
+/// approved the mount.
 pub fn scan_layer_scope_violations(
     conn: &Connection,
     sentinel_revision_id: &str,
     since: Option<&str>,
     scan_limit: u32,
+    scope_agent_id: Option<&str>,
 ) -> Result<Vec<SecurityFinding>> {
     let mut stmt = conn.prepare(
         "SELECT request_id, agent_id, session_id, root_session_id, action_payload, decided_at
@@ -83,12 +90,13 @@ pub fn scan_layer_scope_violations(
          WHERE action_type = 'layer_mount'
            AND status = 'approved'
            AND (?1 IS NULL OR decided_at >= ?1)
+           AND (?3 IS NULL OR agent_id = ?3)
          ORDER BY decided_at DESC, request_id
          LIMIT ?2",
     )?;
 
     let rows: Vec<(String, String, String, Option<String>, String, Option<String>)> = stmt
-        .query_map(params![since, scan_limit as i64], |row| {
+        .query_map(params![since, scan_limit as i64, scope_agent_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -194,10 +202,14 @@ pub fn scan_layer_provenance_gaps(
     sentinel_revision_id: &str,
     since: Option<&str>,
     scan_limit: u32,
+    scope_agent_id: Option<&str>,
 ) -> Result<Vec<SecurityFinding>> {
     // Collect distinct (layer_id, digest, request_id, agent_id, session_id) from
     // approved layer_mount approvals, then filter to those with no capture trace
     // in execution_traces.result JSON (captured_layers[*].layer_id).
+    //
+    // `scope_agent_id` filters on the *mounting* agent so a provenance gap
+    // for a layer mounted by agent A does not block promotion of agent B.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT
              json_extract(l.value, '$.layer_id')  AS layer_id,
@@ -208,6 +220,7 @@ pub fn scan_layer_provenance_gaps(
          WHERE a.action_type = 'layer_mount'
            AND a.status = 'approved'
            AND (?1 IS NULL OR a.decided_at >= ?1)
+           AND (?3 IS NULL OR a.agent_id = ?3)
            AND json_extract(l.value, '$.layer_id') IS NOT NULL
            AND NOT EXISTS (
                SELECT 1 FROM execution_traces et
@@ -220,17 +233,20 @@ pub fn scan_layer_provenance_gaps(
     )?;
 
     let rows: Vec<(String, String, String, String, String, String, Option<String>)> = stmt
-        .query_map(params![since, scan_limit as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        })?
+        .query_map(
+            params![since, scan_limit as i64, scope_agent_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut findings = Vec::new();
@@ -372,7 +388,7 @@ mod tests {
             &conn, "apr-001", "coder.default", "approved",
             r#"[{"layer_id":"layer_abc","digest":"sha256:aabbcc","name":"python-deps","mount_path":"/deps","source":"artifact:art_001","build_time_approved_hosts":["pypi.org"],"unapproved_delta":["pypi.org"]}]"#,
         );
-        let findings = scan_layer_scope_violations(&conn, "rev-001", None, 100).unwrap();
+        let findings = scan_layer_scope_violations(&conn, "rev-001", None, 100, None).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, FindingSeverity::Warning);
         assert_eq!(findings[0].finding_type, FindingType::SupplyChainScopeViolation);
@@ -389,7 +405,7 @@ mod tests {
             &conn, "apr-002", "coder.default", "approved",
             r#"[{"layer_id":"layer_def","digest":"sha256:ddeeff","name":"locked-deps","mount_path":"/deps","source":"runtime.lock","build_time_approved_hosts":["private.registry.internal"],"unapproved_delta":["private.registry.internal"]}]"#,
         );
-        let findings = scan_layer_scope_violations(&conn, "rev-001", None, 100).unwrap();
+        let findings = scan_layer_scope_violations(&conn, "rev-001", None, 100, None).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, FindingSeverity::Critical);
         // No ArtifactId anchor for runtime.lock source.
@@ -403,7 +419,7 @@ mod tests {
             &conn, "apr-003", "coder.default", "approved",
             r#"[{"layer_id":"layer_clean","digest":"sha256:112233","name":"cached-deps","mount_path":"/deps","source":"artifact:art_002","build_time_approved_hosts":["pypi.org"],"unapproved_delta":[]}]"#,
         );
-        let findings = scan_layer_scope_violations(&conn, "rev-001", None, 100).unwrap();
+        let findings = scan_layer_scope_violations(&conn, "rev-001", None, 100, None).unwrap();
         assert!(findings.is_empty(), "empty delta must not produce a scope violation finding");
     }
 
@@ -414,7 +430,7 @@ mod tests {
             &conn, "apr-004", "coder.default", "pending",
             r#"[{"layer_id":"layer_pend","digest":"sha256:445566","name":"py","mount_path":"/deps","source":"artifact:x","build_time_approved_hosts":["pypi.org"],"unapproved_delta":["pypi.org"]}]"#,
         );
-        let findings = scan_layer_scope_violations(&conn, "rev-001", None, 100).unwrap();
+        let findings = scan_layer_scope_violations(&conn, "rev-001", None, 100, None).unwrap();
         assert!(findings.is_empty(), "pending approval must not fire");
     }
 
@@ -425,7 +441,7 @@ mod tests {
             &conn, "apr-005", "coder.default", "approved",
             r#"[{"layer_id":"layer_gap","digest":"sha256:778899","name":"unknown-origin","mount_path":"/deps","source":"artifact:art_003","build_time_approved_hosts":[],"unapproved_delta":[]}]"#,
         );
-        let findings = scan_layer_provenance_gaps(&conn, "rev-001", None, 100).unwrap();
+        let findings = scan_layer_provenance_gaps(&conn, "rev-001", None, 100, None).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].finding_type, FindingType::SupplyChainProvenanceGap);
         assert!(findings[0].evidence_anchors.iter().any(|a| matches!(a, EvidenceAnchor::ApprovalRecord { .. })));
@@ -440,7 +456,7 @@ mod tests {
         );
         // Capture trace in execution_traces.result JSON.
         insert_capture_trace(&conn, "trace_001", "layer_known");
-        let findings = scan_layer_provenance_gaps(&conn, "rev-001", None, 100).unwrap();
+        let findings = scan_layer_provenance_gaps(&conn, "rev-001", None, 100, None).unwrap();
         assert!(findings.is_empty(), "layer with capture trace must not produce gap finding");
     }
 
@@ -454,7 +470,7 @@ mod tests {
                 {"layer_id":"layer_b2","digest":"sha256:222222","name":"b","mount_path":"/b","source":"artifact:y","build_time_approved_hosts":["b.com"],"unapproved_delta":[]}
             ]"#,
         );
-        let violations = scan_layer_scope_violations(&conn, "rev-001", None, 100).unwrap();
+        let violations = scan_layer_scope_violations(&conn, "rev-001", None, 100, None).unwrap();
         assert_eq!(violations.len(), 1, "only the layer with delta fires");
         assert!(violations[0].proposed_remediation.contains("a.com"));
     }

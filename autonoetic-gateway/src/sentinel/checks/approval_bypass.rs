@@ -17,11 +17,14 @@ use rusqlite::Connection;
 /// Flag root sessions that have more than `denial_threshold` denied approvals
 /// in the past `window_days` days. One finding per offending (root_session_id,
 /// agent_id) pair, using the most-recently-denied session_id for attribution.
+///
+/// `scope_agent_id` filters to a single agent (used by the pre-promotion gate).
 pub fn scan_approval_denials(
     conn: &Connection,
     sentinel_revision_id: &str,
     window_days: u32,
     denial_threshold: u32,
+    scope_agent_id: Option<&str>,
 ) -> Result<Vec<SecurityFinding>> {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(window_days as i64);
     let cutoff_str = cutoff.to_rfc3339();
@@ -44,6 +47,7 @@ pub fn scan_approval_denials(
          FROM approvals ap
          WHERE ap.status = 'denied'
            AND ap.created_at > ?1
+           AND (?3 IS NULL OR ap.agent_id = ?3)
          GROUP BY ap.root_session_id, ap.agent_id
          HAVING cnt > ?2
          ORDER BY cnt DESC",
@@ -57,14 +61,17 @@ pub fn scan_approval_denials(
     }
 
     let rows = stmt
-        .query_map(rusqlite::params![cutoff_str, threshold_i], |row| {
-            Ok(DenialRow {
-                root_session_id: row.get(0)?,
-                agent_id: row.get(1)?,
-                count: row.get(2)?,
-                latest_session_id: row.get(3)?,
-            })
-        })?
+        .query_map(
+            rusqlite::params![cutoff_str, threshold_i, scope_agent_id],
+            |row| {
+                Ok(DenialRow {
+                    root_session_id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    count: row.get(2)?,
+                    latest_session_id: row.get(3)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut findings = Vec::new();
@@ -110,6 +117,7 @@ pub fn scan_exec_without_grant(
     sentinel_revision_id: &str,
     since_rfc3339: Option<&str>,
     limit: u32,
+    scope_agent_id: Option<&str>,
 ) -> Result<Vec<SecurityFinding>> {
     let since = since_rfc3339.unwrap_or("1970-01-01T00:00:00Z");
     let lim = limit as i64;
@@ -121,6 +129,7 @@ pub fn scan_exec_without_grant(
            AND ap.action_type = 'sandbox_exec'
            AND ap.created_at > ?1
            AND ap.root_session_id IS NOT NULL
+           AND (?3 IS NULL OR ap.agent_id = ?3)
            AND NOT EXISTS (
                SELECT 1 FROM session_approval_grants sg
                WHERE sg.root_session_id = ap.root_session_id
@@ -137,13 +146,16 @@ pub fn scan_exec_without_grant(
     }
 
     let rows = stmt
-        .query_map(rusqlite::params![since, lim], |row| {
-            Ok(ApprovalRow {
-                root_session_id: row.get(0)?,
-                session_id: row.get(1)?,
-                agent_id: row.get(2)?,
-            })
-        })?
+        .query_map(
+            rusqlite::params![since, lim, scope_agent_id],
+            |row| {
+                Ok(ApprovalRow {
+                    root_session_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    agent_id: row.get(2)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut findings = Vec::new();
@@ -230,7 +242,7 @@ mod tests {
             .unwrap();
         }
 
-        let findings = scan_approval_denials(&conn, "sentinel-rev-1", 7, 5).unwrap();
+        let findings = scan_approval_denials(&conn, "sentinel-rev-1", 7, 5, None).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, FindingSeverity::Warning);
         assert_eq!(findings[0].finding_type, FindingType::ApprovalBypass);
@@ -267,7 +279,7 @@ mod tests {
             .unwrap();
         }
 
-        let findings = scan_approval_denials(&conn, "sentinel-rev-1", 7, 5).unwrap();
+        let findings = scan_approval_denials(&conn, "sentinel-rev-1", 7, 5, None).unwrap();
         assert_eq!(findings.len(), 1, "only agent_a should be flagged");
         assert_eq!(
             findings[0].affected.agent_alias.as_deref(),
@@ -291,7 +303,7 @@ mod tests {
             .unwrap();
         }
 
-        let findings = scan_approval_denials(&conn, "sentinel-rev-1", 7, 5).unwrap();
+        let findings = scan_approval_denials(&conn, "sentinel-rev-1", 7, 5, None).unwrap();
         assert!(findings.is_empty());
     }
 }

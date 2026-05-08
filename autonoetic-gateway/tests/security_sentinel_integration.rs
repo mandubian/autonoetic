@@ -906,69 +906,209 @@ fn ensure_sentinel_scheduled_jobs_disabled_skips_all() {
 
 #[test]
 fn promotion_gate_passes_on_clean_store() {
-    // With an empty store (no findings), the gate must return Passed.
+    // With an empty store (no findings for the scoped agent), the gate must
+    // return Passed.
     let (_dir, store) = open_store();
     let outcome = autonoetic_gateway::sentinel::check_pre_promotion(
         Arc::clone(&store),
         "sentinel.test",
+        "coder.default",
         10,
     )
     .expect("gate must not error on clean store");
 
     assert!(
         matches!(outcome, autonoetic_gateway::sentinel::GateOutcome::Passed),
-        "gate must pass when no critical findings exist"
+        "gate must pass when no critical findings exist for the scoped agent"
     );
 }
 
 #[test]
-fn promotion_gate_blocks_on_critical_finding() {
-    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+fn promotion_gate_blocks_on_critical_finding_for_scoped_agent() {
+    let (dir, _store) = open_store();
 
-    let (dir, store) = open_store();
+    // Inject a credential-leak signal attributed to coder.default.
+    insert_credential_leak_event(&dir, "coder.default", "evt_gate_a");
 
-    // Inject a causal event that will trigger a credential-leak (critical) finding.
-    {
-        let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
-        let fake_key = format!("sk-ant-api03-{}-{}", "A".repeat(92), "A".repeat(10));
-        let now = chrono::Utc::now().to_rfc3339();
-        db.execute(
-            "INSERT INTO causal_events
-                 (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
-             VALUES ('evt_gate_crit', 'coder.default', 'sess_gate', 0, ?1, 'tool', 'tool_call', 'success', ?2)",
-            rusqlite::params![now, fake_key],
-        )
-        .unwrap();
-    }
+    // Re-open the store so the gate sees the inserted row.
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(dir.path()).unwrap(),
+    );
 
-    // Run a sweep so the finding is persisted to security_findings.
-    {
-        let runner = SentinelRunner::new(Arc::clone(&store));
-        runner
-            .run_sweep(&SweepConfig {
-                sentinel_revision_id: "sentinel.test".to_string(),
-                phase1_only: true,
-                ..SweepConfig::default()
-            })
-            .expect("sweep");
-    }
-
-    // Now the gate should detect the critical finding and block.
+    // Gate scoped to coder.default — must block.
     let outcome = autonoetic_gateway::sentinel::check_pre_promotion(
-        Arc::clone(&store),
+        store,
         "sentinel.test",
+        "coder.default",
         10,
     )
     .expect("gate must not error");
 
     match outcome {
-        autonoetic_gateway::sentinel::GateOutcome::Blocked { critical_count, .. } => {
+        autonoetic_gateway::sentinel::GateOutcome::Blocked { critical_count, reason } => {
             assert!(critical_count >= 1, "must report at least one critical finding");
+            assert!(
+                reason.contains("coder.default"),
+                "block message must name the scoped agent: {reason}"
+            );
         }
         autonoetic_gateway::sentinel::GateOutcome::Passed => {
-            panic!("gate must block when critical findings exist in the store");
+            panic!("gate must block when scoped agent has critical findings");
         }
     }
+}
+
+// ── Issue #155 acceptance: per-agent scoping ────────────────────────────────
+
+/// Helper: insert a payload that the credential check flags as critical.
+fn insert_credential_leak_event(dir: &tempfile::TempDir, agent_id: &str, event_id: &str) {
+    let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+    let fake_key = format!("sk-ant-api03-{}-{}", "A".repeat(92), "A".repeat(10));
+    let now = chrono::Utc::now().to_rfc3339();
+    db.execute(
+        "INSERT INTO causal_events
+             (event_id, agent_id, session_id, event_seq, timestamp, category, action, status, payload)
+         VALUES (?1, ?2, 'sess_x', 0, ?3, 'tool', 'tool_call', 'success', ?4)",
+        rusqlite::params![event_id, agent_id, now, fake_key],
+    )
+    .unwrap();
+}
+
+#[test]
+fn promotion_gate_does_not_block_unrelated_agent() {
+    // Critical finding for agent A must not block promotion of agent B.
+    let (dir, _store) = open_store();
+    insert_credential_leak_event(&dir, "agent_a.default", "evt_a_leak");
+
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(dir.path()).unwrap(),
+    );
+
+    let outcome = autonoetic_gateway::sentinel::check_pre_promotion(
+        store,
+        "sentinel.test",
+        "agent_b.default",
+        10,
+    )
+    .expect("gate must not error");
+
+    assert!(
+        matches!(outcome, autonoetic_gateway::sentinel::GateOutcome::Passed),
+        "gate must pass for agent_b when only agent_a has critical findings"
+    );
+}
+
+#[test]
+fn promotion_gate_blocks_same_agent_after_unrelated_findings() {
+    // Findings exist for both agent A and agent B — gate scoped to A must
+    // block; scoped to B must also block; scoped to a third agent C must pass.
+    let (dir, _store) = open_store();
+    insert_credential_leak_event(&dir, "agent_a.default", "evt_a_leak");
+    insert_credential_leak_event(&dir, "agent_b.default", "evt_b_leak");
+
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(dir.path()).unwrap(),
+    );
+
+    let outcome_a = autonoetic_gateway::sentinel::check_pre_promotion(
+        std::sync::Arc::clone(&store),
+        "sentinel.test",
+        "agent_a.default",
+        10,
+    )
+    .expect("gate must not error");
+    assert!(
+        matches!(outcome_a, autonoetic_gateway::sentinel::GateOutcome::Blocked { .. }),
+        "gate must block scoped to agent_a"
+    );
+
+    let outcome_b = autonoetic_gateway::sentinel::check_pre_promotion(
+        std::sync::Arc::clone(&store),
+        "sentinel.test",
+        "agent_b.default",
+        10,
+    )
+    .expect("gate must not error");
+    assert!(
+        matches!(outcome_b, autonoetic_gateway::sentinel::GateOutcome::Blocked { .. }),
+        "gate must block scoped to agent_b"
+    );
+
+    let outcome_c = autonoetic_gateway::sentinel::check_pre_promotion(
+        store,
+        "sentinel.test",
+        "agent_c.default",
+        10,
+    )
+    .expect("gate must not error");
+    assert!(
+        matches!(outcome_c, autonoetic_gateway::sentinel::GateOutcome::Passed),
+        "gate must pass scoped to agent_c (no findings attributed to it)"
+    );
+}
+
+#[test]
+fn promotion_gate_layer_mount_finding_anchors_to_mounting_agent() {
+    // A layer-mount approval recorded by agent A as the mounter must produce
+    // a scope-violation finding only when the gate is scoped to agent A.
+    let (dir, _store) = open_store();
+    {
+        let db = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        // Layer mount with non-empty unapproved_delta and source = runtime.lock,
+        // which produces a Critical SupplyChainScopeViolation.
+        let payload = serde_json::json!({
+            "layers": [{
+                "layer_id": "layer_x",
+                "digest": "sha256:abc123def4567890",
+                "name": "node",
+                "source": "runtime.lock",
+                "unapproved_delta": ["evil.example.com"]
+            }]
+        })
+        .to_string();
+        db.execute(
+            "INSERT INTO approvals (
+                request_id, agent_id, session_id, root_session_id, action_type,
+                action_payload, status, created_at, decided_at, approval_level
+             ) VALUES (
+                'req_mounter_a', 'mounter_a.default', 'sess', 'root_x', 'layer_mount',
+                ?1, 'approved', ?2, ?2, 'operator'
+             )",
+            rusqlite::params![payload, now],
+        )
+        .unwrap();
+    }
+
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(dir.path()).unwrap(),
+    );
+
+    // Scoped to mounter_a — must block.
+    let outcome_a = autonoetic_gateway::sentinel::check_pre_promotion(
+        std::sync::Arc::clone(&store),
+        "sentinel.test",
+        "mounter_a.default",
+        10,
+    )
+    .expect("gate must not error");
+    assert!(
+        matches!(outcome_a, autonoetic_gateway::sentinel::GateOutcome::Blocked { .. }),
+        "gate must block scoped to mounter_a (layer-scope critical)"
+    );
+
+    // Scoped to a different agent — must pass (the mount belongs to mounter_a).
+    let outcome_b = autonoetic_gateway::sentinel::check_pre_promotion(
+        store,
+        "sentinel.test",
+        "other_agent.default",
+        10,
+    )
+    .expect("gate must not error");
+    assert!(
+        matches!(outcome_b, autonoetic_gateway::sentinel::GateOutcome::Passed),
+        "gate must pass scoped to a non-mounting agent (cross-agent isolation)"
+    );
 }
 
 // ── Phase 6: Triage store methods ────────────────────────────────────────────

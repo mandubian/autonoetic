@@ -60,6 +60,11 @@ pub struct SweepConfig {
     /// heuristics and prompt-injection scanning. Used by the dual-sweep
     /// orchestrator for the frozen baseline runner.
     pub phase1_only: bool,
+    /// When set, every Phase-1 check filters its query by this agent ID so
+    /// the sweep only sees signal attributable to that agent. Used by the
+    /// pre-promotion gate so a critical finding from agent A does not block
+    /// promotion of agent B (issue #155). `None` = full-store sweep.
+    pub scope_agent_id: Option<String>,
 }
 
 impl Default for SweepConfig {
@@ -75,6 +80,7 @@ impl Default for SweepConfig {
             failure_burst_threshold: 20,
             exec_repeat_threshold: 10,
             phase1_only: false,
+            scope_agent_id: None,
         }
     }
 }
@@ -202,25 +208,30 @@ impl SentinelRunner {
         let cluster_window_minutes = config.cluster_window_minutes;
         let failure_burst_threshold = config.failure_burst_threshold;
         let exec_repeat_threshold = config.exec_repeat_threshold;
+        let scope = config.scope_agent_id.as_deref();
 
         // All DB checks in a single connection borrow.
         let db_results: Vec<Result<Vec<SecurityFinding>>> = self.store.with_conn(|conn| {
             let mut checks = vec![
                 // Phase 1 — deterministic
-                credential::scan_credential_leaks(conn, rev_id, since, scan_limit),
+                credential::scan_credential_leaks(conn, rev_id, since, scan_limit, scope),
                 capability_accretion::scan_capability_accretion(
-                    conn, rev_id, window_days, accretion_threshold,
+                    conn, rev_id, window_days, accretion_threshold, scope,
                 ),
-                approval_bypass::scan_approval_denials(conn, rev_id, window_days, denial_threshold),
-                approval_bypass::scan_exec_without_grant(conn, rev_id, since, scan_limit),
-                sandbox_escape::scan_escape_attempt_records(conn, rev_id, since, scan_limit),
-                sandbox_escape::scan_escape_patterns_in_events(conn, rev_id, since, scan_limit),
+                approval_bypass::scan_approval_denials(
+                    conn, rev_id, window_days, denial_threshold, scope,
+                ),
+                approval_bypass::scan_exec_without_grant(conn, rev_id, since, scan_limit, scope),
+                sandbox_escape::scan_escape_attempt_records(conn, rev_id, since, scan_limit, scope),
+                sandbox_escape::scan_escape_patterns_in_events(conn, rev_id, since, scan_limit, scope),
                 // Phase 1 — supply-chain auditing
-                supply_chain::scan_layer_scope_violations(conn, rev_id, since, scan_limit),
-                supply_chain::scan_layer_provenance_gaps(conn, rev_id, since, scan_limit),
+                supply_chain::scan_layer_scope_violations(conn, rev_id, since, scan_limit, scope),
+                supply_chain::scan_layer_provenance_gaps(conn, rev_id, since, scan_limit, scope),
             ];
             // Phase 2a — cluster heuristics (always rolling window, not `since`).
             // Skipped when phase1_only is set (e.g. frozen baseline runner).
+            // Cluster heuristics are not scoped — they are diagnostic across
+            // sessions and the gate only consumes Phase-1 findings.
             if !config.phase1_only {
                 checks.push(session_cluster::scan_failure_bursts(
                     conn, rev_id, cluster_window_minutes, failure_burst_threshold, scan_limit,
@@ -312,6 +323,7 @@ impl SentinelRunner {
                 window_days: config.window_days,
                 accretion_threshold: config.accretion_threshold,
                 denial_threshold: config.denial_threshold,
+                scope_agent_id: config.scope_agent_id.clone(),
                 ..SweepConfig::default()
             }
         })?;
