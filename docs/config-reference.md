@@ -164,6 +164,58 @@ See `docs/response-validation-gate.md` for implementation details and `docs/iter
 
 ---
 
+## Protected Agents
+
+Controls the protected-agent promotion gate (issue #21). Agents listed here
+require a passed eval run (`required_eval_run_id`) before programmatic
+promotion via `agent_revision_promote` is allowed. This closes the
+recursive-trust problem: a regressed agent-factory cannot silently replace
+itself without independent verification.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `protected_agents.enabled` | bool | `true` | Enable the protected-agent gate. Set to `false` to disable in development. |
+| `protected_agents.agents` | list\<string\> | `[]` | Agent IDs that require eval evidence for promotion. |
+
+The gate fires after the standard capability-delta and artifact promotion
+gates but before the sentinel gate. When a protected agent is promoted:
+
+1. `required_eval_run_id` must be provided and must reference a **passed**
+   eval run targeting the exact revision being promoted.
+2. The standard capability-delta gate (R++2) still fires for any broadening.
+3. The sentinel pre-promotion gate still fires (if enabled).
+
+When the gate blocks promotion, the error response includes:
+- `error: "protected_agent_requires_eval_run"` — identifies the gate
+- `protected_agent` — the agent ID
+- `repair_hint` — how to satisfy the gate
+
+Example:
+
+```yaml
+protected_agents:
+  enabled: true
+  agents:
+    - agent-factory.default
+    - specialized_builder.default
+    - evolution-orchestrator.default
+```
+
+For manual recovery of a protected agent (e.g. when the eval suite is
+unavailable), use the CLI escape hatch:
+
+```bash
+# Rollback to previous revision (bypasses eval gate)
+autonoetic agent revision rollback agent-factory.default
+
+# Or: seed a specific revision directly (bypasses all gates)
+autonoetic agent seed agent-factory.default <revision-id> --reason "manual recovery"
+```
+
+See `docs/protected-agents.md` for the full manual recovery procedure.
+
+---
+
 ## Revision Promotion Approval
 
 Controls when `agent_revision_promote` requires human approval before proceeding. The gateway gates high-risk promotions (bundles with broad capabilities or detected remote access) the same way it previously gated `agent.install`.

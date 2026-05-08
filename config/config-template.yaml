@@ -461,3 +461,15 @@ llm_preset_mapping:
 #     schedule: "0 */4 * * *"
 #     message: "Run evolution analysis cycle"
 #     enabled: true
+
+# ── Protected Agents (issue #21) ───────────────────────────────────────
+# Critical agents whose promotion requires eval-run evidence.
+# A regressed agent-factory cannot silently replace itself without
+# passing an independent eval suite first.
+#
+# protected_agents:
+#   enabled: true
+#   agents:
+#     - agent-factory.default
+#     - specialized_builder.default
+#     - evolution-orchestrator.default

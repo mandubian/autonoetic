@@ -801,6 +801,13 @@ pub struct GatewayConfig {
     /// Security sentinel configuration.
     #[serde(default)]
     pub sentinel: SentinelConfig,
+
+    /// Protected agents configuration (issue #21).
+    /// Agents listed here require a passed eval run before programmatic
+    /// promotion is allowed. The sentinel gate (if enabled) still fires
+    /// independently for all promotions.
+    #[serde(default)]
+    pub protected_agents: ProtectedAgentsConfig,
 }
 
 fn default_approval_dwell_multiplier() -> f64 {
@@ -915,6 +922,46 @@ fn default_sentinel_promotion_gate_enabled() -> bool { true }
 fn default_sentinel_promotion_gate_timeout_secs() -> u64 { 30 }
 fn default_sentinel_revision_id() -> String { "sentinel.current".to_string() }
 fn default_sentinel_baseline_revision_id() -> String { "sentinel.baseline.frozen".to_string() }
+
+/// Protected agents configuration (issue #21).
+///
+/// Protected agents are critical agents whose promotion is mechanically gated
+/// beyond the normal artifact + capability-delta gates. This closes the
+/// recursive-trust problem: a regressed agent-factory cannot silently
+/// replace itself without passing an independent check.
+///
+/// The gate enforces that:
+/// 1. A passed eval run (`required_eval_run_id`) must be provided.
+/// 2. The eval run must target the exact revision being promoted.
+/// 3. The sentinel pre-promotion gate must pass (if enabled).
+///
+/// Operators can still promote by hand via the CLI, but the programmatic
+/// path (agent-driven `agent_revision_promote`) is mechanically blocked
+/// for protected agents unless the eval evidence is presented.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtectedAgentsConfig {
+    /// List of agent IDs that are protected. Default: empty (no extra gate).
+    #[serde(default)]
+    pub agents: Vec<String>,
+
+    /// Whether the protected-agent gate is enabled. Default: true.
+    /// Set to false to disable in development.
+    #[serde(default = "default_protected_agents_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for ProtectedAgentsConfig {
+    fn default() -> Self {
+        Self {
+            agents: Vec::new(),
+            enabled: default_protected_agents_enabled(),
+        }
+    }
+}
+
+fn default_protected_agents_enabled() -> bool {
+    true
+}
 
 /// A system agent declaration for gateway-managed background execution.
 ///
@@ -1498,6 +1545,7 @@ impl Default for GatewayConfig {
             trust_unsigned_bundles: false,
             approval_dwell_multiplier: default_approval_dwell_multiplier(),
             sentinel: SentinelConfig::default(),
+            protected_agents: ProtectedAgentsConfig::default(),
         }
     }
 }

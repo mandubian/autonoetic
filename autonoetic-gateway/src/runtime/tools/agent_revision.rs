@@ -2044,6 +2044,37 @@ impl NativeTool for AgentRevisionPromoteTool {
             );
         }
 
+        // Protected-agent promotion gate (issue #21).
+        // Critical agents (e.g. agent-factory.default) cannot be promoted
+        // without eval evidence. This closes the recursive-trust loop: a
+        // regressed agent-factory is exactly the agent that cannot be trusted
+        // to fix itself without independent verification.
+        if let Some(cfg) = config {
+            if cfg.protected_agents.enabled
+                && cfg
+                    .protected_agents
+                    .agents
+                    .iter()
+                    .any(|a| a == &args.agent_id)
+            {
+                if args.required_eval_run_id.is_none() {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "error": "protected_agent_requires_eval_run",
+                        "message": format!(
+                            "Agent '{}' is protected (issue #21). Promotion requires a passed eval run as evidence. \
+                             Provide `required_eval_run_id` referencing a successful eval run for this revision.",
+                            &args.agent_id
+                        ),
+                        "protected_agent": &args.agent_id,
+                        "repair_hint": "Run an eval suite against this revision, then retry promotion with `required_eval_run_id` pointing to the passed run.",
+                    })
+                    .to_string());
+                }
+            }
+        }
+
         // Security sentinel pre-promotion gate (fail-closed).
         // Runs a Phase-1 sweep scoped to the agent being promoted — only
         // critical findings attributable to this agent block its promotion
