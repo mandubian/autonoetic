@@ -526,6 +526,37 @@ retention:
 
 ---
 
+## Security Sentinel
+
+System-tier read-only auditor over causal events, promotion history, approvals, layer mounts, and SKILL.md bodies. Produces append-only `SecurityFinding` records. See [`docs/security-sentinel.md`](security-sentinel.md) for the full design and threat model.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sentinel.enabled` | bool | `true` | Master switch. When `false`, sweeps and the promotion gate are skipped. |
+| `sentinel.full_sweep_schedule` | string (cron) | `"0 3 * * *"` | Cron expression for the daily full-history dual sweep. UTC. |
+| `sentinel.incremental_sweep_schedule` | string (cron) | `"0 */6 * * *"` | Cron expression for the rolling 25 h incremental dual sweep. UTC. |
+| `sentinel.promotion_gate_enabled` | bool | `true` | When `true`, `agent_revision_promote` runs a Phase-1 sentinel sweep first. Any `critical` finding in `security_findings` blocks promotion (fail-closed). Resolve findings via `autonoetic security triage` to unblock. |
+| `sentinel.promotion_gate_timeout_secs` | u64 | `30` | Maximum seconds the gate waits for the sweep before fail-closing. |
+| `sentinel.sentinel_revision_id` | string | `"sentinel.current"` | Revision label embedded in findings produced by the live sentinel. Update when the sentinel logic changes to make findings filterable by version. |
+| `sentinel.baseline_revision_id` | string | `"sentinel.baseline.frozen"` | Revision label for the frozen-baseline pass of the dual sweep. Disagreements between baseline and current are recorded in `security_sentinel_disagreements`. |
+
+**Promotion-gate scope.** The gate scans the *entire* `security_findings` table — not just findings tied to the agent being promoted. A stale unrelated `critical` finding therefore blocks new promotions until triaged. To unblock, run `autonoetic security triage <finding_id> false_positive --reason "<context>"` or resolve the underlying issue. Per-agent scoping is tracked as a follow-up.
+
+Example:
+
+```yaml
+sentinel:
+  enabled: true
+  full_sweep_schedule: "0 3 * * *"
+  incremental_sweep_schedule: "0 */6 * * *"
+  promotion_gate_enabled: true
+  promotion_gate_timeout_secs: 30
+  sentinel_revision_id: "sentinel.current"
+  baseline_revision_id: "sentinel.baseline.frozen"
+```
+
+---
+
 ## Hooks
 
 Reactive bindings from gateway events to actions. When an event fires (e.g., session closes, approval resolves), the matching hooks are dispatched.

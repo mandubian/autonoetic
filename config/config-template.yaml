@@ -166,6 +166,33 @@ schema_enforcement:
 # full: all results (development) | errors: failures only (production) | off
 evidence_mode: full
 
+# ── Security Sentinel ────────────────────────────────────────────────
+# System-tier read-only auditor over causal events, promotion history,
+# approvals, layer mounts, and SKILL.md bodies. Produces append-only
+# `SecurityFinding` records. See docs/security-sentinel.md.
+#
+# Defaults are operator-friendly; uncomment to override:
+#
+# sentinel:
+#   # Master switch. When false, sweeps and the promotion gate are skipped.
+#   enabled: true
+#   # Cron for the full-history dual sweep (baseline + current). UTC.
+#   full_sweep_schedule: "0 3 * * *"
+#   # Cron for the incremental (last 25 h) dual sweep. UTC.
+#   incremental_sweep_schedule: "0 */6 * * *"
+#   # When true, agent_revision_promote runs a Phase-1 sentinel sweep first.
+#   # Any `critical` finding (anywhere in `security_findings`, not scoped to
+#   # the agent being promoted) blocks promotion. Fail-closed on scan errors
+#   # and on timeout. Resolve findings via `autonoetic security triage` to
+#   # unblock.
+#   promotion_gate_enabled: true
+#   # Max seconds the gate waits for the sweep before fail-closing.
+#   promotion_gate_timeout_secs: 30
+#   # Revision label embedded in findings produced by the live sentinel.
+#   sentinel_revision_id: "sentinel.current"
+#   # Revision label for the frozen-baseline pass of the dual sweep.
+#   baseline_revision_id: "sentinel.baseline.frozen"
+
 # ── Code Analysis ─────────────────────────────────────────────────────
 # Capability and security analysis for tool execution and generated artifacts.
 # capability_provider: pattern | python_ast | llm | composite | none

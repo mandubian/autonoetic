@@ -1,6 +1,20 @@
 # Security Sentinel: System-Tier Security Agent
 
-Status: design — implementation tracked in GitHub issues referenced at the end of this doc.
+Status: **implemented (Phases 0–7 merged)**. Phase mapping below.
+
+| Phase | Scope | PR |
+|---|---|---|
+| 0 + 1 | Foundation, types, append-only `security_findings` table, deterministic core (credentials, capability accretion, approval bypass, sandbox escape) | #140 |
+| 2 | LLM-judgment heuristics (prompt-injection surface, session-cluster anomalies) | #141 |
+| 3 | Frozen baseline, dual-sweep orchestrator, disagreement recording | #142 |
+| 4 | Supply-chain auditing (layer scope violations, provenance gaps) | #144 |
+| 5 | Cron scheduling + pre-promotion gate integration | #145 |
+| 6 | Triage CLI (`autonoetic security triage`), calibration feedback loop | #147 |
+| 7 | Red-team agent + adversarial co-evolution; `attack_pattern_propose` | #149 |
+
+Configuration knobs are documented in [`docs/config-reference.md`](config-reference.md) under "Security Sentinel".
+
+> **Caveat on the "frozen baseline" claim.** The dual-sweep runs the same in-process Rust check code with `phase1_only: true` rather than a separately-versioned baseline binary. This catches Phase-2 (LLM-judgment) regressions but **does not** detect regressions in the deterministic core itself — a regex change in `checks/credential.rs` lands in both branches. Restoring the design's stronger claim requires a separate, version-pinned baseline module; tracked as a follow-up.
 
 ## Summary
 
