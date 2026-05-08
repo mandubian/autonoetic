@@ -1275,7 +1275,22 @@ mod tests {
         );
         assert_eq!(request.body_json["delivery_id"], delivery_id);
         assert_eq!(request.body_json["event"], "session.closed");
-        assert_eq!(request.body_json["fields"]["close_reason"], "***REDACTED***");
+        // close_reason was set to "token=top-secret" in session_closed_ctx.
+        // The canonical redaction (autonoetic-types::redaction) now masks the
+        // value in place via ENV_ASSIGN_RE rather than wholesale-redacting the
+        // string. Still no secret leak — `top-secret` is gone — but the
+        // assignment shape `token=…` is preserved for operator triage.
+        assert_eq!(
+            request.body_json["fields"]["close_reason"],
+            "token=***REDACTED***"
+        );
+        assert!(
+            !request.body_json["fields"]["close_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("top-secret"),
+            "secret value must not leak"
+        );
         assert!(
             request.body_json["report"]["agents"]["coder.default"]["input_preview"].is_null()
         );

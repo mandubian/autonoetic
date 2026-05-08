@@ -306,7 +306,9 @@ impl ScheduledAction {
             _ => {
                 let mut out = std::collections::HashMap::new();
                 for (k, v) in headers {
-                    if is_sensitive_key(k) || looks_like_secret_value(v) {
+                    if super::redaction::is_sensitive_key(k)
+                        || super::redaction::looks_like_secret_value(v)
+                    {
                         out.insert(k.clone(), Self::REDACTED.to_string());
                     } else {
                         out.insert(k.clone(), v.clone());
@@ -320,34 +322,14 @@ impl ScheduledAction {
     fn redact_json_value(value: &serde_json::Value, viewer: super::disclosure::ViewerClass) -> serde_json::Value {
         match viewer {
             super::disclosure::ViewerClass::Admin => value.clone(),
-            _ => Self::redact_json_value_inner(value),
-        }
-    }
-
-    fn redact_json_value_inner(value: &serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Object(map) => {
-                let mut out = serde_json::Map::new();
-                for (k, v) in map {
-                    if is_sensitive_key(k) {
-                        out.insert(k.clone(), serde_json::Value::String(Self::REDACTED.to_string()));
-                    } else {
-                        out.insert(k.clone(), Self::redact_json_value_inner(v));
-                    }
-                }
-                serde_json::Value::Object(out)
-            }
-            serde_json::Value::Array(items) => {
-                serde_json::Value::Array(items.iter().map(Self::redact_json_value_inner).collect())
-            }
-            serde_json::Value::String(s) => {
-                if looks_like_secret_value(s) {
-                    serde_json::Value::String(Self::REDACTED.to_string())
-                } else {
-                    serde_json::Value::String(s.clone())
-                }
-            }
-            other => other.clone(),
+            // Delegate to the canonical helper (issue #156). The previous
+            // local copy did not perform in-place masking on string values,
+            // wholesale-redacting any string for which `looks_like_secret_value`
+            // returned true. The canonical version masks bearer tokens,
+            // env-var assignments, and URL query secrets in place — better
+            // for operator review — and falls back to wholesale redaction
+            // only for shapes that can't be masked locally (PEM, raw `sk-…`).
+            _ => super::redaction::redact_json_value(value),
         }
     }
 
@@ -428,31 +410,6 @@ impl ScheduledAction {
     pub fn redact_for_display(&self) -> Self {
         self.redact_for_viewer(super::disclosure::ViewerClass::Operator)
     }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    k.contains("secret")
-        || k.contains("token")
-        || k.contains("password")
-        || k.contains("api_key")
-        || k.contains("apikey")
-        || k.contains("authorization")
-        || k.contains("access_key")
-        || k.contains("access_token")
-        || k.contains("refresh_token")
-        || k.contains("client_secret")
-}
-
-fn looks_like_secret_value(text: &str) -> bool {
-    let t = text.trim();
-    if t.is_empty() {
-        return false;
-    }
-    let lower = t.to_ascii_lowercase();
-    lower.contains("bearer ")
-        || t.starts_with("sk-")
-        || t.contains("-----BEGIN")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1195,6 +1152,7 @@ mod redaction_tests {
 
     #[test]
     fn looks_like_secret_value_recognises_documented_patterns() {
+        use crate::redaction::looks_like_secret_value;
         assert!(looks_like_secret_value("Bearer eyJhbGc.foo"));
         assert!(looks_like_secret_value("sk-abc12345"));
         assert!(looks_like_secret_value("-----BEGIN RSA PRIVATE KEY-----"));
