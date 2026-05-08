@@ -30,9 +30,14 @@ static GITHUB_PAT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bgh[poshpr]_[A-Za-z0-9]{36}\b").expect("valid github pat regex")
 });
 
-/// Generic high-entropy hex string (≥ 32 hex chars) — potential raw secret.
+/// Generic high-entropy hex string (≥ 64 hex chars = 256 bits) — potential raw secret.
+///
+/// The lower bound is 64 specifically to exclude git SHAs (40 hex chars) and other
+/// 40-char content digests that are routinely embedded in causal-event payloads.
+/// 64+ hex characters indicate sha256 / 256-bit symmetric keys / similar — the
+/// regime where false positives drop sharply.
 static HIGH_ENTROPY_HEX_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b[a-fA-F0-9]{32,}\b").expect("valid high-entropy hex regex")
+    Regex::new(r"\b[a-fA-F0-9]{64,}\b").expect("valid high-entropy hex regex")
 });
 
 /// Bearer token still present in payload.
@@ -92,10 +97,20 @@ pub fn scan_credential_leaks(
     let mut findings = Vec::new();
     for row in rows {
         if let Some((pattern_name, match_len)) = detect_credential(&row.payload) {
+            // `high_entropy_hex` is a heuristic and lands at Warning so it can
+            // never single-handedly block a promotion via the sentinel gate.
+            // All other patterns (specific key formats, bearer tokens) stay at
+            // Critical because the regex shape is highly specific.
+            let severity = if pattern_name == "high_entropy_hex" {
+                FindingSeverity::Warning
+            } else {
+                FindingSeverity::Critical
+            };
+            let confidence = if pattern_name == "high_entropy_hex" { 0.6 } else { 1.0 };
             let finding = SecurityFinding::new(
                 FindingType::CredentialLeak,
-                FindingSeverity::Critical,
-                1.0,
+                severity,
+                confidence,
                 Reproducibility::Deterministic,
                 format!(
                     "Credential pattern '{}' matched in causal event payload \
@@ -141,9 +156,7 @@ fn detect_credential(text: &str) -> Option<(&'static str, usize)> {
         return Some(("bearer_token", m.len()));
     }
     if let Some(m) = HIGH_ENTROPY_HEX_RE.find(text) {
-        if m.len() >= 40 {
-            return Some(("high_entropy_hex", m.len()));
-        }
+        return Some(("high_entropy_hex", m.len()));
     }
     None
 }
@@ -202,5 +215,42 @@ mod tests {
         let text = "hash: deadbeef";
         let result = detect_credential(text);
         assert!(result.is_none(), "short hex should not be flagged");
+    }
+
+    #[test]
+    fn no_false_positive_on_git_sha() {
+        // Git SHAs are 40 hex chars and appear constantly in causal-event payloads
+        // (commit refs, content digests, artifact IDs). They must not be flagged.
+        let text = "Updated to commit a1b2c3d4e5f67890123456789012345678901234";
+        let result = detect_credential(text);
+        assert!(
+            result.is_none(),
+            "git SHA (40 hex chars) must not match high_entropy_hex"
+        );
+    }
+
+    #[test]
+    fn no_false_positive_on_short_sha256_truncation() {
+        // Some tools truncate sha256 to 40, 48, or 56 hex chars in display output.
+        // None of those should trigger high_entropy_hex (threshold is 64).
+        for len in [40, 48, 56, 63] {
+            let hex: String = "a".repeat(len);
+            let result = detect_credential(&format!("digest: {}", hex));
+            assert!(
+                result.is_none(),
+                "{}-char hex string must not match high_entropy_hex",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn detects_full_sha256_as_high_entropy_hex() {
+        // 64 hex chars = sha256, the legitimate detection target.
+        let hex: String = "a".repeat(64);
+        let text = format!("raw secret: {}", hex);
+        let (name, len) = detect_credential(&text).expect("64-char hex must be flagged");
+        assert_eq!(name, "high_entropy_hex");
+        assert_eq!(len, 64);
     }
 }

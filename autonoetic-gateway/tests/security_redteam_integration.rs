@@ -157,13 +157,39 @@ fn propose_rejects_unknown_category() {
         "category": "not_a_real_category",
         "description": "desc",
         "how_sentinel_should_catch": "catch",
-        "evidence_anchors": [],
+        "evidence_anchors": [{"type": "causal_event", "id": "evt_abc"}],
         "synthetic_test_case": {}
     }).to_string();
 
     let result = run_propose(store, &manifest, &args);
     let err = result.unwrap_err().to_string();
     assert!(err.contains("Unknown attack pattern category"), "{err}");
+}
+
+// ─── 2b. Rejects empty evidence_anchors ──────────────────────────────────────
+// A proposal without anchors is not testable — the design principle "findings
+// without anchors are opinions" applies here too.
+
+#[test]
+fn propose_rejects_empty_evidence_anchors() {
+    let tmp = TempDir::new().unwrap();
+    let store = open_store(&tmp);
+    let manifest = redteam_manifest("security_redteam.default");
+
+    let args = json!({
+        "category": "credential_leak",
+        "description": "desc",
+        "how_sentinel_should_catch": "catch",
+        "evidence_anchors": [],
+        "synthetic_test_case": {"foo": "bar"}
+    }).to_string();
+
+    let result = run_propose(store, &manifest, &args);
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("evidence_anchors must be a non-empty"),
+        "expected non-empty-anchors rejection, got: {err}"
+    );
 }
 
 // ─── 3. Rejects agent without SecurityRedTeam capability ──────────────────────

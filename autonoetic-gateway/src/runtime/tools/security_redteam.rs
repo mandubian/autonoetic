@@ -115,6 +115,15 @@ impl NativeTool for AttackPatternProposeTool {
             "evidence_anchors must be a JSON array"
         );
         anyhow::ensure!(
+            args.evidence_anchors
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "evidence_anchors must be a non-empty JSON array — \
+             a proposed pattern without anchors is not testable. \
+             Cite causal_event IDs, skill_md digests, or artifact IDs the sentinel should look at."
+        );
+        anyhow::ensure!(
             args.synthetic_test_case.is_object(),
             "synthetic_test_case must be a JSON object"
         );
