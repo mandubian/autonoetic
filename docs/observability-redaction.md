@@ -4,6 +4,12 @@ How the gateway controls what shows up in observability surfaces — execution t
 
 This doc covers `ViewerClass` (the per-actor mechanism introduced in PR #143). It is distinct from, and composes with, the older `DisclosureClass` mechanism (which controls what an LLM may quote back to a user). See [Relationship to `DisclosureClass`](#relationship-to-disclosureclass) below.
 
+> **Status note.** Several behaviours described here are tied to in-flight PRs. Where a section's claim depends on a specific PR landing, that dependency is called out inline (`(after #N: …)`). Today's behaviour is described first; the post-PR target is described second.
+>
+> Open PRs that affect this doc:
+> - **#160** — `ScheduledAction::SandboxExec.command` is currently preserved verbatim for `ViewerClass::Agent`; #160 redacts it to `"***REDACTED***"`.
+> - **#161** — Redaction primitives are currently triplicated across `causal_chain.rs`, `background.rs`, and `gateway/log_redaction.rs`; #161 centralises them in `autonoetic-types/src/redaction.rs` and replaces the wholesale-substring fallback with precise in-place masking.
+
 ---
 
 ## Why two mechanisms
@@ -25,8 +31,8 @@ Three classes, ordered by decreasing redaction:
 
 | Class | Who | What they see |
 |---|---|---|
-| `Agent` | An autonoetic agent reading observability/approval data via gateway tools. | **Most redacted.** Metadata only. Body text, headers, payloads, command strings, evidence references all blanked or masked. |
-| `Operator` | A human operator using the CLI / chat TUI. | **Targeted redaction.** Secrets within JSON payloads are masked (key-name catalogue + in-place value masking); structural fields preserved. Commands, hosts, request shapes visible for triage. |
+| `Agent` | An autonoetic agent reading observability/approval data via gateway tools. | **Most redacted.** Body text, headers, payloads, evidence references blanked. *Note: `SandboxExec.command` for approval subjects is currently preserved verbatim — see issue #158, fixed by PR #160.* |
+| `Operator` | A human operator using the CLI / chat TUI. | **Targeted redaction.** Secret-named keys in JSON payloads have values replaced with `"***REDACTED***"`. For non-JSON strings the current `redact_json_string` falls back to wholesale redaction when the string contains substrings like `token`, `secret`, or `authorization` (this over-redacts benign strings such as `tokenizer config`, fixed by PR #161 — after which non-JSON strings get precise in-place masking via `redact_embedded_secrets`). Commands, hosts, request shapes are visible for triage. |
 | `Admin` | An admin with full access (currently equivalent to "no redaction applied at this layer"). | Identity. The original record is returned unchanged. Secret material is still subject to the R+9 redaction-before-write invariant — see [R+9 and `RedactedPayload`](#r9-and-redactedpayload). |
 
 The default is `Operator` (`ViewerClass::default()`). See [the default-Operator footgun](#the-default-operator-footgun) for what to watch out for.
@@ -45,7 +51,7 @@ The default is `Operator` (`ViewerClass::default()`). See [the default-Operator 
 | `approval_required`, `approval_request_id` | identity | identity | identity |
 | `command` | identity | identity | `"***REDACTED***"` |
 | `stdout`, `stderr` | identity | identity | `None` |
-| `arguments` (JSON string) | identity | secret-key values redacted, in-place value masking | `None` |
+| `arguments` (JSON string) | identity | secret-key values replaced with `"***REDACTED***"`; non-JSON fallback wholesale-redacts on substring match (after #161: in-place masking) | `None` |
 | `result` (JSON string) | identity | same as `arguments` | `None` |
 
 Source: `autonoetic-types/src/causal_chain.rs::ExecutionTraceRecord::redact_for_viewer`. The `command` field was previously visible to `Agent` until commit 7f8525d (issue #4 follow-up) blanked it.
@@ -56,7 +62,7 @@ Source: `autonoetic-types/src/causal_chain.rs::ExecutionTraceRecord::redact_for_
 |---|---|---|---|
 | `event_id`, `agent_id`, `session_id`, `turn_id`, `event_seq`, `timestamp` | identity | identity | identity |
 | `category`, `action`, `status`, `target`, `enforced_rules` | identity | identity | identity |
-| `payload` (JSON string) | identity | secret-key values redacted, in-place value masking | `None` |
+| `payload` (JSON string) | identity | secret-key values replaced; non-JSON fallback wholesale-redacts on substring match (after #161: in-place masking) | `None` |
 | `payload_ref` | identity | `None` | `None` |
 | `evidence_ref` | identity | identity | `None` |
 | `reason` | identity | identity | `None` |
@@ -74,7 +80,7 @@ The redaction shape varies per-variant. The table below uses the most-redacting 
 | `WriteFile` | `path` | identity | identity | identity |
 | | `content` | identity | identity | `"***REDACTED***"` |
 | | `evidence_ref` | identity | identity | `None` |
-| `SandboxExec` | `command` | identity | identity | `"***REDACTED***"` (issue #158 fix) |
+| `SandboxExec` | `command` | identity | identity | **identity today** (issue #158); `"***REDACTED***"` after PR #160 lands |
 | | `dependencies` | identity | identity | identity |
 | | `detected_hosts` | identity | identity | identity |
 | | `requires_approval` | identity | identity | identity |
@@ -88,20 +94,25 @@ The redaction shape varies per-variant. The table below uses the most-redacting 
 
 Source: `autonoetic-types/src/background.rs::ScheduledAction::redact_for_viewer`.
 
+> **Issue #158 (open, fixed in PR #160).** `SandboxExec.command` is currently preserved verbatim for the `Agent` class — a command embedding a Bearer token in `curl -H 'Authorization: …'` leaks to any agent-class consumer of the approval (e.g. an approver agent reading `approval_summary`). Pinned by `agent_viewer_sandbox_exec_command_currently_preserves_secrets`. PR #160 changes the behaviour to `"***REDACTED***"` and flips that pin.
+
 > Variants in the fall-through set carry no fields with raw secret material today (agent IDs, summaries, request IDs). If a future variant adds a body field, the `agent_viewer_falls_through_for_agent_install_today` regression pin will fail and prompt the author to add an explicit redaction arm rather than silently leaking.
 
 ---
 
 ## Where the class is selected
 
-The viewer class is chosen at the call site. There are two production call sites today:
+The viewer class is chosen at the call site. Two production call sites today pass an explicit class:
 
 | Call site | Class | Why |
 |---|---|---|
 | `runtime/tools/execution.rs::ExecutionSearchTool` | `Agent` | The caller is always an agent invoking the `execution.search` tool. |
 | `runtime/tools/approval.rs::approval_summary` | `Agent` | The caller is the agent that requested or is querying the approval. |
 
-The CLI and HTTP API paths do not invoke the viewer redaction layer at all today — they go through their own rendering paths (CLI via `redact_for_display` which is `Operator`-equivalent; HTTP API via the unredacted store readers gated by HMAC auth).
+Other paths today do **not** invoke `ViewerClass`-aware redaction:
+
+- **CLI rendering of approvals** formats `ApprovalRequest.action` directly (truncating `SandboxExec.command`, etc.) without going through `redact_for_display` or `redact_for_viewer(Operator)`. The CLI is operator-only and the data is already operator-class, but applying the redaction layer would be more defensible — tracked as a follow-up.
+- **HTTP API readers** go through unredacted store readers gated by HMAC auth (the assumption is that HMAC-authenticated callers are equivalent to `Admin`).
 
 > **Convention:** any code path that emits trace, event, or approval data to a non-Admin consumer should pass `ViewerClass::Agent` if the consumer is an autonoetic agent, `ViewerClass::Operator` if it is a human, `ViewerClass::Admin` only when the consumer is part of the gateway core (e.g. log persistence, where R+9 already redacted at write time). When in doubt, pass `Agent` — too restrictive is recoverable; too permissive is not.
 
@@ -119,15 +130,27 @@ The CLI and HTTP API paths do not invoke the viewer redaction layer at all today
 
 ---
 
-## Canonical redaction module
+## Where the redaction primitives live
 
-The primitives behind these redactions live in **`autonoetic-types/src/redaction.rs`** (centralised in #161). Three call layers use them:
+### Today
+
+The primitives are triplicated across the workspace:
+
+- `autonoetic-types/src/causal_chain.rs` — local copies of `redact_json_string`, `redact_json_value`, `is_sensitive_key`. The non-JSON fallback in `redact_json_string` wholesale-redacts on substring match (the bug fixed by PR #161).
+- `autonoetic-types/src/background.rs` — separate local copies of `is_sensitive_key`, `looks_like_secret_value`, plus per-`ScheduledAction`-variant redaction.
+- `autonoetic-gateway/src/log_redaction.rs` — the most comprehensive copy: regex catalogue, JWT/long-hex detection, JSON-aware redaction. Owns `RedactedPayload` (the R+9 wrapper).
+
+The three sets have drifted slightly: the gateway version has the regex catalogue, the types versions don't.
+
+### After PR #161 lands
+
+The canonical primitives move to **`autonoetic-types/src/redaction.rs`**. The three call layers above all delegate to it:
 
 1. `causal_chain::redact_for_viewer` — for `ExecutionTraceRecord` and `CausalEventRecord`.
 2. `background::ScheduledAction::redact_for_viewer` — for approval subjects.
-3. `gateway::log_redaction` — re-exports the canonical helpers; `RedactedPayload` (the R+9 wrapper) lives there.
+3. `gateway::log_redaction` — re-exports the canonical helpers; `RedactedPayload` (the R+9 wrapper) stays local.
 
-Public functions in `autonoetic-types::redaction`:
+Public functions in the canonical module (post-#161):
 
 | Function | Purpose |
 |---|---|
@@ -138,7 +161,7 @@ Public functions in `autonoetic-types::redaction`:
 | `redact_json_value(v)` | Recursive JSON redaction: object keys via `is_sensitive_key` → wholesale value redact; string values via `redact_embedded_secrets`; **narrow PEM fallback** for values that can't be masked locally. |
 | `redact_text_for_logs(t)` | Top-level entry: JSON parse → `redact_json_value`; otherwise `redact_embedded_secrets`. |
 
-### Why the JSON-value fallback is narrow
+#### Why the JSON-value fallback is narrow (post-#161)
 
 The fallback for values that can't be masked in place is restricted to PEM blocks (`-----BEGIN`). It is intentionally **not** the broader `looks_like_secret_value` predicate, because content digests, revision IDs, and hook delivery IDs (e.g. `hook-<sha256>`) routinely match JWT/long-hex shapes — falling back on those would silently mangle ordinary identifiers. The narrow PEM-only path is pinned by the `redact_json_value_handles_each_secret_shape_appropriately` test.
 
@@ -146,7 +169,7 @@ The fallback for values that can't be masked in place is restricted to PEM block
 
 ## R+9 and `RedactedPayload`
 
-`ViewerClass` is a *read-time* defence. The complementary *write-time* invariant is **R+9 (redaction-before-write)**, enforced by `gateway::log_redaction::RedactedPayload`. The newtype wraps `serde_json::Value`; constructors run the canonical `redact_json_value` before the payload reaches the causal chain. Direct `Value` cannot be passed to `CausalLogger::log` — only `RedactedPayload` can.
+`ViewerClass` is a *read-time* defence. The complementary *write-time* invariant is **R+9 (redaction-before-write)**, enforced by `gateway::log_redaction::RedactedPayload`. The newtype wraps `serde_json::Value`; constructors run `redact_json_value` before the payload reaches the causal chain. Direct `Value` cannot be passed to `CausalLogger::log` — only `RedactedPayload` can.
 
 The two layers compose:
 
@@ -178,8 +201,8 @@ They cooperate; neither subsumes the other.
 
 ### What this protects against
 
-- **Cross-agent secret leakage via observability tools.** A specialist agent invoking `execution.search` or `approval_summary` to learn from another session sees only metadata, not stdout/stderr/headers/bodies. Even if the source agent had `NetworkAccess` and made a credential-bearing request, the credential never reaches the curious agent.
-- **Operator-class triage with masked secrets.** Operators inspecting payloads see structural fields (host, method, path, JSON keys) but credential values are masked in place — enough to debug without exposing the secret.
+- **Cross-agent secret leakage via observability tools.** A specialist agent invoking `execution.search` to learn from another session sees only metadata, not stdout/stderr/headers/bodies. Even if the source agent had `NetworkAccess` and made a credential-bearing request, the credential-in-body never reaches the curious agent. (One known gap: `approval_summary` for `ScheduledAction::SandboxExec` currently exposes the command verbatim — issue #158, fixed by PR #160.)
+- **Operator-class triage with redacted secrets.** Operators inspecting payloads see structural fields (host, method, path, JSON keys) but secret-named keys have their values replaced with `"***REDACTED***"`. Non-JSON strings today get the coarse substring-fallback behaviour; PR #161 replaces this with precise in-place masking.
 - **Inadvertent exposure through reports.** The HTML and JSON session reports go through `redact_text_for_logs` before being written to the content store (commit 7f8525d, closes part of issue #4).
 
 ### What this does NOT protect against
@@ -192,10 +215,13 @@ They cooperate; neither subsumes the other.
 
 ## Known gaps and follow-ups
 
-| Gap | Issue | Status |
+| Gap | Issue / PR | Status |
 |---|---|---|
-| `X-API-Key` (hyphenated) does not match `is_sensitive_key` (catalogue uses `api_key` underscore form). `X-Auth-Token` and similar with `token` substring do match. | #156 (filed; partially addressed by canonical move) | Open — adding `api-key` to the catalogue is straightforward but requires intent confirmation. Pinned by `is_sensitive_key_misses_hyphenated_api_key`. |
+| `SandboxExec.command` leaks verbatim to `ViewerClass::Agent`. | #158 (issue), #160 (PR) | PR open. Pinned by `agent_viewer_sandbox_exec_command_currently_preserves_secrets` — flips when PR lands. |
+| Redaction primitives triplicated; non-JSON fallback wholesale-redacts on substring match (`tokenizer config` becomes `"***REDACTED***"`). | #156 (issue), #161 (PR) | PR open. Bonus regex fix: bare `PASSWORD=…` now matches; `KEY=value` regex's leading `[A-Z][A-Z0-9_]*` was tightened to `[A-Z0-9_]*`. |
+| `X-API-Key` (hyphenated) does not match `is_sensitive_key`. `X-Auth-Token` and similar with `token` substring do match. | #156 (filed) | Open — adding `api-key` to the catalogue is straightforward but requires intent confirmation. Pinned by `is_sensitive_key_misses_hyphenated_api_key`. |
+| CLI rendering of approvals does not call `redact_for_display` or `redact_for_viewer(Operator)`; it formats `ApprovalRequest.action` directly. | (not yet filed) | Open — applying `Operator` redaction would be more defensible. The CLI is operator-only so secret leakage is not a current concern, but the layer should be applied for consistency. |
 | Frozen-baseline contract claim in `docs/security-sentinel.md` overstates what dual-sweep catches. | #153 | Open — separate version-pinned baseline module is the architectural fix. |
-| Promotion gate scopes critical findings system-wide rather than per-agent. | #155 | Open. |
+| Promotion gate scopes critical findings system-wide rather than per-agent. | #155 (issue), #163 (PR) | PR open — adds `scope_agent_id` and threads it through the Phase-1 checks. |
 
 When closing one of these, please update the relevant table or note in this file in the same PR.

@@ -240,12 +240,12 @@ Key design decisions:
 
 Two cooperating mechanisms control how sensitive data flows through the gateway:
 
-- **`ViewerClass` (Agent / Operator / Admin)** controls *what an observability or approval reader sees* based on who they are. Agents reading `execution.search` or `approval_summary` get metadata only — no stdout, no command bodies, no headers, no payload content. Operators see structural fields with secret values masked in place. Admins see the raw record. Selected at the call site.
+- **`ViewerClass` (Agent / Operator / Admin)** controls *what an observability or approval reader sees* based on who they are. Agents reading `execution.search` get trace metadata only — no stdout, no commands, no arguments, no result. Agents reading `approval_summary` for `WriteFile` see the path but not content; for `CredentialRequest` they see only `credential_id`/`url`/`method` (headers / body / payload blanked). One known gap (issue #158, fixed by PR #160): `SandboxExec.command` is currently preserved verbatim for the Agent class. Operators see structural fields with secret-named JSON keys redacted; non-JSON strings today fall back to wholesale redaction on substring match (replaced by precise in-place masking once PR #161 lands). Admins see the raw record. Class is selected at the call site.
 - **`DisclosureClass` (Public / Restricted)** controls *what an LLM may quote in its assistant reply*. Per-content classification configured via `DisclosurePolicy` rules in `SKILL.md`.
 
 Together with **R+9** (the redaction-before-write invariant enforced by `RedactedPayload`), these form three layers: R+9 keeps secrets out of the causal chain at write time; `ViewerClass` strips fields per consumer at read time; `DisclosureClass` filters the LLM's reply.
 
-Redaction primitives are centralised in `autonoetic-types/src/redaction.rs`. Per-record field-by-field tables, call-site conventions, and the threat model are documented in [`docs/observability-redaction.md`](observability-redaction.md).
+Redaction primitives currently live in three places (`causal_chain.rs`, `background.rs`, `gateway/log_redaction.rs`); PR #161 centralises them in `autonoetic-types/src/redaction.rs`. Per-record field-by-field tables, call-site conventions, and the threat model are documented in [`docs/observability-redaction.md`](observability-redaction.md).
 
 ### Capability-Based Access Control
 
