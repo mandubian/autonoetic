@@ -79,9 +79,16 @@ impl DualSweepRunner {
     ) -> Result<DualSweepResult> {
         let sweep_at = chrono::Utc::now().to_rfc3339();
 
-        // Enforce Phase-1-only on the baseline regardless of caller config.
+        // Enforce Phase-1-only on the baseline regardless of caller config,
+        // and force the baseline pass to dispatch to the frozen
+        // `super::baseline` module (issue #153). The current pass continues
+        // to use `super::checks`. Together this means a regex regression in
+        // `checks/credential.rs` (or similar) shows up as a `baseline_only`
+        // disagreement here, rather than silently propagating to both passes
+        // as it did when both branches called the same code.
         let baseline_config_p1 = SweepConfig {
             phase1_only: true,
+            phase1_use_baseline: true,
             sentinel_revision_id: baseline_config.sentinel_revision_id.clone(),
             since_rfc3339: baseline_config.since_rfc3339.clone(),
             scan_limit: baseline_config.scan_limit,

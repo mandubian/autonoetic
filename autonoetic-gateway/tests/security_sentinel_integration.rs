@@ -1252,3 +1252,160 @@ fn list_security_findings_filtered_by_triage_state() {
     assert_eq!(tp.len(), 1);
     assert_eq!(tp[0].finding_id, f1.finding_id);
 }
+
+// ── Issue #153: Frozen-baseline module ──────────────────────────────────────
+//
+// The baseline lives in `autonoetic-gateway/src/sentinel/baseline/` as a
+// hand-frozen snapshot of `sentinel/checks/`. The dual-sweep dispatches the
+// baseline pass to `super::baseline::*` (via `phase1_use_baseline=true`),
+// while the current pass runs `super::checks::*`. A regression in the
+// canonical sentinel produces a `baseline_only` disagreement at the next
+// sweep instead of silently propagating to both branches.
+//
+// These tests pin two contracts:
+//
+// 1. **Dispatch wiring** — when `phase1_use_baseline=true`, the runner
+//    actually executes the baseline functions and returns findings (not just
+//    silently producing no output).
+// 2. **In-sync at this commit** — running both the baseline and the
+//    canonical checks against the same fixture produces equal findings, so
+//    a future PR that updates `super::checks` without `[baseline-update]`
+//    will fail this pin and force a deliberate decision.
+
+#[test]
+fn baseline_dispatch_runs_and_produces_findings() {
+    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+
+    let (dir, store) = open_store();
+    insert_credential_leak_event(&dir, "coder.default", "evt_baseline_dispatch");
+
+    // Re-open so the runner sees the inserted row.
+    let store = std::sync::Arc::new(GatewayStore::open(dir.path()).unwrap());
+
+    // Run with phase1_use_baseline=true. If dispatch is broken (e.g. someone
+    // accidentally drops the baseline arm), we either get no findings or
+    // build errors. The baseline must produce at least the credential finding.
+    let runner = SentinelRunner::new(store);
+    let result = runner
+        .run_sweep(&SweepConfig {
+            sentinel_revision_id: "test.baseline".into(),
+            phase1_only: true,
+            phase1_use_baseline: true,
+            ..SweepConfig::default()
+        })
+        .expect("baseline sweep");
+
+    assert!(
+        !result.credential_findings.is_empty(),
+        "baseline dispatch must produce credential findings; got 0 \
+         (regression: SweepConfig::phase1_use_baseline may not be wired)"
+    );
+}
+
+#[test]
+fn baseline_and_checks_agree_on_credential_fixture_at_this_commit() {
+    // Pin: at the time this test was written, `sentinel/baseline/credential.rs`
+    // is a hand-frozen snapshot of `sentinel/checks/credential.rs`, so they
+    // must produce equal findings on the same fixture. A future PR that
+    // updates `checks` without also updating `baseline` (deliberate
+    // `[baseline-update]` action) will fail this test, forcing the author
+    // to decide: (a) propagate the change with `[baseline-update]`, or
+    // (b) accept the divergence as the disagreement-detection signal it's
+    // designed to be.
+    use autonoetic_gateway::sentinel::runner::{SentinelRunner, SweepConfig};
+
+    let (dir, _store) = open_store();
+    insert_credential_leak_event(&dir, "coder.default", "evt_pin_001");
+    let store = std::sync::Arc::new(GatewayStore::open(dir.path()).unwrap());
+
+    let baseline = SentinelRunner::new(std::sync::Arc::clone(&store))
+        .run_sweep(&SweepConfig {
+            sentinel_revision_id: "test.baseline".into(),
+            phase1_only: true,
+            phase1_use_baseline: true,
+            ..SweepConfig::default()
+        })
+        .expect("baseline sweep");
+    let current = SentinelRunner::new(store)
+        .run_sweep(&SweepConfig {
+            sentinel_revision_id: "test.current".into(),
+            phase1_only: true,
+            phase1_use_baseline: false,
+            ..SweepConfig::default()
+        })
+        .expect("current sweep");
+
+    // Same number of findings per category.
+    assert_eq!(
+        baseline.credential_findings.len(),
+        current.credential_findings.len(),
+        "baseline and checks must produce equal credential-finding counts at \
+         this commit — divergence means the canonical checks were updated \
+         without a [baseline-update] PR. Either propagate the change to \
+         baseline (deliberate) or accept it as a disagreement signal."
+    );
+
+    // Same anchors (compare by event_id, since finding_id is UUID-random).
+    let anchor_set =
+        |findings: &[autonoetic_types::security::SecurityFinding]| -> std::collections::BTreeSet<String> {
+            findings
+                .iter()
+                .flat_map(|f| f.evidence_anchors.iter())
+                .filter_map(|a| match a {
+                    autonoetic_types::security::EvidenceAnchor::CausalEvent { id } => {
+                        Some(id.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+    assert_eq!(
+        anchor_set(&baseline.credential_findings),
+        anchor_set(&current.credential_findings),
+        "evidence anchors must match between baseline and checks at this commit"
+    );
+}
+
+#[test]
+fn dual_sweep_at_creation_records_full_baseline_agreement() {
+    // End-to-end pin: with the baseline frozen as an exact copy of checks,
+    // every Phase-1 finding from the dual-sweep should have
+    // `baseline_agreed = true` and zero baseline_only / current_only
+    // disagreements. A future divergence will break this pin AND surface as
+    // a real disagreement record — the intended behaviour.
+    use autonoetic_gateway::scheduler::gateway_store::sentinel_disagreements::DisagreementDirection;
+    use autonoetic_gateway::sentinel::runner::SweepConfig;
+    use autonoetic_gateway::sentinel::DualSweepRunner;
+
+    let (dir, _store) = open_store();
+    insert_credential_leak_event(&dir, "coder.default", "evt_dual_pin_001");
+    let store = std::sync::Arc::new(GatewayStore::open(dir.path()).unwrap());
+
+    let runner = DualSweepRunner::new(std::sync::Arc::clone(&store));
+    let baseline_config = SweepConfig {
+        sentinel_revision_id: "sentinel.baseline".into(),
+        ..SweepConfig::default()
+    };
+    let current_config = SweepConfig {
+        sentinel_revision_id: "sentinel.current".into(),
+        ..SweepConfig::default()
+    };
+    let result = runner.run(&baseline_config, &current_config).expect("dual sweep");
+
+    assert!(
+        result.baseline_agreed_count > 0,
+        "baseline_agreed_count > 0 expected at this commit (baseline = checks)"
+    );
+    assert!(
+        result.disagreements.iter().all(|d| {
+            d.direction != DisagreementDirection::BaselineOnly
+                && d.direction != DisagreementDirection::CurrentOnly
+        }),
+        "no Phase-1 disagreements expected at this commit; got: {:?}",
+        result
+            .disagreements
+            .iter()
+            .map(|d| (&d.direction, &d.anchor_json))
+            .collect::<Vec<_>>()
+    );
+}
