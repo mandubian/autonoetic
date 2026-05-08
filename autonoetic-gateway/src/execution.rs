@@ -267,7 +267,8 @@ pub fn collect_shared_knowledge(
                 return None;
             }
             let preview = if m.content.len() > 100 {
-                format!("{}...", &m.content[..100])
+                let end = m.content.floor_char_boundary(100);
+                format!("{}...", &m.content[..end])
             } else {
                 m.content.clone()
             };

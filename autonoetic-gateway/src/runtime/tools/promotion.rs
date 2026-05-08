@@ -164,7 +164,8 @@ impl NativeTool for PromotionRecordTool {
                 .map(|f| {
                     let desc = &f.description;
                     if desc.len() > 80 {
-                        format!("{}...", &desc[..80])
+                        let end = desc.floor_char_boundary(80);
+                        format!("{}...", &desc[..end])
                     } else {
                         desc.clone()
                     }

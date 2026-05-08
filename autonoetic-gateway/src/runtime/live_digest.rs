@@ -697,8 +697,8 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn truncate_json_string_fields(v: &mut Value, max_len: usize) {
     match v {
         Value::String(s) => {
-            if s.len() > max_len {
-                *s = format!("{}…", &s[..max_len]);
+            if s.chars().count() > max_len {
+                *s = truncate_chars(s, max_len);
             }
         }
         Value::Array(arr) => {
