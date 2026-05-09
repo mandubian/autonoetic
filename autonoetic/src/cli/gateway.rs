@@ -435,6 +435,20 @@ pub async fn handle_gateway_approvals(
                     if let Some(ref phrase) = a.confirm_phrase {
                         println!("R++4 confirm:   --confirm-phrase '{}'", phrase);
                     }
+
+                    if let Ok(msgs) = gateway_store.get_gate_messages(request_id) {
+                        if !msgs.is_empty() {
+                            println!("\nEnrichment:");
+                            for msg in &msgs {
+                                println!(
+                                    "  [{}] {}: {}",
+                                    msg.created_at.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == 'Z' || c == '+' || c == '-').trim_end_matches(|c: char| c == ':' || c == 'T'),
+                                    msg.sender,
+                                    msg.content
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1063,6 +1077,25 @@ async fn run_interactive_approvals(
                         ]));
                     }
                 }
+
+                if let Ok(msgs) = gateway_store.get_gate_messages(&items[idx].request_id) {
+                    if !msgs.is_empty() {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            "Enrichment:",
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        )));
+                        for msg in msgs {
+                            let sender = format!("[{}] ", msg.sender);
+                            let content = msg.content;
+                            lines.push(Line::from(vec![
+                                Span::styled(sender, Style::default().fg(Color::DarkGray)),
+                                Span::styled(content, Style::default().fg(Color::Cyan)),
+                            ]));
+                        }
+                    }
+                }
+
                 lines
             } else {
                 vec![Line::from(Span::styled(
