@@ -3760,7 +3760,11 @@ fn indent_block(prefix: &str, text: &str) -> String {
 }
 
 /// Multi-line card for a persisted [`ApprovalRequest`] (gateway store sync).
-fn format_store_approval_card(req: &ApprovalRequest, approval_instructions: &str) -> String {
+fn format_store_approval_card(
+    req: &ApprovalRequest,
+    approval_instructions: &str,
+    enrichment: &[autonoetic_gateway::runtime::human_gate::GateMessage],
+) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("⏸ Pending approval — {}", req.request_id));
     lines.push(format!(
@@ -3782,6 +3786,19 @@ fn format_store_approval_card(req: &ApprovalRequest, approval_instructions: &str
     if let Some(ev) = req.evidence_ref.as_deref().filter(|s| !s.is_empty()) {
         lines.push(String::new());
         lines.push(format!("Evidence ref: {}", clamp_chat_field(ev)));
+    }
+    if !enrichment.is_empty() {
+        lines.push(String::new());
+        lines.push("Context:".to_string());
+        for msg in enrichment {
+            for (i, ln) in msg.content.lines().enumerate() {
+                if i == 0 {
+                    lines.push(format!("  [{}] {}", msg.sender, clamp_chat_field(ln)));
+                } else {
+                    lines.push(format!("  {}", clamp_chat_field(ln)));
+                }
+            }
+        }
     }
     lines.push(String::new());
     lines.push(approval_instructions.to_string());
@@ -3832,7 +3849,14 @@ fn merge_gateway_store_pending_approvals(
                     req.request_id
                 )
             };
-            let card = format_store_approval_card(&req, &detail);
+            let enrichment = match store.get_gate_messages(&req.request_id) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    tracing::debug!(target: "chat", error = %e, request_id = %req.request_id, "Failed to load gate enrichment");
+                    Vec::new()
+                }
+            };
+            let card = format_store_approval_card(&req, &detail, &enrichment);
             app.add_message(MessageRole::Signal, card);
             announced = true;
         }

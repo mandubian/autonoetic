@@ -234,6 +234,19 @@ impl GateService {
         // 5. Create new approval row.
         let gate_id = self.create_approval_row(req, action)?;
 
+        // 5b. Seed enrichment thread with reason + targets.
+        {
+            let targets_str = if targets.is_empty() {
+                String::new()
+            } else {
+                format!(" (targets: {})", targets.join(", "))
+            };
+            let seed = format!("{}{}", req.reason, targets_str);
+            if !seed.trim().is_empty() {
+                let _ = self.add_gate_message(&gate_id, "system", &seed);
+            }
+        }
+
         // 6. Build suspension JSON.
         let response_json = self.build_approval_suspension_json(&gate_id, req, action)?;
 
@@ -293,6 +306,8 @@ impl GateService {
 
         self.store.create_user_interaction(&interaction)?;
 
+        let _ = self.add_gate_message(&interaction_id, "system", &format!("Agent asks: {}", question));
+
         let response_json = serde_json::json!({
             "ok": true,
             "interaction_required": true,
@@ -334,6 +349,8 @@ impl GateService {
         };
 
         let gate_id = self.create_approval_row(req, &action)?;
+
+        let _ = self.add_gate_message(&gate_id, "system", &format!("Escalation: {}", reason));
 
         let response_json = serde_json::json!({
             "ok": false,
@@ -1099,6 +1116,51 @@ mod tests {
         // Empty for a different gate.
         let empty = svc.get_gate_messages("apr-nonexistent")?;
         assert!(empty.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn approval_auto_seeds_enrichment_message() -> Result<()> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let manifest = test_manifest();
+
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action: make_credential_request_action("http://api.example.com/data"),
+                targets: vec!["api.example.com".to_string()],
+                match_strategy: MatchStrategy::HostLevel,
+            },
+            manifest: &manifest,
+            session_id: Some("ses-seed-123"),
+            run_context: None,
+            config: None,
+            reason: "API access required".to_string(),
+            summary: "Fetch data".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+        };
+
+        let result = svc.check(req)?;
+        let gate_id = match result {
+            GateResult::Suspended { gate_id, .. } => gate_id,
+            other => panic!("expected Suspended, got {:?}", other),
+        };
+
+        let msgs = svc.get_gate_messages(&gate_id)?;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].sender, "system");
+        assert!(
+            msgs[0].content.contains("API access required"),
+            "seed message should contain the reason: {:?}",
+            msgs[0].content
+        );
+        assert!(
+            msgs[0].content.contains("api.example.com"),
+            "seed message should contain the target: {:?}",
+            msgs[0].content
+        );
         Ok(())
     }
 }

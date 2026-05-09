@@ -435,6 +435,22 @@ pub async fn handle_gateway_approvals(
                     if let Some(ref phrase) = a.confirm_phrase {
                         println!("R++4 confirm:   --confirm-phrase '{}'", phrase);
                     }
+
+                    if let Ok(msgs) = gateway_store.get_gate_messages(request_id) {
+                        if !msgs.is_empty() {
+                            println!("\nEnrichment:");
+                            for msg in &msgs {
+                                let ts: String = msg.created_at.chars().take(19).collect();
+                                for (i, ln) in msg.content.lines().enumerate() {
+                                    if i == 0 {
+                                        println!("  [{}] {}: {}", ts, msg.sender, ln);
+                                    } else {
+                                        println!("  {}{}", " ".repeat(22 + msg.sender.len()), ln);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -639,6 +655,10 @@ async fn run_interactive_approvals(
     let mut tui_mode = TuiMode::Navigate;
     let mut question_input = String::new();
     let mut question_answer = String::new();
+
+    let mut enrichment_cache: std::collections::HashMap<String, Vec<autonoetic_gateway::runtime::human_gate::GateMessage>> =
+        std::collections::HashMap::new();
+    let mut last_selected: Option<usize> = None;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1063,6 +1083,43 @@ async fn run_interactive_approvals(
                         ]));
                     }
                 }
+
+                let selected_id = items[idx].request_id.clone();
+                if last_selected != Some(idx) {
+                    if let Ok(msgs) = gateway_store.get_gate_messages(&selected_id) {
+                        enrichment_cache.insert(selected_id.clone(), msgs);
+                    }
+                    last_selected = Some(idx);
+                }
+                if let Some(msgs) = enrichment_cache.get(&selected_id) {
+                    if !msgs.is_empty() {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            "Enrichment:",
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        )));
+                        for msg in msgs {
+                            let sender = format!("[{}] ", msg.sender);
+                            for (i, ln) in msg.content.lines().enumerate() {
+                                if i == 0 {
+                                    lines.push(Line::from(vec![
+                                        Span::styled(sender.clone(), Style::default().fg(Color::DarkGray)),
+                                        Span::styled(ln.to_string(), Style::default().fg(Color::Cyan)),
+                                    ]));
+                                } else {
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            format!("{:width$}", "", width = sender.len()),
+                                            Style::default().fg(Color::DarkGray),
+                                        ),
+                                        Span::styled(ln.to_string(), Style::default().fg(Color::Cyan)),
+                                    ]));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 lines
             } else {
                 vec![Line::from(Span::styled(
@@ -1302,6 +1359,8 @@ async fn run_interactive_approvals(
                         ) {
                             Ok(refreshed) => {
                                 items = refreshed;
+                                enrichment_cache.clear();
+                                last_selected = None;
                                 if items.is_empty() {
                                     done = true;
                                     status_msg = "No more pending approvals.".to_string();
