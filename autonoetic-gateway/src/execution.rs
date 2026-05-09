@@ -1204,7 +1204,6 @@ impl GatewayExecutionService {
         Option<String>,
     )> {
         use autonoetic_types::background::UserInteractionStatus;
-        use crate::runtime::session_resume::resume_answered_user_interaction_from_loaded_checkpoint;
 
         if matches!(
             checkpoint.yield_reason,
@@ -1277,6 +1276,9 @@ impl GatewayExecutionService {
                     runtime.session_started = true;
                     runtime.turn_counter = checkpoint.turn_counter;
                     runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+                    if let Some(ref cm) = checkpoint.compression_metadata {
+                        runtime.compression_metadata = cm.clone();
+                    }
                     let mut history = checkpoint.history.clone();
                     inject_approval_ref_into_history(&mut history, rid);
                     let initial_msg = checkpoint
@@ -1393,6 +1395,9 @@ impl GatewayExecutionService {
                     runtime.session_started = true;
                     runtime.turn_counter = checkpoint.turn_counter;
                     runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+                    if let Some(ref cm) = checkpoint.compression_metadata {
+                        runtime.compression_metadata = cm.clone();
+                    }
                     let mut history = checkpoint.history.clone();
                     let operator = req.decided_by.as_deref().unwrap_or("operator");
                     let guidance_note = req.decision_reason.as_deref().unwrap_or("");
