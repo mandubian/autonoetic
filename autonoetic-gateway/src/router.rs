@@ -919,6 +919,93 @@ impl JsonRpcRouter {
                 )
             }
 
+            "gate.get_messages" => {
+                #[derive(Deserialize)]
+                struct GetMessagesParams {
+                    gate_id: String,
+                }
+
+                let params: GetMessagesParams = match serde_json::from_value(req.params.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for gate.get_messages: {}", e),
+                        );
+                    }
+                };
+
+                match self.execution.gateway_store() {
+                    Some(store) => match store.get_gate_messages(&params.gate_id) {
+                        Ok(msgs) => JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "ok": true,
+                                "gate_id": params.gate_id,
+                                "messages": msgs,
+                            }),
+                        ),
+                        Err(e) => JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to get gate messages: {}", e),
+                        ),
+                    },
+                    None => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available",
+                    ),
+                }
+            }
+
+            "gate.add_message" => {
+                #[derive(Deserialize)]
+                struct AddMessageParams {
+                    gate_id: String,
+                    sender: String,
+                    content: String,
+                }
+
+                let params: AddMessageParams = match serde_json::from_value(req.params.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for gate.add_message: {}", e),
+                        );
+                    }
+                };
+
+                match self.execution.gateway_store() {
+                    Some(store) => match store.add_gate_message(
+                        &params.gate_id,
+                        &params.sender,
+                        &params.content,
+                    ) {
+                        Ok(id) => JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "ok": true,
+                                "message_id": id,
+                            }),
+                        ),
+                        Err(e) => JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to add gate message: {}", e),
+                        ),
+                    },
+                    None => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available",
+                    ),
+                }
+            }
+
             _ => JsonRpcResponse::error(req.id, -32601, "Method not found"),
         }
     }
