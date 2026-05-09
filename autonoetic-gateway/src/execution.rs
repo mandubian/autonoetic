@@ -32,6 +32,51 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
+/// Inject `approval_ref` into the last tool_call's arguments in the history,
+/// then append a user message confirming the approval.  This fixes the
+/// LLM-dependent relay bug where the model ignores the text-only hint and
+/// retries without `approval_ref`, causing redundant approval requests.
+fn inject_approval_ref_into_history(history: &mut Vec<Message>, approval_ref: &str) {
+    // Walk history backwards to find the last assistant message with tool_calls.
+    for msg in history.iter_mut().rev() {
+        if matches!(msg.role, crate::llm::Role::Assistant) && !msg.tool_calls.is_empty() {
+            // Inject approval_ref into the last tool call's arguments.
+            if let Some(tc) = msg.tool_calls.last_mut() {
+                match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+                    Ok(mut args_val) => {
+                        if let Some(obj) = args_val.as_object_mut() {
+                            obj.insert(
+                                "approval_ref".to_string(),
+                                serde_json::Value::String(approval_ref.to_string()),
+                            );
+                        }
+                        tc.arguments = serde_json::to_string(&args_val)
+                            .unwrap_or_else(|_| tc.arguments.clone());
+                    }
+                    Err(_) => {
+                        // Arguments are not valid JSON; fall back to appending.
+                        if !tc.arguments.contains("approval_ref") {
+                            let suffix = if tc.arguments.ends_with('}') {
+                                format!(",\"approval_ref\":\"{}\"}}", approval_ref)
+                            } else {
+                                format!("{{\"approval_ref\":\"{}\"}}", approval_ref)
+                            };
+                            tc.arguments = suffix;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+    // Also inject the text hint as a user message (belt-and-suspenders).
+    history.push(crate::llm::Message::user(format!(
+        "[gateway] Approval `{}` has been granted by the operator. \
+         The tool call has been updated with approval_ref=\"{}\".",
+        approval_ref, approval_ref
+    )));
+}
+
 /// Ensures `close_session` runs when `execute_with_history` fails so session report / digest finalize.
 pub(crate) async fn execute_with_history_close_on_error(
     runtime: &mut AgentExecutor,
@@ -1855,15 +1900,7 @@ impl GatewayExecutionService {
                                     runtime.turn_counter = checkpoint.turn_counter;
                                     runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
                                     let mut history = checkpoint.history.clone();
-                                    // Inject approval-granted notice so the LLM knows to pass
-                                    // approval_ref on retry instead of re-triggering the gate.
-                                    history.push(crate::llm::Message::user(format!(
-                                        "[gateway] Approval `{}` has been granted by the operator. \
-                                         When retrying the tool call that required approval, include \
-                                         `\"approval_ref\": \"{}\"` in the arguments to skip the \
-                                         approval gate.",
-                                        rid, rid
-                                    )));
+                                    inject_approval_ref_into_history(&mut history, rid);
                                     let initial_msg = checkpoint
                                         .history
                                         .iter()
@@ -2139,15 +2176,7 @@ impl GatewayExecutionService {
                                 runtime.turn_counter = checkpoint.turn_counter;
                                 runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
                                 let mut history = checkpoint.history.clone();
-                                // Inject approval-granted notice so the LLM knows to pass
-                                // approval_ref on retry instead of re-triggering the gate.
-                                history.push(crate::llm::Message::user(format!(
-                                    "[gateway] Approval `{}` has been granted by the operator. \
-                                     When retrying the tool call that required approval, include \
-                                     `\"approval_ref\": \"{}\"` in the arguments to skip the \
-                                     approval gate.",
-                                    rid, rid
-                                )));
+                                inject_approval_ref_into_history(&mut history, rid);
                                 let initial_msg = checkpoint
                                     .history
                                     .iter()
@@ -3385,5 +3414,67 @@ mod tests {
             SessionCloseReason::for_checkpoint_respawn(false, false, false).as_str(),
             "checkpoint_respawn_complete_empty"
         );
+    }
+
+    #[test]
+    fn inject_approval_ref_into_history_adds_ref_to_last_tool_call() {
+        use crate::llm::ToolCall;
+
+        let mut history = vec![
+            Message::user("Set up credentials"),
+            Message {
+                role: crate::llm::Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "credential.setup".to_string(),
+                    arguments: r#"{"skill_url":"http://localhost:8080/skill.md"}"#.to_string(),
+                }],
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+
+        inject_approval_ref_into_history(&mut history, "apr-abc123");
+
+        // The assistant message's tool call should now have approval_ref.
+        let assistant_msg = &history[1];
+        assert_eq!(assistant_msg.role, crate::llm::Role::Assistant);
+        let tc = &assistant_msg.tool_calls[0];
+        let args: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap();
+        assert_eq!(args["approval_ref"], "apr-abc123");
+        assert_eq!(args["skill_url"], "http://localhost:8080/skill.md");
+
+        // A user message should be appended with the approval notice.
+        let user_msg = history.last().unwrap();
+        assert_eq!(user_msg.role, crate::llm::Role::User);
+        assert!(user_msg.content.contains("apr-abc123"));
+    }
+
+    #[test]
+    fn inject_approval_ref_preserves_existing_fields() {
+        use crate::llm::ToolCall;
+
+        let mut history = vec![
+            Message {
+                role: crate::llm::Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_2".to_string(),
+                    name: "sandbox.exec".to_string(),
+                    arguments: r#"{"command":"curl http://api.example.com","approval_ref":"apr-old"}"#.to_string(),
+                }],
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+
+        inject_approval_ref_into_history(&mut history, "apr-new");
+
+        let tc = &history[0].tool_calls[0];
+        let args: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap();
+        // Should be overwritten with the new ref.
+        assert_eq!(args["approval_ref"], "apr-new");
+        assert_eq!(args["command"], "curl http://api.example.com");
     }
 }

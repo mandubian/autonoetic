@@ -6,6 +6,7 @@ pub mod attack_patterns;
 pub mod constitutional_proposals;
 mod credentials;
 mod evaluations;
+mod gate_messages;
 mod hook_deliveries;
 mod memory;
 mod messages;

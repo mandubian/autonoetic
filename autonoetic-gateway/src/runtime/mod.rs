@@ -19,6 +19,7 @@ pub mod crypto;
 pub mod disclosure;
 pub mod guard;
 pub mod history_persist;
+pub mod human_gate;
 pub mod install_contract;
 pub mod lifecycle;
 pub mod live_digest;
