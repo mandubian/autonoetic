@@ -925,7 +925,7 @@ impl JsonRpcRouter {
                     gate_id: String,
                 }
 
-                let params: GetMessagesParams = match serde_json::from_value(req.params.clone()) {
+                let params: GetMessagesParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
                     Err(e) => {
                         return JsonRpcResponse::error(
@@ -941,7 +941,6 @@ impl JsonRpcRouter {
                         Ok(msgs) => JsonRpcResponse::success(
                             req.id,
                             serde_json::json!({
-                                "ok": true,
                                 "gate_id": params.gate_id,
                                 "messages": msgs,
                             }),
@@ -968,7 +967,7 @@ impl JsonRpcRouter {
                     content: String,
                 }
 
-                let params: AddMessageParams = match serde_json::from_value(req.params.clone()) {
+                let params: AddMessageParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
                     Err(e) => {
                         return JsonRpcResponse::error(
@@ -979,16 +978,40 @@ impl JsonRpcRouter {
                     }
                 };
 
+                if params.gate_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "gate_id must not be empty",
+                    );
+                }
+                if params.content.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "content must not be empty",
+                    );
+                }
+                match params.sender.trim() {
+                    "operator" | "system" | "agent" => {}
+                    other => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("sender must be one of: operator, system, agent (got: {})", other),
+                        );
+                    }
+                }
+
                 match self.execution.gateway_store() {
                     Some(store) => match store.add_gate_message(
-                        &params.gate_id,
-                        &params.sender,
+                        params.gate_id.trim(),
+                        params.sender.trim(),
                         &params.content,
                     ) {
                         Ok(id) => JsonRpcResponse::success(
                             req.id,
                             serde_json::json!({
-                                "ok": true,
                                 "message_id": id,
                             }),
                         ),
