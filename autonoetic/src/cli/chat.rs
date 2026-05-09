@@ -3791,7 +3791,13 @@ fn format_store_approval_card(
         lines.push(String::new());
         lines.push("Context:".to_string());
         for msg in enrichment {
-            lines.push(format!("  [{}] {}", msg.sender, msg.content));
+            for (i, ln) in msg.content.lines().enumerate() {
+                if i == 0 {
+                    lines.push(format!("  [{}] {}", msg.sender, clamp_chat_field(ln)));
+                } else {
+                    lines.push(format!("  {}", clamp_chat_field(ln)));
+                }
+            }
         }
     }
     lines.push(String::new());
@@ -3843,7 +3849,13 @@ fn merge_gateway_store_pending_approvals(
                     req.request_id
                 )
             };
-            let enrichment = store.get_gate_messages(&req.request_id).unwrap_or_default();
+            let enrichment = match store.get_gate_messages(&req.request_id) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    tracing::debug!(target: "chat", error = %e, request_id = %req.request_id, "Failed to load gate enrichment");
+                    Vec::new()
+                }
+            };
             let card = format_store_approval_card(&req, &detail, &enrichment);
             app.add_message(MessageRole::Signal, card);
             announced = true;

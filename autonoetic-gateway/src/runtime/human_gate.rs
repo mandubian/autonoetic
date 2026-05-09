@@ -242,7 +242,9 @@ impl GateService {
                 format!(" (targets: {})", targets.join(", "))
             };
             let seed = format!("{}{}", req.reason, targets_str);
-            let _ = self.add_gate_message(&gate_id, "system", &seed);
+            if !seed.trim().is_empty() {
+                let _ = self.add_gate_message(&gate_id, "system", &seed);
+            }
         }
 
         // 6. Build suspension JSON.
