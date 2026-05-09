@@ -88,7 +88,7 @@ pub(crate) fn pending_user_ask_call_from_history(history: &[Message]) -> anyhow:
     let tc = &assistant.tool_calls[tc_idx];
     if tc.name != "user_ask" {
         anyhow::bail!(
-            "expected pending tool user.ask for UserInputRequired checkpoint, found {}",
+            "expected pending tool user_ask for UserInputRequired checkpoint, found {}",
             tc.name
         );
     }

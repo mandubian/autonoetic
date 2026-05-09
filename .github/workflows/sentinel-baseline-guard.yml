@@ -30,14 +30,14 @@ jobs:
 
           # Check PR title and all commit messages for the prefix.
           COMMITS_HAVE_PREFIX=false
-          for msg in $(git log --format='%s' origin/${{ github.base_ref }}...HEAD); do
+          while IFS= read -r msg; do
             case "$msg" in
               '[baseline-update]'*|'[baseline-update '*)
                 COMMITS_HAVE_PREFIX=true
                 break
                 ;;
             esac
-          done
+          done < <(git log --format='%s' origin/${{ github.base_ref }}...HEAD)
 
           if echo "$PR_TITLE" | grep -qE '^\[baseline-update\]'; then
             echo "OK: PR title carries [baseline-update] prefix."
