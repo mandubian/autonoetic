@@ -972,38 +972,74 @@ impl NativeTool for WebSearchTool {
                 })),
             };
             let reason = format!("web.search to {} requires approval", engine_host);
-            let request_id = create_network_approval(
-                store.as_ref(),
-                manifest,
-                Some(cfg),
-                _run_context,
-                _session_id,
-                action,
-                reason.clone(),
+
+            let gate = crate::runtime::human_gate::GateService::new(store.clone());
+            let gate_result = gate.check(
+                crate::runtime::human_gate::GateRequest {
+                    kind: crate::runtime::human_gate::GateKind::Approval {
+                        action: action.clone(),
+                        targets: vec![engine_host.clone()],
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                    },
+                    manifest,
+                    session_id: _session_id,
+                    run_context: _run_context,
+                    config: Some(cfg),
+                    reason: reason.clone(),
+                    summary: format!("web.search {}", engine_host),
+                    approval_ref: None,
+                    pre_validated: false,
+                },
             )?;
-            Ok(Some(
-                serde_json::json!({
-                    "ok": false,
-                    "error_type": "permission",
-                    "message": format!(
-                        "Execution suspended pending operator approval ({}). Retry web.search with approval_ref after approval.",
-                        request_id
-                    ),
-                    "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                    "error": format!("Network access denied for host: {}", engine_host),
-                    "approval_required": true,
-                    "request_id": request_id,
-                    "suspended": true,
-                    "reason": reason,
-                    "approval": {
-                        "kind": "web_search",
-                        "summary": format!("web.search {}", engine_host),
-                        "reason": format!("web.search to {} requires approval", engine_host),
-                        "retry_field": "approval_ref"
-                    }
-                })
-                .to_string(),
-            ))
+            match gate_result {
+                crate::runtime::human_gate::GateResult::Cleared { .. } => Ok(None),
+                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                    Ok(Some(serde_json::json!({
+                        "ok": false,
+                        "approval_required": true,
+                        "approval_already_pending": true,
+                        "request_id": gate_id,
+                        "suspended": true,
+                        "reason": reason,
+                        "repair_hint": "Wait for the existing approval to be resolved.",
+                        "approval": {
+                            "kind": "web_search",
+                            "summary": format!("web.search {}", engine_host),
+                            "retry_field": "approval_ref"
+                        }
+                    }).to_string()))
+                }
+                crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                    Ok(Some(serde_json::json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "message": format!(
+                            "Execution suspended pending operator approval ({}). Retry web.search with approval_ref after approval.",
+                            gate_id
+                        ),
+                        "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                        "error": format!("Network access denied for host: {}", engine_host),
+                        "approval_required": true,
+                        "request_id": gate_id,
+                        "suspended": true,
+                        "reason": reason,
+                        "approval": {
+                            "kind": "web_search",
+                            "summary": format!("web.search {}", engine_host),
+                            "reason": format!("web.search to {} requires approval", engine_host),
+                            "retry_field": "approval_ref"
+                        }
+                    }).to_string()))
+                }
+                other => {
+                    tracing::warn!(
+                        target: "web",
+                        gate_result = ?other,
+                        "Unexpected gate result for web.search gate"
+                    );
+                    Ok(None)
+                }
+            }
         };
 
         let mut attempted_providers = Vec::new();
@@ -1400,36 +1436,73 @@ impl NativeTool for WebFetchTool {
                 })),
             };
             let reason = format!("web.fetch to {} requires approval", host);
-            let request_id = create_network_approval(
-                store.as_ref(),
-                manifest,
-                Some(cfg),
-                _run_context,
-                _session_id,
-                action,
-                reason.clone(),
+
+            let gate = crate::runtime::human_gate::GateService::new(store);
+            let gate_result = gate.check(
+                crate::runtime::human_gate::GateRequest {
+                    kind: crate::runtime::human_gate::GateKind::Approval {
+                        action: action.clone(),
+                        targets: vec![host.clone()],
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                    },
+                    manifest,
+                    session_id: _session_id,
+                    run_context: _run_context,
+                    config: Some(cfg),
+                    reason: reason.clone(),
+                    summary: format!("web.fetch {}", host),
+                    approval_ref: None,
+                    pre_validated: false,
+                },
             )?;
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "permission",
-                "message": format!(
-                    "Execution suspended pending operator approval ({}). Retry web.fetch with approval_ref after approval.",
-                    request_id
-                ),
-                "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                "error": format!("Network access denied for host: {}", host),
-                "approval_required": true,
-                "request_id": request_id,
-                "suspended": true,
-                "reason": reason,
-                "approval": {
-                    "kind": "web_fetch",
-                    "summary": format!("web.fetch {}", host),
-                    "reason": format!("web.fetch to {} requires approval", host),
-                    "retry_field": "approval_ref"
+            match gate_result {
+                crate::runtime::human_gate::GateResult::Cleared { .. } => {}
+                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "approval_required": true,
+                        "approval_already_pending": true,
+                        "request_id": gate_id,
+                        "suspended": true,
+                        "reason": reason,
+                        "repair_hint": "Wait for the existing approval to be resolved.",
+                        "approval": {
+                            "kind": "web_fetch",
+                            "summary": format!("web.fetch {}", host),
+                            "retry_field": "approval_ref"
+                        }
+                    }).to_string());
                 }
-            })
-            .to_string());
+                crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "message": format!(
+                            "Execution suspended pending operator approval ({}). Retry web.fetch with approval_ref after approval.",
+                            gate_id
+                        ),
+                        "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                        "error": format!("Network access denied for host: {}", host),
+                        "approval_required": true,
+                        "request_id": gate_id,
+                        "suspended": true,
+                        "reason": reason,
+                        "approval": {
+                            "kind": "web_fetch",
+                            "summary": format!("web.fetch {}", host),
+                            "reason": format!("web.fetch to {} requires approval", host),
+                            "retry_field": "approval_ref"
+                        }
+                    }).to_string());
+                }
+                other => {
+                    tracing::warn!(
+                        target: "web",
+                        gate_result = ?other,
+                        "Unexpected gate result for web.fetch gate"
+                    );
+                }
+            }
         }
 
         let timeout_secs = args.timeout_secs.unwrap_or(20).clamp(5, 120);
@@ -1702,36 +1775,73 @@ impl NativeTool for WebCallTool {
                 })),
             };
             let reason = format!("web.call to {} requires approval", host);
-            let request_id = create_network_approval(
-                store.as_ref(),
-                manifest,
-                Some(cfg),
-                _run_context,
-                _session_id,
-                action,
-                reason.clone(),
+
+            let gate = crate::runtime::human_gate::GateService::new(store);
+            let gate_result = gate.check(
+                crate::runtime::human_gate::GateRequest {
+                    kind: crate::runtime::human_gate::GateKind::Approval {
+                        action: action.clone(),
+                        targets: vec![host.clone()],
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                    },
+                    manifest,
+                    session_id: _session_id,
+                    run_context: _run_context,
+                    config: Some(cfg),
+                    reason: reason.clone(),
+                    summary: format!("web.call {}", host),
+                    approval_ref: None,
+                    pre_validated: false,
+                },
             )?;
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "permission",
-                "message": format!(
-                    "Execution suspended pending operator approval ({}). Retry web.call with approval_ref after approval.",
-                    request_id
-                ),
-                "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                "error": format!("Network access denied for host: {}", host),
-                "approval_required": true,
-                "request_id": request_id,
-                "suspended": true,
-                "reason": reason,
-                "approval": {
-                    "kind": "web_call",
-                    "summary": format!("web.call {}", host),
-                    "reason": format!("web.call to {} requires approval", host),
-                    "retry_field": "approval_ref"
+            match gate_result {
+                crate::runtime::human_gate::GateResult::Cleared { .. } => {}
+                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "approval_required": true,
+                        "approval_already_pending": true,
+                        "request_id": gate_id,
+                        "suspended": true,
+                        "reason": reason,
+                        "repair_hint": "Wait for the existing approval to be resolved.",
+                        "approval": {
+                            "kind": "web_call",
+                            "summary": format!("web.call {}", host),
+                            "retry_field": "approval_ref"
+                        }
+                    }).to_string());
                 }
-            })
-            .to_string());
+                crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "message": format!(
+                            "Execution suspended pending operator approval ({}). Retry web.call with approval_ref after approval.",
+                            gate_id
+                        ),
+                        "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                        "error": format!("Network access denied for host: {}", host),
+                        "approval_required": true,
+                        "request_id": gate_id,
+                        "suspended": true,
+                        "reason": reason,
+                        "approval": {
+                            "kind": "web_call",
+                            "summary": format!("web.call {}", host),
+                            "reason": format!("web.call to {} requires approval", host),
+                            "retry_field": "approval_ref"
+                        }
+                    }).to_string());
+                }
+                other => {
+                    tracing::warn!(
+                        target: "web",
+                        gate_result = ?other,
+                        "Unexpected gate result for web.call gate"
+                    );
+                }
+            }
         }
 
         let method = args

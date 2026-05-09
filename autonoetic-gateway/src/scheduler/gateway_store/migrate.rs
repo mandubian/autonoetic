@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 30;
+const SCHEMA_VERSION_LATEST: i64 = 31;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -514,6 +514,8 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_eval_suite_ownership_v28(conn)?;
     apply_attack_patterns_v29(conn)?;
     apply_user_interaction_resume_claim_v30(conn)?;
+
+    apply_gate_messages_v31(conn)?;
 
     Ok(())
 }
@@ -1718,6 +1720,39 @@ fn apply_user_interaction_resume_claim_v30(conn: &mut Connection) -> Result<()> 
         params![
             30_i64,
             "user_interaction_resume_claim",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_gate_messages_v31(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 31 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS gate_messages (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate_id    TEXT NOT NULL,
+            sender     TEXT NOT NULL,
+            content    TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_gate_messages_gate_id
+            ON gate_messages(gate_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            31_i64,
+            "gate_messages",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;
