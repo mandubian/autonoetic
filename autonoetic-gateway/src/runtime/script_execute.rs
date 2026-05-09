@@ -1,0 +1,304 @@
+//! Script-mode fast path — execute script agents directly in sandbox, bypassing the LLM.
+
+use autonoetic_types::causal_chain::CausalEventRecord;
+use autonoetic_types::config::GatewayConfig;
+use std::path::{Path, PathBuf};
+
+const AUTONOETIC_INPUT_ENV: &str = "AUTONOETIC_INPUT";
+const AUTONOETIC_META_ENV: &str = "AUTONOETIC_META";
+const AUTONOETIC_INPUT_PATH_ENV: &str = "AUTONOETIC_INPUT_PATH";
+const AUTONOETIC_META_PATH_ENV: &str = "AUTONOETIC_META_PATH";
+
+pub(crate) struct ScriptInvocationFiles {
+    pub runtime_dir_host: PathBuf,
+    pub input_path_sandbox: String,
+    pub meta_path_sandbox: Option<String>,
+}
+
+impl ScriptInvocationFiles {
+    pub fn cleanup(&self) {
+        let _ = std::fs::remove_dir_all(&self.runtime_dir_host);
+    }
+}
+
+pub(crate) fn sandbox_workspace_path(agent_dir: &Path, host_path: &Path) -> String {
+    match host_path.strip_prefix(agent_dir) {
+        Ok(relative) => format!(
+            "{}/{}",
+            crate::sandbox::BWRAP_WORKSPACE_DIR,
+            relative.to_string_lossy()
+        ),
+        Err(_) => host_path.to_string_lossy().to_string(),
+    }
+}
+
+pub(crate) fn write_script_invocation_files(
+    agent_dir: &Path,
+    input_payload: &str,
+    metadata: Option<&serde_json::Value>,
+) -> anyhow::Result<ScriptInvocationFiles> {
+    let nonce = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
+    let runtime_dir_host = agent_dir.join(".autonoetic_runtime").join(nonce);
+    std::fs::create_dir_all(&runtime_dir_host)?;
+
+    let input_path_host = runtime_dir_host.join("input.json");
+    std::fs::write(&input_path_host, input_payload)?;
+
+    let meta_path_sandbox = if let Some(meta) = metadata {
+        let meta_path_host = runtime_dir_host.join("meta.json");
+        std::fs::write(&meta_path_host, meta.to_string())?;
+        Some(sandbox_workspace_path(agent_dir, &meta_path_host))
+    } else {
+        None
+    };
+
+    Ok(ScriptInvocationFiles {
+        runtime_dir_host,
+        input_path_sandbox: sandbox_workspace_path(agent_dir, &input_path_host),
+        meta_path_sandbox,
+    })
+}
+
+pub(crate) fn normalize_script_input_payload(
+    input_payload: &str,
+    metadata: Option<&serde_json::Value>,
+) -> String {
+    let Some(meta) = metadata else {
+        return input_payload.to_string();
+    };
+    let meta_text = meta.to_string();
+
+    if let Some(stripped) =
+        input_payload.strip_suffix(&format!("\n\nDelegation metadata: {}", meta_text))
+    {
+        return stripped.to_string();
+    }
+
+    let task_marker = "\n\n[Task]\n";
+    let metadata_marker = "\n\n[Metadata]\n";
+    if input_payload.starts_with("[Context]\n") && input_payload.ends_with(&meta_text) {
+        if let (Some(task_start), Some(metadata_start)) = (
+            input_payload.find(task_marker),
+            input_payload.rfind(metadata_marker),
+        ) {
+            if task_start < metadata_start {
+                let task_body_start = task_start + task_marker.len();
+                let task_body = &input_payload[task_body_start..metadata_start];
+                return task_body.to_string();
+            }
+        }
+    }
+
+    input_payload.to_string()
+}
+
+/// Execute a script agent directly in sandbox, bypassing the LLM.
+pub(crate) async fn execute_script_in_sandbox(
+    agent_dir: &PathBuf,
+    script_path: &PathBuf,
+    input_payload: &str,
+    metadata: Option<&serde_json::Value>,
+    sandbox_type: &str,
+    _config: &GatewayConfig,
+    sandbox_kill: Option<(
+        std::sync::Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>,
+        String,
+    )>,
+    capabilities: &[autonoetic_types::capability::Capability],
+    input_mode: autonoetic_types::agent::ScriptInputMode,
+) -> anyhow::Result<String> {
+    use std::io::Write;
+
+    tracing::info!(
+        agent_dir = %agent_dir.display(),
+        script = %script_path.display(),
+        sandbox = %sandbox_type,
+        input_mode = ?input_mode,
+        "Executing script agent"
+    );
+
+    let driver = crate::sandbox::SandboxDriverKind::parse(sandbox_type)?;
+    let mut overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
+    let has_evaluation_cap = capabilities.iter().any(|c| {
+        matches!(
+            c,
+            autonoetic_types::capability::Capability::Evaluation { .. }
+        )
+    });
+    if has_evaluation_cap {
+        overrides.force_network_off = true;
+        overrides.share_net = false;
+    }
+    let normalized_input = normalize_script_input_payload(input_payload, metadata);
+    let invocation_files = write_script_invocation_files(agent_dir, &normalized_input, metadata)?;
+    let entrypoint_relative = match script_path.strip_prefix(agent_dir) {
+        Ok(relative) => format!(
+            "{}/{}",
+            crate::sandbox::BWRAP_WORKSPACE_DIR,
+            relative.to_string_lossy()
+        ),
+        Err(_) => script_path.to_string_lossy().to_string(),
+    };
+
+    let shell_command = match input_mode {
+        autonoetic_types::agent::ScriptInputMode::Args => {
+            format!(
+                "{} {}",
+                entrypoint_relative,
+                shell_words_quote(&normalized_input)
+            )
+        }
+        autonoetic_types::agent::ScriptInputMode::Stdin => entrypoint_relative,
+    };
+
+    // Primary contract for script agents: file-backed payload + metadata paths.
+    // Keep normalized env payloads for compatibility with older scripts.
+    let mut autonoetic_env = vec![
+        (
+            AUTONOETIC_INPUT_PATH_ENV.to_string(),
+            invocation_files.input_path_sandbox.clone(),
+        ),
+        (AUTONOETIC_INPUT_ENV.to_string(), normalized_input.clone()),
+    ];
+    if let Some(meta) = metadata {
+        autonoetic_env.push((AUTONOETIC_META_ENV.to_string(), meta.to_string()));
+    }
+    if let Some(meta_path) = invocation_files.meta_path_sandbox.as_ref() {
+        autonoetic_env.push((AUTONOETIC_META_PATH_ENV.to_string(), meta_path.clone()));
+    }
+    let mut runner = match crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies_and_env(
+        driver,
+        &agent_dir.to_string_lossy(),
+        &shell_command,
+        None,
+        Some(&overrides),
+        &autonoetic_env,
+        None,
+    ) {
+        Ok(runner) => runner,
+        Err(error) => {
+            invocation_files.cleanup();
+            return Err(error);
+        }
+    };
+
+    let _script_sandbox_guard = sandbox_kill.as_ref().and_then(|(reg, root)| {
+        let pid = runner.process.id();
+        (pid > 0).then(|| reg.register_sandbox_child_pid(root, pid))
+    });
+
+    if input_mode == autonoetic_types::agent::ScriptInputMode::Stdin {
+        if let Some(mut stdin) = runner.process.stdin.take() {
+            stdin
+                .write_all(normalized_input.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Failed to write to script stdin: {}", e))?;
+        }
+    }
+
+    let output = match tokio::task::spawn_blocking(move || runner.process.wait_with_output()).await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            invocation_files.cleanup();
+            return Err(anyhow::anyhow!("Failed to execute script: {}", error));
+        }
+        Err(error) => {
+            invocation_files.cleanup();
+            return Err(anyhow::anyhow!("Task join error: {}", error));
+        }
+    };
+
+    invocation_files.cleanup();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::error!(stderr = %stderr, stdout = %stdout, status = ?output.status.code(), "Script execution failed");
+        anyhow::bail!(
+            "Script execution failed with code {:?}: stdout={}, stderr={}",
+            output.status.code(),
+            stdout,
+            stderr
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    tracing::info!(stdout_len = stdout.len(), "Script execution completed");
+
+    Ok(stdout)
+}
+
+/// Quote a string for safe inclusion in a shell command (POSIX sh -c).
+/// Uses single-quote wrapping with embedded single-quote escaping.
+pub(crate) fn shell_words_quote(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
+/// Write a single `causal_events` row for script-agent fast-path execution.
+/// Called in place of the former no-op `log_gateway_causal_event` so that
+/// script agent runs are visible in `execution.search` and session_overview.
+pub(crate) fn script_causal_event(
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    agent_id: &str,
+    session_id: &str,
+    event_seq: u64,
+    action: &str,
+    status: &str,
+    payload: serde_json::Value,
+) {
+    let Some(store) = store else { return };
+    let _ = store.create_causal_event(&CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "script".to_string(),
+        action: action.to_string(),
+        status: status.to_string(),
+        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+        target: None,
+        payload: Some(payload.to_string()),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: None,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_script_input_payload_strips_delegation_suffix() {
+        let metadata = serde_json::json!({
+            "delegated_role": "weather.forecast",
+            "reply_to_agent_id": "planner.default"
+        });
+        let payload = r#"{"location":"Paris, France","date":"tomorrow"}"#;
+        let kickoff = format!("{payload}\n\nDelegation metadata: {}", metadata);
+        assert_eq!(
+            normalize_script_input_payload(&kickoff, Some(&metadata)),
+            payload
+        );
+    }
+
+    #[test]
+    fn normalize_script_input_payload_extracts_task_block() {
+        let metadata = serde_json::json!({
+            "delegated_role": "weather.forecast",
+            "reply_to_agent_id": "planner.default"
+        });
+        let task = r#"{"location":"Paris, France","date":"tomorrow"}"#;
+        let kickoff = format!(
+            "[Context]\nVerify the agent.\n\n[Task]\n{task}\n\n[Metadata]\n{}",
+            metadata
+        );
+        assert_eq!(
+            normalize_script_input_payload(&kickoff, Some(&metadata)),
+            task
+        );
+    }
+}

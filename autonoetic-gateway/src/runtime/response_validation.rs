@@ -4,11 +4,18 @@
 //! Returns violations for each failed check.
 
 use autonoetic_types::agent::OutputPolicy;
+use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
+use autonoetic_types::config::GatewayConfig;
 use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::execution::SpawnResult;
+use crate::causal_chain::CausalLogger;
+use crate::execution::{GatewayExecutionService, SpawnResult};
+use crate::runtime::live_digest::{
+    append_repair_attempt_best_effort, append_repair_passed_best_effort, base_session_id,
+};
 
 /// A single validation violation found during response checking.
 #[derive(Debug, Clone)]
@@ -661,6 +668,489 @@ fn json_type_name(value: &serde_json::Value) -> &'static str {
         serde_json::Value::String(_) => "string",
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
+    }
+}
+
+pub(crate) fn log_nested_spawn_to_gateway(
+    config: &GatewayConfig,
+    session_id: &str,
+    source_agent_id: Option<&str>,
+    agent_id: &str,
+    message: &str,
+    result: &SpawnResult,
+) {
+    let logger = match crate::execution::init_gateway_causal_logger(config) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    let path = logger.path().to_path_buf();
+    let entries = match CausalLogger::read_entries(&path) {
+        Ok(e) => e,
+        Err(err) => {
+            if path.exists() {
+                tracing::warn!(
+                    error = %err,
+                    "Failed to read existing gateway causal entries before input schema log"
+                );
+                return;
+            }
+            Vec::new()
+        }
+    };
+    let mut seq = entries.last().map(|e| e.event_seq + 1).unwrap_or(1);
+    let requested_data = serde_json::json!({
+        "agent_id": agent_id,
+        "source_agent_id": source_agent_id,
+        "session_id": session_id,
+        "message_len": message.len(),
+        "message_sha256": crate::execution::sha256_hex(message),
+    });
+    crate::execution::log_gateway_causal_event(
+        &logger,
+        &crate::execution::gateway_actor_id(),
+        session_id,
+        seq,
+        "agent.spawn.requested",
+        EntryStatus::Success,
+        Some(requested_data),
+    );
+    seq += 1;
+    let completed_data = serde_json::json!({
+        "agent_id": result.agent_id,
+        "source_agent_id": source_agent_id,
+        "session_id": result.session_id,
+        "assistant_reply_len": result.assistant_reply.as_ref().map(|s| s.len()).unwrap_or(0),
+        "assistant_reply_sha256": result.assistant_reply.as_ref().map(|s| crate::execution::sha256_hex(s)),
+        "llm_usage": result.llm_usage,
+    });
+    crate::execution::log_gateway_causal_event(
+        &logger,
+        &crate::execution::gateway_actor_id(),
+        session_id,
+        seq,
+        "agent.spawn.completed",
+        EntryStatus::Success,
+        Some(completed_data),
+    );
+}
+
+pub(crate) fn contract_event_seq() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub(crate) fn log_contract_enforcement_event_to_gateway(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    agent_id: &str,
+    session_id: &str,
+    action: &str,
+    status: EntryStatus,
+    target_agent_id: Option<&str>,
+    payload: serde_json::Value,
+) {
+    let Some(store) = gateway_store else {
+        return;
+    };
+
+    let payload_str = serde_json::to_string(&payload).ok();
+    let reason = payload
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+
+    if let Err(error) = store.create_causal_event(&CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq: contract_event_seq(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "contract".to_string(),
+        action: action.to_string(),
+        status: status.to_string(),
+        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+        target: target_agent_id.map(ToOwned::to_owned),
+        payload: payload_str,
+        payload_ref: None,
+        evidence_ref: None,
+        reason,
+    }) {
+        tracing::warn!(
+            target: "response_validation",
+            error = %error,
+            action = action,
+            agent_id = agent_id,
+            session_id = session_id,
+            "Failed to persist contract enforcement event"
+        );
+    }
+}
+
+impl GatewayExecutionService {
+    pub(crate) async fn validate_and_maybe_repair(
+        &self,
+        agent_id: &str,
+        mut result: SpawnResult,
+        output_schema: Option<&serde_json::Value>,
+        output_policy: &autonoetic_types::agent::OutputPolicy,
+        source_agent_id: Option<&str>,
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        let max_duration_ms = output_policy.validation_max_duration_ms;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(max_duration_ms as u64);
+        let repair_enabled =
+            self.config().response_validation.repair_enabled && output_policy.repair.auto;
+        let max_repair_rounds = output_policy.declared_repair_attempts().min(
+            self.config()
+                .response_validation
+                .max_repair_attempts_ceiling as usize,
+        );
+
+        let gateway_dir = self.config().agents_dir.join(".gateway");
+
+        let mut violations =
+            validate_spawn_response(&result, output_schema, output_policy, Some(&gateway_dir));
+        violations.extend(validate_session_evidence(
+            self.gateway_store().as_deref(),
+            &result.session_id,
+            output_policy,
+        ));
+        if violations.is_empty() {
+            tracing::debug!(
+                target: "response_validation",
+                agent_id = %agent_id,
+                session_id = %result.session_id,
+                "response.validation.pass"
+            );
+            return Ok(result);
+        }
+
+        tracing::warn!(
+            target: "response_validation",
+            agent_id = %agent_id,
+            session_id = %result.session_id,
+            violation_count = violations.len(),
+            "response.validation.fail"
+        );
+
+        if !repair_enabled || max_repair_rounds == 0 {
+            return Err(violations_to_final_error(
+                &violations,
+                &result.session_id,
+                repair_enabled,
+            ));
+        }
+
+        for attempt in 1..=max_repair_rounds {
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    attempt = attempt,
+                    "response.repair.exhausted: deadline reached"
+                );
+                return Err(violations_to_final_error(
+                    &violations,
+                    &result.session_id,
+                    true,
+                ));
+            }
+
+            let repair_msg = build_repair_prompt(&violations, attempt, max_repair_rounds);
+
+            tracing::info!(
+                target: "response_validation",
+                agent_id = %agent_id,
+                session_id = %result.session_id,
+                attempt = attempt,
+                max_repair_rounds = max_repair_rounds,
+                "response.repair.start"
+            );
+
+            let base = base_session_id(&result.session_id);
+            let violation_summary = violations
+                .iter()
+                .map(|v| v.rule.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            append_repair_attempt_best_effort(
+                &gateway_dir,
+                base,
+                attempt,
+                max_repair_rounds,
+                &format!("{} ({})", violation_summary, violations.len()),
+            );
+
+            let repaired = match self
+                .respawn_from_checkpoint(
+                    agent_id,
+                    &result.session_id,
+                    Some(&repair_msg),
+                    source_agent_id,
+                    workflow_id,
+                    task_id,
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        error = %e,
+                        "response.repair.error: respawn failed"
+                    );
+                    return Err(violations_to_final_error(
+                        &violations,
+                        &result.session_id,
+                        true,
+                    ));
+                }
+            };
+
+            if repaired.suspended_for_approval.is_some() || repaired.suspended_for_user_input {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    "response.repair.aborted: session suspended during repair"
+                );
+                return Err(anyhow::anyhow!(
+                    "repair aborted: agent suspended during repair; session: {}",
+                    result.session_id
+                ));
+            }
+
+            if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(
+                &self.config(),
+                &repaired.session_id,
+            ) {
+                if matches!(
+                    cp.yield_reason,
+                    crate::runtime::checkpoint::YieldReason::UserInputRequired { .. }
+                ) {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        session_id = %repaired.session_id,
+                        "response.repair.aborted: session suspended for user interaction during repair"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "repair aborted: agent suspended for user interaction during repair; session: {}",
+                        result.session_id
+                    ));
+                }
+            }
+
+            violations = validate_spawn_response(
+                &repaired,
+                output_schema,
+                output_policy,
+                Some(&gateway_dir),
+            );
+            violations.extend(validate_session_evidence(
+                self.gateway_store().as_deref(),
+                &repaired.session_id,
+                output_policy,
+            ));
+            result = repaired;
+
+            if violations.is_empty() {
+                tracing::info!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    session_id = %result.session_id,
+                    attempt = attempt,
+                    "response.repair.pass"
+                );
+                append_repair_passed_best_effort(
+                    &gateway_dir,
+                    base_session_id(&result.session_id),
+                    attempt,
+                );
+                return Ok(result);
+            }
+
+            tracing::warn!(
+                target: "response_validation",
+                agent_id = %agent_id,
+                attempt = attempt,
+                violation_count = violations.len(),
+                "response.repair.fail"
+            );
+
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    attempt = attempt,
+                    "response.repair.exhausted: deadline reached after respawn"
+                );
+                return Err(violations_to_final_error(
+                    &violations,
+                    &result.session_id,
+                    true,
+                ));
+            }
+        }
+
+        tracing::warn!(
+            target: "response_validation",
+            agent_id = %agent_id,
+            "response.repair.exhausted: max_loops reached"
+        );
+        Err(violations_to_final_error(
+            &violations,
+            &result.session_id,
+            true,
+        ))
+    }
+
+    pub(crate) async fn validate_promotion_gate(
+        &self,
+        agent_id: &str,
+        mut result: SpawnResult,
+        metadata: Option<&serde_json::Value>,
+        source_agent_id: Option<&str>,
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        if result.suspended_for_approval.is_some() || result.suspended_for_user_input {
+            return Ok(result);
+        }
+
+        let require_promotion = metadata
+            .and_then(|m| m.get("require_promotion_record"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !require_promotion {
+            return Ok(result);
+        }
+
+        let promotion_artifact_id = metadata
+            .and_then(|m| m.get("promotion_artifact_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let promotion_role = metadata
+            .and_then(|m| m.get("promotion_role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("evaluator");
+
+        let gateway_dir = self.config().agents_dir.join(".gateway");
+        let promotion_violations = validate_promotion_record(
+            Some(&gateway_dir),
+            promotion_artifact_id,
+            promotion_role,
+        );
+
+        if !promotion_violations.is_empty() {
+            let repair_enabled = self.config().response_validation.repair_enabled;
+            let is_missing = promotion_violations
+                .iter()
+                .any(|v| v.rule == "promotion_record_missing");
+
+            if is_missing && repair_enabled {
+                let max_repair_rounds: usize = 2;
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(5000);
+
+                for attempt in 1..=max_repair_rounds {
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+
+                    let repair_msg = build_repair_prompt(
+                        &promotion_violations,
+                        attempt,
+                        max_repair_rounds,
+                    );
+
+                    tracing::info!(
+                        target: "promotion_validation",
+                        agent_id = %agent_id,
+                        session_id = %result.session_id,
+                        attempt,
+                        "promotion.record repair attempt"
+                    );
+
+                    let repaired = match self
+                        .respawn_from_checkpoint(
+                            agent_id,
+                            &result.session_id,
+                            Some(&repair_msg),
+                            source_agent_id,
+                            workflow_id,
+                            task_id,
+                        )
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "promotion_validation",
+                                agent_id = %agent_id,
+                                error = %e,
+                                "promotion.record repair: respawn failed"
+                            );
+                            break;
+                        }
+                    };
+
+                    if repaired.suspended_for_approval.is_some()
+                        || repaired.suspended_for_user_input
+                    {
+                        break;
+                    }
+
+                    let remaining = validate_promotion_record(
+                        Some(&gateway_dir),
+                        promotion_artifact_id,
+                        promotion_role,
+                    );
+                    result = repaired;
+
+                    if remaining.is_empty() {
+                        tracing::info!(
+                            target: "promotion_validation",
+                            agent_id = %agent_id,
+                            session_id = %result.session_id,
+                            attempt,
+                            "promotion.record repair succeeded"
+                        );
+                        return Ok(result);
+                    }
+
+                    if remaining
+                        .iter()
+                        .any(|v| v.rule == "promotion_record_failed")
+                    {
+                        break;
+                    }
+                }
+            }
+
+            let summary: String = promotion_violations
+                .iter()
+                .map(|v| format!("[{}] {}", v.rule, v.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let hints: String = promotion_violations
+                .iter()
+                .map(|v| v.repair_hint.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(anyhow::anyhow!(
+                "execution — {} Repair hints: {}",
+                summary,
+                hints
+            ));
+        }
+
+        Ok(result)
     }
 }
 
