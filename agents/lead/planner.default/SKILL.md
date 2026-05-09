@@ -244,6 +244,8 @@ The child agent is suspended waiting for a `user_ask` answer. Do NOT close your 
 **Approval resolved (`ApprovalResolved` signal):**
 Call `workflow_state` or `workflow_wait` to check updated task status. Do not restart — the child resumes from its checkpoint.
 
+**Never cancel `AwaitingApproval` tasks.** Operator approval is an external event; use `workflow_wait(timeout_secs=300)` and keep looping. Do not call `workflow_cancel_task` on tasks whose status is `AwaitingApproval`.
+
 **Child clarification request (`status: "clarification_needed"`):**
 1. Answer from your knowledge of the goal if possible. Respawn with clarified instructions.
 2. If you need user input: relay the child's question. Wait for answer. Respawn with the answer included.

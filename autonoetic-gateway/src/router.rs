@@ -107,11 +107,16 @@ impl JsonRpcResponse {
     }
 }
 
+type ProcessedSignalSet = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+
 #[derive(Clone)]
 pub struct JsonRpcRouter {
     config: Arc<GatewayConfig>,
     execution: Arc<GatewayExecutionService>,
     async_results: AsyncResultMap,
+    /// Signal IDs already ingested — prevents at-least-once pump retries from
+    /// triggering duplicate agent turns.
+    processed_signal_ids: ProcessedSignalSet,
 }
 
 impl JsonRpcRouter {
@@ -132,6 +137,9 @@ impl JsonRpcRouter {
             config: Arc::new(config),
             execution,
             async_results: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            processed_signal_ids: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
         }
     }
 
@@ -467,6 +475,35 @@ impl JsonRpcRouter {
                         );
                     }
                 };
+
+                // ── Idempotency guard for pump-delivered signals ──
+                // The notification pump retries on timeout, but the gateway may
+                // have already processed the original TCP request.  Deduplicate
+                // by the signal's request_id to prevent spurious agent turns.
+                if let Some(meta) = params.metadata.as_ref() {
+                    if meta.get("signal_delivered") == Some(&serde_json::Value::Bool(true)) {
+                        if let Some(serde_json::Value::String(signal_req_id)) =
+                            meta.get("approval_request_id")
+                        {
+                            let mut seen = self.processed_signal_ids.lock().unwrap();
+                            if !seen.insert(signal_req_id.clone()) {
+                                tracing::info!(
+                                    target: "gateway.router",
+                                    signal_request_id = %signal_req_id,
+                                    "Duplicate signal delivery detected — returning success (idempotent no-op)"
+                                );
+                                return JsonRpcResponse::success(
+                                    req.id,
+                                    serde_json::json!({
+                                        "status": "already_processed",
+                                        "signal_request_id": signal_req_id,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+
                 let mut session_id = params
                     .session_id
                     .clone()
@@ -1644,5 +1681,105 @@ mod tests {
             .expect("global overflow should error")
             .to_string()
             .contains("max concurrent executions reached"));
+    }
+
+    #[tokio::test]
+    async fn test_signal_delivery_idempotency_deduplicates_by_request_id() {
+        let (_temp, router) = test_router();
+
+        let make_signal_ingest = |id: &str, signal_req_id: &str| JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: id.to_string(),
+            method: "event.ingest".to_string(),
+            params: serde_json::json!({
+                "event_type": "chat",
+                "target_agent_id": "planner.default",
+                "message": "approval resolved",
+                "session_id": "demo-session-1",
+                "metadata": {
+                    "sender_id": "gateway-signal-poller",
+                    "signal_delivered": true,
+                    "approval_request_id": signal_req_id,
+                    "approval_status": "approved",
+                }
+            }),
+            auth_token: None,
+        };
+
+        // First delivery — should NOT be short-circuited (will fail downstream
+        // because there's no real agent, but that proves it passed the guard).
+        let resp1 = router
+            .dispatch(make_signal_ingest("sig-1", "apr-test-dedup"))
+            .await;
+        assert!(
+            resp1.result.is_none() || {
+                let r = resp1.result.as_ref().unwrap();
+                r.get("status").and_then(|s| s.as_str()) != Some("already_processed")
+            },
+            "first delivery must not be short-circuited as already_processed"
+        );
+
+        // Second delivery with the SAME approval_request_id — must return
+        // the idempotent no-op response.
+        let resp2 = router
+            .dispatch(make_signal_ingest("sig-2", "apr-test-dedup"))
+            .await;
+        let result2 = resp2
+            .result
+            .expect("duplicate signal should return success");
+        assert_eq!(
+            result2.get("status").and_then(|s| s.as_str()),
+            Some("already_processed"),
+            "second delivery must be deduplicated"
+        );
+        assert_eq!(
+            result2
+                .get("signal_request_id")
+                .and_then(|s| s.as_str()),
+            Some("apr-test-dedup")
+        );
+
+        // A DIFFERENT signal_request_id should NOT be deduplicated.
+        let resp3 = router
+            .dispatch(make_signal_ingest("sig-3", "apr-other"))
+            .await;
+        let is_dedup = resp3
+            .result
+            .as_ref()
+            .and_then(|r| r.get("status"))
+            .and_then(|s| s.as_str())
+            == Some("already_processed");
+        assert!(
+            !is_dedup,
+            "different signal_request_id must not be deduplicated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_signal_ingest_bypasses_idempotency_guard() {
+        let (_temp, router) = test_router();
+
+        // A normal event.ingest without signal_delivered metadata should not
+        // interact with the idempotency guard at all.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "normal-1".to_string(),
+            method: "event.ingest".to_string(),
+            params: serde_json::json!({
+                "event_type": "chat",
+                "target_agent_id": "planner.default",
+                "message": "user typed something",
+                "session_id": "demo-session-1",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        let is_dedup = resp
+            .result
+            .as_ref()
+            .and_then(|r| r.get("status"))
+            .and_then(|s| s.as_str())
+            == Some("already_processed");
+        assert!(!is_dedup, "normal ingest must never hit the idempotency guard");
     }
 }

@@ -38,6 +38,10 @@ pub struct AttestationInputs<'a> {
     /// Bounded by the caller (we cap to 32 in the wrapper to keep the
     /// system-prompt tail small).
     pub pending_approval_ids: Vec<String>,
+    /// Pending user-interaction IDs (GateKind::UserInput).
+    pub pending_user_interaction_ids: Vec<String>,
+    /// Pending escalation IDs (GateKind::Escalation).
+    pub pending_escalation_ids: Vec<String>,
     /// Named budget meters from the session registry. `limit` is `None`
     /// when no cap is configured for that meter (e.g. price tracking
     /// without a ceiling). Empty when budgets are disabled or the
@@ -72,6 +76,10 @@ pub struct StateAttestationPayload {
     pub active_capabilities: Vec<String>,
     pub pending_approval_count: usize,
     pub pending_approval_ids: Vec<String>,
+    pub pending_user_interaction_count: usize,
+    pub pending_user_interaction_ids: Vec<String>,
+    pub pending_escalation_count: usize,
+    pub pending_escalation_ids: Vec<String>,
     pub spawn_depth: u32,
     pub budget: Vec<BudgetMeter>,
     pub gateway_node_id: String,
@@ -106,6 +114,20 @@ pub fn compose_and_sign(
         .take(MAX_PENDING_APPROVALS_INLINE)
         .collect();
 
+    let pending_ui_total = inputs.pending_user_interaction_ids.len();
+    let pending_ui_inline: Vec<String> = inputs
+        .pending_user_interaction_ids
+        .into_iter()
+        .take(MAX_PENDING_APPROVALS_INLINE)
+        .collect();
+
+    let pending_esc_total = inputs.pending_escalation_ids.len();
+    let pending_esc_inline: Vec<String> = inputs
+        .pending_escalation_ids
+        .into_iter()
+        .take(MAX_PENDING_APPROVALS_INLINE)
+        .collect();
+
     let active_capabilities = inputs
         .manifest
         .capabilities
@@ -126,6 +148,10 @@ pub fn compose_and_sign(
         active_capabilities,
         pending_approval_count: pending_total,
         pending_approval_ids: pending_inline,
+        pending_user_interaction_count: pending_ui_total,
+        pending_user_interaction_ids: pending_ui_inline,
+        pending_escalation_count: pending_esc_total,
+        pending_escalation_ids: pending_esc_inline,
         spawn_depth,
         budget: inputs.budget_meters,
         gateway_node_id: inputs.gateway_node_id.to_string(),
@@ -157,9 +183,10 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
         "---\n\nGateway State Attestation (R++1)\n\n\
          The block below is signed by the gateway's identity key. It is the \
          **authoritative** statement of your remaining budget, active \
-         capabilities, pending approvals, spawn depth, session ids, and turn \
-         counter. If your own memory of these facts disagrees with the block, \
-         the block is correct.\n\n\
+         capabilities, pending gates (approvals, user interactions, \
+         escalations), spawn depth, session ids, and turn counter. If your \
+         own memory of these facts disagrees with the block, the block is \
+         correct.\n\n\
          <gateway_state_attestation>\n{body}\n</gateway_state_attestation>\n",
     ))
 }
@@ -278,6 +305,8 @@ mod tests {
                 manifest: &manifest,
                 gateway_node_id: "node-a",
                 pending_approval_ids: vec!["apr-aaa".to_string(), "apr-bbb".to_string()],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
                 budget_meters: vec![BudgetMeter {
                     name: "llm_rounds".to_string(),
                     used: 3.0,
@@ -313,6 +342,8 @@ mod tests {
                 manifest: &manifest,
                 gateway_node_id: "node-a",
                 pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
                 budget_meters: vec![],
             },
             &key,
@@ -342,6 +373,8 @@ mod tests {
                 manifest: &manifest,
                 gateway_node_id: "node-a",
                 pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
                 budget_meters: vec![],
             },
             &key,
@@ -373,6 +406,8 @@ mod tests {
                 manifest: &manifest,
                 gateway_node_id: "node",
                 pending_approval_ids: lots,
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
                 budget_meters: vec![],
             },
             &key,
@@ -399,6 +434,8 @@ mod tests {
                 manifest: &manifest,
                 gateway_node_id: "node",
                 pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
                 budget_meters: vec![],
             },
             &key,
@@ -426,6 +463,8 @@ mod tests {
                 manifest: &manifest,
                 gateway_node_id: "node",
                 pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
                 budget_meters: vec![],
             },
             &key,

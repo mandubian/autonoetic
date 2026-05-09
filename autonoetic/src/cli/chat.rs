@@ -1204,6 +1204,26 @@ fn signal_resume_key(signal_session_id: &str, request_id: &str) -> String {
     format!("{}::{}", signal_session_id, request_id)
 }
 
+/// Dedup with [`merge_gateway_store_pending_approvals`]: both emit a transcript card for the same
+/// `apr-*`. Returns false when this `approval_request_id` was already announced (store card wins).
+fn should_show_workflow_awaiting_approval_card(
+    app: &mut App,
+    event: &autonoetic_types::workflow::WorkflowEventRecord,
+) -> bool {
+    if event.event_type != "task.awaiting_approval" {
+        return true;
+    }
+    let Some(apr_id) = event
+        .payload
+        .get("approval_request_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return true;
+    };
+    app.announced_store_approval_ids.insert(apr_id.to_string())
+}
+
 fn format_workflow_event_card(
     event: &autonoetic_types::workflow::WorkflowEventRecord,
 ) -> Option<(String, MessageRole)> {
@@ -4019,6 +4039,10 @@ async fn check_signals(
                                             if matches!(role, MessageRole::SignalLow) {
                                                 continue;
                                             }
+                                            if !should_show_workflow_awaiting_approval_card(app, event)
+                                            {
+                                                continue;
+                                            }
                                             app.session_overview.latest_signal = Some(card.clone());
                                             push_workflow_event_message(app, role, card);
                                             processed_any = true;
@@ -4038,8 +4062,12 @@ async fn check_signals(
                         for event in events {
                             if app.seen_workflow_event_ids.insert(event.event_id.clone()) {
                                 if let Some((card, role)) = format_workflow_event_card(&event) {
-                                    push_workflow_event_message(app, role, card.clone());
-                                    app.session_overview.latest_signal = Some(card.clone());
+                                    let show_card =
+                                        should_show_workflow_awaiting_approval_card(app, &event);
+                                    if show_card {
+                                        push_workflow_event_message(app, role, card.clone());
+                                        app.session_overview.latest_signal = Some(card.clone());
+                                    }
 
                                     // Track pending approval IDs for inline approval (Ctrl+A)
                                     if app.inline_approvals_enabled {

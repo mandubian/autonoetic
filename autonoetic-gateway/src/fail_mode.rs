@@ -207,6 +207,22 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
         rule_id: "R-2.17",
         fail_mode: FailMode::RefuseSessionStart,
     },
+    FailModeEntry {
+        rule_id: "R-2.18",
+        fail_mode: FailMode::RefuseBoot,
+    },
+    FailModeEntry {
+        rule_id: "R-2.19",
+        fail_mode: FailMode::LogOnly,
+    },
+    FailModeEntry {
+        rule_id: "R-2.20",
+        fail_mode: FailMode::RefuseSessionStart,
+    },
+    FailModeEntry {
+        rule_id: "R-2.21",
+        fail_mode: FailMode::RefuseSessionStart,
+    },
     // §3 Sandbox Isolation
     FailModeEntry {
         rule_id: "R-3.1",
@@ -591,6 +607,10 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
     },
     FailModeEntry {
         rule_id: "R-8.18",
+        fail_mode: FailMode::LogOnly,
+    },
+    FailModeEntry {
+        rule_id: "R-8.19",
         fail_mode: FailMode::LogOnly,
     },
     // §9 Agent Install & Provenance

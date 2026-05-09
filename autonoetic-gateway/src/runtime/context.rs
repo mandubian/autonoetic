@@ -337,6 +337,44 @@ impl AgentExecutor {
             .transpose()?
             .unwrap_or_default();
 
+        let pending_user_interaction_ids = self
+            .session_id
+            .as_ref()
+            .and_then(|_| self.gateway_store.as_deref())
+            .map(|store| {
+                let sid = self.session_id.as_deref().unwrap();
+                store
+                    .get_pending_interactions_for_session(sid)
+                    .map(|interactions| {
+                        interactions
+                            .into_iter()
+                            .map(|i| i.interaction_id)
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let pending_escalation_ids = self
+            .session_id
+            .as_ref()
+            .and_then(|sid| self.config.as_ref().map(|cfg| (cfg.as_ref(), sid.as_str())))
+            .map(|(cfg, sid)| {
+                crate::scheduler::approval::pending_approval_requests_for_session(
+                    cfg,
+                    self.gateway_store.as_deref(),
+                    sid,
+                )
+                .map(|reqs| {
+                    reqs.into_iter()
+                        .filter(|r| matches!(r.action, autonoetic_types::background::ScheduledAction::SessionEscalate { .. }))
+                        .map(|r| r.request_id)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
         let budget_meters = self.snapshot_budget_meters();
         let gateway_node_id =
             std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string());
@@ -350,6 +388,8 @@ impl AgentExecutor {
                 manifest: &self.manifest,
                 gateway_node_id: &gateway_node_id,
                 pending_approval_ids,
+                pending_user_interaction_ids,
+                pending_escalation_ids,
                 budget_meters,
             },
             &key,

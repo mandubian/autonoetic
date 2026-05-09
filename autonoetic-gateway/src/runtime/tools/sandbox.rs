@@ -1587,7 +1587,7 @@ impl NativeTool for SandboxExecTool {
                         )?;
                         match gate_result {
                             crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                            crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                            crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                                 let (cmd, cmd_deps, pending_action) = match store.get_approval(&gate_id)? {
                                     Some(pending) => match &pending.action {
                                         ScheduledAction::SandboxExec {
@@ -1954,7 +1954,7 @@ impl NativeTool for SandboxExecTool {
                                 )?;
                                 match gate_result {
                                     crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                                         return serde_json::to_string(&serde_json::json!({
                                             "ok": false,
                                             "exit_code": null,

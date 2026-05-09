@@ -77,20 +77,26 @@ pub struct GateRequest<'a> {
 }
 
 /// Unified result returned by `GateService::check`.
+///
+/// Every variant carries `enforced_rules` for R+++3 compliance: the
+/// constitutional rule IDs that drove the decision.
 #[derive(Debug)]
 pub enum GateResult {
     /// Proceed — already approved / answered / granted.
     Cleared {
         source: ClearanceSource,
+        enforced_rules: Vec<&'static str>,
     },
     /// A matching gate is already pending — reuse the existing gate ID.
     AlreadyPending {
         gate_id: String,
+        enforced_rules: Vec<&'static str>,
     },
     /// New gate created; session should suspend.
     Suspended {
         gate_id: String,
         response_json: String,
+        enforced_rules: Vec<&'static str>,
     },
     /// Policy allows without gating (no action required).
     PolicyAllowed,
@@ -123,6 +129,16 @@ impl GateResult {
                 None
             }
             GateResult::Cleared { .. } | GateResult::PolicyAllowed => None,
+        }
+    }
+
+    /// Constitutional rule IDs that drove this gate decision (R+++3).
+    pub fn enforced_rules(&self) -> &[&'static str] {
+        match self {
+            GateResult::Cleared { enforced_rules, .. } => enforced_rules,
+            GateResult::AlreadyPending { enforced_rules, .. } => enforced_rules,
+            GateResult::Suspended { enforced_rules, .. } => enforced_rules,
+            GateResult::PolicyAllowed => &[],
         }
     }
 }
@@ -194,6 +210,7 @@ impl GateService {
         if req.pre_validated {
             return Ok(GateResult::Cleared {
                 source: ClearanceSource::CachedApproval,
+                enforced_rules: vec!["R-2.6"],
             });
         }
 
@@ -213,6 +230,7 @@ impl GateService {
                     if self.store.session_grants_cover_targets(root_sid, targets) {
                         return Ok(GateResult::Cleared {
                             source: ClearanceSource::SessionGrant,
+                            enforced_rules: vec!["R-2.4"],
                         });
                     }
                 }
@@ -226,6 +244,7 @@ impl GateService {
                 if let Some(pending_id) = self.find_pending_for_targets(sid, action, targets)? {
                     return Ok(GateResult::AlreadyPending {
                         gate_id: pending_id,
+                        enforced_rules: vec!["R-2.3"],
                     });
                 }
             }
@@ -253,6 +272,7 @@ impl GateService {
         Ok(GateResult::Suspended {
             gate_id,
             response_json,
+            enforced_rules: vec!["R-2.1", "R-2.2", "R-2.18"],
         })
     }
 
@@ -319,6 +339,7 @@ impl GateService {
         Ok(GateResult::Suspended {
             gate_id: interaction_id,
             response_json,
+            enforced_rules: vec!["R-2.13", "R-2.18"],
         })
     }
 
@@ -364,6 +385,7 @@ impl GateService {
         Ok(GateResult::Suspended {
             gate_id,
             response_json,
+            enforced_rules: vec!["R-2.18"],
         })
     }
 
@@ -422,8 +444,14 @@ impl GateService {
         };
 
         if covered {
+            let rules = match match_strategy {
+                MatchStrategy::HostLevel => vec!["R-2.4", "R-2.6"],
+                MatchStrategy::ExactPayload => vec!["R-2.6"],
+                MatchStrategy::SubstituteCommand => vec!["R-2.4", "R-2.6"],
+            };
             Ok(Some(GateResult::Cleared {
                 source: ClearanceSource::ApprovalRef(ref_id.to_string()),
+                enforced_rules: rules,
             }))
         } else {
             Ok(None)
@@ -748,17 +776,20 @@ mod tests {
     #[test]
     fn gate_result_is_cleared() {
         assert!(GateResult::Cleared {
-            source: ClearanceSource::SessionGrant
+            source: ClearanceSource::SessionGrant,
+            enforced_rules: vec!["R-2.4"],
         }
         .is_cleared());
         assert!(GateResult::PolicyAllowed.is_cleared());
         assert!(!GateResult::AlreadyPending {
-            gate_id: "apr-test".to_string()
+            gate_id: "apr-test".to_string(),
+            enforced_rules: vec!["R-2.3"],
         }
         .is_cleared());
         assert!(!GateResult::Suspended {
             gate_id: "apr-test".to_string(),
-            response_json: "{}".to_string()
+            response_json: "{}".to_string(),
+            enforced_rules: vec!["R-2.1"],
         }
         .is_cleared());
     }
@@ -877,10 +908,11 @@ mod tests {
 
         let result = svc.check(req)?;
         assert!(result.is_cleared());
-        match result {
-            GateResult::Cleared { source: ClearanceSource::CachedApproval } => {}
+        match &result {
+            GateResult::Cleared { source: ClearanceSource::CachedApproval, .. } => {}
             other => panic!("expected CachedApproval, got {:?}", other),
         }
+        assert!(result.enforced_rules().contains(&"R-2.6"));
         Ok(())
     }
 
@@ -907,8 +939,11 @@ mod tests {
         };
 
         let result = svc.check(req)?;
+        assert!(result.enforced_rules().contains(&"R-2.1"));
+        assert!(result.enforced_rules().contains(&"R-2.2"));
+        assert!(result.enforced_rules().contains(&"R-2.18"));
         match result {
-            GateResult::Suspended { gate_id, response_json } => {
+            GateResult::Suspended { gate_id, response_json, .. } => {
                 assert!(gate_id.starts_with("apr-"));
                 let json: serde_json::Value = serde_json::from_str(&response_json)?;
                 assert_eq!(json["ok"], false);
@@ -969,8 +1004,9 @@ mod tests {
             pre_validated: false,
         };
         let result2 = svc.check(req2)?;
+        assert!(result2.enforced_rules().contains(&"R-2.3"));
         match result2 {
-            GateResult::AlreadyPending { gate_id } => {
+            GateResult::AlreadyPending { gate_id, .. } => {
                 assert_eq!(gate_id, gate_id_1);
             }
             other => panic!("expected AlreadyPending, got {:?}", other),
@@ -1031,8 +1067,9 @@ mod tests {
             pre_validated: false,
         };
         let result = svc.check(req)?;
+        assert!(result.enforced_rules().contains(&"R-2.6"));
         match result {
-            GateResult::Cleared { source: ClearanceSource::ApprovalRef(id) } => {
+            GateResult::Cleared { source: ClearanceSource::ApprovalRef(id), .. } => {
                 assert_eq!(id, ref_id);
             }
             other => panic!("expected Cleared(ApprovalRef), got {:?}", other),
@@ -1143,6 +1180,7 @@ mod tests {
         };
 
         let result = svc.check(req)?;
+        assert!(result.enforced_rules().contains(&"R-2.18"));
         let gate_id = match result {
             GateResult::Suspended { gate_id, .. } => gate_id,
             other => panic!("expected Suspended, got {:?}", other),

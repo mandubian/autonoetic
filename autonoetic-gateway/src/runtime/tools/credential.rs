@@ -431,7 +431,7 @@ impl NativeTool for CredentialRequestTool {
                 )?;
                 match gate_result {
                     crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                         return Ok(json!({
                             "ok": false,
                             "approval_required": true,
@@ -521,7 +521,7 @@ impl NativeTool for CredentialRequestTool {
             )?;
             match gate_result {
                 crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                     return Ok(json!({
                         "ok": false,
                         "approval_required": true,
@@ -1536,7 +1536,7 @@ impl NativeTool for CredentialSetupTool {
                     )?;
                     match gate_result {
                         crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                        crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                        crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                             return Ok(json!({
                                 "ok": false,
                                 "approval_required": true,
@@ -1781,7 +1781,7 @@ impl NativeTool for CredentialSetupTool {
                         )?;
                         match gate_result {
                             crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                            crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                            crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                                 return Ok(json!({
                                     "ok": false,
                                     "approval_required": true,

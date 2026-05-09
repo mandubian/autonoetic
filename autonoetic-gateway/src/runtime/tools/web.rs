@@ -912,7 +912,7 @@ impl NativeTool for WebSearchTool {
             )?;
             match gate_result {
                 crate::runtime::human_gate::GateResult::Cleared { .. } => Ok(None),
-                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                     Ok(Some(serde_json::json!({
                         "ok": false,
                         "approval_required": true,
@@ -1376,7 +1376,7 @@ impl NativeTool for WebFetchTool {
             )?;
             match gate_result {
                 crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                     return Ok(serde_json::json!({
                         "ok": false,
                         "approval_required": true,
@@ -1715,7 +1715,7 @@ impl NativeTool for WebCallTool {
             )?;
             match gate_result {
                 crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
                     return Ok(serde_json::json!({
                         "ok": false,
                         "approval_required": true,

@@ -72,6 +72,8 @@ fn turn_counter_monotonic_across_attestations() {
                 manifest: &manifest,
                 gateway_node_id: "node",
                 pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
                 budget_meters: vec![],
             },
             &key,
@@ -111,6 +113,8 @@ fn budget_meters_reflect_consumption() {
             manifest: &manifest,
             gateway_node_id: "node",
             pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![BudgetMeter {
                 name: "llm_rounds".to_string(),
                 used: 0.0,
@@ -144,6 +148,8 @@ fn budget_meters_reflect_consumption() {
             manifest: &manifest,
             gateway_node_id: "node",
             pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![
                 BudgetMeter {
                     name: "llm_rounds".to_string(),
@@ -194,6 +200,8 @@ fn capability_changes_appear_immediately() {
             manifest: &manifest_r,
             gateway_node_id: "node",
             pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![],
         },
         &key,
@@ -219,6 +227,8 @@ fn capability_changes_appear_immediately() {
             manifest: &manifest_rw,
             gateway_node_id: "node",
             pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![],
         },
         &key,
@@ -248,6 +258,8 @@ fn pending_approval_ids_are_current() {
             manifest: &manifest,
             gateway_node_id: "node",
             pending_approval_ids: vec!["apr-aaa".to_string()],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![],
         },
         &key,
@@ -266,6 +278,8 @@ fn pending_approval_ids_are_current() {
             manifest: &manifest,
             gateway_node_id: "node",
             pending_approval_ids: vec!["apr-aaa".to_string(), "apr-bbb".to_string()],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![],
         },
         &key,
@@ -284,6 +298,8 @@ fn pending_approval_ids_are_current() {
             manifest: &manifest,
             gateway_node_id: "node",
             pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![],
         },
         &key,
@@ -309,6 +325,8 @@ fn attested_at_advances_across_turns() {
             manifest: &manifest,
             gateway_node_id: "node",
             pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![],
         },
         &key,
@@ -324,6 +342,8 @@ fn attested_at_advances_across_turns() {
             manifest: &manifest,
             gateway_node_id: "node",
             pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
             budget_meters: vec![],
         },
         &key,
@@ -359,6 +379,8 @@ fn spawn_depth_tracks_session_path() {
                 manifest: &manifest,
                 gateway_node_id: "node",
                 pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
                 budget_meters: vec![],
             },
             &key,
@@ -371,4 +393,42 @@ fn spawn_depth_tracks_session_path() {
             session_id
         );
     }
+}
+
+/// R-6.23 amendment: attestation includes user interaction and escalation gate IDs.
+#[test]
+fn pending_gate_ids_include_all_gate_kinds() {
+    let dir = tempdir().expect("tempdir");
+    let key = GatewayIdentityKey::load_or_generate(dir.path()).expect("key");
+    let manifest = manifest_with_caps(vec![]);
+
+    let att = compose_and_sign(
+        AttestationInputs {
+            agent_id: &manifest.agent.id,
+            session_id: Some("root"),
+            root_session_id: Some("root"),
+            turn_counter: 1,
+            manifest: &manifest,
+            gateway_node_id: "node",
+            pending_approval_ids: vec!["apr-001".to_string()],
+            pending_user_interaction_ids: vec!["ui-001".to_string(), "ui-002".to_string()],
+            pending_escalation_ids: vec!["apr-esc-001".to_string()],
+            budget_meters: vec![],
+        },
+        &key,
+    )
+    .expect("compose");
+    let payload = verify(&key.public_key_bytes(), &att).expect("verify");
+
+    assert_eq!(payload.pending_approval_count, 1);
+    assert_eq!(payload.pending_approval_ids, vec!["apr-001"]);
+
+    assert_eq!(payload.pending_user_interaction_count, 2);
+    assert_eq!(
+        payload.pending_user_interaction_ids,
+        vec!["ui-001", "ui-002"]
+    );
+
+    assert_eq!(payload.pending_escalation_count, 1);
+    assert_eq!(payload.pending_escalation_ids, vec!["apr-esc-001"]);
 }

@@ -63,6 +63,8 @@ fn default_inputs<'a>(manifest: &'a AgentManifest) -> AttestationInputs<'a> {
         manifest,
         gateway_node_id: "node-xyz",
         pending_approval_ids: vec!["apr-001".to_string(), "apr-002".to_string()],
+        pending_user_interaction_ids: vec![],
+        pending_escalation_ids: vec![],
         budget_meters: vec![BudgetMeter {
             name: "llm_rounds".to_string(),
             used: 5.0,
