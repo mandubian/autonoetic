@@ -492,39 +492,76 @@ impl NativeTool for CredentialRequestTool {
                     "Credential request to {} requires approval (policy: {})",
                     url_host, violation.error_type
                 );
-                let request_id = create_credential_request_approval(
-                    &store,
-                    manifest,
-                    _config,
-                    _run_context,
-                    _session_id,
-                    action,
-                    reason.clone(),
+
+                let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                let gate_result = gate.check(
+                    crate::runtime::human_gate::GateRequest {
+                        kind: crate::runtime::human_gate::GateKind::Approval {
+                            action: action.clone(),
+                            targets: vec![url_host.clone()],
+                            match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                        },
+                        manifest,
+                        session_id: _session_id,
+                        run_context: _run_context,
+                        config: _config,
+                        reason: reason.clone(),
+                        summary: format!("Credential request to {}", url_host),
+                        approval_ref: None,
+                        pre_validated: false,
+                    },
                 )?;
-                return Ok(json!({
-                    "ok": false,
-                    "error_type": violation.error_type,
-                    "message": format!(
-                        "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
-                        request_id
-                    ),
-                    "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                    "error": violation.message,
-                    "approval_required": true,
-                    "request_id": request_id,
-                    "suspended": true,
-                    "reason": reason,
-                    "approval": {
-                        "kind": "credential_request",
-                        "summary": format!("Credential request to {}", url_host),
-                        "reason": format!(
-                            "Credential request to {} requires approval because remote target policy is not declared for this host.",
-                            url_host
-                        ),
-                        "retry_field": "approval_ref"
+                match gate_result {
+                    crate::runtime::human_gate::GateResult::Cleared { .. } => {}
+                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                        return Ok(json!({
+                            "ok": false,
+                            "approval_required": true,
+                            "approval_already_pending": true,
+                            "request_id": gate_id,
+                            "suspended": true,
+                            "reason": reason,
+                            "repair_hint": "Wait for the existing approval to be resolved.",
+                            "approval": {
+                                "kind": "credential_request",
+                                "summary": format!("Credential request to {}", url_host),
+                                "retry_field": "approval_ref"
+                            }
+                        }).to_string());
                     }
-                })
-                .to_string());
+                    crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                        return Ok(json!({
+                            "ok": false,
+                            "error_type": violation.error_type,
+                            "message": format!(
+                                "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
+                                gate_id
+                            ),
+                            "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                            "error": violation.message,
+                            "approval_required": true,
+                            "request_id": gate_id,
+                            "suspended": true,
+                            "reason": reason,
+                            "approval": {
+                                "kind": "credential_request",
+                                "summary": format!("Credential request to {}", url_host),
+                                "reason": format!(
+                                    "Credential request to {} requires approval because remote target policy is not declared for this host.",
+                                    url_host
+                                ),
+                                "retry_field": "approval_ref"
+                            }
+                        }).to_string());
+                    }
+                    other => {
+                        tracing::warn!(
+                            target: "credential_request",
+                            gate_result = ?other,
+                            "Unexpected gate result for credential.request remote target gate"
+                        );
+                    }
+                }
             }
         }
 
@@ -545,37 +582,73 @@ impl NativeTool for CredentialRequestTool {
                 })),
             };
             let reason = format!("HTTP request to {} requires approval", url_host);
-            let request_id = create_credential_request_approval(
-                &store,
-                manifest,
-                _config,
-                _run_context,
-                _session_id,
-                action,
-                reason.clone(),
+
+            let gate = crate::runtime::human_gate::GateService::new(store.clone());
+            let gate_result = gate.check(
+                crate::runtime::human_gate::GateRequest {
+                    kind: crate::runtime::human_gate::GateKind::Approval {
+                        action: action.clone(),
+                        targets: vec![url_host.clone()],
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                    },
+                    manifest,
+                    session_id: _session_id,
+                    run_context: _run_context,
+                    config: _config,
+                    reason: reason.clone(),
+                    summary: format!("Credential request to {}", url_host),
+                    approval_ref: None,
+                    pre_validated: false,
+                },
             )?;
-            let message = format!(
-                "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
-                request_id
-            );
-            return Ok(json!({
-                "ok": false,
-                "error_type": "permission",
-                "message": message,
-                "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                "error": format!("Network access denied for host: {}", url_host),
-                "approval_required": true,
-                "request_id": request_id,
-                "suspended": true,
-                "reason": reason,
-                "approval": {
-                    "kind": "credential_request",
-                    "summary": format!("Credential request to {}", url_host),
-                    "reason": format!("HTTP request to {} requires approval", url_host),
-                    "retry_field": "approval_ref"
+            match gate_result {
+                crate::runtime::human_gate::GateResult::Cleared { .. } => {}
+                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                    return Ok(json!({
+                        "ok": false,
+                        "approval_required": true,
+                        "approval_already_pending": true,
+                        "request_id": gate_id,
+                        "suspended": true,
+                        "reason": reason,
+                        "repair_hint": "Wait for the existing approval to be resolved.",
+                        "approval": {
+                            "kind": "credential_request",
+                            "summary": format!("Credential request to {}", url_host),
+                            "retry_field": "approval_ref"
+                        }
+                    }).to_string());
                 }
-            })
-            .to_string());
+                crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                    return Ok(json!({
+                        "ok": false,
+                        "error_type": "permission",
+                        "message": format!(
+                            "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
+                            gate_id
+                        ),
+                        "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                        "error": format!("Network access denied for host: {}", url_host),
+                        "approval_required": true,
+                        "request_id": gate_id,
+                        "suspended": true,
+                        "reason": reason,
+                        "approval": {
+                            "kind": "credential_request",
+                            "summary": format!("Credential request to {}", url_host),
+                            "reason": format!("HTTP request to {} requires approval", url_host),
+                            "retry_field": "approval_ref"
+                        }
+                    }).to_string());
+                }
+                other => {
+                    tracing::warn!(
+                        target: "credential_request",
+                        gate_result = ?other,
+                        "Unexpected gate result for credential.request network gate"
+                    );
+                }
+            }
         }
 
         // Bind credential to destination host: the URL host must match
