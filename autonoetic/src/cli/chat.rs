@@ -264,6 +264,9 @@ struct App {
     /// Latest prompt footprint from the gateway: largest `input_tokens` among `llm_usage` entries
     /// for the last completed `event.ingest` (sync) response.
     last_llm_context: Option<LlmExchangeUsage>,
+    /// Synthetic pending IDs added after inline approval so the spinner shows
+    /// until the scheduler picks up the Runnable task.
+    post_approval_pending_ids: Vec<u64>,
 }
 
 impl App {
@@ -308,6 +311,7 @@ impl App {
             prompt_history_draft: None,
             pending_prompt: None,
             last_llm_context: None,
+            post_approval_pending_ids: Vec::new(),
         }
     }
 
@@ -830,6 +834,7 @@ fn reset_for_session_switch(
     app.seen_user_interaction_prompts.clear();
     app.pending_approval_ids.clear();
     app.announced_store_approval_ids.clear();
+    app.post_approval_pending_ids.clear();
     app.seen_causal_policy_event_ids.clear();
     app.policy_causal_pane.clear();
     app.pending_prompt = None;
@@ -3137,6 +3142,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                     MessageRole::System,
                                                     format!("Approved: {}", apr_id),
                                                 );
+                                                // Show working spinner until the scheduler
+                                                // re-queues and finishes the task.
+                                                let pid = app.next_id();
+                                                app.add_pending(pid);
+                                                app.post_approval_pending_ids.push(pid);
                                             }
                                             Err(e) => {
                                                 app.add_message(
@@ -4034,6 +4044,23 @@ async fn check_signals(
                                             {
                                                 app.pending_approval_ids.retain(|id| id != apr_id);
                                             }
+                                        }
+                                    }
+
+                                    // Clear post-approval spinners on task lifecycle events
+                                    // that indicate the scheduler resumed (or finished) work.
+                                    if matches!(
+                                        event.event_type.as_str(),
+                                        "task.started"
+                                            | "task.completed"
+                                            | "task.failed"
+                                            | "workflow.completed"
+                                    ) && !app.post_approval_pending_ids.is_empty()
+                                    {
+                                        let ids: Vec<u64> =
+                                            app.post_approval_pending_ids.drain(..).collect();
+                                        for pid in ids {
+                                            app.remove_pending(pid);
                                         }
                                     }
 

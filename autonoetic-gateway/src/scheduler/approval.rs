@@ -1123,25 +1123,7 @@ fn decide_request_with_options(
     }
 
     if matches!(status, ApprovalStatus::Approved) {
-        let hosts: Option<&Vec<String>> = match &decision.action {
-            ScheduledAction::SandboxExec {
-                detected_hosts: Some(hosts),
-                ..
-            } => Some(hosts),
-            ScheduledAction::WebFetch {
-                detected_hosts: Some(hosts),
-                ..
-            } => Some(hosts),
-            ScheduledAction::WebCall {
-                detected_hosts: Some(hosts),
-                ..
-            } => Some(hosts),
-            ScheduledAction::WebSearch {
-                detected_hosts: Some(hosts),
-                ..
-            } => Some(hosts),
-            _ => None,
-        };
+        let hosts = decision.action.detected_hosts();
 
         if let Some(hosts) = hosts {
             if !hosts.is_empty() {
