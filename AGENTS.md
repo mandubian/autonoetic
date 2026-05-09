@@ -15,6 +15,15 @@ RUST_LOG=autonoetic=debug cargo test           # Debug logging during tests
 
 No linter or formatter is configured. There is no `cargo clippy` or `rustfmt` CI gate — run `cargo build` to verify.
 
+## Sentinel Baseline Guard
+
+PRs that touch both `sentinel/checks/` and `sentinel/baseline/` are rejected by CI unless a `[baseline-update]` prefix appears in the PR title or a commit message. Check locally:
+
+```bash
+cargo xtask sentinel-baseline-guard         # against main
+cargo xtask sentinel-baseline-guard my-branch  # against a custom base
+```
+
 ## Recompute Constitution Lock (Digest + Signature)
 
 When `docs/constitution/versions/<version>/constitution.md` changes, run the

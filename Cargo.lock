@@ -278,6 +278,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "url",
  "uuid",
 ]
 
@@ -4054,6 +4055,10 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
 ]
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
 
 [[package]]
 name = "yaml-rust2"

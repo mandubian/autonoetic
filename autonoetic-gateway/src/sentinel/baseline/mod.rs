@@ -43,9 +43,13 @@
 //!      that constant.
 //!   4. Document the rationale in the PR description.
 //!
-//! Today these rules are enforced solely by code review. An automated CI
-//! guard rejecting concurrent edits without `[baseline-update]` is tracked
-//! as issue #165.
+//! These rules are enforced by:
+//!
+//! - **CI guard** (`.github/workflows/sentinel-baseline-guard.yml`): rejects
+//!   PRs that touch both `checks/` and `baseline/` without a `[baseline-update]`
+//!   prefix in the PR title or any commit message.
+//! - **xtask** (`xtask/src/main.rs`): run `cargo xtask sentinel-baseline-guard`
+//!   locally before pushing.
 //!
 //! ## Why duplicate the code instead of generating it?
 //!

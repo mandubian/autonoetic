@@ -1,0 +1,65 @@
+name: sentinel-baseline-guard
+
+on:
+  pull_request:
+    paths:
+      - 'autonoetic-gateway/src/sentinel/checks/**'
+      - 'autonoetic-gateway/src/sentinel/baseline/**'
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for concurrent edits without [baseline-update]
+        run: |
+          # Collect the file lists changed in this PR against the base branch
+          CHECKS_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- \
+            'autonoetic-gateway/src/sentinel/checks/' || true)
+          BASELINE_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- \
+            'autonoetic-gateway/src/sentinel/baseline/' || true)
+
+          if [ -z "$CHECKS_FILES" ] || [ -z "$BASELINE_FILES" ]; then
+            echo "OK: Only one of checks/ or baseline/ is modified."
+            exit 0
+          fi
+
+          # Both directories are touched — require [baseline-update] signal.
+          PR_TITLE="${{ github.event.pull_request.title }}"
+
+          # Check PR title and all commit messages for the prefix.
+          COMMITS_HAVE_PREFIX=false
+          while IFS= read -r msg; do
+            case "$msg" in
+              '[baseline-update]'*|'[baseline-update '*)
+                COMMITS_HAVE_PREFIX=true
+                break
+                ;;
+            esac
+          done < <(git log --format='%s' origin/${{ github.base_ref }}...HEAD)
+
+          if echo "$PR_TITLE" | grep -qE '^\[baseline-update\]'; then
+            echo "OK: PR title carries [baseline-update] prefix."
+            exit 0
+          fi
+
+          if [ "$COMMITS_HAVE_PREFIX" = true ]; then
+            echo "OK: At least one commit carries [baseline-update] prefix."
+            exit 0
+          fi
+
+          echo "::error::This PR modifies both sentinel/checks/ and sentinel/baseline/ without a [baseline-update] prefix."
+          echo ""
+          echo "The frozen-baseline contract requires that changes to baseline/ land in"
+          echo "a separate PR with a [baseline-update] prefix in the commit message or PR title."
+          echo ""
+          echo "Files in sentinel/checks/:"
+          echo "$CHECKS_FILES"
+          echo ""
+          echo "Files in sentinel/baseline/:"
+          echo "$BASELINE_FILES"
+          echo ""
+          echo "If this is a deliberate baseline update, retitle the PR (or amend a commit)"
+          echo "to start with '[baseline-update]' and re-push."
+          exit 1

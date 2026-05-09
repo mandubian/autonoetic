@@ -550,7 +550,7 @@ impl NativeTool for SessionSummarizeTool {
         let messages: Vec<crate::llm::Message> = serde_json::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("Failed to parse transcript: {}", e))?;
 
-        let excerpt = crate::runtime::lifecycle::extract_searchable_excerpt(&messages);
+        let excerpt = crate::runtime::history_persist::extract_searchable_excerpt(&messages);
         let summary = if excerpt.len() > args.max_length {
             format!("{}...", &excerpt[..args.max_length])
         } else {

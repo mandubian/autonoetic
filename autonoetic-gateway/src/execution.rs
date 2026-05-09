@@ -5,32 +5,35 @@ use crate::causal_chain::CausalLogger;
 use crate::llm::{build_driver, Message};
 use crate::runtime::active_execution_registry::ActiveExecutionRegistry;
 use crate::runtime::lifecycle::{AgentExecutor, TurnOutcome};
-use crate::runtime::live_digest::{
-    append_repair_attempt_best_effort, append_repair_passed_best_effort, base_session_id,
-};
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
+use crate::runtime::response_validation::{
+    log_contract_enforcement_event_to_gateway, log_nested_spawn_to_gateway,
+};
 use crate::runtime::root_session_budget::RootSessionBudgetRegistry;
+use crate::runtime::script_execute::{execute_script_in_sandbox, script_causal_event};
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
+use crate::runtime::session_resume::{
+    resume_answered_user_interaction_from_loaded_checkpoint,
+    should_auto_resume_checkpoint_yield_reason,
+};
 use crate::runtime::session_report::SessionReportWriter;
 use crate::scheduler::gateway_store::default_gateway_host_id;
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
-use autonoetic_types::background::{ScheduledAction, UserInteraction, UserInteractionStatus};
-use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
+use autonoetic_types::background::{ScheduledAction, UserInteractionStatus};
+use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::tool_error::tagged;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
 /// Ensures `close_session` runs when `execute_with_history` fails so session report / digest finalize.
-async fn execute_with_history_close_on_error(
+pub(crate) async fn execute_with_history_close_on_error(
     runtime: &mut AgentExecutor,
     history: &mut Vec<Message>,
 ) -> anyhow::Result<TurnOutcome> {
@@ -44,7 +47,7 @@ async fn execute_with_history_close_on_error(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionCloseReason {
+pub(crate) enum SessionCloseReason {
     SpawnExecuteError,
     JsonRpcSpawnSuspendedApproval,
     JsonRpcSpawnSuspendedUserInput,
@@ -57,7 +60,7 @@ enum SessionCloseReason {
 }
 
 impl SessionCloseReason {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::SpawnExecuteError => "spawn_execute_error",
             Self::JsonRpcSpawnSuspendedApproval => "jsonrpc_spawn_suspended_approval",
@@ -1292,21 +1295,6 @@ impl GatewayExecutionService {
                         issues = ?validation.issues,
                         "Input schema validation"
                     );
-                    if let Err(error) = log_input_schema_validation_to_gateway(
-                        self.config.as_ref(),
-                        session_id,
-                        source_agent_id,
-                        agent_id,
-                        message,
-                        &validation,
-                    ) {
-                        tracing::warn!(
-                            error = %error,
-                            agent_id = agent_id,
-                            session_id = session_id,
-                            "Failed to append input schema validation to gateway causal chain"
-                        );
-                    }
                 }
             }
             // Background signaling is handled by the notification processor
@@ -1764,124 +1752,32 @@ impl GatewayExecutionService {
                         vec![]
                     };
 
-                    // Check if a remaining tool call also hit an approval gate.
-                    // process_tool_calls stops at the first approval-required
-                    // result, so if the last remaining result has
-                    // approval_required=true, we must save a new continuation
-                    // and suspend — otherwise the user sees a "duplicate"
-                    // approval that requires a second Ctrl+A.
-                    let nested_approval = remaining_results.last().and_then(|(id, _name, result_json)| {
-                        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
-                        if parsed.get("approval_required").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            let request_id = parsed.get("request_id")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .unwrap_or_default();
-                            Some((id.clone(), request_id, result_json.clone()))
-                        } else {
-                            None
-                        }
-                    });
+                    // Reconstruct conversation history and restore guard state.
+                    let mut history = crate::runtime::continuation::reconstruct_history(
+                        &cont,
+                        approved_result,
+                        remaining_results,
+                    );
 
-                    if let Some((nested_call_id, nested_request_id, nested_approval_response)) = nested_approval {
-                        // A remaining tool call also needs approval. Build a
-                        // chained continuation so the next approval resume
-                        // picks up where we left off.
-                        let results_before_gate = remaining_results[..remaining_results.len() - 1].to_vec();
-                        let calls_after_gate = cont.remaining_tool_calls[remaining_results.len()..].to_vec();
+                    let initial_msg = cont.history
+                        .iter()
+                        .find(|m| matches!(m.role, crate::llm::Role::User))
+                        .map(|m| m.content.clone())
+                        .unwrap_or_default();
 
-                        let nested_tc = cont.remaining_tool_calls
-                            .iter()
-                            .find(|tc| tc.id == nested_call_id)
-                            .expect("nested approval call id must match a remaining tool call");
+                    runtime.guard = crate::runtime::guard::LoopGuard::restore(cont.loop_guard_state.clone());
+                    runtime.session_id = Some(cont.session_id.clone());
+                    runtime.session_started = true;
+                    runtime.turn_counter = cont.turn_id
+                        .trim_start_matches("turn-")
+                        .parse()
+                        .unwrap_or(0);
 
-                        // Merge all prior results into completed_tool_results:
-                        // original completed + the now-approved result + remaining results before this gate
-                        let mut merged_completed = cont.completed_tool_results.clone();
-                        merged_completed.push((
-                            cont.pending_tool_call.call_id.clone(),
-                            cont.pending_tool_call.tool_name.clone(),
-                            approved_result,
-                        ));
-                        merged_completed.extend(results_before_gate);
+                    // Delete the continuation file — we are now live.
+                    let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
 
-                        let nested_action = self.gateway_store.as_ref().and_then(|store| {
-                            store.get_approval(&nested_request_id).ok().flatten().map(|a| a.action)
-                        });
-
-                        let nested_continuation = crate::runtime::continuation::TurnContinuation {
-                            history: cont.history.clone(),
-                            assistant_message: cont.assistant_message.clone(),
-                            completed_tool_results: merged_completed,
-                            pending_tool_call: crate::runtime::continuation::PendingApprovalToolCall {
-                                call_id: nested_call_id,
-                                tool_name: nested_tc.name.clone(),
-                                arguments: nested_tc.arguments.clone(),
-                                approval_response: nested_approval_response,
-                            },
-                            remaining_tool_calls: calls_after_gate,
-                            approval_request_id: nested_request_id.clone(),
-                            pending_action: nested_action,
-                            workflow_id: cont.workflow_id.clone(),
-                            task_id: cont.task_id.clone(),
-                            session_id: cont.session_id.clone(),
-                            turn_id: cont.turn_id.clone(),
-                            suspended_at: chrono::Utc::now().to_rfc3339(),
-                            loop_guard_state: cont.loop_guard_state.clone(),
-                            session_state: runtime.session_state,
-                        };
-
-                        crate::runtime::continuation::save_continuation(
-                            &self.config,
-                            t_id,
-                            &nested_continuation,
-                        )?;
-
-                        tracing::info!(
-                            target: "continuation",
-                            task_id = %t_id,
-                            original_request_id = %cont.approval_request_id,
-                            nested_request_id = %nested_request_id,
-                            "Chained continuation: remaining tool call also requires approval"
-                        );
-
-                        let initial_msg = cont.history
-                            .iter()
-                            .find(|m| matches!(m.role, crate::llm::Role::User))
-                            .map(|m| m.content.clone())
-                            .unwrap_or_default();
-                        (TurnOutcome::Suspended {
-                            approval_request_id: nested_request_id,
-                            continuation: Some(Box::new(nested_continuation)),
-                        }, initial_msg, None)
-                    } else {
-                        // No nested approval — normal resume path.
-                        let mut history = crate::runtime::continuation::reconstruct_history(
-                            &cont,
-                            approved_result,
-                            remaining_results,
-                        );
-
-                        let initial_msg = cont.history
-                            .iter()
-                            .find(|m| matches!(m.role, crate::llm::Role::User))
-                            .map(|m| m.content.clone())
-                            .unwrap_or_default();
-
-                        runtime.guard = crate::runtime::guard::LoopGuard::restore(cont.loop_guard_state.clone());
-                        runtime.session_id = Some(cont.session_id.clone());
-                        runtime.session_started = true;
-                        runtime.turn_counter = cont.turn_id
-                            .trim_start_matches("turn-")
-                            .parse()
-                            .unwrap_or(0);
-
-                        // Delete the continuation file — we are now live.
-                        let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
-
-                        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
-                        (outcome, initial_msg, None)
-                    }
+                    let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
+                    (outcome, initial_msg, None)
                 } else {
                     // No continuation on disk — optionally resume from latest checkpoint.
                     let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint(
@@ -1959,6 +1855,15 @@ impl GatewayExecutionService {
                                     runtime.turn_counter = checkpoint.turn_counter;
                                     runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
                                     let mut history = checkpoint.history.clone();
+                                    // Inject approval-granted notice so the LLM knows to pass
+                                    // approval_ref on retry instead of re-triggering the gate.
+                                    history.push(crate::llm::Message::user(format!(
+                                        "[gateway] Approval `{}` has been granted by the operator. \
+                                         When retrying the tool call that required approval, include \
+                                         `\"approval_ref\": \"{}\"` in the arguments to skip the \
+                                         approval gate.",
+                                        rid, rid
+                                    )));
                                     let initial_msg = checkpoint
                                         .history
                                         .iter()
@@ -2234,6 +2139,15 @@ impl GatewayExecutionService {
                                 runtime.turn_counter = checkpoint.turn_counter;
                                 runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
                                 let mut history = checkpoint.history.clone();
+                                // Inject approval-granted notice so the LLM knows to pass
+                                // approval_ref on retry instead of re-triggering the gate.
+                                history.push(crate::llm::Message::user(format!(
+                                    "[gateway] Approval `{}` has been granted by the operator. \
+                                     When retrying the tool call that required approval, include \
+                                     `\"approval_ref\": \"{}\"` in the arguments to skip the \
+                                     approval gate.",
+                                    rid, rid
+                                )));
                                 let initial_msg = checkpoint
                                     .history
                                     .iter()
@@ -2668,400 +2582,16 @@ impl GatewayExecutionService {
             }
         }
 
-        // Promotion record gate: if metadata requires a promotion.record, verify
-        // the PromotionStore has a matching record before returning the result.
-        // Two failure modes:
-        //   1. promotion_record_missing — agent forgot to call promotion.record → repairable
-        //   2. promotion_record_failed  — evaluator/auditor passed=false → terminal
-        if result.suspended_for_approval.is_none() && !result.suspended_for_user_input {
-            let require_promotion = metadata
-                .and_then(|m| m.get("require_promotion_record"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            if require_promotion {
-                let promotion_artifact_id = metadata
-                    .and_then(|m| m.get("promotion_artifact_id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let promotion_role = metadata
-                    .and_then(|m| m.get("promotion_role"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("evaluator");
-
-                let gateway_dir = self.config.agents_dir.join(".gateway");
-                let promotion_violations =
-                    crate::runtime::response_validation::validate_promotion_record(
-                        Some(&gateway_dir),
-                        promotion_artifact_id,
-                        promotion_role,
-                    );
-
-                if !promotion_violations.is_empty() {
-                    let repair_enabled = self.config.response_validation.repair_enabled;
-                    let is_missing = promotion_violations
-                        .iter()
-                        .any(|v| v.rule == "promotion_record_missing");
-
-                    // pass=false is terminal — no point repairing
-                    // missing record is repairable if repair is enabled
-                    if is_missing && repair_enabled {
-                        let max_repair_rounds: usize = 2;
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_millis(5000);
-
-                        for attempt in 1..=max_repair_rounds {
-                            if std::time::Instant::now() >= deadline {
-                                break;
-                            }
-
-                            let repair_msg =
-                                crate::runtime::response_validation::build_repair_prompt(
-                                    &promotion_violations,
-                                    attempt,
-                                    max_repair_rounds,
-                                );
-
-                            tracing::info!(
-                                target: "promotion_validation",
-                                agent_id = %agent_id,
-                                session_id = %result.session_id,
-                                attempt,
-                                "promotion.record repair attempt"
-                            );
-
-                            let repaired = match self
-                                .respawn_from_checkpoint(
-                                    agent_id,
-                                    &result.session_id,
-                                    Some(&repair_msg),
-                                    source_agent_id,
-                                    workflow_id,
-                                    task_id,
-                                )
-                                .await
-                            {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        target: "promotion_validation",
-                                        agent_id = %agent_id,
-                                        error = %e,
-                                        "promotion.record repair: respawn failed"
-                                    );
-                                    break;
-                                }
-                            };
-
-                            if repaired.suspended_for_approval.is_some()
-                                || repaired.suspended_for_user_input
-                            {
-                                break;
-                            }
-
-                            let remaining =
-                                crate::runtime::response_validation::validate_promotion_record(
-                                    Some(&gateway_dir),
-                                    promotion_artifact_id,
-                                    promotion_role,
-                                );
-                            result = repaired;
-
-                            if remaining.is_empty() {
-                                tracing::info!(
-                                    target: "promotion_validation",
-                                    agent_id = %agent_id,
-                                    session_id = %result.session_id,
-                                    attempt,
-                                    "promotion.record repair succeeded"
-                                );
-                                return Ok(result);
-                            }
-
-                            // If the agent recorded pass=false, stop repairing
-                            if remaining
-                                .iter()
-                                .any(|v| v.rule == "promotion_record_failed")
-                            {
-                                break;
-                            }
-                        }
-                    }
-
-                    // Final failure — return error with violations
-                    let summary: String = promotion_violations
-                        .iter()
-                        .map(|v| format!("[{}] {}", v.rule, v.message))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    let hints: String = promotion_violations
-                        .iter()
-                        .map(|v| v.repair_hint.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return Err(anyhow::anyhow!(
-                        "execution — {} Repair hints: {}",
-                        summary,
-                        hints
-                    ));
-                }
-            }
-        }
+        result = self.validate_promotion_gate(
+            agent_id,
+            result,
+            metadata,
+            source_agent_id,
+            workflow_id,
+            task_id,
+        ).await?;
 
         Ok(result)
-    }
-
-    /// Validate a `SpawnResult` against output schema/policy and, when repair is enabled,
-    /// re-enter the child agent session (via its hibernation checkpoint) to give the agent
-    /// a bounded number of repair attempts.
-    ///
-    /// Repair feedback is injected as a structured user message so the agent can call its
-    /// normal tools (`content.write`, `artifact.build`, etc.) to fix the issue.  After each
-    /// repair turn the fresh durable state is re-collected and re-validated.
-    ///
-    /// Hard guards enforced:
-    /// - `output_policy.validation_max_loops` — total rounds including the initial execution
-    ///   (repair attempts = max_loops - 1; default: 1, meaning no repair).
-    /// - `output_policy.validation_max_duration_ms` — wall-clock deadline across all repair rounds.
-    /// - Session suspension during repair (approval gate / user.ask) → repair aborted.
-    async fn validate_and_maybe_repair(
-        &self,
-        agent_id: &str,
-        mut result: SpawnResult,
-        output_schema: Option<&serde_json::Value>,
-        output_policy: &autonoetic_types::agent::OutputPolicy,
-        source_agent_id: Option<&str>,
-        workflow_id: Option<&str>,
-        task_id: Option<&str>,
-    ) -> anyhow::Result<SpawnResult> {
-        use crate::runtime::response_validation::{
-            build_repair_prompt, validate_session_evidence, validate_spawn_response,
-            violations_to_final_error,
-        };
-
-        let max_duration_ms = output_policy.validation_max_duration_ms;
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(max_duration_ms as u64);
-        let repair_enabled =
-            self.config.response_validation.repair_enabled && output_policy.repair.auto;
-        let max_repair_rounds = output_policy.declared_repair_attempts().min(
-            self.config
-                .response_validation
-                .max_repair_attempts_ceiling as usize,
-        );
-
-        // Initial validation.
-        let gateway_dir = self.config.agents_dir.join(".gateway");
-
-        let mut violations =
-            validate_spawn_response(&result, output_schema, output_policy, Some(&gateway_dir));
-        violations.extend(validate_session_evidence(
-            self.gateway_store.as_deref(),
-            &result.session_id,
-            output_policy,
-        ));
-        if violations.is_empty() {
-            tracing::debug!(
-                target: "response_validation",
-                agent_id = %agent_id,
-                session_id = %result.session_id,
-                "response.validation.pass"
-            );
-            return Ok(result);
-        }
-
-        tracing::warn!(
-            target: "response_validation",
-            agent_id = %agent_id,
-            session_id = %result.session_id,
-            violation_count = violations.len(),
-            "response.validation.fail"
-        );
-
-        // When repair is disabled or only one loop is allowed, fail immediately.
-        // Include session context in the error when repair mode is on so the caller
-        // can identify the session for higher-level recovery.
-        if !repair_enabled || max_repair_rounds == 0 {
-            return Err(violations_to_final_error(
-                &violations,
-                &result.session_id,
-                repair_enabled, // include context when repair mode active
-            ));
-        }
-
-        // Repair loop: attempt up to the agent-declared count, bounded by system ceiling.
-        for attempt in 1..=max_repair_rounds {
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    attempt = attempt,
-                    "response.repair.exhausted: deadline reached"
-                );
-                return Err(violations_to_final_error(
-                    &violations,
-                    &result.session_id,
-                    true,
-                ));
-            }
-
-            let repair_msg = build_repair_prompt(&violations, attempt, max_repair_rounds);
-
-            tracing::info!(
-                target: "response_validation",
-                agent_id = %agent_id,
-                session_id = %result.session_id,
-                attempt = attempt,
-                max_repair_rounds = max_repair_rounds,
-                "response.repair.start"
-            );
-
-            let base = base_session_id(&result.session_id);
-            let violation_summary = violations
-                .iter()
-                .map(|v| v.rule.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            append_repair_attempt_best_effort(
-                &gateway_dir,
-                base,
-                attempt,
-                max_repair_rounds,
-                &format!("{} ({})", violation_summary, violations.len()),
-            );
-
-            let repaired = match self
-                .respawn_from_checkpoint(
-                    agent_id,
-                    &result.session_id,
-                    Some(&repair_msg),
-                    source_agent_id,
-                    workflow_id,
-                    task_id,
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "response_validation",
-                        agent_id = %agent_id,
-                        error = %e,
-                        "response.repair.error: respawn failed"
-                    );
-                    return Err(violations_to_final_error(
-                        &violations,
-                        &result.session_id,
-                        true,
-                    ));
-                }
-            };
-
-            // If the agent suspended for approval during repair we cannot continue the
-            // repair loop — abort and surface the original violations.
-            if repaired.suspended_for_approval.is_some() || repaired.suspended_for_user_input {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    "response.repair.aborted: session suspended during repair"
-                );
-                return Err(anyhow::anyhow!(
-                    "repair aborted: agent suspended during repair; session: {}",
-                    result.session_id
-                ));
-            }
-
-            // Check if the agent ended with a user interaction (user.ask) suspension.
-            // If the latest checkpoint is UserInputRequired (not yet answered), abort repair.
-            if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(
-                &self.config,
-                &repaired.session_id,
-            ) {
-                if matches!(
-                    cp.yield_reason,
-                    crate::runtime::checkpoint::YieldReason::UserInputRequired { .. }
-                ) {
-                    tracing::warn!(
-                        target: "response_validation",
-                        agent_id = %agent_id,
-                        session_id = %repaired.session_id,
-                        "response.repair.aborted: session suspended for user interaction during repair"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "repair aborted: agent suspended for user interaction during repair; session: {}",
-                        result.session_id
-                    ));
-                }
-            }
-
-            // Re-validate against the fresh state returned by respawn_from_checkpoint.
-            // Do this BEFORE the deadline check so a successful repair is never discarded
-            // just because the LLM took longer than validation_max_duration_ms to respond.
-            violations = validate_spawn_response(
-                &repaired,
-                output_schema,
-                output_policy,
-                Some(&gateway_dir),
-            );
-            violations.extend(validate_session_evidence(
-                self.gateway_store.as_deref(),
-                &repaired.session_id,
-                output_policy,
-            ));
-            result = repaired;
-
-            if violations.is_empty() {
-                tracing::info!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    session_id = %result.session_id,
-                    attempt = attempt,
-                    "response.repair.pass"
-                );
-                append_repair_passed_best_effort(
-                    &gateway_dir,
-                    base_session_id(&result.session_id),
-                    attempt,
-                );
-                return Ok(result);
-            }
-
-            tracing::warn!(
-                target: "response_validation",
-                agent_id = %agent_id,
-                attempt = attempt,
-                violation_count = violations.len(),
-                "response.repair.fail"
-            );
-
-            // Deadline check: only fail here when violations *remain* after re-validation.
-            // Checking before re-validation would discard a successful repair whose LLM
-            // response took longer than validation_max_duration_ms.
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    attempt = attempt,
-                    "response.repair.exhausted: deadline reached after respawn"
-                );
-                return Err(violations_to_final_error(
-                    &violations,
-                    &result.session_id,
-                    true,
-                ));
-            }
-        }
-
-        tracing::warn!(
-            target: "response_validation",
-            agent_id = %agent_id,
-            "response.repair.exhausted: max_loops reached"
-        );
-        Err(violations_to_final_error(
-            &violations,
-            &result.session_id,
-            true,
-        ))
     }
 
     /// Resume execution after a `user.ask` interaction was answered in the gateway store.
@@ -3482,137 +3012,6 @@ impl GatewayExecutionService {
     }
 }
 
-/// Logs agent.spawn.requested and agent.spawn.completed to the gateway causal chain for nested
-/// delegations (when source_agent_id is set), so the gateway log shows the full delegation tree.
-fn log_nested_spawn_to_gateway(
-    config: &GatewayConfig,
-    session_id: &str,
-    source_agent_id: Option<&str>,
-    agent_id: &str,
-    message: &str,
-    result: &SpawnResult,
-) {
-    let logger = match init_gateway_causal_logger(config) {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-    let path = logger.path().to_path_buf();
-    let entries = match CausalLogger::read_entries(&path) {
-        Ok(e) => e,
-        Err(err) => {
-            if path.exists() {
-                tracing::warn!(
-                    error = %err,
-                    "Failed to read existing gateway causal entries before input schema log"
-                );
-                return;
-            }
-            Vec::new()
-        }
-    };
-    let mut seq = entries.last().map(|e| e.event_seq + 1).unwrap_or(1);
-    let requested_data = serde_json::json!({
-        "agent_id": agent_id,
-        "source_agent_id": source_agent_id,
-        "session_id": session_id,
-        "message_len": message.len(),
-        "message_sha256": sha256_hex(message),
-    });
-    log_gateway_causal_event(
-        &logger,
-        &gateway_actor_id(),
-        session_id,
-        seq,
-        "agent.spawn.requested",
-        EntryStatus::Success,
-        Some(requested_data),
-    );
-    seq += 1;
-    let completed_data = serde_json::json!({
-        "agent_id": result.agent_id,
-        "source_agent_id": source_agent_id,
-        "session_id": result.session_id,
-        "assistant_reply_len": result.assistant_reply.as_ref().map(|s| s.len()).unwrap_or(0),
-        "assistant_reply_sha256": result.assistant_reply.as_ref().map(|s| sha256_hex(s)),
-        "llm_usage": result.llm_usage,
-    });
-    log_gateway_causal_event(
-        &logger,
-        &gateway_actor_id(),
-        session_id,
-        seq,
-        "agent.spawn.completed",
-        EntryStatus::Success,
-        Some(completed_data),
-    );
-}
-
-fn log_input_schema_validation_to_gateway(
-    _config: &GatewayConfig,
-    _session_id: &str,
-    _source_agent_id: Option<&str>,
-    _agent_id: &str,
-    _message: &str,
-    _validation: &SchemaValidation,
-) -> anyhow::Result<()> {
-    // No-op: gateway causal chain events are now captured in gateway.db
-    Ok(())
-}
-
-fn contract_event_seq() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn log_contract_enforcement_event_to_gateway(
-    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    agent_id: &str,
-    session_id: &str,
-    action: &str,
-    status: EntryStatus,
-    target_agent_id: Option<&str>,
-    payload: serde_json::Value,
-) {
-    let Some(store) = gateway_store else {
-        return;
-    };
-
-    let payload_str = serde_json::to_string(&payload).ok();
-    let reason = payload
-        .get("reason")
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned);
-
-    if let Err(error) = store.create_causal_event(&CausalEventRecord {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        turn_id: None,
-        event_seq: contract_event_seq(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        category: "contract".to_string(),
-        action: action.to_string(),
-        status: status.to_string(),
-        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
-        target: target_agent_id.map(ToOwned::to_owned),
-        payload: payload_str,
-        payload_ref: None,
-        evidence_ref: None,
-        reason,
-    }) {
-        tracing::warn!(
-            target: "response_validation",
-            error = %error,
-            action = action,
-            agent_id = agent_id,
-            session_id = session_id,
-            "Failed to persist contract enforcement event"
-        );
-    }
-}
-
 pub fn gateway_actor_id() -> String {
     std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string())
 }
@@ -3657,310 +3056,12 @@ pub fn log_gateway_causal_event(
     // No-op: gateway causal chain events are now captured in gateway.db
 }
 
-/// Write a single `causal_events` row for script-agent fast-path execution.
-/// Called in place of the former no-op `log_gateway_causal_event` so that
-/// script agent runs are visible in `execution.search` and session_overview.
-fn script_causal_event(
-    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    agent_id: &str,
-    session_id: &str,
-    event_seq: u64,
-    action: &str,
-    status: &str,
-    payload: serde_json::Value,
-) {
-    let Some(store) = store else { return };
-    let _ = store.create_causal_event(&CausalEventRecord {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        turn_id: None,
-        event_seq,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        category: "script".to_string(),
-        action: action.to_string(),
-        status: status.to_string(),
-        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
-        target: None,
-        payload: Some(payload.to_string()),
-        payload_ref: None,
-        evidence_ref: None,
-        reason: None,
-    });
-}
-
-/// [DEPRECATED] This function is no longer called as gateway causal chain events are now captured in gateway.db.
-fn _deprecated_update_session_index(
-    logger: &CausalLogger,
-    actor_id: &str,
-    session_id: &str,
-    event_seq: u64,
-    action: &str,
-    status: &EntryStatus,
-    payload: Option<&serde_json::Value>,
-) -> anyhow::Result<()> {
-    let index_path = logger
-        .path()
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Logger path has no parent"))?
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Logger path has no grandparent"))?
-        .join("sessions")
-        .join(session_id)
-        .join("index.json");
-
-    let mut index = if index_path.exists() {
-        serde_json::from_str::<SessionIndex>(&std::fs::read_to_string(&index_path)?)?
-    } else {
-        SessionIndex {
-            session_id: session_id.to_string(),
-            first_timestamp: None,
-            last_timestamp: None,
-            events: vec![],
-        }
-    };
-
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    if index.first_timestamp.is_none() {
-        index.first_timestamp = Some(timestamp.clone());
-    }
-    index.last_timestamp = Some(timestamp.clone());
-
-    let log_id = format!("{}:{}:{}", actor_id, session_id, event_seq);
-
-    let event_ref = SessionEventRef {
-        log_id: log_id.clone(),
-        agent_id: actor_id.to_string(),
-        timestamp: timestamp.clone(),
-        category: "gateway".to_string(),
-        action: action.to_string(),
-        status: status.clone(),
-        causal_hash: payload
-            .and_then(|p| p.get("causal_hash").and_then(|h| h.as_str()))
-            .map(String::from),
-    };
-    index.events.push(event_ref);
-
-    if let Some(parent) = index_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&index_path, serde_json::to_string_pretty(&index)?)?;
-
-    Ok(())
-}
-
-/// [DEPRECATED] This struct is no longer used as gateway causal chain events are now captured in gateway.db.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionIndex {
-    session_id: String,
-    first_timestamp: Option<String>,
-    last_timestamp: Option<String>,
-    events: Vec<SessionEventRef>,
-}
-
-/// [DEPRECATED] This struct is no longer used as gateway causal chain events are now captured in gateway.db.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionEventRef {
-    log_id: String,
-    agent_id: String,
-    timestamp: String,
-    category: String,
-    action: String,
-    status: EntryStatus,
-    causal_hash: Option<String>,
-}
-
 pub fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-fn should_auto_resume_checkpoint_yield_reason(
-    yield_reason: &crate::runtime::checkpoint::YieldReason,
-) -> bool {
-    use crate::runtime::checkpoint::YieldReason;
-    matches!(
-        yield_reason,
-        YieldReason::Hibernation
-            | YieldReason::BudgetExhausted
-            | YieldReason::ManualStop
-            | YieldReason::Error(_)
-    )
-}
-
-fn build_user_ask_answer_tool_result_json(interaction: &UserInteraction) -> anyhow::Result<String> {
-    if interaction.status != UserInteractionStatus::Answered {
-        anyhow::bail!(
-            "user interaction {} is not answered ({:?})",
-            interaction.interaction_id,
-            interaction.status
-        );
-    }
-    let selected_value = match &interaction.answer_option_id {
-        Some(oid) => interaction
-            .options
-            .iter()
-            .find(|o| &o.id == oid)
-            .map(|o| o.value.clone()),
-        None => None,
-    };
-    Ok(serde_json::json!({
-        "ok": true,
-        "interaction_id": interaction.interaction_id,
-        "status": "answered",
-        "question": interaction.question,
-        "kind": interaction.kind.as_str(),
-        "answer_text": interaction.answer_text,
-        "answer_option_id": interaction.answer_option_id,
-        "selected_value": selected_value,
-    })
-    .to_string())
-}
-
-fn resolve_pending_user_ask_call(
-    checkpoint: &crate::runtime::checkpoint::SessionCheckpoint,
-) -> anyhow::Result<(String, String)> {
-    if let Some(ref pts) = checkpoint.pending_tool_state {
-        return Ok((
-            pts.pending_tool_call.call_id.clone(),
-            pts.pending_tool_call.tool_name.clone(),
-        ));
-    }
-    pending_user_ask_call_from_history(&checkpoint.history)
-}
-
-fn pending_user_ask_call_from_history(history: &[Message]) -> anyhow::Result<(String, String)> {
-    use crate::llm::Role;
-    let i = history
-        .iter()
-        .rposition(|m| matches!(m.role, Role::Assistant) && !m.tool_calls.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("checkpoint history has no assistant message with tool calls")
-        })?;
-    let assistant = &history[i];
-    let mut j = i + 1;
-    let mut tc_idx = 0usize;
-    while tc_idx < assistant.tool_calls.len() && j < history.len() {
-        let m = &history[j];
-        if matches!(m.role, Role::Tool)
-            && m.tool_call_id.as_deref() == Some(assistant.tool_calls[tc_idx].id.as_str())
-        {
-            tc_idx += 1;
-            j += 1;
-        } else {
-            break;
-        }
-    }
-    if tc_idx >= assistant.tool_calls.len() {
-        anyhow::bail!("checkpoint history has no pending tool call (batch missing result)");
-    }
-    let tc = &assistant.tool_calls[tc_idx];
-    if tc.name != "user_ask" {
-        anyhow::bail!(
-            "expected pending tool user.ask for UserInputRequired checkpoint, found {}",
-            tc.name
-        );
-    }
-    Ok((tc.id.clone(), tc.name.clone()))
-}
-
-fn inject_answered_user_interaction_into_history(
-    history: &mut Vec<Message>,
-    checkpoint: &crate::runtime::checkpoint::SessionCheckpoint,
-    interaction: &UserInteraction,
-) -> anyhow::Result<()> {
-    let (call_id, tool_name) = resolve_pending_user_ask_call(checkpoint)?;
-    let json = build_user_ask_answer_tool_result_json(interaction)?;
-    history.push(Message::tool_result(call_id, tool_name, json));
-    Ok(())
-}
-
-async fn resume_answered_user_interaction_from_loaded_checkpoint(
-    runtime: &mut AgentExecutor,
-    session_id: &str,
-    message: &str,
-    checkpoint: crate::runtime::checkpoint::SessionCheckpoint,
-    interaction: &UserInteraction,
-) -> anyhow::Result<(
-    crate::runtime::lifecycle::TurnOutcome,
-    String,
-    Option<String>,
-)> {
-    anyhow::ensure!(
-        interaction.session_id == session_id,
-        "interaction session_id '{}' does not match spawn session_id '{}'",
-        interaction.session_id,
-        session_id
-    );
-    anyhow::ensure!(
-        interaction.agent_id == runtime.manifest.agent.id,
-        "interaction agent_id '{}' does not match spawned agent '{}'",
-        interaction.agent_id,
-        runtime.manifest.agent.id
-    );
-
-    let yield_iid = match &checkpoint.yield_reason {
-        crate::runtime::checkpoint::YieldReason::UserInputRequired { interaction_id } => {
-            interaction_id.clone()
-        }
-        _ => anyhow::bail!("checkpoint yield reason is not UserInputRequired"),
-    };
-    anyhow::ensure!(
-        yield_iid == interaction.interaction_id,
-        "checkpoint interaction_id '{}' does not match row '{}'",
-        yield_iid,
-        interaction.interaction_id
-    );
-
-    tracing::info!(
-        target: "user_interaction",
-        session_id = %session_id,
-        interaction_id = %interaction.interaction_id,
-        "Resuming session from user.ask checkpoint with stored answer"
-    );
-
-    runtime.guard = crate::runtime::guard::LoopGuard::restore(checkpoint.loop_guard_state.clone());
-    runtime.session_state = checkpoint.session_state;
-    runtime.session_started = true;
-    runtime.turn_counter = checkpoint.turn_counter;
-    runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
-
-    let mut history = checkpoint.history.clone();
-    inject_answered_user_interaction_into_history(&mut history, &checkpoint, interaction)?;
-    if let Some(gw) = runtime.gateway_dir.as_ref() {
-        let base = base_session_id(session_id).to_string();
-        let answer_summary = match (
-            interaction.answer_text.as_deref(),
-            interaction.answer_option_id.as_deref(),
-        ) {
-            (Some(t), _) if !t.trim().is_empty() => t.trim().to_string(),
-            (_, Some(oid)) if !oid.is_empty() => format!("selected option `{oid}`"),
-            _ => "(answered)".to_string(),
-        };
-        crate::runtime::live_digest::append_user_ask_answer_best_effort(
-            gw,
-            &base,
-            &interaction.interaction_id,
-            &answer_summary,
-        );
-    }
-    if !message.trim().is_empty() {
-        history.push(Message::user(message.to_string()));
-    }
-
-    let initial_msg = checkpoint
-        .history
-        .iter()
-        .find(|m| matches!(m.role, crate::llm::Role::User))
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
-
-    let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
-    Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
-}
 
 fn build_initial_history(
     agent_dir: &std::path::Path,
@@ -4247,30 +3348,6 @@ mod tests {
     }
 
     #[test]
-    fn test_log_input_schema_validation_to_gateway_is_noop() {
-        let temp = tempfile::tempdir().expect("tempdir should create");
-        let mut config = GatewayConfig::default();
-        config.agents_dir = temp.path().join("agents");
-
-        let validation = SchemaValidation {
-            valid: false,
-            issues: vec!["Missing required field: 'query'".to_string()],
-        };
-        log_input_schema_validation_to_gateway(
-            &config,
-            "session-3",
-            Some("planner.default"),
-            "researcher.default",
-            "plain text query",
-            &validation,
-        )
-        .expect("schema validation event should log (no-op now)");
-
-        // Gateway causal chain is no longer used - function is a no-op
-        // Relevant data is captured in gateway.db causal_events table via SessionTracer
-    }
-
-    #[test]
     fn session_close_reason_jsonrpc_mapping_is_closed_and_stable() {
         assert_eq!(
             SessionCloseReason::for_jsonrpc_spawn(true, false, false).as_str(),
@@ -4309,391 +3386,4 @@ mod tests {
             "checkpoint_respawn_complete_empty"
         );
     }
-}
-
-const AUTONOETIC_INPUT_ENV: &str = "AUTONOETIC_INPUT";
-const AUTONOETIC_META_ENV: &str = "AUTONOETIC_META";
-const AUTONOETIC_INPUT_PATH_ENV: &str = "AUTONOETIC_INPUT_PATH";
-const AUTONOETIC_META_PATH_ENV: &str = "AUTONOETIC_META_PATH";
-
-struct ScriptInvocationFiles {
-    runtime_dir_host: PathBuf,
-    input_path_sandbox: String,
-    meta_path_sandbox: Option<String>,
-}
-
-impl ScriptInvocationFiles {
-    fn cleanup(&self) {
-        let _ = std::fs::remove_dir_all(&self.runtime_dir_host);
-    }
-}
-
-fn sandbox_workspace_path(agent_dir: &Path, host_path: &Path) -> String {
-    match host_path.strip_prefix(agent_dir) {
-        Ok(relative) => format!(
-            "{}/{}",
-            crate::sandbox::BWRAP_WORKSPACE_DIR,
-            relative.to_string_lossy()
-        ),
-        Err(_) => host_path.to_string_lossy().to_string(),
-    }
-}
-
-fn write_script_invocation_files(
-    agent_dir: &Path,
-    input_payload: &str,
-    metadata: Option<&serde_json::Value>,
-) -> anyhow::Result<ScriptInvocationFiles> {
-    let nonce = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
-    let runtime_dir_host = agent_dir.join(".autonoetic_runtime").join(nonce);
-    std::fs::create_dir_all(&runtime_dir_host)?;
-
-    let input_path_host = runtime_dir_host.join("input.json");
-    std::fs::write(&input_path_host, input_payload)?;
-
-    let meta_path_sandbox = if let Some(meta) = metadata {
-        let meta_path_host = runtime_dir_host.join("meta.json");
-        std::fs::write(&meta_path_host, meta.to_string())?;
-        Some(sandbox_workspace_path(agent_dir, &meta_path_host))
-    } else {
-        None
-    };
-
-    Ok(ScriptInvocationFiles {
-        runtime_dir_host,
-        input_path_sandbox: sandbox_workspace_path(agent_dir, &input_path_host),
-        meta_path_sandbox,
-    })
-}
-
-fn normalize_script_input_payload(
-    input_payload: &str,
-    metadata: Option<&serde_json::Value>,
-) -> String {
-    let Some(meta) = metadata else {
-        return input_payload.to_string();
-    };
-    let meta_text = meta.to_string();
-
-    if let Some(stripped) =
-        input_payload.strip_suffix(&format!("\n\nDelegation metadata: {}", meta_text))
-    {
-        return stripped.to_string();
-    }
-
-    let task_marker = "\n\n[Task]\n";
-    let metadata_marker = "\n\n[Metadata]\n";
-    if input_payload.starts_with("[Context]\n") && input_payload.ends_with(&meta_text) {
-        if let (Some(task_start), Some(metadata_start)) = (
-            input_payload.find(task_marker),
-            input_payload.rfind(metadata_marker),
-        ) {
-            if task_start < metadata_start {
-                let task_body_start = task_start + task_marker.len();
-                let task_body = &input_payload[task_body_start..metadata_start];
-                return task_body.to_string();
-            }
-        }
-    }
-
-    input_payload.to_string()
-}
-
-/// Execute a script agent directly in sandbox, bypassing the LLM.
-async fn execute_script_in_sandbox(
-    agent_dir: &PathBuf,
-    script_path: &PathBuf,
-    input_payload: &str,
-    metadata: Option<&serde_json::Value>,
-    sandbox_type: &str,
-    _config: &GatewayConfig,
-    sandbox_kill: Option<(
-        std::sync::Arc<crate::runtime::active_execution_registry::ActiveExecutionRegistry>,
-        String,
-    )>,
-    capabilities: &[autonoetic_types::capability::Capability],
-    input_mode: autonoetic_types::agent::ScriptInputMode,
-) -> anyhow::Result<String> {
-    use std::io::Write;
-
-    tracing::info!(
-        agent_dir = %agent_dir.display(),
-        script = %script_path.display(),
-        sandbox = %sandbox_type,
-        input_mode = ?input_mode,
-        "Executing script agent"
-    );
-
-    let driver = crate::sandbox::SandboxDriverKind::parse(sandbox_type)?;
-    let mut overrides = crate::sandbox::BwrapIsolationOverrides::from_capabilities(capabilities);
-    let has_evaluation_cap = capabilities.iter().any(|c| {
-        matches!(
-            c,
-            autonoetic_types::capability::Capability::Evaluation { .. }
-        )
-    });
-    if has_evaluation_cap {
-        overrides.force_network_off = true;
-        overrides.share_net = false;
-    }
-    let normalized_input = normalize_script_input_payload(input_payload, metadata);
-    let invocation_files = write_script_invocation_files(agent_dir, &normalized_input, metadata)?;
-    let entrypoint_relative = match script_path.strip_prefix(agent_dir) {
-        Ok(relative) => format!(
-            "{}/{}",
-            crate::sandbox::BWRAP_WORKSPACE_DIR,
-            relative.to_string_lossy()
-        ),
-        Err(_) => script_path.to_string_lossy().to_string(),
-    };
-
-    let shell_command = match input_mode {
-        autonoetic_types::agent::ScriptInputMode::Args => {
-            format!(
-                "{} {}",
-                entrypoint_relative,
-                shell_words_quote(&normalized_input)
-            )
-        }
-        autonoetic_types::agent::ScriptInputMode::Stdin => entrypoint_relative,
-    };
-
-    // Primary contract for script agents: file-backed payload + metadata paths.
-    // Keep normalized env payloads for compatibility with older scripts.
-    let mut autonoetic_env = vec![
-        (
-            AUTONOETIC_INPUT_PATH_ENV.to_string(),
-            invocation_files.input_path_sandbox.clone(),
-        ),
-        (AUTONOETIC_INPUT_ENV.to_string(), normalized_input.clone()),
-    ];
-    if let Some(meta) = metadata {
-        autonoetic_env.push((AUTONOETIC_META_ENV.to_string(), meta.to_string()));
-    }
-    if let Some(meta_path) = invocation_files.meta_path_sandbox.as_ref() {
-        autonoetic_env.push((AUTONOETIC_META_PATH_ENV.to_string(), meta_path.clone()));
-    }
-    let mut runner = match crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies_and_env(
-        driver,
-        &agent_dir.to_string_lossy(),
-        &shell_command,
-        None,
-        Some(&overrides),
-        &autonoetic_env,
-        None,
-    ) {
-        Ok(runner) => runner,
-        Err(error) => {
-            invocation_files.cleanup();
-            return Err(error);
-        }
-    };
-
-    let _script_sandbox_guard = sandbox_kill.as_ref().and_then(|(reg, root)| {
-        let pid = runner.process.id();
-        (pid > 0).then(|| reg.register_sandbox_child_pid(root, pid))
-    });
-
-    if input_mode == autonoetic_types::agent::ScriptInputMode::Stdin {
-        if let Some(mut stdin) = runner.process.stdin.take() {
-            stdin
-                .write_all(normalized_input.as_bytes())
-                .map_err(|e| anyhow::anyhow!("Failed to write to script stdin: {}", e))?;
-        }
-    }
-
-    let output = match tokio::task::spawn_blocking(move || runner.process.wait_with_output()).await
-    {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            invocation_files.cleanup();
-            return Err(anyhow::anyhow!("Failed to execute script: {}", error));
-        }
-        Err(error) => {
-            invocation_files.cleanup();
-            return Err(anyhow::anyhow!("Task join error: {}", error));
-        }
-    };
-
-    invocation_files.cleanup();
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        tracing::error!(stderr = %stderr, stdout = %stdout, status = ?output.status.code(), "Script execution failed");
-        anyhow::bail!(
-            "Script execution failed with code {:?}: stdout={}, stderr={}",
-            output.status.code(),
-            stdout,
-            stderr
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    tracing::info!(stdout_len = stdout.len(), "Script execution completed");
-
-    Ok(stdout)
-}
-
-/// Quote a string for safe inclusion in a shell command (POSIX sh -c).
-/// Uses single-quote wrapping with embedded single-quote escaping.
-fn shell_words_quote(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('\'', "'\\''");
-    format!("'{}'", escaped)
-}
-
-#[cfg(test)]
-#[test]
-fn normalize_script_input_payload_strips_delegation_suffix() {
-    let metadata = serde_json::json!({
-        "delegated_role": "weather.forecast",
-        "reply_to_agent_id": "planner.default"
-    });
-    let payload = r#"{"location":"Paris, France","date":"tomorrow"}"#;
-    let kickoff = format!("{payload}\n\nDelegation metadata: {}", metadata);
-    assert_eq!(
-        normalize_script_input_payload(&kickoff, Some(&metadata)),
-        payload
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn normalize_script_input_payload_extracts_task_block() {
-    let metadata = serde_json::json!({
-        "delegated_role": "weather.forecast",
-        "reply_to_agent_id": "planner.default"
-    });
-    let task = r#"{"location":"Paris, France","date":"tomorrow"}"#;
-    let kickoff = format!(
-        "[Context]\nVerify the agent.\n\n[Task]\n{task}\n\n[Metadata]\n{}",
-        metadata
-    );
-    assert_eq!(
-        normalize_script_input_payload(&kickoff, Some(&metadata)),
-        task
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn pending_user_ask_call_from_history_finds_first_missing_result() {
-    use crate::llm::ToolCall;
-    let mut a = Message::assistant("");
-    a.tool_calls = vec![
-        ToolCall {
-            id: "c1".into(),
-            name: "noop".into(),
-            arguments: "{}".into(),
-        },
-        ToolCall {
-            id: "c2".into(),
-            name: "user_ask".into(),
-            arguments: "{}".into(),
-        },
-    ];
-    let history = vec![
-        Message::user("hi"),
-        a,
-        Message::tool_result("c1", "noop", r#"{"ok":true}"#),
-    ];
-    let (id, name) = pending_user_ask_call_from_history(&history).unwrap();
-    assert_eq!(id, "c2");
-    assert_eq!(name, "user_ask");
-}
-
-#[cfg(test)]
-#[test]
-fn resolve_pending_prefers_checkpoint_pending_tool_state() {
-    use crate::runtime::checkpoint::{
-        PendingToolCall, PendingToolState, SessionCheckpoint, YieldReason,
-    };
-    use crate::runtime::guard::LoopGuardState;
-    let pts = PendingToolState {
-        completed_tool_results: vec![],
-        pending_tool_call: PendingToolCall {
-            call_id: "tid-99".into(),
-            tool_name: "user_ask".into(),
-            arguments: "{}".into(),
-            approval_response: None,
-        },
-        remaining_tool_calls: vec![],
-    };
-    let cp = SessionCheckpoint {
-        history: vec![],
-        turn_counter: 0,
-        loop_guard_state: LoopGuardState {
-            max_loops_without_progress: 1,
-            max_tool_failures: 5,
-            max_consecutive_same_progress: 0,
-            max_child_failures: 3,
-            current_loops: 0,
-            tool_failure_counts: std::collections::HashMap::new(),
-            last_progress_fingerprint: None,
-            consecutive_progress_count: 0,
-            child_failure_count: 0,
-            ..Default::default()
-        },
-        session_state: autonoetic_types::agent::SessionState::Normal,
-        agent_id: "a".into(),
-        session_id: "s".into(),
-        turn_id: "turn-1".into(),
-        workflow_id: None,
-        task_id: None,
-        runtime_lock_hash: None,
-        llm_config_snapshot: None,
-        tool_registry_version: None,
-        yield_reason: YieldReason::UserInputRequired {
-            interaction_id: "ui-x".into(),
-        },
-        content_store_refs: vec![],
-        created_at: "".into(),
-        pending_tool_state: Some(pts),
-        llm_rounds_consumed: 0,
-        tool_invocations_consumed: 0,
-        tokens_consumed: 0,
-        estimated_cost_usd: 0.0,
-        compression_metadata: None,
-    };
-    let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
-    assert_eq!(id, "tid-99");
-    assert_eq!(name, "user_ask");
-}
-
-#[cfg(test)]
-#[test]
-fn build_user_ask_answer_includes_selected_value() {
-    use autonoetic_types::background::{
-        UserInteraction, UserInteractionKind, UserInteractionStatus,
-    };
-    let interaction = UserInteraction {
-        interaction_id: "ui-abc".into(),
-        session_id: "s1".into(),
-        root_session_id: "s1".into(),
-        agent_id: "ag1".into(),
-        turn_id: "t1".into(),
-        kind: UserInteractionKind::Decision,
-        question: "Pick one".into(),
-        context: None,
-        options: vec![autonoetic_types::background::UserInteractionOption {
-            id: "opt-a".into(),
-            label: "A".into(),
-            value: "alpha".into(),
-        }],
-        allow_freeform: false,
-        status: UserInteractionStatus::Answered,
-        answer_option_id: Some("opt-a".into()),
-        answer_text: None,
-        answered_by: Some("cli".into()),
-        created_at: "".into(),
-        answered_at: None,
-        expires_at: None,
-        workflow_id: None,
-        task_id: None,
-        checkpoint_turn_id: None,
-    };
-    let json = build_user_ask_answer_tool_result_json(&interaction).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["selected_value"], "alpha");
-    assert_eq!(v["answer_option_id"], "opt-a");
 }

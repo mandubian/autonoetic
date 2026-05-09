@@ -315,6 +315,24 @@ impl ScheduledAction {
         }
     }
 
+    /// Concrete network host targets for session approval grants after operator approval.
+    ///
+    /// Returns `None` when the action has no grant-relevant hosts (e.g. install prompts).
+    /// Prefers structured `detected_hosts` on variants that carry it; parses `CredentialRequest.url`
+    /// otherwise.
+    pub fn detected_hosts(&self) -> Option<Vec<String>> {
+        match self {
+            Self::SandboxExec { detected_hosts, .. }
+            | Self::WebFetch { detected_hosts, .. }
+            | Self::WebCall { detected_hosts, .. }
+            | Self::WebSearch { detected_hosts, .. } => detected_hosts.clone(),
+            Self::CredentialRequest { url: request_url, .. } => url::Url::parse(request_url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| vec![h.to_string()])),
+            _ => None,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::WriteFile { .. } => "write_file",
@@ -1259,5 +1277,62 @@ mod redaction_tests {
         assert!(!looks_like_secret_value("plain text"));
         assert!(!looks_like_secret_value(""));
         assert!(!looks_like_secret_value("   "));
+    }
+}
+
+#[cfg(test)]
+mod detected_hosts_tests {
+    use super::ScheduledAction;
+
+    #[test]
+    fn sandbox_exec_clones_detected_hosts() {
+        let a = ScheduledAction::SandboxExec {
+            command: "".into(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["a.example.com".into(), "b.example.com".into()]),
+        };
+        assert_eq!(
+            a.detected_hosts(),
+            Some(vec!["a.example.com".into(), "b.example.com".into()])
+        );
+    }
+
+    #[test]
+    fn sandbox_exec_none_when_no_hosts() {
+        let a = ScheduledAction::SandboxExec {
+            command: "".into(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: None,
+        };
+        assert_eq!(a.detected_hosts(), None);
+    }
+
+    #[test]
+    fn credential_request_parses_host_from_url() {
+        let a = ScheduledAction::CredentialRequest {
+            credential_id: "c".into(),
+            url: "http://localhost:9876/skill.md".into(),
+            method: Some("GET".into()),
+            headers: None,
+            body: None,
+            inject_secret_as: None,
+            payload: None,
+        };
+        assert_eq!(a.detected_hosts(), Some(vec!["localhost".into()]));
+    }
+
+    #[test]
+    fn non_network_actions_return_none() {
+        let a = ScheduledAction::WriteFile {
+            path: "/tmp/x".into(),
+            content: "".into(),
+            requires_approval: true,
+            evidence_ref: None,
+        };
+        assert_eq!(a.detected_hosts(), None);
     }
 }

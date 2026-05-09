@@ -442,6 +442,30 @@ impl NativeTool for CredentialRequestTool {
             false
         };
 
+        // Session approval grants: if the operator already approved a request
+        // targeting this host within the same root session, skip new approval.
+        let approval_validated = if approval_validated {
+            true
+        } else if let Some(sid) = _session_id {
+            let root_sid = crate::runtime::content_store::root_session_id(sid);
+            if !url_host.is_empty()
+                && store.session_grants_cover_targets(&root_sid, &[url_host.clone()])
+            {
+                tracing::info!(
+                    target: "credential_request",
+                    agent_id = %manifest.agent.id,
+                    root_session_id = %root_sid,
+                    host = %url_host,
+                    "Session grant covers host — auto-approving credential request"
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         if !approval_validated {
             if let Err(violation) = crate::runtime::network_policy::enforce_remote_target_policy(
                 manifest,

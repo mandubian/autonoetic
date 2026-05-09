@@ -20,7 +20,7 @@ Configuration knobs are documented in [`docs/config-reference.md`](config-refere
 > - **Phase-1 disagreement records** in `security_sentinel_disagreements` (`baseline_only` when only the baseline flagged the anchor — i.e. a regression in canonical checks; `current_only` when only the canonical flagged it — i.e. a baseline that has aged out).
 > - **Independent Phase-2 findings** from the current pass. The baseline never runs Phase-2; it is `phase1_only` by contract.
 >
-> Editing the baseline requires a deliberate `[baseline-update]` commit prefix and lands as a separate PR from any concurrent `sentinel/checks/` change. PRs that touch both for the same pattern defeat the purpose.
+> Editing the baseline requires a deliberate `[baseline-update]` commit prefix and lands as a separate PR from any concurrent `sentinel/checks/` change. PRs that touch both for the same pattern defeat the purpose. This is enforced by the `sentinel-baseline-guard` CI workflow (`.github/workflows/sentinel-baseline-guard.yml`) and can be checked locally with `cargo xtask sentinel-baseline-guard`.
 
 ## Summary
 

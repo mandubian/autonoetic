@@ -4,7 +4,8 @@ members = [
     "autonoetic-gateway",
     "autonoetic-types",
     "autonoetic-ofp",
-    "autonoetic-mcp"
+    "autonoetic-mcp",
+    "xtask"
 ]
 resolver = "2"
 
