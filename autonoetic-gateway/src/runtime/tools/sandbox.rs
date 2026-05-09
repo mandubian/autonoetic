@@ -1588,11 +1588,24 @@ impl NativeTool for SandboxExecTool {
                         match gate_result {
                             crate::runtime::human_gate::GateResult::Cleared { .. } => {}
                             crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
-                                let (cmd, cmd_deps) = match &action {
-                                    ScheduledAction::SandboxExec { command, dependencies, .. } => {
-                                        (command.clone(), dependencies)
+                                let (cmd, cmd_deps, pending_action) = match store.get_approval(&gate_id)? {
+                                    Some(pending) => match &pending.action {
+                                        ScheduledAction::SandboxExec {
+                                            command,
+                                            dependencies,
+                                            ..
+                                        } => (
+                                            command.clone(),
+                                            dependencies.clone(),
+                                            pending.action.clone(),
+                                        ),
+                                        _ => {
+                                            (effective_command.clone(), None, pending.action.clone())
+                                        }
+                                    },
+                                    None => {
+                                        (effective_command.clone(), None, action.clone())
                                     }
-                                    _ => unreachable!(),
                                 };
                                 let approval = build_approval_details(
                                     &autonoetic_types::background::ApprovalRequest {
@@ -1602,7 +1615,7 @@ impl NativeTool for SandboxExecTool {
                                         root_session_id: None,
                                         workflow_id: None,
                                         task_id: None,
-                                        action: action.clone(),
+                                        action: pending_action,
                                         created_at: String::new(),
                                         status: None,
                                         decided_at: None,
@@ -1951,6 +1964,7 @@ impl NativeTool for SandboxExecTool {
                                                 gate_id
                                             ),
                                             "approval_required": true,
+                                            "layer_mount_approval_required": true,
                                             "approval_already_pending": true,
                                             "request_id": gate_id,
                                             "suspended": true,
@@ -2033,6 +2047,11 @@ impl NativeTool for SandboxExecTool {
                                         );
                                     }
                                 }
+                            } else {
+                                return Err(tagged::Tagged::resource(anyhow::anyhow!(
+                                    "GatewayStore missing; cannot persist layer mount approval request"
+                                ))
+                                .into());
                             }
                         }
 
