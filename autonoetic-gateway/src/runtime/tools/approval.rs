@@ -74,11 +74,18 @@ impl NativeTool for ApprovalListTool {
         if let Some(rid) = &args.request_id {
             let req = store.get_approval(rid)?;
             return match req {
-                Some(r) => Ok(serde_json::json!({
-                    "ok": true,
-                    "approval": approval_summary(&r),
-                })
-                .to_string()),
+                Some(r) => {
+                    let mut summary = serde_json::json!({
+                        "ok": true,
+                        "approval": approval_summary(&r),
+                    });
+                    if let Ok(msgs) = store.get_gate_messages(rid) {
+                        if !msgs.is_empty() {
+                            summary["enrichment_messages"] = serde_json::json!(msgs);
+                        }
+                    }
+                    Ok(summary.to_string())
+                }
                 None => Ok(autonoetic_types::tool_error::ToolError::not_found(
                     format!("approval '{}'", rid),
                     Some(
