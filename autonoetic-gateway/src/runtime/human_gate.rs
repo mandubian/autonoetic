@@ -258,13 +258,13 @@ impl GateService {
             unreachable!()
         };
 
-        let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let sid = req.session_id.unwrap_or("");
-        let root_sid = if sid.is_empty() {
-            String::new()
-        } else {
-            content_store::root_session_id(sid).to_string()
-        };
+        anyhow::ensure!(
+            !sid.is_empty(),
+            "GateKind::UserInput requires a session_id"
+        );
+
+        let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
         let (root_session_id, workflow_id, task_id) = resolve_execution_context(req);
 

@@ -54,15 +54,9 @@ fn inject_approval_ref_into_history(history: &mut Vec<Message>, approval_ref: &s
                             .unwrap_or_else(|_| tc.arguments.clone());
                     }
                     Err(_) => {
-                        // Arguments are not valid JSON; fall back to appending.
-                        if !tc.arguments.contains("approval_ref") {
-                            let suffix = if tc.arguments.ends_with('}') {
-                                format!(",\"approval_ref\":\"{}\"}}", approval_ref)
-                            } else {
-                                format!("{{\"approval_ref\":\"{}\"}}", approval_ref)
-                            };
-                            tc.arguments = suffix;
-                        }
+                        // Arguments are not valid JSON — leave them untouched.
+                        // The appended user message (below) carries the approval_ref
+                        // as a belt-and-suspenders hint.
                     }
                 }
             }
