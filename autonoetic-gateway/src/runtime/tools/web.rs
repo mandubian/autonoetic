@@ -4,7 +4,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::network_policy::{self, DeclarationRequirement};
 use crate::runtime::tools::{block_on_http, extract_host, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
-use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::tagged;
 use serde::Deserialize;
@@ -135,87 +135,6 @@ fn enforce_remote_target_for_web(
     )
     .map(|_| ())
     .map_err(network_policy_violation_to_anyhow)
-}
-
-fn resolve_approval_execution_context(
-    config: Option<&autonoetic_types::config::GatewayConfig>,
-    run_context: Option<&NativeToolRunContext>,
-    session_id: &str,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let root_session_id = run_context
-        .map(|rc| rc.root_session_id.clone())
-        .or_else(|| {
-            if session_id.is_empty() {
-                None
-            } else {
-                Some(crate::runtime::content_store::root_session_id(session_id).to_string())
-            }
-        });
-
-    let workflow_id = run_context
-        .and_then(|rc| rc.workflow_id.clone())
-        .or_else(|| {
-            let (Some(cfg), Some(root_sid)) = (config, root_session_id.as_ref()) else {
-                return None;
-            };
-            crate::scheduler::resolve_workflow_id_for_root_session(cfg, root_sid)
-                .ok()
-                .flatten()
-        });
-
-    let task_id = run_context.and_then(|rc| rc.task_id.clone()).or_else(|| {
-        if session_id.is_empty() {
-            return None;
-        }
-        let (Some(cfg), Some(workflow)) = (config, workflow_id.as_ref()) else {
-            return None;
-        };
-        crate::scheduler::resolve_task_id_for_session(cfg, None, workflow, session_id)
-            .ok()
-            .flatten()
-    });
-
-    (root_session_id, workflow_id, task_id)
-}
-
-fn create_network_approval(
-    store: &crate::scheduler::gateway_store::GatewayStore,
-    manifest: &AgentManifest,
-    config: Option<&autonoetic_types::config::GatewayConfig>,
-    run_context: Option<&NativeToolRunContext>,
-    session_id: Option<&str>,
-    action: ScheduledAction,
-    reason: String,
-) -> anyhow::Result<String> {
-    let sid = session_id.unwrap_or("");
-    let (root_session_id, workflow_id, task_id) =
-        resolve_approval_execution_context(config, run_context, sid);
-    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    let mut req = ApprovalRequest {
-        request_id: request_id.clone(),
-        agent_id: manifest.agent.id.clone(),
-        session_id: sid.to_string(),
-        root_session_id,
-        workflow_id,
-        task_id,
-        action: action.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        status: None,
-        decided_at: None,
-        decided_by: None,
-        reason: Some(reason),
-        evidence_ref: None,
-        decision_reason: None,
-        approval_level: config
-            .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
-            .unwrap_or(ApprovalLevel::Operator),
-        similar_to_request_id: None,
-        similarity_score: None,
-        min_dwell_ms: None,
-        confirm_phrase: None,
-    };
-    store.create_approval(&mut req)?;
-    Ok(request_id)
 }
 
 fn validate_approval_ref_context(
