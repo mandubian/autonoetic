@@ -1419,11 +1419,11 @@ impl NativeTool for SandboxExecTool {
                                                         approved_by: "operator".to_string(),
                                                         last_used_at: chrono::Utc::now().to_rfc3339(),
                                                     };
-                                                    let _ = cache.record(entry);
-                                                }
-                                            }
-                                        }
-                                    }
+                                                     let _ = cache.record(entry);
+                            }
+                        }
+                    }
+                }
                                 }
                             }
                         }
@@ -1536,7 +1536,6 @@ impl NativeTool for SandboxExecTool {
             // Still need approval (no cache hit, no pending)
             if !approval_validated_for_command {
                 if let Some(cfg) = config {
-                    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
                     let summary = sandbox_approval_summary_line(
                         &manifest.agent.id,
                         &effective_command,
@@ -1559,105 +1558,184 @@ impl NativeTool for SandboxExecTool {
                         evidence_ref: None,
                         detected_hosts: Some(normalized_targets.clone()),
                     };
-                    let approval_workflow_id = {
-                        let sid = session_id.unwrap_or("");
-                        let root = crate::runtime::content_store::root_session_id(sid);
-                        crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
-                            .ok()
-                            .flatten()
-                    };
-                    let sid = session_id.unwrap_or("");
-                    let root_session_id = crate::runtime::content_store::root_session_id(sid);
-                    let mut request = autonoetic_types::background::ApprovalRequest {
-                        request_id: request_id.clone(),
-                        agent_id: manifest.agent.id.clone(),
-                        session_id: sid.to_string(),
-                        root_session_id: Some(root_session_id.to_string()),
-                        action: action.clone(),
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        status: None,
-                        decided_at: None,
-                        decided_by: None,
-                        reason: Some(sandbox_approval_operator_reason(
-                            &effective_command,
-                            args.intent.as_deref(),
-                            &remote_analysis.summary,
-                            &remote_hint_suffix,
-                            &detected_patterns,
-                        )),
-                        evidence_ref: None,
-                        workflow_id: approval_workflow_id.clone(),
-                        decision_reason: None,
-                        approval_level: crate::scheduler::approval::resolve_approval_level(
-                            cfg, &action,
-                        ),
-                        task_id: match (&approval_workflow_id, session_id) {
-                            (Some(wf_id), Some(sid)) => {
-                                crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
-                                    .ok()
-                                    .flatten()
-                            }
-                            _ => None,
-                        },
-                        similar_to_request_id: None,
-                        similarity_score: None,
-                        min_dwell_ms: None,
-                        confirm_phrase: None,
-                    };
+                    let reason = sandbox_approval_operator_reason(
+                        &effective_command,
+                        args.intent.as_deref(),
+                        &remote_analysis.summary,
+                        &remote_hint_suffix,
+                        &detected_patterns,
+                    );
+
                     if let Some(store) = &gateway_store {
-                        store.create_approval(&mut request).map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to persist sandbox approval request '{}': {}",
-                                request_id,
-                                e
-                            )
-                        })?;
+                        let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                        let gate_result = gate.check(
+                            crate::runtime::human_gate::GateRequest {
+                                kind: crate::runtime::human_gate::GateKind::Approval {
+                                    action: action.clone(),
+                                    targets: normalized_targets.clone(),
+                                    match_strategy: crate::runtime::human_gate::MatchStrategy::SubstituteCommand,
+                                },
+                                manifest,
+                                session_id,
+                                run_context,
+                                config: Some(cfg),
+                                reason: reason.clone(),
+                                summary: summary.clone(),
+                                approval_ref: None,
+                                pre_validated: false,
+                            },
+                        )?;
+                        match gate_result {
+                            crate::runtime::human_gate::GateResult::Cleared { .. } => {}
+                            crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                                let (cmd, cmd_deps, pending_action) = match store.get_approval(&gate_id)? {
+                                    Some(pending) => match &pending.action {
+                                        ScheduledAction::SandboxExec {
+                                            command,
+                                            dependencies,
+                                            ..
+                                        } => (
+                                            command.clone(),
+                                            dependencies.clone(),
+                                            pending.action.clone(),
+                                        ),
+                                        _ => {
+                                            (effective_command.clone(), None, pending.action.clone())
+                                        }
+                                    },
+                                    None => {
+                                        (effective_command.clone(), None, action.clone())
+                                    }
+                                };
+                                let approval = build_approval_details(
+                                    &autonoetic_types::background::ApprovalRequest {
+                                        request_id: gate_id.clone(),
+                                        agent_id: manifest.agent.id.clone(),
+                                        session_id: session_id.unwrap_or("").to_string(),
+                                        root_session_id: None,
+                                        workflow_id: None,
+                                        task_id: None,
+                                        action: pending_action,
+                                        created_at: String::new(),
+                                        status: None,
+                                        decided_at: None,
+                                        decided_by: None,
+                                        reason: Some(reason),
+                                        evidence_ref: None,
+                                        decision_reason: None,
+                                        approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                        similar_to_request_id: None,
+                                        similarity_score: None,
+                                        min_dwell_ms: None,
+                                        confirm_phrase: None,
+                                    },
+                                    "sandbox_exec",
+                                    summary.clone(),
+                                    "approval_ref",
+                                    serde_json::json!({
+                                        "command": cmd,
+                                        "dependencies": cmd_deps.as_ref().map(|d| serde_json::json!({
+                                            "runtime": d.runtime,
+                                            "packages": d.packages,
+                                        })),
+                                        "approval_already_pending": true,
+                                        "note": "A sandbox approval is already pending for this session. After operator approval, retry with approval_ref. The approved command will be used automatically.",
+                                    }),
+                                );
+                                return serde_json::to_string(&serde_json::json!({
+                                    "ok": false,
+                                    "exit_code": null,
+                                    "stdout": "",
+                                    "stderr": format!(
+                                        "Sandbox approval already pending (request_id: {}). After approval, the persisted command will execute automatically.",
+                                        gate_id
+                                    ),
+                                    "approval_required": true,
+                                    "approval_already_pending": true,
+                                    "suspended": true,
+                                    "request_id": gate_id,
+                                    "message": format!(
+                                        "Execution suspended. Approval {} is pending. The approved command is already persisted and will be used automatically on resume.",
+                                        gate_id
+                                    ),
+                                    "approval": approval,
+                                }))
+                                .map_err(Into::into);
+                            }
+                            crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                                let approval = build_approval_details(
+                                    &autonoetic_types::background::ApprovalRequest {
+                                        request_id: gate_id.clone(),
+                                        agent_id: manifest.agent.id.clone(),
+                                        session_id: session_id.unwrap_or("").to_string(),
+                                        root_session_id: None,
+                                        workflow_id: None,
+                                        task_id: None,
+                                        action: action.clone(),
+                                        created_at: String::new(),
+                                        status: None,
+                                        decided_at: None,
+                                        decided_by: None,
+                                        reason: Some(reason),
+                                        evidence_ref: None,
+                                        decision_reason: None,
+                                        approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                        similar_to_request_id: None,
+                                        similarity_score: None,
+                                        min_dwell_ms: None,
+                                        confirm_phrase: None,
+                                    },
+                                    "sandbox_exec",
+                                    summary.clone(),
+                                    "approval_ref",
+                                    serde_json::json!({
+                                        "command": effective_command,
+                                        "intent": args.intent.clone(),
+                                        "primary_script": infer_primary_script_display(&effective_command),
+                                        "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
+                                            "runtime": d.runtime,
+                                            "packages": d.packages,
+                                        })),
+                                        "remote_access_detected": true,
+                                        "detected_patterns": detected_patterns,
+                                        "normalized_targets": normalized_targets,
+                                        "hosts": normalized_targets
+                                    }),
+                                );
+
+                                return serde_json::to_string(&serde_json::json!({
+                                    "ok": false,
+                                    "exit_code": null,
+                                    "stdout": "",
+                                    "stderr": format!(
+                                        "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute code that may reach the network/APIs.",
+                                        summary,
+                                        format!("{}{}", remote_analysis.summary, remote_hint_suffix)
+                                    ),
+                                    "approval_required": true,
+                                    "request_id": gate_id,
+                                    "remote_access_detected": true,
+                                    "detected_patterns": remote_analysis.detected_patterns,
+                                    "suspended": true,
+                                    "message": format!("Execution suspended pending operator approval ({}). The approved command is persisted and will be used automatically on resume.", gate_id),
+                                    "approval": approval
+                                }))
+                                .map_err(Into::into);
+                            }
+                            other => {
+                                tracing::warn!(
+                                    target: "sandbox_exec",
+                                    gate_result = ?other,
+                                    "Unexpected gate result for sandbox.exec gate"
+                                );
+                            }
+                        }
                     } else {
                         return Err(tagged::Tagged::resource(anyhow::anyhow!(
-                            "GatewayStore missing; cannot persist sandbox approval request '{}'",
-                            request_id
+                            "GatewayStore missing; cannot persist sandbox approval request"
                         ))
                         .into());
                     }
-
-                    let approval = build_approval_details(
-                        &request,
-                        "sandbox_exec",
-                        summary.clone(),
-                        "approval_ref",
-                        serde_json::json!({
-                            "command": effective_command,
-                            "intent": args.intent.clone(),
-                            "primary_script": infer_primary_script_display(&effective_command),
-                            "dependencies": args.dependencies.as_ref().map(|d| serde_json::json!({
-                                "runtime": d.runtime,
-                                "packages": d.packages,
-                            })),
-                            "remote_access_detected": true,
-                            "detected_patterns": detected_patterns,
-                            "normalized_targets": normalized_targets,
-                            "hosts": normalized_targets
-                        }),
-                    );
-
-                    return serde_json::to_string(&serde_json::json!({
-                        "ok": false,
-                        "exit_code": null,
-                        "stdout": "",
-                        "stderr": format!(
-                            "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute code that may reach the network/APIs.",
-                            summary,
-                            format!("{}{}", remote_analysis.summary, remote_hint_suffix)
-                        ),
-                        "approval_required": true,
-                        "request_id": request_id,
-                        "remote_access_detected": true,
-                        "detected_patterns": remote_analysis.detected_patterns,
-                        "suspended": true,
-                        "message": format!("Execution suspended pending operator approval ({}). The approved command is persisted and will be used automatically on resume.", request_id),
-                        "approval": approval
-                    }))
-                    .map_err(Into::into);
                 }
 
                 let detected_patterns_fallback = remote_analysis.detected_patterns.clone();
@@ -1835,8 +1913,6 @@ impl NativeTool for SandboxExecTool {
                         );
 
                         if let Some(cfg) = config {
-                            let request_id =
-                                format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
                             let summary = format!(
                             "Layer mount approval: {} layer(s) with unapproved build-time hosts",
                             scope_issues.len()
@@ -1845,111 +1921,138 @@ impl NativeTool for SandboxExecTool {
                                 layers: scope_issues.clone(),
                                 command: effective_command.clone(),
                             };
-                            let approval_workflow_id = {
-                                let sid = session_id.unwrap_or("");
-                                let root = crate::runtime::content_store::root_session_id(sid);
-                                crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
-                                    .ok()
-                                    .flatten()
-                            };
-                            let sid = session_id.unwrap_or("");
-                            let root_session_id =
-                                crate::runtime::content_store::root_session_id(sid);
                             let all_unapproved: Vec<String> = scope_issues
                                 .iter()
                                 .flat_map(|i| i.unapproved_delta.iter().cloned())
                                 .collect::<std::collections::BTreeSet<_>>()
                                 .into_iter()
                                 .collect();
-                            let mut request = autonoetic_types::background::ApprovalRequest {
-                            request_id: request_id.clone(),
-                            agent_id: manifest.agent.id.clone(),
-                            session_id: sid.to_string(),
-                            root_session_id: Some(root_session_id.to_string()),
-                            action: action.clone(),
-                            created_at: chrono::Utc::now().to_rfc3339(),
-                            status: None,
-                            decided_at: None,
-                            decided_by: None,
-                            reason: Some(format!(
+                            let reason = format!(
                                 "Layer mount scope check: {} layer(s) were captured with network access to hosts [{}] not yet approved in this session.",
                                 scope_issues.len(),
                                 all_unapproved.join(", ")
-                            )),
-                            evidence_ref: None,
-                            workflow_id: approval_workflow_id.clone(),
-                            decision_reason: None,
-                            approval_level:
-                                crate::scheduler::approval::resolve_approval_level(
-                                    cfg, &action,
-                                ),
-                            task_id: match (&approval_workflow_id, session_id) {
-                                (Some(wf_id), Some(sid)) => {
-                                    crate::scheduler::resolve_task_id_for_session(
-                                        cfg, None, wf_id, sid,
-                                    )
-                                    .ok()
-                                    .flatten()
-                                }
-                                _ => None,
-                            },
-                            similar_to_request_id: None,
-                            similarity_score: None,
-                            min_dwell_ms: None,
-                            confirm_phrase: None,
-                        };
+                            );
+
                             if let Some(store) = &gateway_store {
-                                store.create_approval(&mut request).map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "Failed to persist layer mount approval request '{}': {}",
-                                        request_id,
-                                        e
-                                    )
-                                })?;
+                                let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                                let gate_result = gate.check(
+                                    crate::runtime::human_gate::GateRequest {
+                                        kind: crate::runtime::human_gate::GateKind::Approval {
+                                            action: action.clone(),
+                                            targets: all_unapproved.clone(),
+                                            match_strategy: crate::runtime::human_gate::MatchStrategy::HostLevel,
+                                        },
+                                        manifest,
+                                        session_id,
+                                        run_context,
+                                        config: Some(cfg),
+                                        reason: reason.clone(),
+                                        summary: summary.clone(),
+                                        approval_ref: None,
+                                        pre_validated: false,
+                                    },
+                                )?;
+                                match gate_result {
+                                    crate::runtime::human_gate::GateResult::Cleared { .. } => {}
+                                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id } => {
+                                        return serde_json::to_string(&serde_json::json!({
+                                            "ok": false,
+                                            "exit_code": null,
+                                            "stdout": "",
+                                            "stderr": format!(
+                                                "Layer mount approval already pending (request_id: {}). Retry with approval_ref after operator approves.",
+                                                gate_id
+                                            ),
+                                            "approval_required": true,
+                                            "layer_mount_approval_required": true,
+                                            "approval_already_pending": true,
+                                            "request_id": gate_id,
+                                            "suspended": true,
+                                            "message": format!(
+                                                "Execution suspended. Layer mount approval {} is pending.",
+                                                gate_id
+                                            ),
+                                            "approval": {
+                                                "kind": "layer_mount",
+                                                "summary": summary,
+                                                "retry_field": "approval_ref",
+                                            }
+                                        }))
+                                        .map_err(Into::into);
+                                    }
+                                    crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                                        let approval = build_approval_details(
+                                            &autonoetic_types::background::ApprovalRequest {
+                                                request_id: gate_id.clone(),
+                                                agent_id: manifest.agent.id.clone(),
+                                                session_id: session_id.unwrap_or("").to_string(),
+                                                root_session_id: None,
+                                                workflow_id: None,
+                                                task_id: None,
+                                                action: action.clone(),
+                                                created_at: String::new(),
+                                                status: None,
+                                                decided_at: None,
+                                                decided_by: None,
+                                                reason: Some(reason),
+                                                evidence_ref: None,
+                                                decision_reason: None,
+                                                approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                                similar_to_request_id: None,
+                                                similarity_score: None,
+                                                min_dwell_ms: None,
+                                                confirm_phrase: None,
+                                            },
+                                            "layer_mount",
+                                            summary.clone(),
+                                            "approval_ref",
+                                            serde_json::json!({
+                                                "layers": scope_issues.iter().map(|i| serde_json::json!({
+                                                    "layer_id": i.layer_id,
+                                                    "name": i.name,
+                                                    "mount_path": i.mount_path,
+                                                    "source": i.source,
+                                                    "build_time_approved_hosts": i.build_time_approved_hosts,
+                                                    "unapproved_delta": i.unapproved_delta,
+                                                })).collect::<Vec<_>>(),
+                                                "command": effective_command,
+                                            }),
+                                        );
+                                        return serde_json::to_string(&serde_json::json!({
+                                            "ok": false,
+                                            "exit_code": null,
+                                            "stdout": "",
+                                            "stderr": format!(
+                                                "Layer mount approval required: {} layer(s) were captured with network access to hosts [{}] not yet approved in this session. Retry with approval_ref after operator approves.",
+                                                scope_issues.len(),
+                                                all_unapproved.join(", ")
+                                            ),
+                                            "approval_required": true,
+                                            "layer_mount_approval_required": true,
+                                            "request_id": gate_id,
+                                            "suspended": true,
+                                            "message": format!(
+                                                "Execution suspended pending layer mount approval ({}). Retry sandbox.exec with approval_ref after operator approves.",
+                                                gate_id
+                                            ),
+                                            "approval": approval
+                                        }))
+                                        .map_err(Into::into);
+                                    }
+                                    other => {
+                                        tracing::warn!(
+                                            target: "sandbox_exec",
+                                            gate_result = ?other,
+                                            "Unexpected gate result for layer mount gate"
+                                        );
+                                    }
+                                }
                             } else {
                                 return Err(tagged::Tagged::resource(anyhow::anyhow!(
-                                    "GatewayStore missing; cannot persist layer mount approval request '{}'",
-                                    request_id
+                                    "GatewayStore missing; cannot persist layer mount approval request"
                                 ))
                                 .into());
                             }
-                            let approval = build_approval_details(
-                                &request,
-                                "layer_mount",
-                                summary.clone(),
-                                "approval_ref",
-                                serde_json::json!({
-                                    "layers": scope_issues.iter().map(|i| serde_json::json!({
-                                        "layer_id": i.layer_id,
-                                        "name": i.name,
-                                        "mount_path": i.mount_path,
-                                        "source": i.source,
-                                        "build_time_approved_hosts": i.build_time_approved_hosts,
-                                        "unapproved_delta": i.unapproved_delta,
-                                    })).collect::<Vec<_>>(),
-                                    "command": effective_command,
-                                }),
-                            );
-                            return serde_json::to_string(&serde_json::json!({
-                            "ok": false,
-                            "exit_code": null,
-                            "stdout": "",
-                            "stderr": format!(
-                                "Layer mount approval required: {} layer(s) were captured with network access to hosts [{}] not yet approved in this session. Retry with approval_ref after operator approves.",
-                                scope_issues.len(),
-                                all_unapproved.join(", ")
-                            ),
-                            "approval_required": true,
-                            "layer_mount_approval_required": true,
-                            "request_id": request_id,
-                            "suspended": true,
-                            "message": format!(
-                                "Execution suspended pending layer mount approval ({}). Retry sandbox.exec with approval_ref after operator approves.",
-                                request_id
-                            ),
-                            "approval": approval
-                        }))
-                        .map_err(Into::into);
                         }
 
                         // No config available — fail closed rather than silently bypassing the gate.
