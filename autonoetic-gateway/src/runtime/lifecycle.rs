@@ -10,7 +10,7 @@ use crate::runtime::checkpoint::{
     SessionCheckpoint, YieldReason,
 };
 use crate::runtime::context::{
-    compose_system_instructions_with_user_context, safe_prefix_by_bytes,
+    compose_system_instructions_full, safe_prefix_by_bytes,
     workflow_status_user_message_for_chat,
 };
 pub(crate) use crate::runtime::context::compose_system_instructions_with_metadata;
@@ -160,6 +160,9 @@ pub struct AgentExecutor {
     pub artifact_id: Option<String>,
     /// Previous turn's Ri-0.6 capability snapshot for narrowing checks.
     pub(crate) ri_0_6_previous_snapshot: Option<crate::runtime::tool_dispatch::Ri06CapabilitySnapshot>,
+    /// Cross-agent persona text loaded from `persona.md`. Injected into every
+    /// agent's system prompt between the foundation and agent-specific instructions.
+    pub persona: Option<String>,
 }
 
 use crate::runtime::tool_dispatch::{
@@ -211,6 +214,7 @@ impl AgentExecutor {
             user_id: None,
             artifact_id: None,
             ri_0_6_previous_snapshot: None,
+            persona: None,
         }
     }
 
@@ -227,6 +231,11 @@ impl AgentExecutor {
     pub fn with_config(mut self, config: Arc<GatewayConfig>) -> Self {
         self.guard = loop_guard_from_config_and_manifest(Some(config.as_ref()), &self.agent_dir);
         self.config = Some(config);
+        self
+    }
+
+    pub fn with_persona(mut self, persona: Option<String>) -> Self {
+        self.persona = persona;
         self
     }
 
@@ -669,7 +678,8 @@ impl AgentExecutor {
     /// Run the agent loop until completion or guard trip.
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let user_context = self.build_user_context_snippet();
-        let mut system_instructions = compose_system_instructions_with_user_context(
+        let memory_context = self.build_memory_context_snippet();
+        let mut system_instructions = compose_system_instructions_full(
             &self.instructions,
             &self.manifest,
             self.manifest
@@ -677,7 +687,12 @@ impl AgentExecutor {
                 .as_ref()
                 .and_then(|io| io.output_policy.as_ref()),
             user_context.as_deref(),
+            self.persona.as_deref(),
         );
+        if let Some(ref snippet) = memory_context {
+            system_instructions.push_str("\n\n");
+            system_instructions.push_str(snippet);
+        }
         if let Some(tail) = self.build_state_attestation_tail()? {
             system_instructions.push_str("\n\n");
             system_instructions.push_str(&tail);
@@ -1112,7 +1127,8 @@ impl AgentExecutor {
 
             // Update system message — ensure exactly one system message at position 0
             let user_context = self.build_user_context_snippet();
-            let mut system_instructions = compose_system_instructions_with_user_context(
+            let memory_context = self.build_memory_context_snippet();
+            let mut system_instructions = compose_system_instructions_full(
                 &self.instructions,
                 &self.manifest,
                 self.manifest
@@ -1120,7 +1136,12 @@ impl AgentExecutor {
                     .as_ref()
                     .and_then(|io| io.output_policy.as_ref()),
                 user_context.as_deref(),
+                self.persona.as_deref(),
             );
+            if let Some(ref snippet) = memory_context {
+                system_instructions.push_str("\n\n");
+                system_instructions.push_str(snippet);
+            }
             if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
                 system_instructions.push_str("\n\n");
                 system_instructions.push_str(&notice);

@@ -71,6 +71,8 @@ pub enum MemorySourceType {
     Manual,
     /// Extracted by the post-session digest LLM from a completed session.
     SessionDigest,
+    /// Lightweight per-session quality signal (auto-learning pipeline).
+    QualitySignal,
 }
 
 /// Lineage entry tracks the ancestry of a memory record.

@@ -213,6 +213,64 @@ impl GatewayStore {
         Ok(out)
     }
 
+    /// Retrieve recent global memories matching any of the given tags.
+    ///
+    /// Used by the session continuity feature to prime agent context with
+    /// relevant prior knowledge. Returns full `MemoryObject`s (not just IDs).
+    pub fn search_memories_by_tags(
+        &self,
+        tags: &[&str],
+        limit: usize,
+    ) -> Result<Vec<MemoryObject>> {
+        let tag_clauses: Vec<String> = tags
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?{})", i + 3))
+            .collect();
+
+        if tag_clauses.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sql = format!(
+            "SELECT m.memory_id FROM memories m \
+             WHERE (json_extract(m.visibility, '$.kind') = 'global' \
+                    OR json_extract(m.visibility, '$') = 'global') \
+             AND (m.expires_at IS NULL OR m.expires_at > ?1) \
+             AND m.quarantine_reason IS NULL \
+             AND ({}) \
+             ORDER BY m.created_at DESC LIMIT ?2",
+            tag_clauses.join(" OR ")
+        );
+
+        let ids: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut stmt = conn.prepare(&sql)?;
+            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            param_values.push(Box::new(now));
+            param_values.push(Box::new(limit as i64));
+            for tag in tags {
+                param_values.push(Box::new(tag.to_string()));
+            }
+            let refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+            let mut rows = stmt.query(refs.as_slice())?;
+            let mut ids = Vec::new();
+            while let Some(row) = rows.next()? {
+                ids.push(row.get(0)?);
+            }
+            ids
+        };
+
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(obj) = self.memory_get_unrestricted(&id)? {
+                out.push(obj);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn memory_list_ids_owned_by(&self, owner_agent_id: &str) -> Result<Vec<String>> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();

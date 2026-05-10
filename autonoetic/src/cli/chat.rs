@@ -206,6 +206,15 @@ enum SlashCommand {
     SessionNew(Option<String>),
     SessionSwitch(String),
     Cancel,
+    Why(Option<String>),
+    Persona(Option<String>),
+    Policy(String),
+}
+
+#[derive(Debug, Clone)]
+enum ChatOutbound {
+    Chat(String),
+    PolicyAuthor(String),
 }
 
 struct App {
@@ -586,6 +595,31 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
                 other
             )),
         },
+        "/why" => {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            if rest.trim().is_empty() {
+                Ok(SlashCommand::Why(None))
+            } else {
+                Ok(SlashCommand::Why(Some(rest.trim().to_string())))
+            }
+        },
+        "/policy" => {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            let trimmed = rest.trim();
+            if trimmed.is_empty() {
+                Err("Usage: /policy <natural language policy request>".to_string())
+            } else {
+                Ok(SlashCommand::Policy(trimmed.to_string()))
+            }
+        }
+        "/persona" => {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            if rest.trim().is_empty() {
+                Ok(SlashCommand::Persona(None))
+            } else {
+                Ok(SlashCommand::Persona(Some(rest.trim().to_string())))
+            }
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -597,6 +631,9 @@ fn format_help_card() -> String {
         "  /session new [name]    Create and switch to a new session",
         "  /session switch <id>   Switch to an existing session",
         "  /status                Show current session details",
+        "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
+        "  /policy <text>          Route natural language governance requests to governance-author.default",
+        "  /persona [text]        Show or set session persona (user context/preferences)",
         "  /cancel                Leave the current picker/prompt",
         "  /quit                  Exit chat",
     ]
@@ -1031,6 +1068,145 @@ fn handle_slash_command_submission(
                 );
             }
             true
+        }
+        SlashCommand::Why(request_id) => {
+            let explanation = format_why_explanation(gateway_store, config, &app.session_id, request_id.as_deref());
+            app.add_message(MessageRole::System, explanation);
+            true
+        }
+        SlashCommand::Persona(new_persona) => {
+            let persona_path = config
+                .persona_path
+                .clone()
+                .unwrap_or_else(|| {
+                    config
+                        .agents_dir
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join("persona.md")
+                });
+
+            if let Some(text) = new_persona {
+                match std::fs::write(&persona_path, &text) {
+                    Ok(()) => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!(
+                                "Persona saved to {}. It will apply to new agent sessions.",
+                                persona_path.display()
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!("Failed to write persona: {e}"),
+                        );
+                    }
+                }
+            } else {
+                match std::fs::read_to_string(&persona_path) {
+                    Ok(content) if !content.trim().is_empty() => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!("Current persona ({}):\n\n{}", persona_path.display(), content.trim()),
+                        );
+                    }
+                    _ => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!(
+                                "No persona set. Use `/persona <text>` to set one.\n\
+                                 Or create {} with your preferred context.",
+                                persona_path.display()
+                            ),
+                        );
+                    }
+                }
+            }
+            true
+        }
+        SlashCommand::Policy(_) => {
+            app.add_message(
+                MessageRole::System,
+                "/policy is only available in interactive TUI mode.".to_string(),
+            );
+            true
+        }
+    }
+}
+
+fn format_why_explanation(
+    gateway_store: Option<&GatewayStore>,
+    config: &GatewayConfig,
+    session_id: &str,
+    request_id: Option<&str>,
+) -> String {
+    let Some(store) = gateway_store else {
+        return "Gateway store not available.".to_string();
+    };
+
+    if let Some(rid) = request_id {
+        match store.get_approval(rid) {
+            Ok(Some(req)) => {
+                let mut lines = vec![format!("Approval: {}", req.request_id)];
+                lines.push(format!("Status: {:?}", req.status));
+                lines.push(format!("Agent: {}", req.agent_id));
+                lines.push(String::new());
+                lines.push("Action:".to_string());
+                for ln in format_scheduled_action_detail_lines(&req.action) {
+                    lines.push(ln);
+                }
+                if let Some(r) = req.reason.as_deref().filter(|s| !s.is_empty()) {
+                    lines.push(String::new());
+                    lines.push(format!("Reason: {}", r));
+                }
+                if let Some(ref dr) = req.decision_reason {
+                    lines.push(String::new());
+                    lines.push(format!("Decision reason: {}", dr));
+                }
+                // Look up causal events for this approval to find enforced rules
+                if let Ok(events) = store.search_causal_events(Some(&req.session_id), None, 100) {
+                    let gate_rules: Vec<String> = events
+                        .iter()
+                        .filter(|e| {
+                            (e.action == "gate_suspended" || e.action == "approval_created")
+                                && e.target.as_deref() == Some(rid)
+                        })
+                        .flat_map(|e| e.enforced_rules.iter().cloned())
+                        .collect();
+                    if !gate_rules.is_empty() {
+                        lines.push(String::new());
+                        lines.push(
+                            autonoetic_types::constitution_glossary::format_enforced_rules(&gate_rules),
+                        );
+                    }
+                }
+                lines.join("\n")
+            }
+            Ok(None) => format!("No approval found with id '{}'.", rid),
+            Err(e) => format!("Error looking up approval: {}", e),
+        }
+    } else {
+        let pending = match autonoetic_gateway::scheduler::approval::pending_approval_requests_for_session(
+            config,
+            Some(store),
+            session_id,
+        ) {
+            Ok(p) => p,
+            Err(_) => Vec::new(),
+        };
+        if pending.is_empty() {
+            "No pending approvals. Use /why <request_id> to inspect a specific approval.".to_string()
+        } else {
+            let mut lines = vec![format!("{} pending approval(s):", pending.len())];
+            for req in pending.iter().take(5) {
+                let line = format!("  {} — {}", req.request_id, req.action.kind());
+                lines.push(line);
+            }
+            lines.push(String::new());
+            lines.push("Use /why <request_id> for details.".to_string());
+            lines.join("\n")
         }
     }
 }
@@ -2341,7 +2517,7 @@ async fn wait_with_cancel(
 
 async fn handle_chat_test_mode(
     config_path: &Path,
-    config: &autonoetic_types::config::GatewayConfig,
+    _config: &autonoetic_types::config::GatewayConfig,
     gateway_addr: &str,
     jsonrpc_auth_token: &str,
     initial_session_id: String,
@@ -2402,6 +2578,15 @@ async fn handle_chat_test_mode(
                 }
                 Ok(SlashCommand::Cancel) => {
                     println!("No active prompt in test mode.");
+                }
+                Ok(SlashCommand::Why(_)) => {
+                    println!("/why is not supported in test mode.");
+                }
+                Ok(SlashCommand::Persona(_)) => {
+                    println!("/persona is not supported in test mode.");
+                }
+                Ok(SlashCommand::Policy(_)) => {
+                    println!("/policy is not supported in test mode.");
                 }
                 Err(error) => {
                     println!("{}", error);
@@ -2534,7 +2719,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     add_session_banner(&mut app, config.as_ref(), &session_id);
 
     // Channel for sending messages from TUI to gateway
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, ChatOutbound)>();
 
     // When the user answers a `user_ask` via the TUI, resume runs in a background task (no
     // `event.ingest` JSON-RPC round-trip). Notify the UI loop when that work finishes so we can
@@ -2694,8 +2879,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
     config: &Arc<autonoetic_types::config::GatewayConfig>,
     gateway_store: Option<&autonoetic_gateway::scheduler::gateway_store::GatewayStore>,
     execution_for_interactions: Option<&std::sync::Arc<autonoetic_gateway::execution::GatewayExecutionService>>,
-    tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, String)>,
+    tx: &tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, ChatOutbound)>,
     pending_map: &mut std::collections::HashMap<String, u64>,
     signal_interval: &mut tokio::time::Interval,
     shutdown: &std::sync::Arc<tokio::sync::Notify>,
@@ -2865,7 +3050,10 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
             // User message to send
             msg = rx.recv() => {
-                if let Some((id, message)) = msg {
+                if let Some((id, outbound)) = msg {
+                    let message_text = match &outbound {
+                        ChatOutbound::Chat(s) | ChatOutbound::PolicyAuthor(s) => s.clone(),
+                    };
                     // Pending user.ask: gateway-owned answer + resume (workflow Runnable or session checkpoint).
                     let mut skip_chat_ingest = false;
                     let mut defer_pending_clear_for_interaction_resume = false;
@@ -2897,7 +3085,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     );
                                     skip_chat_ingest = true;
                                 } else if autonoetic_gateway::log_redaction::looks_like_secret_value(
-                                    &message,
+                                    &message_text,
                                 ) {
                                     app.add_message(
                                         MessageRole::System,
@@ -2911,7 +3099,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     let interaction_id = interaction.interaction_id.clone();
                                     let interaction_id_for_task = interaction.interaction_id.clone();
                                     let exec = std::sync::Arc::clone(exec);
-                                    let answer_text = message.clone();
+                                    let answer_text = message_text.clone();
                                     let resume_notify = interaction_resume_tx.clone();
                                     let pending_row_id = id;
                                     tokio::spawn(async move {
@@ -2963,15 +3151,43 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
                     let req_id = format!("tui-{}", id);
                     pending_map.insert(req_id.clone(), id);
-                    let envelope =
-                        terminal_channel_envelope(&app.channel_id, &app.sender_id, &app.session_id);
+
+                    let mut metadata_value = terminal_channel_envelope(
+                        &app.channel_id,
+                        &app.sender_id,
+                        &app.session_id,
+                    );
+
+                    let root_session_id = if app.session_overview.root_session_id.is_empty() {
+                        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id)
+                            .to_string()
+                    } else {
+                        app.session_overview.root_session_id.clone()
+                    };
+
+                    if matches!(&outbound, ChatOutbound::PolicyAuthor(_)) {
+                        if let serde_json::Value::Object(ref mut map) = metadata_value {
+                            map.insert(
+                                "root_session_id".to_string(),
+                                serde_json::json!(root_session_id),
+                            );
+                        }
+                    }
+
+                    let (target_agent_id, ingest_message) = match &outbound {
+                        ChatOutbound::Chat(_) => (app.target_hint.clone(), message_text.clone()),
+                        ChatOutbound::PolicyAuthor(_) => (
+                            "governance-author.default".to_string(),
+                            message_text.clone(),
+                        ),
+                    };
 
                     let params = serde_json::json!({
                         "event_type": "chat",
-                        "message": message,
+                        "message": ingest_message,
                         "session_id": app.session_id.clone(),
-                        "target_agent_id": app.target_hint.clone(),
-                        "metadata": envelope,
+                        "target_agent_id": target_agent_id,
+                        "metadata": metadata_value,
                     });
 
                     let request = GatewayJsonRpcRequest {
@@ -3001,6 +3217,12 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                 HandleKeyAction::SubmitInput(input) => {
                                     if input.trim_start().starts_with('/') {
                                         match parse_slash_command(&input) {
+                                            Ok(SlashCommand::Policy(text)) => {
+                                                let id = app.next_id();
+                                                app.add_pending(id);
+                                                app.add_message(MessageRole::User, input.clone());
+                                                let _ = tx.send((id, ChatOutbound::PolicyAuthor(text)));
+                                            }
                                             Ok(command) => {
                                                 if !handle_slash_command_submission(
                                                     app,
@@ -3030,7 +3252,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         let id = app.next_id();
                                         app.add_pending(id);
                                         app.add_message(MessageRole::User, input.clone());
-                                        let _ = tx.send((id, input));
+                                        let _ = tx.send((id, ChatOutbound::Chat(input)));
                                     }
                                 }
                                 HandleKeyAction::PauseSession => {
@@ -3295,7 +3517,7 @@ enum HandleKeyAction {
 fn handle_key(
     key: crossterm::event::KeyEvent,
     app: &mut App,
-    _tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
+    _tx: &tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>,
 ) -> anyhow::Result<HandleKeyAction> {
     match key.code {
         // Quit
@@ -3820,9 +4042,34 @@ fn format_store_approval_card(
             }
         }
     }
+    let inferred_rules = infer_rules_for_action(&req.action);
+    if !inferred_rules.is_empty() {
+        lines.push(String::new());
+        lines.push(autonoetic_types::constitution_glossary::format_enforced_rules(&inferred_rules));
+    }
     lines.push(String::new());
     lines.push(approval_instructions.to_string());
     lines.join("\n")
+}
+
+fn infer_rules_for_action(action: &autonoetic_types::background::ScheduledAction) -> Vec<&'static str> {
+    match action {
+        autonoetic_types::background::ScheduledAction::SandboxExec { .. }
+        | autonoetic_types::background::ScheduledAction::WebSearch { .. }
+        | autonoetic_types::background::ScheduledAction::WebFetch { .. }
+        | autonoetic_types::background::ScheduledAction::WebCall { .. }
+        | autonoetic_types::background::ScheduledAction::CredentialPrompt { .. }
+        | autonoetic_types::background::ScheduledAction::CredentialRequest { .. } => {
+            vec!["R-2.1", "R-2.18"]
+        }
+        autonoetic_types::background::ScheduledAction::RevisionPromote { .. } => {
+            vec!["R++2", "R-2.18"]
+        }
+        autonoetic_types::background::ScheduledAction::SessionEscalate { .. } => {
+            vec!["R-2.18"]
+        }
+        _ => vec!["R-2.18"],
+    }
 }
 
 /// Merge pending gateway approvals for this chat's root session into `pending_approval_ids` so
@@ -3933,7 +4180,7 @@ async fn check_signals(
     config: &autonoetic_types::config::GatewayConfig,
     store: Option<&autonoetic_gateway::scheduler::gateway_store::GatewayStore>,
     session_id: &str,
-    _tx: &tokio::sync::mpsc::UnboundedSender<(u64, String)>,
+    _tx: &tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>,
 ) -> bool {
     let mut processed_any = false;
 

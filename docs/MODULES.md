@@ -99,6 +99,7 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | `tools/workflow.rs` | `workflow.*`, `approval_status` |
 | `tools/user_interaction.rs` | `user_ask`, `user_interaction_status` |
 | `human_gate.rs` | Unified `GateService` — centralizes dedup, grants, `approval_ref` validation, enrichment threads, and secret redaction for all human-gated operations (approvals, `user_ask`, escalations) |
+| `quality_signal.rs` | Per-session quality signal computation (turn count, error count, completion) — persisted as Tier-2 memories |
 | `tools/artifact.rs` | `artifact_build`, `artifact_inspect`, `artifact_resolve_ref` |
 | `tools/artifact_prepare.rs` | `artifact_prepare` |
 | `tools/artifact_exec.rs` | `artifact_exec` |
@@ -183,6 +184,9 @@ Shared type definitions used across all crates.
 | `DisclosurePolicy` | `disclosure.rs` | Reply governance rules |
 | `MemoryObject` | `memory.rs` | Tier 2 memory record with provenance |
 | `ToolError` | `tool_error.rs` | Structured tool error for repair |
+| `Profile` | `config.rs` | Complexity profile enum (`Starter`/`Standard`/`Expert`) with behavior methods |
+| `AutoLearningConfig` | `config.rs` | Auto-learning pipeline config (digest, quality signals, curation cron) |
+| `constitution_glossary` | `constitution_glossary.rs` | Rule ID to human-readable explanation mapping |
 
 ---
 

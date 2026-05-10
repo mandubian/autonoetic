@@ -452,6 +452,11 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
             "ok": true,
             "proposal_id": proposal_id,
             "status": "pending",
+            "summary": format!(
+                "Proposal {proposal_id} created: [{}] — {}. Status: pending. An operator must review and approve.",
+                proposal.kind,
+                proposal.justification
+            ),
             "constitution_digest": constitution_digest().as_ref(),
         })
         .to_string())

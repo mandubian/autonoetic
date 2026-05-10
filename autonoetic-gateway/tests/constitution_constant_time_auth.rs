@@ -25,6 +25,7 @@ async fn http_rejects_wrong_token_with_403() {
         store: Arc::new(Mutex::new(store)),
         shared_secret: TEST_SECRET.to_string(),
         max_body_size: 10 * 1024 * 1024,
+        router: None,
     };
     let app = create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -72,6 +73,7 @@ async fn http_accepts_correct_token() {
         store: Arc::new(Mutex::new(store)),
         shared_secret: TEST_SECRET.to_string(),
         max_body_size: 10 * 1024 * 1024,
+        router: None,
     };
     let app = create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

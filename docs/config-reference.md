@@ -19,6 +19,7 @@ Fields marked **required** must be present or the gateway will fail to start.
 |-------|------|---------|-------------|
 | `agents_dir` | string (path) | `"./agents"` | **Required.** Directory containing agent subdirectories, each with a `SKILL.md`. Set to absolute path by `init-config`. |
 | `port` | u16 | `4000` | Port for the local JSON-RPC IPC listener (Unix socket on Linux, TCP fallback). |
+| `http_port` | u16 | `4100` | HTTP ingress bind (`0.0.0.0:http_port`) for `/api/*` routes (`event.ingest`, SSE, content API). Set `0` to disable HTTP while keeping localhost JSON-RPC on `port`. |
 | `ofp_port` | u16 | `4200` | Open Fang Protocol federation port for gateway-to-gateway communication. |
 | `tls` | bool | `false` | Enable TLS on the OFP port. |
 | ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
@@ -36,6 +37,8 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `workflow_task_heartbeat_secs` | u64 \| null | `null` | Optional heartbeat interval for `Running` workflow tasks (sync + async) to refresh `updated_at` and avoid false stuck resolution during long tails. If `null`, derives from `background_tick_secs` (clamped `1..=5`). Effective range when set: `1..=30`. |
 | `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
+| `profile` | string | `"standard"` | Complexity profile: `starter` (simplified UX, auto-approve safe tools), `standard` (current behavior), or `expert` (full constitutional visibility). See [Profiles](#profiles). |
+| `persona_path` | string (path) \| null | `null` | Path to a Markdown file injected into every agent's system prompt. Enables cross-agent user context and communication preferences. Relative paths resolve from the config directory. When `null`, the gateway looks for `persona.md` next to the config file (used only if it exists). |
 
 > **Note:** `AUTONOETIC_SHARED_SECRET` is intentionally not in config.yaml — it must be set as an environment variable to avoid accidental commits of secrets. It authenticates both the HTTP API and local JSON-RPC ingress requests.
 
@@ -703,6 +706,79 @@ digest_agent:
   llm_preset: agentic
 ```
 
+> **Note:** With the auto-learning pipeline (see below), `digest_agent.enabled` defaults to `true`.
+
+---
+
+## Auto-Learning Pipeline
+
+Controls the default self-improvement loop. When enabled, the gateway automatically distills memories after sessions, emits quality signals, and schedules periodic memory curation.
+
+When `auto_learning.enabled` is `true`, startup injects synthetic cron rows for:
+
+- `memory-curator.default`, driven by `auto_learning.curation_schedule`
+- `evolution-orchestrator.default`, on a fixed daily cadence (`0 3 * * *`)
+
+Injection is skipped when an enabled `system_agents` entry already declares a schedule for those targets, or when the agent bundle is missing from `agents_dir`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `auto_learning.enabled` | bool | `true` | Master switch for the auto-learning pipeline. |
+| `auto_learning.quality_signals` | bool | `true` | Emit per-session quality signals (turn count, error count, completion) as Tier-2 memories tagged `source:quality_signal`. |
+| `auto_learning.curation_schedule` | string | `"0 */4 * * *"` | Cron expression forwarded to the injected `memory-curator.default` job (UTC). Ignored when auto-learning is disabled or the curator already has an active system cron. |
+
+```yaml
+auto_learning:
+  enabled: true
+  quality_signals: true
+  curation_schedule: "0 */4 * * *"
+```
+
+To opt out entirely:
+
+```yaml
+auto_learning:
+  enabled: false
+```
+
+---
+
+## Profiles
+
+Complexity profiles control default behaviors and visibility. Explicit config overrides always win over profile defaults.
+
+| Profile | Description |
+|---------|-------------|
+| `starter` | Simplified UX. Auto-approves safe tool invocations, simplified help text, auto-learning ON, generous memory priming (3 memories). |
+| `standard` | Current behavior (default). All approvals require operator confirmation. Memory priming limit: 5. |
+| `expert` | Full constitutional visibility. Rule IDs shown alongside approval cards. Memory priming limit: 10. |
+
+```yaml
+profile: starter
+```
+
+---
+
+## User Persona
+
+A Markdown file loaded at gateway start and injected into every agent's system prompt between the constitutional foundation and agent-specific instructions. Enables cross-agent personalization (communication style, domain context, preferences).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `persona_path` | string (path) \| null | `null` | Path to persona file. Relative paths resolve from config directory. When `null`, looks for `persona.md` next to config file. |
+
+The persona file is free-form Markdown:
+
+```markdown
+I'm a senior Rust developer working on distributed systems.
+Respond concisely. Use English for code, French for prose.
+My project uses tokio + axum + SQLite.
+```
+
+Set or view the persona from the chat TUI with `/persona [text]`.
+
+The persona layer sits after constitutional rules (cannot override them) and before agent-specific instructions (agents can further specialize).
+
 ---
 
 ## Template → Preset Mapping
@@ -733,6 +809,7 @@ When no mapping exists for a template, the agent uses its role-specific hardcode
 ```yaml
 agents_dir: "/home/user/autonoetic/agents"
 port: 4000
+http_port: 4100
 ofp_port: 4200
 tls: false
 node_id: "gateway"

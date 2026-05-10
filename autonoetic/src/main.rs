@@ -93,6 +93,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     match &cli.command {
+        Commands::Run(args) => {
+            cli::run::handle_run(Some(config_path.to_str().unwrap_or("config.yaml")), args).await?;
+        }
         Commands::Gateway(args) => match &args.command {
             cli::common::GatewayCommands::Start {
                 daemon,

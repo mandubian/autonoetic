@@ -21,3 +21,35 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
         Ok(GatewayConfig::default())
     }
 }
+
+/// Resolve and load the persona text from the config.
+///
+/// Resolution order:
+/// 1. Explicit `persona_path` in config (relative paths resolve from `config_dir`)
+/// 2. Default `persona.md` next to the config file
+///
+/// Returns `None` if no persona file exists (not an error).
+pub fn load_persona(config: &GatewayConfig, config_dir: &Path) -> Option<String> {
+    let path = if let Some(ref explicit) = config.persona_path {
+        if explicit.is_absolute() {
+            explicit.clone()
+        } else {
+            config_dir.join(explicit)
+        }
+    } else {
+        config_dir.join("persona.md")
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                tracing::info!("Loaded persona from {}", path.display());
+                Some(trimmed.to_string())
+            }
+        }
+        Err(_) => None,
+    }
+}

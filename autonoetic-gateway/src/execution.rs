@@ -468,12 +468,21 @@ pub struct GatewayExecutionService {
     active_executions: Arc<ActiveExecutionRegistry>,
     hook_executor: Arc<crate::scheduler::hooks::HookExecutor>,
     degraded_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
+    persona: Option<String>,
 }
 
 impl GatewayExecutionService {
     pub fn new(
         config: GatewayConfig,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> Self {
+        Self::new_with_persona(config, gateway_store, None)
+    }
+
+    pub fn new_with_persona(
+        config: GatewayConfig,
+        gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        persona: Option<String>,
     ) -> Self {
         if let Err(e) = crate::runtime::tool_tier_registry::initialize_from_startup_path() {
             tracing::warn!(
@@ -518,6 +527,7 @@ impl GatewayExecutionService {
             active_executions: ActiveExecutionRegistry::new(),
             hook_executor,
             degraded_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            persona,
         };
 
         // Spawn the drain task that turns HookSpawnRequests into actual agent runs.
@@ -1818,7 +1828,8 @@ impl GatewayExecutionService {
             .with_active_executions(Some(self.active_executions.clone()))
             .with_http_client(self.http_client.clone())
             .with_artifact_id(artifact_id.map(String::from))
-            .with_degraded_sessions(Some(self.degraded_sessions.clone()));
+            .with_degraded_sessions(Some(self.degraded_sessions.clone()))
+            .with_persona(self.persona.clone());
 
             use crate::runtime::lifecycle::TurnOutcome;
 
@@ -2233,6 +2244,7 @@ impl GatewayExecutionService {
                     self.hook_executor.dispatch_async(ctx);
                 }
             }
+            let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
             crate::runtime::post_session_digest::maybe_run_post_session_digest(
                 self.config.as_ref(),
                 &self.config.agents_dir.join(".gateway"),
@@ -2241,9 +2253,22 @@ impl GatewayExecutionService {
                 &resolved_session_id,
                 agent_id,
                 digest_turn_count,
-                suspended_for_approval.is_some() || suspended_for_user_input,
+                is_suspended,
             )
             .await;
+            if let Some(gs) = self.gateway_store.as_ref() {
+                let mem_store = crate::runtime::memory::SqliteMemoryStore::new(gs.clone());
+                crate::runtime::quality_signal::maybe_emit_quality_signal(
+                    self.config.as_ref(),
+                    self.gateway_store.as_ref(),
+                    &mem_store,
+                    &resolved_session_id,
+                    agent_id,
+                    digest_turn_count,
+                    is_suspended,
+                )
+                .await;
+            }
             let llm_usage = runtime.take_llm_usage_last_run();
 
             // Extract artifacts from content store
@@ -2585,7 +2610,8 @@ impl GatewayExecutionService {
         .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from))
         .with_active_executions(Some(self.active_executions.clone()))
         .with_http_client(self.http_client.clone())
-        .with_degraded_sessions(Some(self.degraded_sessions.clone()));
+        .with_degraded_sessions(Some(self.degraded_sessions.clone()))
+        .with_persona(self.persona.clone());
 
         // Restore executor state from checkpoint
         runtime.guard =
@@ -2661,6 +2687,7 @@ impl GatewayExecutionService {
                 self.hook_executor.dispatch_async(ctx);
             }
         }
+        let is_checkpoint_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
         crate::runtime::post_session_digest::maybe_run_post_session_digest(
             self.config.as_ref(),
             &self.config.agents_dir.join(".gateway"),
@@ -2669,9 +2696,22 @@ impl GatewayExecutionService {
             &resolved_session_id,
             agent_id,
             digest_turn_count,
-            suspended_for_approval.is_some() || suspended_for_user_input,
+            is_checkpoint_suspended,
         )
         .await;
+        if let Some(gs) = self.gateway_store.as_ref() {
+            let mem_store = crate::runtime::memory::SqliteMemoryStore::new(gs.clone());
+            crate::runtime::quality_signal::maybe_emit_quality_signal(
+                self.config.as_ref(),
+                self.gateway_store.as_ref(),
+                &mem_store,
+                &resolved_session_id,
+                agent_id,
+                digest_turn_count,
+                is_checkpoint_suspended,
+            )
+            .await;
+        }
         let llm_usage = runtime.take_llm_usage_last_run();
 
         let artifacts = extract_artifacts_from_content_store(

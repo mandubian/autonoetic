@@ -105,15 +105,75 @@ pub(crate) fn compose_system_instructions_with_metadata(
     manifest: &AgentManifest,
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
 ) -> String {
-    compose_system_instructions_with_user_context(agent_instructions, manifest, output_policy, None)
+    compose_system_instructions_full(agent_instructions, manifest, output_policy, None, None)
 }
 
-/// Full system prompt composition with optional user context injection.
+/// Build a "Prior knowledge" block from Tier-2 global memories relevant to this agent.
+///
+/// Returns `None` if no memories are found or the store is unavailable.
+pub(crate) fn build_memory_context_snippet(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    max_memories: usize,
+) -> Option<String> {
+    let agent_tag = format!("agent:{agent_id}");
+
+    let agent_digests = store.search_memories_by_tags(
+        &[agent_tag.as_str(), "source:post_session_digest"],
+        max_memories,
+    ).ok().unwrap_or_default();
+
+    let agent_signals = store.search_memories_by_tags(
+        &[agent_tag.as_str(), "source:quality_signal"],
+        max_memories,
+    ).ok().unwrap_or_default();
+
+    let mut memories: Vec<_> = agent_digests;
+    memories.extend(agent_signals);
+    memories.truncate(max_memories);
+
+    if memories.is_empty() {
+        memories = store
+            .search_memories_by_tags(&["source:post_session_digest"], max_memories)
+            .ok()
+            .unwrap_or_default();
+    }
+
+    if memories.is_empty() {
+        return None;
+    }
+
+    let mut parts = vec!["---\n\nPrior Knowledge (from past sessions)\n".to_string()];
+    for mem in memories.iter().take(max_memories) {
+        let truncated: String = mem.content.chars().take(500).collect();
+        parts.push(format!("- {}", truncated));
+    }
+    Some(parts.join("\n"))
+}
+
+/// Backward-compatible wrapper: composes system instructions with an optional
+/// user context snippet but no persona.
 pub(crate) fn compose_system_instructions_with_user_context(
     agent_instructions: &str,
     manifest: &AgentManifest,
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
     user_context_snippet: Option<&str>,
+) -> String {
+    compose_system_instructions_full(agent_instructions, manifest, output_policy, user_context_snippet, None)
+}
+
+/// Full system prompt composition.
+///
+/// Layer order (each layer is structurally positioned so it cannot override
+/// the previous one — foundation constitutional rules always win):
+///
+///   Foundation → Tool bridging → Persona → User profile → Agent instructions → Output contract
+pub(crate) fn compose_system_instructions_full(
+    agent_instructions: &str,
+    manifest: &AgentManifest,
+    output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
+    user_context_snippet: Option<&str>,
+    persona: Option<&str>,
 ) -> String {
     let foundation = compose_foundation(manifest);
 
@@ -123,11 +183,20 @@ pub(crate) fn compose_system_instructions_with_user_context(
         .filter(|m| m.needs_tool_bridging)
         .map(|_| tool_bridging_appendix());
 
+    let persona_block = persona.map(|p| {
+        format!("---\n\nUser Persona\n\nThe operator has provided the following context about themselves. \
+                 Adapt your communication style and assumptions accordingly, but never violate \
+                 constitutional rules or agent-specific constraints.\n\n{p}")
+    });
+
     let base = {
         let trimmed = agent_instructions.trim();
         let mut parts = vec![foundation.as_str()];
         if let Some(ref bridging) = tool_bridging {
             parts.push(bridging);
+        }
+        if let Some(ref persona_text) = persona_block {
+            parts.push(persona_text);
         }
         if let Some(snippet) = user_context_snippet {
             parts.push(snippet);
@@ -303,6 +372,15 @@ impl AgentExecutor {
         let profile = store.get_user_profile(user_id).ok()??;
 
         render_user_context_snippet(&profile, &binding.scope)
+    }
+
+    /// Build memory context snippet from Tier-2 global memories for session continuity.
+    pub(crate) fn build_memory_context_snippet(&self) -> Option<String> {
+        let store = self.gateway_store.as_ref()?;
+        let config = self.config.as_ref()?;
+        let agent_id = &self.manifest.agent.id;
+        let limit = config.profile.memory_priming_limit();
+        build_memory_context_snippet(store, agent_id, limit)
     }
 
     /// Compose, sign, and render the R++1 state-attestation tail for the

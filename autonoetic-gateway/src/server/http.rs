@@ -13,29 +13,40 @@
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use futures::stream::{self, Stream};
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
+use crate::router::{
+    AsyncIngestResult, AsyncIngestStatus, JsonRpcRequest, JsonRpcResponse, JsonRpcRouter,
+};
 use crate::runtime::content_store::ContentStore;
 
 /// Shared state for HTTP handlers
 #[derive(Clone)]
 pub struct HttpState {
     pub store: Arc<Mutex<ContentStore>>,
-    /// Shared secret for authentication (Bearer token)
+    /// Shared secret for authentication (Bearer token or `?token=` on SSE)
     pub shared_secret: String,
     /// Maximum request body size in bytes (default: 10MB)
     pub max_body_size: usize,
+    /// JSON-RPC router for HTTP ingress (`event.ingest`, streamed `session.status`).
+    pub router: Option<Arc<JsonRpcRouter>>,
 }
 
 /// Default max body size: 10MB
-const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// Valid session_id pattern (alphanumeric, dash, underscore, dot, slash for delegated sessions)
 fn is_valid_session_id(s: &str) -> bool {
@@ -84,6 +95,63 @@ fn validate_auth(headers: &HeaderMap, expected_secret: &str) -> Result<(), Error
     }
 
     Ok(())
+}
+
+/// Bearer auth (`Authorization: Bearer …`) or query token (`?token=`) for SSE clients.
+fn validate_bearer_or_query(
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    expected_secret: &str,
+) -> Result<(), ErrorResponse> {
+    if validate_auth(headers, expected_secret).is_ok() {
+        return Ok(());
+    }
+
+    let Some(token) = query_token.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Err(ErrorResponse {
+            error: "Missing Authorization header or token query parameter".to_string(),
+            code: 401,
+        });
+    };
+
+    let token_valid: bool =
+        subtle::ConstantTimeEq::ct_eq(token.as_bytes(), expected_secret.as_bytes()).into();
+    if !token_valid {
+        return Err(ErrorResponse {
+            error: "Invalid token".to_string(),
+            code: 403,
+        });
+    }
+
+    Ok(())
+}
+
+async fn dispatch_session_status(
+    router: &JsonRpcRouter,
+    session_id: &str,
+    secret: &str,
+) -> JsonRpcResponse {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: format!("http-sse-{}", uuid::Uuid::new_v4()),
+        method: "session.status".to_string(),
+        params: serde_json::json!({ "session_id": session_id }),
+        auth_token: Some(secret.to_string()),
+    };
+    router.dispatch(req).await
+}
+
+fn sse_session_status_terminal(resp: &JsonRpcResponse) -> bool {
+    if resp.error.is_some() {
+        return true;
+    }
+    let Some(val) = resp.result.as_ref() else {
+        return true;
+    };
+    match serde_json::from_value::<AsyncIngestResult>(val.clone()) {
+        Ok(parsed) => !matches!(parsed.status, AsyncIngestStatus::Processing),
+        Err(_) => true,
+    }
 }
 
 /// Extract and validate session_id from request
@@ -191,9 +259,38 @@ impl IntoResponse for ErrorResponse {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct HttpEventIngestBody {
+    event_type: String,
+    #[serde(default)]
+    target_agent_id: Option<String>,
+    message: String,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    source_agent_id: Option<String>,
+    #[serde(default)]
+    async_mode: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionStreamQuery {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    interval_ms: Option<u64>,
+}
+
 /// Create the HTTP router for content API
 pub fn create_router(state: HttpState) -> Router {
     Router::new()
+        .route("/api/event/ingest", post(handle_event_ingest))
+        .route(
+            "/api/session/stream/{session_id}",
+            get(handle_session_stream_sse),
+        )
         .route("/api/content/write", post(handle_write))
         .route(
             "/api/content/read/{session_id}/{name_or_handle}",
@@ -227,8 +324,87 @@ pub async fn start_http_server_with_store(
         store: Arc::new(Mutex::new(store)),
         shared_secret,
         max_body_size: DEFAULT_MAX_BODY_SIZE,
+        router: None,
     };
     start_http_server(addr, state).await
+}
+
+/// POST /api/event/ingest — JSON body mirrors JSON-RPC `event.ingest` params.
+async fn handle_event_ingest(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Json(body): Json<HttpEventIngestBody>,
+) -> Result<Json<JsonRpcResponse>, ErrorResponse> {
+    validate_auth(&headers, &state.shared_secret)?;
+
+    let Some(router) = state.router.clone() else {
+        return Err(ErrorResponse {
+            error: "HTTP ingress router not configured".to_string(),
+            code: 503,
+        });
+    };
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: format!("http-ingest-{}", uuid::Uuid::new_v4()),
+        method: "event.ingest".to_string(),
+        params: serde_json::to_value(&body).map_err(|e| ErrorResponse {
+            error: format!("Failed to serialize ingest params: {e}"),
+            code: 400,
+        })?,
+        auth_token: Some(state.shared_secret.clone()),
+    };
+
+    let resp = router.dispatch(req).await;
+    Ok(Json(resp))
+}
+
+/// GET /api/session/stream/{session_id} — SSE stream polling async `session.status`.
+///
+/// Clients created with browser `EventSource` cannot set headers; pass `?token=` mirroring
+/// `AUTONOETIC_SHARED_SECRET`.
+async fn handle_session_stream_sse(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Query(q): Query<SessionStreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ErrorResponse> {
+    validate_bearer_or_query(&headers, q.token.as_deref(), &state.shared_secret)?;
+    validate_session_id(&session_id)?;
+
+    let Some(router) = state.router.clone() else {
+        return Err(ErrorResponse {
+            error: "HTTP ingress router not configured".to_string(),
+            code: 503,
+        });
+    };
+
+    let interval_ms = q.interval_ms.unwrap_or(500).clamp(100, 10_000);
+    let secret = state.shared_secret.clone();
+
+    let stream = stream::unfold(Some(()), move |tick_state| {
+        let router = router.clone();
+        let session_id = session_id.clone();
+        let secret = secret.clone();
+        async move {
+            if tick_state.is_none() {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+            let resp = dispatch_session_status(router.as_ref(), &session_id, &secret).await;
+            let terminal = sse_session_status_terminal(&resp);
+            let json = serde_json::to_string(&resp).unwrap_or_else(|_| {
+                "{\"jsonrpc\":\"2.0\",\"id\":\"null\",\"error\":{\"code\":-32603,\"message\":\"serialization_failed\"}}"
+                    .to_string()
+            });
+            let evt = Ok(Event::default().event("session.status").data(json));
+            Some((evt, if terminal { None } else { Some(()) }))
+        }
+    });
+
+    Ok(
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))),
+    )
 }
 
 /// POST /api/content/write - Write content to the store
@@ -410,6 +586,7 @@ mod tests {
             store: Arc::new(Mutex::new(store)),
             shared_secret: TEST_SECRET.to_string(),
             max_body_size: DEFAULT_MAX_BODY_SIZE,
+            router: None,
         };
         let app = create_router(state);
 

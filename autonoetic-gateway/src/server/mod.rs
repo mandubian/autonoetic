@@ -1,9 +1,11 @@
 //! Gateway Event Loop Server.
 
+use crate::runtime::content_store::ContentStore;
 use crate::server::registry::PeerRegistry;
 use autonoetic_types::config::GatewayConfig;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub mod http;
 pub mod jsonrpc;
@@ -149,6 +151,37 @@ impl GatewayServer {
             }
         }
 
+        let auto_learning_results =
+            crate::scheduler::auto_learning_jobs::inject_auto_learning_jobs(&self.config, &gateway_store);
+        for r in &auto_learning_results {
+            match r.action {
+                crate::scheduler::system_agents::ReconcileAction::Created => {
+                    tracing::info!(
+                        target: "auto_learning",
+                        agent_id = %r.agent_id,
+                        "Auto-learning cron created: {}",
+                        r.message
+                    );
+                }
+                crate::scheduler::system_agents::ReconcileAction::Failed => {
+                    tracing::warn!(
+                        target: "auto_learning",
+                        agent_id = %r.agent_id,
+                        "Auto-learning scheduling failed: {}",
+                        r.message
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "auto_learning",
+                        agent_id = %r.agent_id,
+                        "{}",
+                        r.message
+                    );
+                }
+            }
+        }
+
         let jsonrpc_router = Arc::new(crate::router::JsonRpcRouter::new(
             self.config.as_ref().clone(),
             Some(gateway_store.clone()),
@@ -163,13 +196,41 @@ impl GatewayServer {
             crate::scheduler::eval_runner::start_eval_runner(jsonrpc_router.execution_service());
 
         tracing::info!(
-            "GatewayServer starting (jsonrpc_port={}, ofp_port={}, node_id={})",
+            "GatewayServer starting (jsonrpc_port={}, http_port={}, ofp_port={}, node_id={})",
             self.config.port,
+            self.config.http_port,
             self.config.ofp_port,
             node_id
         );
 
-        // Phase 5/7: start OFP and JSON-RPC listeners concurrently.
+        let http_port = self.config.http_port;
+        let gateway_dir_http = gateway_dir.clone();
+        let shared_secret_http = shared_secret.clone();
+        let jsonrpc_router_http = jsonrpc_router.clone();
+        let http_server = async move {
+            if http_port == 0 {
+                tracing::info!("HTTP ingress disabled (http_port=0)");
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+
+            let http_addr =
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), http_port);
+            let store = ContentStore::new(&gateway_dir_http)?;
+            let http_state = crate::server::http::HttpState {
+                store: Arc::new(Mutex::new(store)),
+                shared_secret: shared_secret_http,
+                max_body_size: crate::server::http::DEFAULT_MAX_BODY_SIZE,
+                router: Some(jsonrpc_router_http),
+            };
+            tracing::info!(
+                http_listen = %http_addr,
+                "HTTP ingress listening (0.0.0.0; Bearer-authenticated)"
+            );
+            crate::server::http::start_http_server(http_addr, http_state).await
+        };
+
+        // Phase 5/7: start OFP, JSON-RPC, and HTTP listeners concurrently.
         // Missing federation identity is a hard failure by design.
         tokio::try_join!(
             ofp::start_ofp_server(
@@ -186,6 +247,7 @@ impl GatewayServer {
                 (*jsonrpc_router).clone(),
                 Some(shared_secret),
             ),
+            http_server,
             background_scheduler,
             eval_runner,
         )?;

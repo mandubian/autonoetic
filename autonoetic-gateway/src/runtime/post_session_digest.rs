@@ -329,6 +329,9 @@ pub async fn maybe_run_post_session_digest(
     let Some(store) = store else {
         return;
     };
+    if !config.auto_learning.enabled {
+        return;
+    }
     if !config.digest_agent.enabled {
         return;
     }
