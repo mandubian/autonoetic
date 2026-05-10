@@ -207,6 +207,7 @@ enum SlashCommand {
     SessionSwitch(String),
     Cancel,
     Why(Option<String>),
+    Persona(Option<String>),
 }
 
 struct App {
@@ -595,6 +596,14 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
                 Ok(SlashCommand::Why(Some(rest.trim().to_string())))
             }
         }
+        "/persona" => {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            if rest.trim().is_empty() {
+                Ok(SlashCommand::Persona(None))
+            } else {
+                Ok(SlashCommand::Persona(Some(rest.trim().to_string())))
+            }
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -607,6 +616,7 @@ fn format_help_card() -> String {
         "  /session switch <id>   Switch to an existing session",
         "  /status                Show current session details",
         "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
+        "  /persona [text]        Show or set session persona (user context/preferences)",
         "  /cancel                Leave the current picker/prompt",
         "  /quit                  Exit chat",
     ]
@@ -1045,6 +1055,58 @@ fn handle_slash_command_submission(
         SlashCommand::Why(request_id) => {
             let explanation = format_why_explanation(gateway_store, request_id.as_deref());
             app.add_message(MessageRole::System, explanation);
+            true
+        }
+        SlashCommand::Persona(new_persona) => {
+            let persona_path = config
+                .persona_path
+                .clone()
+                .unwrap_or_else(|| {
+                    config
+                        .agents_dir
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join("persona.md")
+                });
+
+            if let Some(text) = new_persona {
+                match std::fs::write(&persona_path, &text) {
+                    Ok(()) => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!(
+                                "Persona saved to {}. It will apply to new agent sessions.",
+                                persona_path.display()
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!("Failed to write persona: {e}"),
+                        );
+                    }
+                }
+            } else {
+                match std::fs::read_to_string(&persona_path) {
+                    Ok(content) if !content.trim().is_empty() => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!("Current persona ({}):\n\n{}", persona_path.display(), content.trim()),
+                        );
+                    }
+                    _ => {
+                        app.add_message(
+                            MessageRole::System,
+                            format!(
+                                "No persona set. Use `/persona <text>` to set one.\n\
+                                 Or create {} with your preferred context.",
+                                persona_path.display()
+                            ),
+                        );
+                    }
+                }
+            }
             true
         }
     }
@@ -2493,6 +2555,9 @@ async fn handle_chat_test_mode(
                 }
                 Ok(SlashCommand::Why(_)) => {
                     println!("/why is not supported in test mode.");
+                }
+                Ok(SlashCommand::Persona(_)) => {
+                    println!("/persona is not supported in test mode.");
                 }
                 Err(error) => {
                     println!("{}", error);

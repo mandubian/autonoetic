@@ -132,7 +132,16 @@ impl JsonRpcRouter {
                 e
             )
         });
-        let execution = Arc::new(GatewayExecutionService::new(config.clone(), gateway_store));
+        let config_dir = config
+            .agents_dir
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        let persona = crate::config::load_persona(&config, config_dir);
+        let execution = Arc::new(GatewayExecutionService::new_with_persona(
+            config.clone(),
+            gateway_store,
+            persona,
+        ));
         Self {
             config: Arc::new(config),
             execution,

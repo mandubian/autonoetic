@@ -909,6 +909,13 @@ pub struct GatewayConfig {
     /// Controls post-session digest, quality signals, and periodic memory curation.
     #[serde(default)]
     pub auto_learning: AutoLearningConfig,
+
+    /// Path to a persona file (Markdown) injected into every agent's system
+    /// prompt. Defines cross-agent user context, communication preferences,
+    /// or domain background. Relative paths resolve from the config directory.
+    /// Default: `persona.md` next to the config file (used only if the file exists).
+    #[serde(default)]
+    pub persona_path: Option<PathBuf>,
 }
 
 fn default_approval_dwell_multiplier() -> f64 {
@@ -1667,6 +1674,7 @@ impl Default for GatewayConfig {
             protected_agents: ProtectedAgentsConfig::default(),
             profile: Profile::default(),
             auto_learning: AutoLearningConfig::default(),
+            persona_path: None,
         }
     }
 }

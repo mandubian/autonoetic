@@ -468,12 +468,21 @@ pub struct GatewayExecutionService {
     active_executions: Arc<ActiveExecutionRegistry>,
     hook_executor: Arc<crate::scheduler::hooks::HookExecutor>,
     degraded_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
+    persona: Option<String>,
 }
 
 impl GatewayExecutionService {
     pub fn new(
         config: GatewayConfig,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    ) -> Self {
+        Self::new_with_persona(config, gateway_store, None)
+    }
+
+    pub fn new_with_persona(
+        config: GatewayConfig,
+        gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        persona: Option<String>,
     ) -> Self {
         if let Err(e) = crate::runtime::tool_tier_registry::initialize_from_startup_path() {
             tracing::warn!(
@@ -518,6 +527,7 @@ impl GatewayExecutionService {
             active_executions: ActiveExecutionRegistry::new(),
             hook_executor,
             degraded_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            persona,
         };
 
         // Spawn the drain task that turns HookSpawnRequests into actual agent runs.
@@ -1818,7 +1828,8 @@ impl GatewayExecutionService {
             .with_active_executions(Some(self.active_executions.clone()))
             .with_http_client(self.http_client.clone())
             .with_artifact_id(artifact_id.map(String::from))
-            .with_degraded_sessions(Some(self.degraded_sessions.clone()));
+            .with_degraded_sessions(Some(self.degraded_sessions.clone()))
+            .with_persona(self.persona.clone());
 
             use crate::runtime::lifecycle::TurnOutcome;
 
@@ -2599,7 +2610,8 @@ impl GatewayExecutionService {
         .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from))
         .with_active_executions(Some(self.active_executions.clone()))
         .with_http_client(self.http_client.clone())
-        .with_degraded_sessions(Some(self.degraded_sessions.clone()));
+        .with_degraded_sessions(Some(self.degraded_sessions.clone()))
+        .with_persona(self.persona.clone());
 
         // Restore executor state from checkpoint
         runtime.guard =

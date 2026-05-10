@@ -9,6 +9,7 @@
 | Feature 3: Contextual "why" | Done | `constitution_glossary.rs`, `/why` in `chat.rs` |
 | Feature 4: Complexity profiles | Done | `Profile` enum + behavior methods in `config.rs` |
 | Feature 5: Session continuity | Done | `build_memory_context_snippet` in `context.rs`, `search_memories_by_tags` in `gateway_store/memory.rs` |
+| Feature 6: User persona | Done | `persona.md` file, `persona_path` in config, injection in `context.rs`, `/persona` command, first-run prompt |
 
 ---
 
@@ -95,10 +96,28 @@ Single config key: `profile: starter | standard | expert`. Each profile sets def
 
 ---
 
+## Feature 6: User persona
+
+**Problem**: Users must re-explain their context, preferences, and communication style to every agent in every session. There is no persistent cross-agent "who am I" setting.
+
+**Solution**: A `persona.md` file loaded at gateway start and injected into every agent's system prompt:
+
+- **File-based**: `~/.autonoetic/persona.md` (default) or explicit `persona_path` in config. Editable with any text editor, versionable.
+- **System prompt injection**: Persona text is placed between the foundation (constitutional rules) and agent-specific instructions, so it cannot override constitutional constraints but naturally adapts agent behavior.
+- **`/persona` slash command**: View or update persona from the TUI. Changes persist to disk.
+- **First-run prompt**: `autonoetic run` asks "Tell me about yourself" during setup and writes `persona.md`.
+
+**Layer order**: Foundation → Tool bridging → **Persona** → User profile → Agent instructions → Output contract
+
+**Key files**: `config.rs` (`persona_path`), `config.rs` gateway (`load_persona`), `context.rs` (`compose_system_instructions_full`), `lifecycle.rs`, `execution.rs`, `chat.rs` (`/persona`), `run.rs`.
+
+---
+
 ## Priority
 
 1. Feature 2 (auto-learning) — highest leverage, most "autonoetic"
 2. Feature 1 (one-command start) — removes biggest adoption barrier
-3. Feature 3 (contextual why) — data exists, just needs surfacing
-4. Feature 5 (session continuity) — builds on Feature 2
-5. Feature 4 (complexity profiles) — ties everything together
+3. Feature 6 (user persona) — highest-impact personalization
+4. Feature 3 (contextual why) — data exists, just needs surfacing
+5. Feature 5 (session continuity) — builds on Feature 2
+6. Feature 4 (complexity profiles) — ties everything together

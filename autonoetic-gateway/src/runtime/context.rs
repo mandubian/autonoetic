@@ -105,7 +105,7 @@ pub(crate) fn compose_system_instructions_with_metadata(
     manifest: &AgentManifest,
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
 ) -> String {
-    compose_system_instructions_with_user_context(agent_instructions, manifest, output_policy, None)
+    compose_system_instructions_full(agent_instructions, manifest, output_policy, None, None)
 }
 
 /// Build a "Prior knowledge" block from Tier-2 global memories relevant to this agent.
@@ -143,12 +143,29 @@ pub(crate) fn build_memory_context_snippet(
     Some(parts.join("\n"))
 }
 
-/// Full system prompt composition with optional user context injection.
+/// Backward-compatible wrapper: composes system instructions with an optional
+/// user context snippet but no persona.
 pub(crate) fn compose_system_instructions_with_user_context(
     agent_instructions: &str,
     manifest: &AgentManifest,
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
     user_context_snippet: Option<&str>,
+) -> String {
+    compose_system_instructions_full(agent_instructions, manifest, output_policy, user_context_snippet, None)
+}
+
+/// Full system prompt composition.
+///
+/// Layer order (each layer is structurally positioned so it cannot override
+/// the previous one — foundation constitutional rules always win):
+///
+///   Foundation → Tool bridging → Persona → User profile → Agent instructions → Output contract
+pub(crate) fn compose_system_instructions_full(
+    agent_instructions: &str,
+    manifest: &AgentManifest,
+    output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
+    user_context_snippet: Option<&str>,
+    persona: Option<&str>,
 ) -> String {
     let foundation = compose_foundation(manifest);
 
@@ -158,11 +175,20 @@ pub(crate) fn compose_system_instructions_with_user_context(
         .filter(|m| m.needs_tool_bridging)
         .map(|_| tool_bridging_appendix());
 
+    let persona_block = persona.map(|p| {
+        format!("---\n\nUser Persona\n\nThe operator has provided the following context about themselves. \
+                 Adapt your communication style and assumptions accordingly, but never violate \
+                 constitutional rules or agent-specific constraints.\n\n{p}")
+    });
+
     let base = {
         let trimmed = agent_instructions.trim();
         let mut parts = vec![foundation.as_str()];
         if let Some(ref bridging) = tool_bridging {
             parts.push(bridging);
+        }
+        if let Some(ref persona_text) = persona_block {
+            parts.push(persona_text);
         }
         if let Some(snippet) = user_context_snippet {
             parts.push(snippet);

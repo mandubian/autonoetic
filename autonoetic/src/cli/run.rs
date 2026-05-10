@@ -4,6 +4,7 @@
 //! if none exists, bootstraps agents, starts the gateway in-process, and opens
 //! chat — all without requiring the user to understand the decomposed commands.
 
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 fn default_config_dir() -> PathBuf {
@@ -71,6 +72,41 @@ llm_preset_mapping:
 
     std::fs::write(config_path, &config_content)?;
     eprintln!("\n  Config written to {}", config_path.display());
+
+    prompt_persona(config_dir)?;
+
+    Ok(())
+}
+
+fn prompt_persona(config_dir: &Path) -> anyhow::Result<()> {
+    let persona_path = config_dir.join("persona.md");
+    if persona_path.exists() {
+        return Ok(());
+    }
+
+    let mut stderr = std::io::stderr();
+    writeln!(
+        stderr,
+        "\n  Optional: tell the agents about yourself so they can adapt."
+    )?;
+    writeln!(
+        stderr,
+        "  Examples: your role, tech stack, language preferences, communication style."
+    )?;
+    writeln!(stderr, "  Press Enter to skip.\n")?;
+    write!(stderr, "  About you: ")?;
+    stderr.flush()?;
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+
+    if !trimmed.is_empty() {
+        std::fs::write(&persona_path, trimmed)?;
+        eprintln!("  Persona saved to {}", persona_path.display());
+        eprintln!("  You can update it anytime with `/persona <text>` in chat.");
+    }
+
     Ok(())
 }
 
