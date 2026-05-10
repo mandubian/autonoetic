@@ -11,6 +11,7 @@ pub mod capability;
 pub mod capsule;
 pub mod causal_chain;
 pub mod config;
+pub mod constitution_glossary;
 pub mod disclosure;
 pub mod evaluation;
 pub mod hooks;

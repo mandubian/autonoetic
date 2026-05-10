@@ -2233,6 +2233,7 @@ impl GatewayExecutionService {
                     self.hook_executor.dispatch_async(ctx);
                 }
             }
+            let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
             crate::runtime::post_session_digest::maybe_run_post_session_digest(
                 self.config.as_ref(),
                 &self.config.agents_dir.join(".gateway"),
@@ -2241,9 +2242,22 @@ impl GatewayExecutionService {
                 &resolved_session_id,
                 agent_id,
                 digest_turn_count,
-                suspended_for_approval.is_some() || suspended_for_user_input,
+                is_suspended,
             )
             .await;
+            if let Some(gs) = self.gateway_store.as_ref() {
+                let mem_store = crate::runtime::memory::SqliteMemoryStore::new(gs.clone());
+                crate::runtime::quality_signal::maybe_emit_quality_signal(
+                    self.config.as_ref(),
+                    self.gateway_store.as_ref(),
+                    &mem_store,
+                    &resolved_session_id,
+                    agent_id,
+                    digest_turn_count,
+                    is_suspended,
+                )
+                .await;
+            }
             let llm_usage = runtime.take_llm_usage_last_run();
 
             // Extract artifacts from content store
@@ -2661,6 +2675,7 @@ impl GatewayExecutionService {
                 self.hook_executor.dispatch_async(ctx);
             }
         }
+        let is_checkpoint_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
         crate::runtime::post_session_digest::maybe_run_post_session_digest(
             self.config.as_ref(),
             &self.config.agents_dir.join(".gateway"),
@@ -2669,9 +2684,22 @@ impl GatewayExecutionService {
             &resolved_session_id,
             agent_id,
             digest_turn_count,
-            suspended_for_approval.is_some() || suspended_for_user_input,
+            is_checkpoint_suspended,
         )
         .await;
+        if let Some(gs) = self.gateway_store.as_ref() {
+            let mem_store = crate::runtime::memory::SqliteMemoryStore::new(gs.clone());
+            crate::runtime::quality_signal::maybe_emit_quality_signal(
+                self.config.as_ref(),
+                self.gateway_store.as_ref(),
+                &mem_store,
+                &resolved_session_id,
+                agent_id,
+                digest_turn_count,
+                is_checkpoint_suspended,
+            )
+            .await;
+        }
         let llm_usage = runtime.take_llm_usage_last_run();
 
         let artifacts = extract_artifacts_from_content_store(

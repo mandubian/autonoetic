@@ -185,11 +185,102 @@ fn default_digest_min_turns() -> u32 {
 impl Default for DigestAgentConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             min_turns: default_digest_min_turns(),
             llm_preset: None,
             provider: None,
             model: None,
+        }
+    }
+}
+
+/// Auto-learning configuration: controls the default self-improvement pipeline.
+///
+/// When enabled, sessions automatically produce memories (via post-session digest)
+/// and the memory curator runs periodically to distill cross-session knowledge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoLearningConfig {
+    /// Master switch for the auto-learning pipeline. When false, post-session
+    /// digest and periodic memory curation are both disabled regardless of their
+    /// individual settings. Default: true.
+    #[serde(default = "default_auto_learning_enabled")]
+    pub enabled: bool,
+
+    /// Emit a lightweight quality signal after each completed session, persisted
+    /// as a Tier-2 memory tagged `source:quality_signal`. Default: true.
+    #[serde(default = "default_auto_learning_enabled")]
+    pub quality_signals: bool,
+
+    /// Cron schedule for the periodic memory-curator run.
+    /// Default: every 4 hours ("0 */4 * * *").
+    #[serde(default = "default_curation_schedule")]
+    pub curation_schedule: String,
+}
+
+fn default_auto_learning_enabled() -> bool {
+    true
+}
+
+fn default_curation_schedule() -> String {
+    "0 */4 * * *".to_string()
+}
+
+impl Default for AutoLearningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_auto_learning_enabled(),
+            quality_signals: default_auto_learning_enabled(),
+            curation_schedule: default_curation_schedule(),
+        }
+    }
+}
+
+/// Complexity profile that controls default behavior and visibility.
+///
+/// Profiles set sensible defaults for various config knobs; explicit overrides
+/// in the config file always win. The profile is resolved once at config load
+/// and does not change at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Profile {
+    /// Minimal setup, auto-learning ON, simplified TUI, generous session grants.
+    Starter,
+    /// Current behavior: all approvals require operator, full config surface.
+    #[default]
+    Standard,
+    /// Full constitutional visibility, eval suite mandatory for promotion.
+    Expert,
+}
+
+impl Profile {
+    /// Whether safe tool invocations (e.g., read-only file ops, web_search) can
+    /// skip explicit approval.  Starter auto-approves safe ops so new users are
+    /// not overwhelmed.
+    pub fn auto_approve_safe_tools(&self) -> bool {
+        matches!(self, Self::Starter)
+    }
+
+    /// Whether the background scheduler should auto-start.
+    pub fn background_scheduler_default(&self) -> bool {
+        !matches!(self, Self::Starter)
+    }
+
+    /// Whether to display constitutional rule IDs alongside approval cards.
+    pub fn show_rule_ids_in_approvals(&self) -> bool {
+        matches!(self, Self::Expert)
+    }
+
+    /// Whether the TUI shows the full help text or a simplified version.
+    pub fn simplified_help(&self) -> bool {
+        matches!(self, Self::Starter)
+    }
+
+    /// Max Tier-2 memories to inject in session priming context.
+    pub fn memory_priming_limit(&self) -> usize {
+        match self {
+            Self::Starter => 3,
+            Self::Standard => 5,
+            Self::Expert => 10,
         }
     }
 }
@@ -808,6 +899,16 @@ pub struct GatewayConfig {
     /// independently for all promotions.
     #[serde(default)]
     pub protected_agents: ProtectedAgentsConfig,
+
+    /// Complexity profile: starter / standard / expert.
+    /// Controls default behavior and visibility. Explicit config overrides always win.
+    #[serde(default)]
+    pub profile: Profile,
+
+    /// Auto-learning pipeline configuration.
+    /// Controls post-session digest, quality signals, and periodic memory curation.
+    #[serde(default)]
+    pub auto_learning: AutoLearningConfig,
 }
 
 fn default_approval_dwell_multiplier() -> f64 {
@@ -1564,6 +1665,8 @@ impl Default for GatewayConfig {
             approval_dwell_multiplier: default_approval_dwell_multiplier(),
             sentinel: SentinelConfig::default(),
             protected_agents: ProtectedAgentsConfig::default(),
+            profile: Profile::default(),
+            auto_learning: AutoLearningConfig::default(),
         }
     }
 }

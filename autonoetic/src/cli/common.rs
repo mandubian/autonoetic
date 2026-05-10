@@ -140,6 +140,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Bootstrap, start gateway, and open chat in one step
+    Run(RunArgs),
     /// Manage the Gateway lifecycle
     Gateway(GatewayArgs),
     /// Manage Autonoetic Agents
@@ -156,6 +158,16 @@ pub enum Commands {
     Mcp(McpArgs),
     /// Security sentinel — status, findings, and triage
     Security(SecurityArgs),
+}
+
+/// Arguments for the all-in-one `run` command.
+#[derive(Args)]
+pub struct RunArgs {
+    /// Optional target agent ID. Defaults to planner.default.
+    pub agent_id: Option<String>,
+    /// Stable conversation/session identifier.
+    #[arg(long)]
+    pub session_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

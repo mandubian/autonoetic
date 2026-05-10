@@ -108,6 +108,41 @@ pub(crate) fn compose_system_instructions_with_metadata(
     compose_system_instructions_with_user_context(agent_instructions, manifest, output_policy, None)
 }
 
+/// Build a "Prior knowledge" block from Tier-2 global memories relevant to this agent.
+///
+/// Returns `None` if no memories are found or the store is unavailable.
+pub(crate) fn build_memory_context_snippet(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    max_memories: usize,
+) -> Option<String> {
+    let agent_tag = format!("agent:{agent_id}");
+    let memories = store.search_memories_by_tags(
+        &[agent_tag.as_str(), "source:quality_signal", "source:post_session_digest"],
+        max_memories,
+    ).ok().unwrap_or_default();
+
+    let global_memories: Vec<_> = if memories.is_empty() {
+        store
+            .search_memories_by_tags(&["source:post_session_digest"], max_memories)
+            .ok()
+            .unwrap_or_default()
+    } else {
+        memories
+    };
+
+    if global_memories.is_empty() {
+        return None;
+    }
+
+    let mut parts = vec!["---\n\nPrior Knowledge (from past sessions)\n".to_string()];
+    for mem in global_memories.iter().take(max_memories) {
+        let truncated: String = mem.content.chars().take(500).collect();
+        parts.push(format!("- {}", truncated));
+    }
+    Some(parts.join("\n"))
+}
+
 /// Full system prompt composition with optional user context injection.
 pub(crate) fn compose_system_instructions_with_user_context(
     agent_instructions: &str,

@@ -206,6 +206,7 @@ enum SlashCommand {
     SessionNew(Option<String>),
     SessionSwitch(String),
     Cancel,
+    Why(Option<String>),
 }
 
 struct App {
@@ -586,6 +587,14 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
                 other
             )),
         },
+        "/why" => {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            if rest.trim().is_empty() {
+                Ok(SlashCommand::Why(None))
+            } else {
+                Ok(SlashCommand::Why(Some(rest.trim().to_string())))
+            }
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -597,6 +606,7 @@ fn format_help_card() -> String {
         "  /session new [name]    Create and switch to a new session",
         "  /session switch <id>   Switch to an existing session",
         "  /status                Show current session details",
+        "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
         "  /cancel                Leave the current picker/prompt",
         "  /quit                  Exit chat",
     ]
@@ -1031,6 +1041,84 @@ fn handle_slash_command_submission(
                 );
             }
             true
+        }
+        SlashCommand::Why(request_id) => {
+            let explanation = format_why_explanation(gateway_store, request_id.as_deref());
+            app.add_message(MessageRole::System, explanation);
+            true
+        }
+    }
+}
+
+fn format_why_explanation(
+    gateway_store: Option<&GatewayStore>,
+    request_id: Option<&str>,
+) -> String {
+    let Some(store) = gateway_store else {
+        return "Gateway store not available.".to_string();
+    };
+
+    if let Some(rid) = request_id {
+        match store.get_approval(rid) {
+            Ok(Some(req)) => {
+                let mut lines = vec![format!("Approval: {}", req.request_id)];
+                lines.push(format!("Status: {:?}", req.status));
+                lines.push(format!("Agent: {}", req.agent_id));
+                lines.push(String::new());
+                lines.push("Action:".to_string());
+                for ln in format_scheduled_action_detail_lines(&req.action) {
+                    lines.push(ln);
+                }
+                if let Some(r) = req.reason.as_deref().filter(|s| !s.is_empty()) {
+                    lines.push(String::new());
+                    lines.push(format!("Reason: {}", r));
+                }
+                if let Some(ref dr) = req.decision_reason {
+                    lines.push(String::new());
+                    lines.push(format!("Decision reason: {}", dr));
+                }
+                // Look up causal events for this approval to find enforced rules
+                if let Ok(events) = store.search_causal_events(Some(&req.session_id), None, 100) {
+                    let gate_rules: Vec<String> = events
+                        .iter()
+                        .filter(|e| {
+                            (e.action == "gate_suspended" || e.action == "approval_created")
+                                && e.target.as_deref() == Some(rid)
+                        })
+                        .flat_map(|e| e.enforced_rules.iter().cloned())
+                        .collect();
+                    if !gate_rules.is_empty() {
+                        lines.push(String::new());
+                        lines.push(
+                            autonoetic_types::constitution_glossary::format_enforced_rules(&gate_rules),
+                        );
+                    }
+                }
+                lines.join("\n")
+            }
+            Ok(None) => format!("No approval found with id '{}'.", rid),
+            Err(e) => format!("Error looking up approval: {}", e),
+        }
+    } else {
+        let pending = match autonoetic_gateway::scheduler::approval::pending_approval_requests_for_session(
+            &autonoetic_types::config::GatewayConfig::default(),
+            Some(store),
+            "",
+        ) {
+            Ok(p) => p,
+            Err(_) => Vec::new(),
+        };
+        if pending.is_empty() {
+            "No pending approvals. Use /why <request_id> to inspect a specific approval.".to_string()
+        } else {
+            let mut lines = vec![format!("{} pending approval(s):", pending.len())];
+            for req in pending.iter().take(5) {
+                let line = format!("  {} — {}", req.request_id, req.action.kind());
+                lines.push(line);
+            }
+            lines.push(String::new());
+            lines.push("Use /why <request_id> for details.".to_string());
+            lines.join("\n")
         }
     }
 }
@@ -2402,6 +2490,9 @@ async fn handle_chat_test_mode(
                 }
                 Ok(SlashCommand::Cancel) => {
                     println!("No active prompt in test mode.");
+                }
+                Ok(SlashCommand::Why(_)) => {
+                    println!("/why is not supported in test mode.");
                 }
                 Err(error) => {
                     println!("{}", error);
@@ -3820,9 +3911,34 @@ fn format_store_approval_card(
             }
         }
     }
+    let inferred_rules = infer_rules_for_action(&req.action);
+    if !inferred_rules.is_empty() {
+        lines.push(String::new());
+        lines.push(autonoetic_types::constitution_glossary::format_enforced_rules(&inferred_rules));
+    }
     lines.push(String::new());
     lines.push(approval_instructions.to_string());
     lines.join("\n")
+}
+
+fn infer_rules_for_action(action: &autonoetic_types::background::ScheduledAction) -> Vec<&'static str> {
+    match action {
+        autonoetic_types::background::ScheduledAction::SandboxExec { .. }
+        | autonoetic_types::background::ScheduledAction::WebSearch { .. }
+        | autonoetic_types::background::ScheduledAction::WebFetch { .. }
+        | autonoetic_types::background::ScheduledAction::WebCall { .. }
+        | autonoetic_types::background::ScheduledAction::CredentialPrompt { .. }
+        | autonoetic_types::background::ScheduledAction::CredentialRequest { .. } => {
+            vec!["R-2.1", "R-2.18"]
+        }
+        autonoetic_types::background::ScheduledAction::RevisionPromote { .. } => {
+            vec!["R++2", "R-2.18"]
+        }
+        autonoetic_types::background::ScheduledAction::SessionEscalate { .. } => {
+            vec!["R-2.18"]
+        }
+        _ => vec!["R-2.18"],
+    }
 }
 
 /// Merge pending gateway approvals for this chat's root session into `pending_approval_ids` so

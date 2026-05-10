@@ -34,6 +34,7 @@ pub mod parser;
 pub mod post_session_digest;
 pub mod promotion_store;
 pub mod prompt_budget;
+pub mod quality_signal;
 pub mod reevaluation_state;
 pub mod remote_access;
 pub mod response_validation;
