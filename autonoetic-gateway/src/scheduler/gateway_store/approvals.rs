@@ -258,6 +258,30 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn list_all_approvals_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ApprovalRequest>> {
+        let root = crate::runtime::content_store::root_session_id(session_id);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id FROM approvals WHERE session_id = ?1 OR root_session_id = ?2 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id, &root], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for id_result in rows {
+            let id = id_result?;
+            if let Some(app) = Self::get_approval_with_conn(&conn, &id)? {
+                results.push(app);
+            }
+        }
+        Ok(results)
+    }
+
     pub fn get_recent_approvals_for_agent(
         &self,
         agent_id: &str,

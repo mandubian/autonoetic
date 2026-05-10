@@ -52,6 +52,7 @@ struct AgentReport {
     last_event_kind: Option<String>,
     last_event_summary: Option<String>,
     approvals: Vec<ApprovalItem>,
+    interactions: Vec<InteractionItem>,
     errors: Vec<ErrorItem>,
     artifacts: Vec<ArtifactItem>,
     delegations: Vec<DelegationItem>,
@@ -73,6 +74,17 @@ struct ApprovalItem {
     resolution_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     links: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InteractionItem {
+    interaction_id: String,
+    kind: String,
+    status: String,
+    question: String,
+    answer: Option<String>,
+    created_at: String,
+    resolved_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +183,7 @@ impl AgentReport {
             last_event_kind: None,
             last_event_summary: None,
             approvals: Vec::new(),
+            interactions: Vec::new(),
             errors: Vec::new(),
             artifacts: Vec::new(),
             delegations: Vec::new(),
@@ -634,6 +647,31 @@ impl SessionReportWriter {
                     links: None,
                 },
             );
+        })
+    }
+
+    pub fn record_interaction_pending(
+        &mut self,
+        interaction_id: &str,
+        kind: &str,
+        question: &str,
+    ) -> anyhow::Result<()> {
+        self.update_state(|state| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
+            record_interaction_pending(agent, interaction_id, kind, question, &now);
+        })
+    }
+
+    pub fn resolve_interaction(
+        &mut self,
+        interaction_id: &str,
+        answer: &str,
+    ) -> anyhow::Result<()> {
+        self.update_state(|state| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
+            resolve_interaction(agent, interaction_id, answer, &now);
         })
     }
 
@@ -1167,6 +1205,44 @@ fn resolve_approval(
     }
 }
 
+fn record_interaction_pending(
+    agent: &mut AgentReport,
+    interaction_id: &str,
+    kind: &str,
+    question: &str,
+    now: &str,
+) {
+    if agent.interactions.iter().any(|i| i.interaction_id == interaction_id) {
+        return;
+    }
+    agent.interactions.push(InteractionItem {
+        interaction_id: interaction_id.to_string(),
+        kind: kind.to_string(),
+        status: "pending".to_string(),
+        question: truncate_chars(question, 200),
+        answer: None,
+        created_at: now.to_string(),
+        resolved_at: None,
+    });
+}
+
+fn resolve_interaction(
+    agent: &mut AgentReport,
+    interaction_id: &str,
+    answer: &str,
+    now: &str,
+) {
+    if let Some(existing) = agent
+        .interactions
+        .iter_mut()
+        .find(|i| i.interaction_id == interaction_id)
+    {
+        existing.status = "answered".to_string();
+        existing.answer = Some(truncate_chars(answer, 200));
+        existing.resolved_at = Some(now.to_string());
+    }
+}
+
 fn maybe_record_output(
     agent: &mut AgentReport,
     tool_name: &str,
@@ -1401,6 +1477,40 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         }
     }
     let _ = writeln!(out);
+
+    {
+        let all_interactions: Vec<_> = state
+            .agents
+            .values()
+            .flat_map(|a| a.interactions.iter().map(move |i| (a.agent_id.as_str(), i)))
+            .collect();
+        let _ = writeln!(out, "## User Interactions");
+        let _ = writeln!(out);
+        if all_interactions.is_empty() {
+            let _ = writeln!(out, "_(none)_");
+        } else {
+            let _ = writeln!(
+                out,
+                "| Time | Agent | ID | Kind | Status | Question | Answer |"
+            );
+            let _ = writeln!(out, "|---|---|---|---|---|---|---|");
+            for (agent_id, i) in &all_interactions {
+                let _ = writeln!(
+                    out,
+                    "| {} | `{}` | `{}` | {} | {} | {} | {} |",
+                    format_timestamp(Some(&i.created_at)),
+                    agent_id,
+                    i.interaction_id,
+                    i.kind,
+                    i.status,
+                    truncate_chars(&i.question, OUTPUT_PREVIEW_DISPLAY_CHARS),
+                    i.answer.as_deref().unwrap_or("—"),
+                );
+            }
+        }
+    }
+    let _ = writeln!(out);
+
     {
         let abnormal: Vec<_> = state
             .agents
@@ -2248,6 +2358,43 @@ fn render_final_markdown(state: &SessionReportState) -> String {
                     .map(|t| format_timestamp(Some(t)))
                     .unwrap_or_else(|| "—".to_string()),
             );
+        }
+    }
+    let _ = writeln!(out);
+
+    {
+        let _ = writeln!(out, "## User Interactions");
+        let _ = writeln!(out);
+        let all_interactions: Vec<_> = state
+            .agents
+            .values()
+            .flat_map(|a| a.interactions.iter().map(move |i| (a.agent_id.as_str(), i)))
+            .collect();
+        if all_interactions.is_empty() {
+            let _ = writeln!(out, "_(none)_");
+        } else {
+            let _ = writeln!(
+                out,
+                "| Time | Agent | ID | Kind | Status | Question | Answer | Resolved |"
+            );
+            let _ = writeln!(out, "|---|---|---|---|---|---|---|---|");
+            for (agent_id, i) in &all_interactions {
+                let _ = writeln!(
+                    out,
+                    "| {} | `{}` | `{}` | {} | {} | {} | {} | {} |",
+                    format_timestamp(Some(&i.created_at)),
+                    agent_id,
+                    i.interaction_id,
+                    i.kind,
+                    i.status,
+                    truncate_chars(&i.question, OUTPUT_PREVIEW_DISPLAY_CHARS),
+                    i.answer.as_deref().unwrap_or("—"),
+                    i.resolved_at
+                        .as_deref()
+                        .map(|t| format_timestamp(Some(t)))
+                        .unwrap_or_else(|| "—".to_string()),
+                );
+            }
         }
     }
     let _ = writeln!(out);

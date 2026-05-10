@@ -2,7 +2,7 @@
 
 Autonoetic is a Rust-first runtime for autonomous, self-evolving agents with durable memory, portable identity, and reproducible execution.
 
-The project is currently incubated in the `autonoetic/` directory inside the broader `ccos` repository, but it is intended to become a standalone project once the architecture and implementation stabilize.
+This repository hosts the standalone Autonoetic project.
 
 ## Why Autonoetic
 

@@ -5,7 +5,7 @@ The `autonoetic` CLI is the primary human-to-system interface for Autonoetic. It
 ## 1. Global Flags & Configuration
 
 Commands can be modified by standard global flags:
-- `--config <path>`: Path to a custom `config.yaml` or `policy.yaml` (default: `~/.ccos/`)
+- `--config <path>`: Path to a custom `config.yaml` or `policy.yaml` (default: `~/.autonoetic/`)
 - `--log-level <level>`: Overrides the Gateway log level (`trace`, `debug`, `info`, `warn`, `error`)
 - `--non-interactive`: Disables all prompts (essential for CI/CD)
 
@@ -22,7 +22,7 @@ Starts the Gateway daemon in the foreground.
   - `--port <number>`: Override the default HTTP/TCP ports.
   - `--tls`: Force TLS wrapping on the OFP federation port.
 - **Operation:**
-  1. Reads `~/.ccos/policy.yaml` to establish global security constraints.
+  1. Reads `~/.autonoetic/policy.yaml` to establish global security constraints.
   2. Binds the local Unix Socket (or TCP loopback) for Agent IPC.
   3. Binds the OFP port (e.g., `4200`) for cluster federation.
 

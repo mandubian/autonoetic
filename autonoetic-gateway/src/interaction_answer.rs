@@ -178,6 +178,22 @@ pub async fn answer_and_orchestrate_resume(
         .get_user_interaction(&params.interaction_id)?
         .ok_or_else(|| anyhow::anyhow!("interaction missing after answer"))?;
 
+    {
+        let gateway_dir = crate::execution::gateway_root_dir(cfg.as_ref());
+        if let Ok(mut report) = crate::runtime::session_report::SessionReportWriter::open(
+            &gateway_dir,
+            &interaction.session_id,
+            &interaction.agent_id,
+        ) {
+            let answer_str = params
+                .answer_text
+                .as_deref()
+                .or(params.answer_option_id.as_deref())
+                .unwrap_or("—");
+            let _ = report.resolve_interaction(&params.interaction_id, answer_str);
+        }
+    }
+
     anyhow::ensure!(
         interaction.status == UserInteractionStatus::Answered,
         "unexpected interaction status after apply: {:?}",

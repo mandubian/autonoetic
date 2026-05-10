@@ -6,6 +6,9 @@ use autonoetic_types::causal_chain::CausalChainEntry;
 use autonoetic_types::config::GatewayConfig;
 use std::collections::BTreeMap;
 
+/// Default basename for operator config/workspace under `$HOME` (unless `--config` is set).
+pub const DEFAULT_OPERATOR_HOME_SUBDIR: &str = ".autonoetic";
+
 fn parse_key_value(s: &str) -> anyhow::Result<(String, String)> {
     let parts: Vec<&str> = s.splitn(2, '=').collect();
     if parts.len() != 2 {
@@ -125,7 +128,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Path to a custom config.yaml or policy.yaml (default: ~/.ccos/)
+    /// Path to a custom config.yaml or policy.yaml (default: ~/.autonoetic/)
     #[arg(global = true, long)]
     pub config: Option<String>,
 
@@ -961,8 +964,8 @@ pub enum McpCommands {
 
 pub fn dirs_or_default() -> PathBuf {
     dirs::home_dir()
-        .map(|h| h.join(".ccos"))
-        .unwrap_or_else(|| PathBuf::from(".ccos"))
+        .map(|h| h.join(DEFAULT_OPERATOR_HOME_SUBDIR))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OPERATOR_HOME_SUBDIR))
 }
 
 pub fn mcp_registry_path(config_path: &Path) -> PathBuf {

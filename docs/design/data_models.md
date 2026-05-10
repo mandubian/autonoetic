@@ -97,7 +97,7 @@ The Runtime Lock pins the execution closure required to reproduce an Agent or Sk
 
 ```yaml
 gateway:
-  artifact: "marketplace://gateway/ccos-gateway"
+  artifact: "marketplace://gateway/autonoetic-gateway"
   version: "0.1.0"
   sha256: "abc123..."
   signature: "ed25519:deadbeef..."
@@ -241,7 +241,7 @@ A Cognitive Capsule packages an Agent bundle together with its runtime closure f
     {"artifact_id": "artifact_01jabc...", "sha256": "7d865e959b2466918c9863a465f1..."}
   ],
   "gateway_runtime": {
-    "artifact": "marketplace://gateway/ccos-gateway",
+    "artifact": "marketplace://gateway/autonoetic-gateway",
     "version": "0.1.0",
     "sha256": "abc123..."
   },
