@@ -589,6 +589,10 @@ impl GatewayExecutionService {
         self.gateway_store.clone()
     }
 
+    pub fn hook_executor(&self) -> Arc<crate::scheduler::hooks::HookExecutor> {
+        self.hook_executor.clone()
+    }
+
     pub fn active_executions(&self) -> Arc<ActiveExecutionRegistry> {
         self.active_executions.clone()
     }

@@ -1044,7 +1044,7 @@ impl JsonRpcRouter {
                     Some(store) => match store.add_gate_message(
                         params.gate_id.trim(),
                         params.sender.trim(),
-                        &params.content,
+                        &crate::log_redaction::redact_text_for_logs(&params.content),
                     ) {
                         Ok(id) => JsonRpcResponse::success(
                             req.id,
@@ -1062,6 +1062,128 @@ impl JsonRpcRouter {
                         req.id,
                         -32000,
                         "GatewayStore not available",
+                    ),
+                }
+            }
+
+            "approvals.approve" => {
+                #[derive(Deserialize)]
+                struct ApproveParams {
+                    request_id: String,
+                    decided_by: String,
+                    reason: Option<String>,
+                    #[serde(default)]
+                    secrets: Option<Vec<(String, String)>>,
+                    approver_level: Option<String>,
+                }
+
+                let params: ApproveParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for approvals.approve: {}", e),
+                        );
+                    }
+                };
+
+                if params.request_id.trim().is_empty() || params.decided_by.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "request_id and decided_by must not be empty",
+                    );
+                }
+
+                let config = self.execution.config();
+                let store = self.execution.gateway_store();
+                let hooks = self.execution.hook_executor();
+                let level = params.approver_level.as_deref().map(|s| match s {
+                    "admin" => autonoetic_types::background::ApprovalLevel::Admin,
+                    s if s.starts_with("agent:") => {
+                        autonoetic_types::background::ApprovalLevel::Agent(
+                            s.strip_prefix("agent:").unwrap_or(s).to_string(),
+                        )
+                    }
+                    _ => autonoetic_types::background::ApprovalLevel::Operator,
+                });
+
+                match crate::scheduler::approve_request(
+                    config.as_ref(),
+                    store.as_deref(),
+                    params.request_id.trim(),
+                    params.decided_by.trim(),
+                    params.reason,
+                    params.secrets,
+                    level.as_ref(),
+                    Some(hooks.as_ref()),
+                ) {
+                    Ok(decision) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "request_id": decision.request_id,
+                            "status": format!("{:?}", decision.status),
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Approval failed: {}", e),
+                    ),
+                }
+            }
+
+            "approvals.reject" => {
+                #[derive(Deserialize)]
+                struct RejectParams {
+                    request_id: String,
+                    decided_by: String,
+                    reason: Option<String>,
+                }
+
+                let params: RejectParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for approvals.reject: {}", e),
+                        );
+                    }
+                };
+
+                if params.request_id.trim().is_empty() || params.decided_by.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "request_id and decided_by must not be empty",
+                    );
+                }
+
+                let config = self.execution.config();
+                let store = self.execution.gateway_store();
+                let hooks = self.execution.hook_executor();
+
+                match crate::scheduler::reject_request(
+                    config.as_ref(),
+                    store.as_deref(),
+                    params.request_id.trim(),
+                    params.decided_by.trim(),
+                    params.reason,
+                    Some(hooks.as_ref()),
+                ) {
+                    Ok(decision) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "request_id": decision.request_id,
+                            "status": format!("{:?}", decision.status),
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Rejection failed: {}", e),
                     ),
                 }
             }

@@ -297,6 +297,14 @@ impl GateService {
             "GateKind::UserInput requires a session_id"
         );
 
+        // Dedup: if a pending interaction already exists for this session, reuse it.
+        if let Some(pending_id) = self.find_pending_user_input(sid)? {
+            return Ok(GateResult::AlreadyPending {
+                gate_id: pending_id,
+                enforced_rules: vec!["R-2.3", "R-2.18"],
+            });
+        }
+
         let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
         let (root_session_id, workflow_id, task_id) = resolve_execution_context(req);
@@ -353,6 +361,27 @@ impl GateService {
         };
 
         let sid = req.session_id.unwrap_or("");
+
+        // Dedup: if a pending SessionEscalate already exists for this session, reuse it.
+        if !sid.is_empty() {
+            let escalate_action = ScheduledAction::SessionEscalate {
+                session_id: sid.to_string(),
+                root_session_id: content_store::root_session_id(sid).to_string(),
+                requested_by_agent_id: req.manifest.agent.id.clone(),
+                reason: reason.clone(),
+                context: String::new(),
+                urgency: "normal".to_string(),
+                suggested_actions: Vec::new(),
+                payload: None,
+            };
+            if let Some(pending_id) = self.find_pending_for_targets(sid, &escalate_action, &[])? {
+                return Ok(GateResult::AlreadyPending {
+                    gate_id: pending_id,
+                    enforced_rules: vec!["R-2.3", "R-2.18"],
+                });
+            }
+        }
+
         let root_sid = if sid.is_empty() {
             String::new()
         } else {
@@ -539,6 +568,15 @@ impl GateService {
         Ok(None)
     }
 
+    /// Find an existing pending user interaction for the same session.
+    fn find_pending_user_input(&self, session_id: &str) -> Result<Option<String>> {
+        let pending = self.store.get_pending_interactions_for_session(session_id)?;
+        if let Some(first) = pending.first() {
+            return Ok(Some(first.interaction_id.clone()));
+        }
+        Ok(None)
+    }
+
     // -----------------------------------------------------------------------
     // Helpers — approval row creation
     // -----------------------------------------------------------------------
@@ -653,13 +691,16 @@ impl GateService {
     // -----------------------------------------------------------------------
 
     /// Add a message to a gate's enrichment thread.
+    ///
+    /// Content is redacted before storage (R-2.19, R-4.13 parity).
     pub fn add_gate_message(
         &self,
         gate_id: &str,
         sender: &str,
         content: &str,
     ) -> Result<i64> {
-        self.store.add_gate_message(gate_id, sender, content)
+        let redacted = crate::log_redaction::redact_text_for_logs(content);
+        self.store.add_gate_message(gate_id, sender, &redacted)
     }
 
     /// Retrieve all messages for a gate's enrichment thread.

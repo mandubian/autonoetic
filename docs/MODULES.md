@@ -98,6 +98,7 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | `tools/evaluation.rs` | `eval.*` |
 | `tools/workflow.rs` | `workflow.*`, `approval_status` |
 | `tools/user_interaction.rs` | `user_ask`, `user_interaction_status` |
+| `human_gate.rs` | Unified `GateService` — centralizes dedup, grants, `approval_ref` validation, enrichment threads, and secret redaction for all human-gated operations (approvals, `user_ask`, escalations) |
 | `tools/artifact.rs` | `artifact_build`, `artifact_inspect`, `artifact_resolve_ref` |
 | `tools/artifact_prepare.rs` | `artifact_prepare` |
 | `tools/artifact_exec.rs` | `artifact_exec` |

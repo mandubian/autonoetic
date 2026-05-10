@@ -1,5 +1,19 @@
 # Approval System Architecture
 
+> **DEPRECATED** — This document describes the pre-unification approval
+> architecture where each tool re-implemented approval logic independently.
+> Since v2026.05.10, all human-gated operations flow through a unified
+> `GateService` (`runtime/human_gate.rs`) that centralizes dedup, grants,
+> `approval_ref` validation, enrichment threads, and secret redaction.
+>
+> See [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md)
+> for the unified architecture.
+> See [`constitution/versions/2026.05.10/constitution.md`](./constitution/versions/2026.05.10/constitution.md)
+> for the constitutional rules governing gates (R-2.18 through R-2.21, R-8.19).
+>
+> The grant model, approval levels, and CLI commands below remain accurate
+> operational reference.
+
 ## Overview
 
 The Autonoetic approval system enforces a **Separation of Powers** between agents (low-privilege reasoners that propose intents) and the Gateway (high-privilege executor that validates and runs them). Before any privileged operation executes, the Gateway requires operator approval.

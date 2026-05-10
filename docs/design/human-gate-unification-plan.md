@@ -2,6 +2,24 @@
 
 > Tracking issue: [#167](https://github.com/mandubian/autonoetic/issues/167)
 
+## Implementation Status (v2026.05.10)
+
+| Phase | Status |
+|-------|--------|
+| `GateService` core (`runtime/human_gate.rs`) with `GateKind`, `GateRequest`, `GateResult` | **Done** |
+| Approval pipeline: dedup, grants, `approval_ref`, enrichment, secret redaction | **Done** |
+| `UserInput` pipeline with dedup | **Done** |
+| `Escalation` pipeline with dedup | **Done** |
+| `web.rs`, `credential.rs`, `sandbox.rs` routed through `GateService` | **Done** |
+| `gate.add_message` / `gate.get_messages` JSON-RPC with redaction | **Done** |
+| `approvals.approve` / `approvals.reject` JSON-RPC (headless/bot clients) | **Done** |
+| Constitutional alignment (R-2.18–R-2.21, R-8.19, R+++3 `enforced_rules`) | **Done** — [#180](https://github.com/mandubian/autonoetic/issues/180) |
+| State attestation expanded to all gate kinds (R-6.23) | **Done** |
+| Migrate remaining tools (`session.rs`, `artifact_prepare.rs`, `artifact_exec.rs`, `user_profile.rs`, `user_interaction.rs`) to `GateService` | **Pending** |
+| Agent-as-decider (R-2.20, R-2.21) | **Pending** — constitutional rules ratified, code not yet implemented |
+
+---
+
 ## Problem Statement
 
 The approval mechanism is **spread across 15+ files** with each tool reimplementing the same "check → gate → suspend → resume" pattern independently. This caused 7 redundant approval requests in a single demo session and makes the system fragile to extend with new tools.

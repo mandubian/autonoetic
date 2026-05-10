@@ -16,10 +16,10 @@ This index links to all documentation under `docs/` and marks what is stable ref
 
 ## Workflow and Interaction Semantics
 
+- [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md) - **Unified GateService architecture** for approvals, `user_ask`, and escalations (`runtime/human_gate.rs`).
+- [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) - Constitutional amendments for the unified gate abstraction (R-2.18–R-2.21, R-8.19).
 - [`workflow-orchestration.md`](./workflow-orchestration.md) - Durable workflow/task lifecycle and join semantics.
-- [`approval-system.md`](./approval-system.md) - Approval flow and interaction mechanism semantics.
 - [`approval-notification-delivery.md`](./approval-notification-delivery.md) - Delivery path for workflow vs non-workflow approvals.
-- [`architecture-interaction-mechanisms.md`](./architecture-interaction-mechanisms.md) - Approval vs `user_ask` vs `clarification_needed`.
 - [`agent-clarification-protocol.md`](./agent-clarification-protocol.md) - Clarification signal format and parent/child handling.
 - [`quickstart-planner-specialist-chat.md`](./quickstart-planner-specialist-chat.md) - End-to-end planner/specialist chat walkthrough.
 
@@ -63,6 +63,8 @@ This index links to all documentation under `docs/` and marks what is stable ref
 
 ## Design Subdirectory
 
+- [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md) - Unified GateService architecture, migration status, and future agent-as-decider design.
+- [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) - Constitutional amendments rationale for unified gates.
 - [`design/architecture_modules.md`](./design/architecture_modules.md) - Architecture decomposition by module.
 - [`design/concepts.md`](./design/concepts.md) - Core conceptual model and terminology.
 - [`design/data_models.md`](./design/data_models.md) - Data model design details.
@@ -83,3 +85,5 @@ These are preserved for history and should not be treated as current source-of-t
 - [`archived/promotion-strategy.md`](./archived/promotion-strategy.md) - Archived promotion strategy.
 - [`archived/spec-agent-revision-evaluation-federation-mvp.md`](./archived/spec-agent-revision-evaluation-federation-mvp.md) - Design spec for the completed revision/eval/federation MVP.
 - [`archived/tool-skill-repository-design.md`](./archived/tool-skill-repository-design.md) - Aspirational tool/skill repository design (not yet implemented).
+- [`archived/approval-system.md`](./archived/approval-system.md) - Pre-unification approval architecture (superseded by `GateService`).
+- [`archived/architecture-interaction-mechanisms.md`](./archived/architecture-interaction-mechanisms.md) - Legacy three-pipeline interaction model (superseded by unified gate).

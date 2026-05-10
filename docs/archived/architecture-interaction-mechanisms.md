@@ -1,5 +1,15 @@
 # Interaction Mechanisms: Approval vs user_ask vs clarification_needed
 
+> **DEPRECATED** — This document describes the legacy three-pipeline interaction
+> model. Since v2026.05.10, approvals, `user_ask`, and escalations are unified
+> under a single `GateService` abstraction (`runtime/human_gate.rs`).
+> See [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md)
+> for the current architecture.
+>
+> The comparison table below remains accurate for **observable behavior** (yield
+> reasons, resume paths, CLI commands) but the implementation is no longer split
+> across independent pipelines.
+
 ## Overview
 
 Autonoetic has three distinct mechanisms for human/agent interaction during workflow execution. Each serves a different purpose and has different semantics. Confusing them leads to deadlocks, stranded sessions, and infinite retry loops.
