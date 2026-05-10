@@ -13,6 +13,30 @@ The Autonoetic CLI (`autonoetic`) provides commands for managing the gateway, ag
 
 ---
 
+## Run (Quick Start)
+
+### `autonoetic run`
+
+One-command start: detects LLM providers, generates config, bootstraps agents, starts gateway, and opens chat. Ideal for first-time users.
+
+```bash
+autonoetic run
+autonoetic run --agent-id researcher.default
+autonoetic run --session-id my-session
+```
+
+| Option | Description |
+|--------|-------------|
+| `--agent-id <ID>` | Target agent (default: `planner.default`) |
+| `--session-id <ID>` | Resume an existing session |
+
+On first run, interactively prompts for:
+1. **LLM provider** — auto-detects API keys and local servers
+2. **Model** — fetches the provider's catalog
+3. **Persona** — optional "about yourself" text for agent personalization
+
+---
+
 ## Gateway
 
 Manage the Gateway lifecycle and configuration.
@@ -215,6 +239,20 @@ autonoetic chat researcher.default --session-id my-session
 | `--channel-id` | Stable channel identity |
 | `--session-id` | Stable conversation ID |
 | `--test-mode` | Suppress prompts for scripted tests |
+
+**Slash commands during chat:**
+
+| Command | Description |
+|---------|-------------|
+| `/session` | Show known sessions and open the session picker |
+| `/session new [name]` | Create a new session |
+| `/session switch <id>` | Switch to an existing session |
+| `/status` | Show current session details |
+| `/why [request_id]` | Explain why an approval was triggered (constitutional rules) |
+| `/persona [text]` | Show or set user persona (persists to `persona.md`, applies to new sessions) |
+| `/cancel` | Leave the current picker/prompt |
+| `/quit` or `/exit` | Exit chat |
+| `/help` | Show all commands |
 
 ---
 

@@ -36,6 +36,8 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `workflow_task_heartbeat_secs` | u64 \| null | `null` | Optional heartbeat interval for `Running` workflow tasks (sync + async) to refresh `updated_at` and avoid false stuck resolution during long tails. If `null`, derives from `background_tick_secs` (clamped `1..=5`). Effective range when set: `1..=30`. |
 | `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
+| `profile` | string | `"standard"` | Complexity profile: `starter` (simplified UX, auto-approve safe tools), `standard` (current behavior), or `expert` (full constitutional visibility). See [Profiles](#profiles). |
+| `persona_path` | string (path) \| null | `null` | Path to a Markdown file injected into every agent's system prompt. Enables cross-agent user context and communication preferences. Relative paths resolve from the config directory. When `null`, the gateway looks for `persona.md` next to the config file (used only if it exists). |
 
 > **Note:** `AUTONOETIC_SHARED_SECRET` is intentionally not in config.yaml — it must be set as an environment variable to avoid accidental commits of secrets. It authenticates both the HTTP API and local JSON-RPC ingress requests.
 
@@ -702,6 +704,72 @@ digest_agent:
   min_turns: 2
   llm_preset: agentic
 ```
+
+> **Note:** With the auto-learning pipeline (see below), `digest_agent.enabled` defaults to `true`.
+
+---
+
+## Auto-Learning Pipeline
+
+Controls the default self-improvement loop. When enabled, the gateway automatically distills memories after sessions, emits quality signals, and schedules periodic memory curation.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `auto_learning.enabled` | bool | `true` | Master switch for the auto-learning pipeline. |
+| `auto_learning.quality_signals` | bool | `true` | Emit per-session quality signals (turn count, error count, completion) as Tier-2 memories tagged `source:quality_signal`. |
+| `auto_learning.curation_schedule` | string | `"0 */4 * * *"` | Cron expression for periodic memory curation. |
+
+```yaml
+auto_learning:
+  enabled: true
+  quality_signals: true
+  curation_schedule: "0 */4 * * *"
+```
+
+To opt out entirely:
+
+```yaml
+auto_learning:
+  enabled: false
+```
+
+---
+
+## Profiles
+
+Complexity profiles control default behaviors and visibility. Explicit config overrides always win over profile defaults.
+
+| Profile | Description |
+|---------|-------------|
+| `starter` | Simplified UX. Auto-approves safe tool invocations, simplified help text, auto-learning ON, generous memory priming (3 memories). |
+| `standard` | Current behavior (default). All approvals require operator confirmation. Memory priming limit: 5. |
+| `expert` | Full constitutional visibility. Rule IDs shown alongside approval cards. Memory priming limit: 10. |
+
+```yaml
+profile: starter
+```
+
+---
+
+## User Persona
+
+A Markdown file loaded at gateway start and injected into every agent's system prompt between the constitutional foundation and agent-specific instructions. Enables cross-agent personalization (communication style, domain context, preferences).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `persona_path` | string (path) \| null | `null` | Path to persona file. Relative paths resolve from config directory. When `null`, looks for `persona.md` next to config file. |
+
+The persona file is free-form Markdown:
+
+```markdown
+I'm a senior Rust developer working on distributed systems.
+Respond concisely. Use English for code, French for prose.
+My project uses tokio + axum + SQLite.
+```
+
+Set or view the persona from the chat TUI with `/persona [text]`.
+
+The persona layer sits after constitutional rules (cannot override them) and before agent-specific instructions (agents can further specialize).
 
 ---
 

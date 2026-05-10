@@ -63,6 +63,7 @@ This index links to all documentation under `docs/` and marks what is stable ref
 
 ## Design Subdirectory
 
+- [`design/progressive-ux-auto-learning-plan.md`](./design/progressive-ux-auto-learning-plan.md) - Progressive UX and default self-improvement: one-command start, auto-learning, contextual "why", complexity profiles, session continuity, user persona.
 - [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md) - Unified GateService architecture, migration status, and future agent-as-decider design.
 - [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) - Constitutional amendments rationale for unified gates.
 - [`design/architecture_modules.md`](./design/architecture_modules.md) - Architecture decomposition by module.

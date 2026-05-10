@@ -5,11 +5,12 @@
 ## Quick Start
 
 ```bash
-# Bootstrap reference agents and start gateway
+# Fastest path: one command does everything (config, bootstrap, gateway, chat)
+autonoetic run
+
+# Or the manual decomposed workflow:
 autonoetic agent bootstrap --from ./agents/ --overwrite
 autonoetic gateway start --port 8080 --config gateway.toml
-
-# Chat with an agent
 autonoetic chat --agent planner.default
 
 # Inspect traces
@@ -23,6 +24,33 @@ autonoetic trace show <session_id>
 |--------|-------------|
 | `-c, --config <PATH>` | Path to gateway.toml config file |
 | `--non-interactive` | Disable interactive prompts |
+
+---
+
+## `autonoetic run`
+
+One-command start for new users. Detects available LLM providers, generates
+config, bootstraps agents, starts the gateway in-process, and opens chat —
+all without requiring the user to understand the decomposed commands.
+
+```bash
+autonoetic run [OPTIONS]
+
+Options:
+  --agent-id <ID>      Target agent (default: planner.default)
+  --session-id <ID>    Resume an existing session
+```
+
+**Interactive setup (first run only):**
+
+1. Detects available providers from environment variables (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, etc.) and probes local servers (Ollama, LM Studio, vLLM, llama.cpp).
+2. Presents a numbered menu to pick a provider.
+3. Fetches the provider's model catalog and lets you pick a model.
+4. Optionally prompts for a user persona ("Tell me about yourself").
+5. Writes `~/.autonoetic/config.yaml` and `~/.autonoetic/persona.md`.
+6. Bootstraps agents and starts gateway + chat.
+
+Subsequent runs skip setup and go straight to chat.
 
 ---
 
@@ -392,6 +420,8 @@ Requires `AUTONOETIC_SHARED_SECRET` in the environment so chat requests can auth
 - `/session new [name]` — Create a new session, optionally naming it explicitly
 - `/session switch <id>` — Switch to an existing session
 - `/status` — Show current session info
+- `/why [request_id]` — Explain why an approval was triggered (shows constitutional rules)
+- `/persona [text]` — Show or set user persona (persists to `persona.md`)
 - `/cancel` — Leave the current session picker/prompt
 - `/exit` or `/quit` — Exit chat
 - `/help` — Show available chat commands
