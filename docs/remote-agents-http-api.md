@@ -14,6 +14,75 @@ Autonoetic supports remote agents that can read/write content on a different mac
 └─────────────────┘                             └─────────────────┘
 ```
 
+## Listener binding & ports
+
+- **JSON-RPC (localhost IPC)** continues to use `GatewayConfig.port` (default `4000`) and only accepts traffic from `127.0.0.1`.
+- **HTTP ingress** listens on **`0.0.0.0:http_port`** (default **`4100`**). Set `http_port: 0` to disable the HTTP server entirely while keeping JSON-RPC available.
+
+Both transports share `AUTONOETIC_SHARED_SECRET` for authentication.
+
+## Channel metadata convention (`event.ingest`)
+
+Remote bridges (Discord bots, WhatsApp relays, web frontends, etc.) should populate `metadata.channel.kind` to identify their transport while keeping the JSON envelope identical to TCP JSON-RPC:
+
+```json
+{
+  "channel": {
+    "kind": "http",
+    "channel_id": "bridge:customer-portal",
+    "sender_id": "user-123",
+    "session_id": "optional-session-hint"
+  }
+}
+```
+
+Suggested values for `kind`: `"http"`, `"discord"`, `"whatsapp"`, `"slack"`, `"terminal"` (built-in TUI uses `"terminal"`).
+
+The chat TUI additionally forwards `root_session_id` inside `metadata` for `/policy` requests so governance agents can scope proposals.
+
+## HTTP Event Ingress & Streaming
+
+### `POST /api/event/ingest`
+
+Accepts a JSON body matching the JSON-RPC **`event.ingest`** `params` object (same fields as the TCP API). Returns a JSON-RPC envelope (`result` or `error`) identical to line-delimited TCP responses.
+
+```http
+POST /api/event/ingest
+Authorization: Bearer <AUTONOETIC_SHARED_SECRET>
+Content-Type: application/json
+
+{
+  "event_type": "chat",
+  "message": "hello from bridge",
+  "session_id": "sess-http-123",
+  "target_agent_id": "planner.default",
+  "async_mode": true,
+  "metadata": {
+    "channel": {
+      "kind": "http",
+      "channel_id": "bridge:demo",
+      "sender_id": "external-client",
+      "session_id": "sess-http-123"
+    }
+  }
+}
+```
+
+### `GET /api/session/stream/{session_id}` (SSE)
+
+Streams periodic JSON-RPC **`session.status`** poll results as Server-Sent Events. Designed for clients that already submitted an `event.ingest` with `"async_mode": true`.
+
+- **Auth**: `Authorization: Bearer …` **or** `?token=<AUTONOETIC_SHARED_SECRET>` (required for browser `EventSource`, which cannot set headers).
+- **Tuning**: optional `interval_ms` query parameter (100–10 000 ms, default `500`).
+- **Termination**: the stream stops once the embedded JSON shows a terminal async status (`completed`, approvals/input suspension, failure, or JSON-RPC error).
+
+```http
+GET /api/session/stream/sess-http-123?token=<AUTONOETIC_SHARED_SECRET>&interval_ms=750
+Accept: text/event-stream
+```
+
+Each SSE `data` payload is the serialized `JsonRpcResponse` from `session.status`.
+
 ## HTTP Content API Endpoints
 
 All endpoints require Bearer token authentication.
@@ -186,12 +255,11 @@ sdk.files.write("main.py", "print('hello')")  # Goes via Unix socket
 
 ### Gateway Side
 
-The HTTP server is integrated into the gateway and uses the same `AUTONOETIC_SHARED_SECRET` as the OFP federation listener. No additional configuration needed - the content API runs on the same port as the gateway.
+Set `http_port` in `gateway.yaml` (defaults to `4100`). The HTTP server shares `AUTONOETIC_SHARED_SECRET` with JSON-RPC/OFP for authentication.
 
 ```bash
-# Start gateway with HTTP content API
 export AUTONOETIC_SHARED_SECRET="my-secret"
-autonoetic gateway start --port 8080
+autonoetic gateway start --config /path/to/gateway.yaml
 ```
 
 ### Agent Side
@@ -213,17 +281,16 @@ sdk = init_remote("http://gateway-host:8080", token="my-secret")
 
 ## Limitations
 
-Currently, only content operations are available via HTTP:
+HTTP exposes **content APIs**, **`event.ingest`**, and **async session polling via SSE**. Everything else (rich MCP transports, vault RPCs, etc.) remains oriented around local sockets unless explicitly added.
 
-| Operation | Local (Socket) | Remote (HTTP) |
-|-----------|----------------|---------------|
+| Operation | Local JSON-RPC | Remote HTTP |
+|-----------|----------------|-------------|
 | `files.write/read/persist` | Yes | Yes |
-| `memory.*` | Yes | No (socket only) |
-| `secrets.*` | Yes | No (socket only) |
-| `message.*` | Yes | No (socket only) |
-| `artifacts.*` | Yes | No (socket only) |
+| `event.ingest` (+ async follow-up) | Yes | Yes (`POST` + SSE stream) |
+| Vault / secrets tooling | Yes | No |
+| Ad-hoc MCP transports | Yes | Not via HTTP |
 
-Secrets and inter-agent messaging remain local-only for security reasons.
+Treat HTTP as an ingress surface for orchestrators you trust — layer TLS/network ACLs accordingly.
 
 ## Agent Manifest Configuration
 

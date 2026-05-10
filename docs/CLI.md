@@ -421,6 +421,7 @@ Requires `AUTONOETIC_SHARED_SECRET` in the environment so chat requests can auth
 - `/session switch <id>` — Switch to an existing session
 - `/status` — Show current session info
 - `/why [request_id]` — Explain why an approval was triggered (shows constitutional rules)
+- `/policy <text>` — Route a governance request to `governance-author.default` (constitutional proposals)
 - `/persona [text]` — Show or set user persona (persists to `persona.md`)
 - `/cancel` — Leave the current session picker/prompt
 - `/exit` or `/quit` — Exit chat

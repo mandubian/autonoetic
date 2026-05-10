@@ -636,6 +636,11 @@ pub struct GatewayConfig {
     #[serde(default = "default_port")]
     pub port: u16,
 
+    /// HTTP listen port for multi-channel ingress (`/api/content/*`, `/api/event/ingest`).
+    /// Binds `0.0.0.0:{http_port}`. Set to `0` to disable the HTTP server (localhost-only JSON-RPC remains available).
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+
     /// OFP federation port.
     #[serde(default = "default_ofp_port")]
     pub ofp_port: u16,
@@ -1399,6 +1404,10 @@ fn default_port() -> u16 {
     4000
 }
 
+fn default_http_port() -> u16 {
+    4100
+}
+
 fn default_ofp_port() -> u16 {
     4200
 }
@@ -1622,6 +1631,7 @@ impl Default for GatewayConfig {
         Self {
             agents_dir: default_agents_dir(),
             port: default_port(),
+            http_port: default_http_port(),
             ofp_port: default_ofp_port(),
             tls: false,
             node_id: default_node_id(),

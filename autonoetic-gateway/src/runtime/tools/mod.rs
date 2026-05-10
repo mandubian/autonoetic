@@ -865,6 +865,7 @@ pub mod execution;
 pub mod knowledge;
 pub mod observability;
 pub mod promotion;
+pub mod quality_trend;
 pub mod sandbox;
 pub mod scheduler;
 pub mod security_redteam;
@@ -891,6 +892,7 @@ pub use crate::runtime::tools::security_redteam::{
 pub fn default_registry() -> NativeToolRegistry {
     let mut registry = NativeToolRegistry::new();
     crate::runtime::tools::execution::register_tools(&mut registry);
+    crate::runtime::tools::quality_trend::register_tools(&mut registry);
     crate::runtime::tools::digest::register_tools(&mut registry);
     crate::runtime::tools::session::register_tools(&mut registry);
     crate::runtime::tools::content::register_tools(&mut registry);

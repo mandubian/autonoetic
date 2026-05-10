@@ -249,6 +249,7 @@ autonoetic chat researcher.default --session-id my-session
 | `/session switch <id>` | Switch to an existing session |
 | `/status` | Show current session details |
 | `/why [request_id]` | Explain why an approval was triggered (constitutional rules) |
+| `/policy <text>` | Send governance intent to `governance-author.default` for constitutional proposals |
 | `/persona [text]` | Show or set user persona (persists to `persona.md`, applies to new sessions) |
 | `/cancel` | Leave the current picker/prompt |
 | `/quit` or `/exit` | Exit chat |

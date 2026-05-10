@@ -25,6 +25,7 @@ pub mod runner;
 pub mod signal;
 pub mod store;
 pub mod system_agents;
+pub mod auto_learning_jobs;
 pub mod workflow_causal;
 pub mod workflow_store;
 

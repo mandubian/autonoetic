@@ -1002,6 +1002,11 @@ pub fn default_terminal_channel_id(sender_id: &str, target_hint: &str) -> String
     format!("terminal:{}:{}", sender_id, target_hint)
 }
 
+/// Terminal sessions label metadata as `channel.kind = "terminal"`.
+///
+/// Remote transports (HTTP bridges, Discord bots, etc.) should use their own `kind`
+/// strings (`"http"`, `"discord"`, `"whatsapp"`, …) following the envelope conventions
+/// documented in `docs/remote-agents-http-api.md`.
 pub fn terminal_channel_envelope(
     channel_id: &str,
     sender_id: &str,

@@ -10,6 +10,10 @@
 | Feature 4: Complexity profiles | Done | `Profile` enum + behavior methods in `config.rs` |
 | Feature 5: Session continuity | Done | `build_memory_context_snippet` in `context.rs`, `search_memories_by_tags` in `gateway_store/memory.rs` |
 | Feature 6: User persona | Done | `persona.md` file, `persona_path` in config, injection in `context.rs`, `/persona` command, first-run prompt |
+| Auto-learning cron injection | Done | `auto_learning.curation_schedule` + daily evolution orchestrator via `inject_auto_learning_jobs` (`scheduler/auto_learning_jobs.rs`, `server/mod.rs`) |
+| Quality trend tooling | Done | `quality_trend_report` native tool + `build_quality_trend_report` aggregation (`runtime/quality_signal.rs`, `runtime/tools/quality_trend.rs`) |
+| HTTP ingress (multi-channel) | Done | `http_port`, `POST /api/event/ingest`, `GET /api/session/stream/{session_id}` SSE (`server/http.rs`, `server/mod.rs`) |
+| Governance authoring (`/policy`) | Done | `agents/governance/governance-author.default`, chat outbound routing + richer proposal summaries |
 
 ---
 

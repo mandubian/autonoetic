@@ -19,6 +19,7 @@ Fields marked **required** must be present or the gateway will fail to start.
 |-------|------|---------|-------------|
 | `agents_dir` | string (path) | `"./agents"` | **Required.** Directory containing agent subdirectories, each with a `SKILL.md`. Set to absolute path by `init-config`. |
 | `port` | u16 | `4000` | Port for the local JSON-RPC IPC listener (Unix socket on Linux, TCP fallback). |
+| `http_port` | u16 | `4100` | HTTP ingress bind (`0.0.0.0:http_port`) for `/api/*` routes (`event.ingest`, SSE, content API). Set `0` to disable HTTP while keeping localhost JSON-RPC on `port`. |
 | `ofp_port` | u16 | `4200` | Open Fang Protocol federation port for gateway-to-gateway communication. |
 | `tls` | bool | `false` | Enable TLS on the OFP port. |
 | ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
@@ -713,11 +714,18 @@ digest_agent:
 
 Controls the default self-improvement loop. When enabled, the gateway automatically distills memories after sessions, emits quality signals, and schedules periodic memory curation.
 
+When `auto_learning.enabled` is `true`, startup injects synthetic cron rows for:
+
+- `memory-curator.default`, driven by `auto_learning.curation_schedule`
+- `evolution-orchestrator.default`, on a fixed daily cadence (`0 3 * * *`)
+
+Injection is skipped when an enabled `system_agents` entry already declares a schedule for those targets, or when the agent bundle is missing from `agents_dir`.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `auto_learning.enabled` | bool | `true` | Master switch for the auto-learning pipeline. |
 | `auto_learning.quality_signals` | bool | `true` | Emit per-session quality signals (turn count, error count, completion) as Tier-2 memories tagged `source:quality_signal`. |
-| `auto_learning.curation_schedule` | string | `"0 */4 * * *"` | Cron expression for periodic memory curation. |
+| `auto_learning.curation_schedule` | string | `"0 */4 * * *"` | Cron expression forwarded to the injected `memory-curator.default` job (UTC). Ignored when auto-learning is disabled or the curator already has an active system cron. |
 
 ```yaml
 auto_learning:
@@ -801,6 +809,7 @@ When no mapping exists for a template, the agent uses its role-specific hardcode
 ```yaml
 agents_dir: "/home/user/autonoetic/agents"
 port: 4000
+http_port: 4100
 ofp_port: 4200
 tls: false
 node_id: "gateway"

@@ -84,8 +84,8 @@ pub async fn maybe_emit_quality_signal(
     }
 }
 
-#[derive(Debug, serde::Serialize)]
-struct QualitySignal {
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct QualitySignal {
     session_id: String,
     agent_id: String,
     turn_count: u64,
@@ -96,7 +96,7 @@ struct QualitySignal {
 }
 
 impl QualitySignal {
-    fn overall_score(&self) -> f64 {
+    pub fn overall_score(&self) -> f64 {
         let mut score = 0.7_f64;
 
         if self.turn_count > 0 && self.error_count == 0 {
@@ -155,4 +155,93 @@ fn compute_signal(
         approval_count,
         completed_normally,
     })
+}
+
+/// Aggregated per-agent metrics derived from persisted quality_signal memories.
+#[derive(Debug, serde::Serialize)]
+pub struct AgentQualityTrendRow {
+    pub agent_id: String,
+    pub sessions_observed: usize,
+    pub avg_overall_score: f64,
+    pub avg_error_count: f64,
+    pub avg_tool_calls: f64,
+    pub avg_approval_count: f64,
+    pub fraction_completed_normally: f64,
+}
+
+/// Build a structured JSON trend report from recent Tier-2 `quality_signal` memories.
+///
+/// Returns an error when **no** parseable quality signals exist (operators expect explicit
+/// failure rather than silent empty reports).
+pub fn build_quality_trend_report(
+    store: &GatewayStore,
+    memory_limit: usize,
+    agent_filter: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    use std::collections::HashMap;
+
+    let memories = store.search_memories_by_tags(&["source:quality_signal"], memory_limit)?;
+
+    let mut signals: Vec<QualitySignal> = Vec::new();
+    for m in memories {
+        match serde_json::from_str::<QualitySignal>(&m.content) {
+            Ok(s) => {
+                if let Some(prefix) = agent_filter {
+                    if s.agent_id != prefix && !s.agent_id.contains(prefix) {
+                        continue;
+                    }
+                }
+                signals.push(s);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "quality_signal",
+                    memory_id = %m.memory_id,
+                    error = %e,
+                    "Skipping malformed quality_signal memory row"
+                );
+            }
+        }
+    }
+
+    if signals.is_empty() {
+        anyhow::bail!(
+            "No quality_signal memories available for trend analysis. \
+             Complete agent sessions with auto_learning.enabled=true and auto_learning.quality_signals=true."
+        );
+    }
+
+    let mut by_agent: HashMap<String, Vec<QualitySignal>> = HashMap::new();
+    for s in signals {
+        by_agent.entry(s.agent_id.clone()).or_default().push(s);
+    }
+
+    let mut rows: Vec<AgentQualityTrendRow> = Vec::new();
+    for (agent_id, sess) in by_agent {
+        let n = sess.len();
+        let nf = n as f64;
+        let sum_score: f64 = sess.iter().map(QualitySignal::overall_score).sum();
+        let sum_err: f64 = sess.iter().map(|x| x.error_count as f64).sum();
+        let sum_tools: f64 = sess.iter().map(|x| x.tool_call_count as f64).sum();
+        let sum_appr: f64 = sess.iter().map(|x| x.approval_count as f64).sum();
+        let completed: f64 = sess.iter().filter(|x| x.completed_normally).count() as f64;
+        rows.push(AgentQualityTrendRow {
+            agent_id,
+            sessions_observed: n,
+            avg_overall_score: sum_score / nf,
+            avg_error_count: sum_err / nf,
+            avg_tool_calls: sum_tools / nf,
+            avg_approval_count: sum_appr / nf,
+            fraction_completed_normally: completed / nf,
+        });
+    }
+
+    rows.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+
+    Ok(serde_json::json!({
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "memory_limit_requested": memory_limit,
+        "agent_filter": agent_filter,
+        "agents": rows,
+    }))
 }
