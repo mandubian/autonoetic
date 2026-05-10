@@ -1129,8 +1129,7 @@ fn handle_slash_command_submission(
         SlashCommand::Policy(_) => {
             app.add_message(
                 MessageRole::System,
-                "Internal error: `/policy` must be routed through the outbound chat pipeline."
-                    .to_string(),
+                "/policy is only available in interactive TUI mode.".to_string(),
             );
             true
         }

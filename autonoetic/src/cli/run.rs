@@ -22,7 +22,7 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
 
-    let (provider, model) = super::model_discovery::interactive_select(&client).await?;
+    let (provider, original_entry, model) = super::model_discovery::interactive_select(&client).await?;
 
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(config_dir)?;
@@ -30,8 +30,7 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
     let agents_dir = config_dir.join("agents");
     let agents_dir_str = agents_dir.to_string_lossy();
 
-    // For local providers with non-standard base URLs, include base_url in preset
-    let base_url_line = match provider.as_str() {
+    let base_url_line = match original_entry.as_str() {
         "llamacpp" => "\n    base_url: \"http://localhost:8080/v1/chat/completions\"".to_string(),
         _ => String::new(),
     };

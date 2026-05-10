@@ -117,26 +117,34 @@ pub(crate) fn build_memory_context_snippet(
     max_memories: usize,
 ) -> Option<String> {
     let agent_tag = format!("agent:{agent_id}");
-    let memories = store.search_memories_by_tags(
-        &[agent_tag.as_str(), "source:quality_signal", "source:post_session_digest"],
+
+    let agent_digests = store.search_memories_by_tags(
+        &[agent_tag.as_str(), "source:post_session_digest"],
         max_memories,
     ).ok().unwrap_or_default();
 
-    let global_memories: Vec<_> = if memories.is_empty() {
-        store
+    let agent_signals = store.search_memories_by_tags(
+        &[agent_tag.as_str(), "source:quality_signal"],
+        max_memories,
+    ).ok().unwrap_or_default();
+
+    let mut memories: Vec<_> = agent_digests;
+    memories.extend(agent_signals);
+    memories.truncate(max_memories);
+
+    if memories.is_empty() {
+        memories = store
             .search_memories_by_tags(&["source:post_session_digest"], max_memories)
             .ok()
-            .unwrap_or_default()
-    } else {
-        memories
-    };
+            .unwrap_or_default();
+    }
 
-    if global_memories.is_empty() {
+    if memories.is_empty() {
         return None;
     }
 
     let mut parts = vec!["---\n\nPrior Knowledge (from past sessions)\n".to_string()];
-    for mem in global_memories.iter().take(max_memories) {
+    for mem in memories.iter().take(max_memories) {
         let truncated: String = mem.content.chars().take(500).collect();
         parts.push(format!("- {}", truncated));
     }

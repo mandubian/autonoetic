@@ -496,10 +496,10 @@ fn read_line_with_prompt(prompt: &str) -> anyhow::Result<String> {
 
 /// Present detected providers, let user pick, fetch models, let user pick.
 ///
-/// Returns `(provider_name, model_id)` ready for config generation.
+/// Returns `(provider_name, original_entry_name, model_id)` ready for config generation.
 pub async fn interactive_select(
     client: &reqwest::Client,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<(String, String, String)> {
     let mut stderr = io::stderr();
 
     writeln!(stderr, "\n  Detecting available LLM providers...")?;
@@ -608,7 +608,8 @@ pub async fn interactive_select(
             if model.is_empty() {
                 anyhow::bail!("Model ID cannot be empty");
             }
-            return Ok((provider_entry.entry.name.to_string(), model));
+            let name = provider_entry.entry.name.to_string();
+            return Ok((name.clone(), name, model));
         }
         Err(e) => {
             writeln!(
@@ -619,17 +620,17 @@ pub async fn interactive_select(
             if model.is_empty() {
                 anyhow::bail!("Model ID cannot be empty");
             }
-            return Ok((provider_entry.entry.name.to_string(), model));
+            let name = provider_entry.entry.name.to_string();
+            return Ok((name.clone(), name, model));
         }
     };
 
     // Display with pagination for large catalogs
     display_model_menu(&models)?;
 
-    let idx = read_number(
-        "  Select model (or 0 to type manually): ",
-        models.len() + 1, // +1 to allow "0" range hack below
-    );
+    let manual_idx = models.len() + 1;
+    let prompt = format!("  Select model (or {} to type manually): ", manual_idx);
+    let idx = read_number(&prompt, manual_idx);
 
     // The read_number requires 1..=max, so handle manual entry via a separate prompt
     // if the list is huge and user may want to type directly
@@ -645,14 +646,12 @@ pub async fn interactive_select(
     };
 
     let provider_name = if provider_entry.entry.name == "llamacpp" {
-        // llama.cpp server is OpenAI-compatible; map to a generic name
-        // so the config works with the existing provider resolution
         "openai".to_string()
     } else {
         provider_entry.entry.name.to_string()
     };
 
-    Ok((provider_name, model_id))
+    Ok((provider_name, provider_entry.entry.name.to_string(), model_id))
 }
 
 fn display_model_menu(models: &[ModelInfo]) -> anyhow::Result<()> {
@@ -709,7 +708,7 @@ fn display_model_menu(models: &[ModelInfo]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn manual_entry() -> anyhow::Result<(String, String)> {
+fn manual_entry() -> anyhow::Result<(String, String, String)> {
     let mut stderr = io::stderr();
     writeln!(
         stderr,
@@ -725,13 +724,14 @@ fn manual_entry() -> anyhow::Result<(String, String)> {
         anyhow::bail!("Model ID cannot be empty");
     }
 
+    let original = provider.clone();
     let effective_provider = if provider == "llamacpp" || provider == "llama.cpp" {
         "openai".to_string()
     } else {
         provider
     };
 
-    Ok((effective_provider, model))
+    Ok((effective_provider, original, model))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
