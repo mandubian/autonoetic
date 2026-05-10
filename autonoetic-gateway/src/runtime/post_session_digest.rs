@@ -286,32 +286,45 @@ async fn run_post_session_digest_inner(
     let system = load_digest_skill_body(agents_dir)?;
 
     let mut governance_lines = Vec::new();
+    let root = crate::runtime::content_store::root_session_id(session_id);
     let approvals = store.list_all_approvals_for_session(session_id).unwrap_or_default();
     if !approvals.is_empty() {
         governance_lines.push(format!("Approvals ({} total):", approvals.len()));
         for a in &approvals {
+            let status_label = match &a.status {
+                Some(s) => format!("{:?}", s).to_lowercase(),
+                None => "pending".to_string(),
+            };
             let decision = match &a.decision_reason {
-                Some(d) => format!(" — {d}"),
-                None => String::new(),
+                Some(d) => truncate_chars(d, 80),
+                None => status_label.clone(),
             };
             governance_lines.push(format!(
-                "  [{:?}] {} ({}) by {}{}",
-                a.status, a.request_id, a.action.kind(), a.agent_id, decision
+                "  [{}] {} ({}) by {}",
+                status_label, a.request_id, a.action.kind(), a.agent_id
             ));
+            if decision != status_label {
+                governance_lines.push(format!("    reason: {}", decision));
+            }
         }
     }
-    let interactions = store.list_user_interactions_for_session_trace(session_id).unwrap_or_default();
+    let interactions = store.list_user_interactions_for_session_trace(root).unwrap_or_default();
     if !interactions.is_empty() {
         governance_lines.push(format!("User interactions ({} total):", interactions.len()));
         for i in &interactions {
+            let status_label = format!("{:?}", i.status).to_lowercase();
             let answer = match (&i.answer_option_id, &i.answer_text) {
-                (Some(opt), _) => format!(" → option: {opt}"),
-                (_, Some(txt)) => format!(" → {txt}"),
+                (Some(opt), _) => format!(" → option: {}", truncate_chars(opt, 60)),
+                (_, Some(txt)) => format!(" → {}", truncate_chars(txt, 80)),
                 _ => String::new(),
             };
             governance_lines.push(format!(
-                "  [{:?}] {} (kind: {}): {}{}",
-                i.status, i.interaction_id, i.kind, i.question, answer
+                "  [{}] {} (kind: {}): {}{}",
+                status_label,
+                i.interaction_id,
+                i.kind,
+                truncate_chars(&i.question, 120),
+                answer
             ));
         }
     }
@@ -440,6 +453,16 @@ pub async fn run_post_session_digest_with_driver(
         driver,
     )
     .await
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut iter = s.chars();
+    let chunk: String = iter.by_ref().take(max).collect();
+    if iter.next().is_some() {
+        format!("{}…", chunk)
+    } else {
+        chunk
+    }
 }
 
 #[cfg(test)]

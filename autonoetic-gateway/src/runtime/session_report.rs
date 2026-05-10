@@ -650,6 +650,31 @@ impl SessionReportWriter {
         })
     }
 
+    pub fn record_interaction_pending(
+        &mut self,
+        interaction_id: &str,
+        kind: &str,
+        question: &str,
+    ) -> anyhow::Result<()> {
+        self.update_state(|state| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
+            record_interaction_pending(agent, interaction_id, kind, question, &now);
+        })
+    }
+
+    pub fn resolve_interaction(
+        &mut self,
+        interaction_id: &str,
+        answer: &str,
+    ) -> anyhow::Result<()> {
+        self.update_state(|state| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
+            resolve_interaction(agent, interaction_id, answer, &now);
+        })
+    }
+
     pub fn finish_session(
         &mut self,
         reason: &str,
@@ -1457,7 +1482,7 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         let all_interactions: Vec<_> = state
             .agents
             .values()
-            .flat_map(|a| a.interactions.iter())
+            .flat_map(|a| a.interactions.iter().map(move |i| (a.agent_id.as_str(), i)))
             .collect();
         let _ = writeln!(out, "## User Interactions");
         let _ = writeln!(out);
@@ -1469,12 +1494,12 @@ fn render_live_markdown(state: &SessionReportState) -> String {
                 "| Time | Agent | ID | Kind | Status | Question | Answer |"
             );
             let _ = writeln!(out, "|---|---|---|---|---|---|---|");
-            for i in &all_interactions {
+            for (agent_id, i) in &all_interactions {
                 let _ = writeln!(
                     out,
                     "| {} | `{}` | `{}` | {} | {} | {} | {} |",
                     format_timestamp(Some(&i.created_at)),
-                    "—",
+                    agent_id,
                     i.interaction_id,
                     i.kind,
                     i.status,

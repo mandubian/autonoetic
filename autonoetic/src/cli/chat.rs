@@ -833,6 +833,71 @@ fn add_session_banner(
     );
 }
 
+fn refresh_gate_history(
+    app: &mut App,
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+) {
+    let active_session_id = app.session_id.clone();
+    let root = if app.session_overview.root_session_id.is_empty() {
+        autonoetic_gateway::runtime::content_store::root_session_id(&active_session_id).to_string()
+    } else {
+        app.session_overview.root_session_id.clone()
+    };
+
+    if let Ok(all_approvals) = store.list_all_approvals_for_session(&active_session_id) {
+        app.gate_history_approvals = all_approvals
+            .into_iter()
+            .filter_map(|a| {
+                let st = a.status?;
+                let status_label = match st {
+                    ApprovalStatus::Approved => "approved",
+                    ApprovalStatus::Rejected => "rejected",
+                    ApprovalStatus::Cancelled => "cancelled",
+                };
+                let decision = a.decision_reason.as_deref().unwrap_or(status_label);
+                Some(format!(
+                    "[{}] {} ({})",
+                    status_label,
+                    a.action.kind(),
+                    truncate_str(decision, 60)
+                ))
+            })
+            .collect();
+    }
+    if let Ok(all_interactions) = store.list_user_interactions_for_session_trace(&root) {
+        app.gate_history_interactions = all_interactions
+            .into_iter()
+            .filter(|i| i.status != UserInteractionStatus::Pending)
+            .map(|i| {
+                let answer = i
+                    .answer_text
+                    .as_deref()
+                    .or(i.answer_option_id.as_deref())
+                    .unwrap_or("—");
+                let status_label = match i.status {
+                    UserInteractionStatus::Pending => "pending",
+                    UserInteractionStatus::Answered => "answered",
+                    UserInteractionStatus::Cancelled => "cancelled",
+                    UserInteractionStatus::Expired => "expired",
+                };
+                let q = truncate_str(&i.question.replace('\n', " "), 80);
+                let a = truncate_str(answer.replace('\n', " ").as_str(), 40);
+                format!("[{}] {} → {}", status_label, q, a)
+            })
+            .collect();
+    }
+}
+
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}…", prefix)
+    } else {
+        prefix
+    }
+}
+
 fn refresh_session_snapshot(
     app: &mut App,
     config: &autonoetic_types::config::GatewayConfig,
@@ -850,44 +915,7 @@ fn refresh_session_snapshot(
             let _ = append_new_pending_user_interaction_prompts(app, &snapshot.pending_interactions);
         }
         let _ = merge_gateway_store_pending_approvals(app, config, store, &active_session_id);
-
-        if let Ok(all_approvals) = store.list_all_approvals_for_session(&active_session_id) {
-            app.gate_history_approvals = all_approvals
-                .into_iter()
-                .filter_map(|a| {
-                    let st = a.status?;
-                    let status_label = match st {
-                        ApprovalStatus::Approved => "approved",
-                        ApprovalStatus::Rejected => "rejected",
-                        ApprovalStatus::Cancelled => "cancelled",
-                    };
-                    let decision = a.decision_reason.as_deref().unwrap_or(status_label);
-                    Some(format!(
-                        "[{}] {} ({})",
-                        status_label,
-                        a.action.kind(),
-                        decision
-                    ))
-                })
-                .collect();
-        }
-        if let Ok(all_interactions) = store.list_user_interactions_for_session_trace(&active_session_id) {
-            app.gate_history_interactions = all_interactions
-                .into_iter()
-                .filter(|i| i.status != UserInteractionStatus::Pending)
-                .map(|i| {
-                    let answer =
-                        i.answer_text.as_deref().or(i.answer_option_id.as_deref()).unwrap_or("—");
-                    let status_label = match i.status {
-                        UserInteractionStatus::Pending => "pending",
-                        UserInteractionStatus::Answered => "answered",
-                        UserInteractionStatus::Cancelled => "cancelled",
-                        UserInteractionStatus::Expired => "expired",
-                    };
-                    format!("[{}] {} → {}", status_label, i.question, answer)
-                })
-                .collect();
-        }
+        refresh_gate_history(app, store);
     }
 }
 
@@ -3663,7 +3691,7 @@ fn handle_key(
             if !app.inline_approvals_enabled {
                 app.add_message(
                     MessageRole::System,
-                    "Inline approvals not enabled. Set chat.inline_approvals: true in gateway config.".to_string(),
+                    "Inline approvals are off (`chat.inline_approvals: false`). Set to true in gateway config or use `autonoetic gateway approvals`.".to_string(),
                 );
             } else if app.pending_approval_ids.is_empty() {
                 app.add_message(
@@ -4178,7 +4206,7 @@ fn merge_gateway_store_pending_approvals(
                 )
             } else {
                 format!(
-                    "Resolve with `autonoetic gateway approvals approve {} …` (set `chat.inline_approvals: true` for Ctrl+A).",
+                    "Resolve with `autonoetic gateway approvals approve {} …` (or enable `chat.inline_approvals` and use Ctrl+A).",
                     req.request_id
                 )
             };
@@ -4472,6 +4500,7 @@ async fn check_signals(
         if merge_gateway_store_pending_approvals(app, config, store, session_id) {
             processed_any = true;
         }
+        refresh_gate_history(app, store);
     }
 
     tracing::debug!(target: "chat", processed_any = processed_any, total_messages = app.messages.len(), "check_signals: complete");

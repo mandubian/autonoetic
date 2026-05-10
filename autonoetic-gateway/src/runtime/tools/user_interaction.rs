@@ -208,6 +208,12 @@ impl NativeTool for UserAskTool {
             "confirmation" => UserInteractionKind::Confirmation,
             _ => UserInteractionKind::Clarification,
         };
+        let kind_str = match kind {
+            UserInteractionKind::Decision => "decision",
+            UserInteractionKind::Proposal => "proposal",
+            UserInteractionKind::Confirmation => "confirmation",
+            _ => "clarification",
+        };
 
         let options: Vec<UserInteractionOption> = args
             .options
@@ -281,6 +287,15 @@ impl NativeTool for UserAskTool {
                         let _ = g.record_user_ask_pending(
                             &interaction.question,
                             opts_summary.as_deref(),
+                        );
+                    }
+                }
+                if let Some(w) = &ctx.live_report {
+                    if let Ok(mut g) = w.lock() {
+                        let _ = g.record_interaction_pending(
+                            &interaction_id,
+                            kind_str,
+                            &interaction.question,
                         );
                     }
                 }
