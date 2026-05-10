@@ -1102,12 +1102,25 @@ fn default_system_agent_enabled() -> bool {
 }
 
 /// Chat TUI configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatConfig {
     /// Allow inline approval of pending requests from the chat TUI (Ctrl+A).
-    /// Disabled by default — the approval channel may be separated from chat.
-    #[serde(default)]
+    /// Defaults to true for interactive local use; set `false` to require
+    /// `autonoetic gateway approvals …` outside the chat pane.
+    #[serde(default = "default_chat_inline_approvals")]
     pub inline_approvals: bool,
+}
+
+fn default_chat_inline_approvals() -> bool {
+    true
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            inline_approvals: default_chat_inline_approvals(),
+        }
+    }
 }
 
 /// Approval level / escalation configuration.

@@ -140,9 +140,10 @@ approval_timeout_secs: 600
 #       - constitutional-observer.default
 
 # ── Chat TUI ──────────────────────────────────────────────────────────
-# Inline approval from the chat interface (Ctrl+A).
+# Inline approval from the chat interface (Ctrl+A). Default: true; set false to
+# require resolving approvals only via `autonoetic gateway approvals` (separate pane / process).
 chat:
-  inline_approvals: true   # Allow Ctrl+A to approve the latest pending approval
+  inline_approvals: true
 
 # ── Approval Levels ───────────────────────────────────────────────────
 # Escalation: require higher authority for sensitive actions.

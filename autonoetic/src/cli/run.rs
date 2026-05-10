@@ -109,13 +109,15 @@ fn prompt_persona(config_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ensure_bootstrap(config_path: &Path) -> anyhow::Result<()> {
+fn ensure_bootstrap(config_path: &Path, overwrite: bool) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    if config.agents_dir.exists() && config.agents_dir.read_dir()?.next().is_some() {
+    let agents_populated = config.agents_dir.exists()
+        && config.agents_dir.read_dir()?.next().is_some();
+    if agents_populated && !overwrite {
         return Ok(());
     }
     eprintln!("  Bootstrapping agents...");
-    super::agent::handle_agent_bootstrap(config_path, None, false)?;
+    super::agent::handle_agent_bootstrap(config_path, None, overwrite)?;
     Ok(())
 }
 
@@ -129,7 +131,7 @@ pub async fn handle_run(
     };
 
     ensure_config(&config_path).await?;
-    ensure_bootstrap(&config_path)?;
+    ensure_bootstrap(&config_path, args.overwrite)?;
 
     if std::env::var("AUTONOETIC_SHARED_SECRET").is_err() {
         let secret = uuid::Uuid::new_v4().to_string();
@@ -166,6 +168,12 @@ pub async fn handle_run(
     if !ready {
         eprintln!("Warning: gateway did not become ready within timeout. Chat may fail to connect.");
     }
+
+    let log_dir = gateway_config.agents_dir.join(".gateway").join("logs");
+    eprintln!(
+        "  Tracing output: {0} — run `tail -f {0}/*.log` in another terminal for live gateway logs.",
+        log_dir.display()
+    );
 
     let result = super::chat::handle_chat(&config_path, &chat_args).await;
 

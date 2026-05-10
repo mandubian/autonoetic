@@ -171,6 +171,11 @@ pub struct RunArgs {
     /// Stable conversation/session identifier.
     #[arg(long)]
     pub session_id: Option<String>,
+    /// Re-copy bundled reference agents from the Autonoetic repo and re-bootstrap gateway revisions
+    /// (equivalent to `autonoetic agent bootstrap --overwrite`). Use after upgrading the binary or when
+    /// reference bundles changed (e.g. new `runtime.lock` or manifest fields).
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 // ---------------------------------------------------------------------------
