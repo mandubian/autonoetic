@@ -6,7 +6,7 @@ The Autonoetic CLI (`autonoetic`) provides commands for managing the gateway, ag
 
 | Option | Description |
 |--------|-------------|
-| `-c, --config <PATH>` | Path to config file (default: `~/.ccos/config.yaml`) |
+| `-c, --config <PATH>` | Path to config file (default: `~/.autonoetic/config.yaml`) |
 | `--non-interactive` | Disables all prompts (for CI/CD) |
 
 ## Commands

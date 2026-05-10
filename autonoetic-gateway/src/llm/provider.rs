@@ -333,7 +333,7 @@ pub fn resolve(
         vec![
             (
                 "HTTP-Referer".to_string(),
-                "https://autonoetic.ccos.local".to_string(),
+                "https://autonoetic.local".to_string(),
             ),
             (
                 "X-OpenRouter-Title".to_string(),

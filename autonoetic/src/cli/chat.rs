@@ -31,7 +31,10 @@ use autonoetic_gateway::router::{
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::LlmExchangeUsage;
-use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction, UserInteraction};
+use autonoetic_types::background::{
+    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction, UserInteraction,
+    UserInteractionStatus,
+};
 use autonoetic_types::config::GatewayConfig;
 
 // ============================================================================
@@ -262,6 +265,10 @@ struct App {
     seen_causal_policy_event_ids: HashSet<String>,
     /// Newest-first policy decision lines for the right pane.
     policy_causal_pane: Vec<String>,
+    /// Gate history: resolved approvals for this session tree.
+    gate_history_approvals: Vec<String>,
+    /// Gate history: resolved user interactions for this session tree.
+    gate_history_interactions: Vec<String>,
     /// Submitted user lines, newest last — for ↑/↓ recall in the prompt.
     prompt_history: Vec<String>,
     /// When set, the input shows `prompt_history[len - 1 - k]` (`k == 0` is the most recent submission).
@@ -315,6 +322,8 @@ impl App {
             gateway_connected: false,
             seen_causal_policy_event_ids: HashSet::new(),
             policy_causal_pane: Vec::new(),
+        gate_history_approvals: Vec::new(),
+        gate_history_interactions: Vec::new(),
             prompt_history: Vec::new(),
             prompt_history_scroll_back: None,
             prompt_history_draft: None,
@@ -653,13 +662,15 @@ fn format_session_status(app: &App) -> String {
         app.session_overview.root_session_id.clone()
     };
     format!(
-        "Session: {}\nRoot: {}\nTarget: {}\nWorkflow: {}\nPending approvals: {}\nPending questions: {}\nGateway: {}",
+        "Session: {}\nRoot: {}\nTarget: {}\nWorkflow: {}\nPending approvals: {}\nPending questions: {}\nResolved approvals: {}\nAnswered questions: {}\nGateway: {}",
         app.session_id,
         root_session_id,
         app.target_hint,
         workflow_id,
         app.pending_approval_ids.len(),
         app.session_overview.pending_user_interactions,
+        app.gate_history_approvals.len(),
+        app.gate_history_interactions.len(),
         if app.gateway_connected { "connected" } else { "disconnected" },
     )
 }
@@ -839,6 +850,44 @@ fn refresh_session_snapshot(
             let _ = append_new_pending_user_interaction_prompts(app, &snapshot.pending_interactions);
         }
         let _ = merge_gateway_store_pending_approvals(app, config, store, &active_session_id);
+
+        if let Ok(all_approvals) = store.list_all_approvals_for_session(&active_session_id) {
+            app.gate_history_approvals = all_approvals
+                .into_iter()
+                .filter_map(|a| {
+                    let st = a.status?;
+                    let status_label = match st {
+                        ApprovalStatus::Approved => "approved",
+                        ApprovalStatus::Rejected => "rejected",
+                        ApprovalStatus::Cancelled => "cancelled",
+                    };
+                    let decision = a.decision_reason.as_deref().unwrap_or(status_label);
+                    Some(format!(
+                        "[{}] {} ({})",
+                        status_label,
+                        a.action.kind(),
+                        decision
+                    ))
+                })
+                .collect();
+        }
+        if let Ok(all_interactions) = store.list_user_interactions_for_session_trace(&active_session_id) {
+            app.gate_history_interactions = all_interactions
+                .into_iter()
+                .filter(|i| i.status != UserInteractionStatus::Pending)
+                .map(|i| {
+                    let answer =
+                        i.answer_text.as_deref().or(i.answer_option_id.as_deref()).unwrap_or("—");
+                    let status_label = match i.status {
+                        UserInteractionStatus::Pending => "pending",
+                        UserInteractionStatus::Answered => "answered",
+                        UserInteractionStatus::Cancelled => "cancelled",
+                        UserInteractionStatus::Expired => "expired",
+                    };
+                    format!("[{}] {} → {}", status_label, i.question, answer)
+                })
+                .collect();
+        }
     }
 }
 
@@ -874,6 +923,8 @@ fn reset_for_session_switch(
     app.post_approval_pending_ids.clear();
     app.seen_causal_policy_event_ids.clear();
     app.policy_causal_pane.clear();
+    app.gate_history_approvals.clear();
+    app.gate_history_interactions.clear();
     app.pending_prompt = None;
 }
 
@@ -2164,6 +2215,21 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
     } else {
         for line in app.policy_causal_pane.iter().take(POLICY_CAUSAL_PANE_MAX) {
             lines.push(Line::raw(line.clone()));
+        }
+    }
+
+    let gate_count = app.gate_history_approvals.len() + app.gate_history_interactions.len();
+    if gate_count > 0 {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Gate History",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for entry in app.gate_history_approvals.iter().rev().take(4) {
+            lines.push(Line::raw(entry.clone()));
+        }
+        for entry in app.gate_history_interactions.iter().rev().take(4) {
+            lines.push(Line::raw(entry.clone()));
         }
     }
 

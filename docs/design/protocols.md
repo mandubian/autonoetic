@@ -84,7 +84,7 @@ Sandboxes are ephemeral, stateless tasks. While running, they only emit and cons
 When a Sandbox script attempts to `sys.exit()`, the Gateway intercepts the final data points before destroying the MicroVM or bwrap instance:
 1. `stdout` buffer.
 2. `stderr` buffer.
-3. Specially designated return schemas written to `.ccos/out.json`.
+3. Specially designated return schemas written to `.autonoetic/out.json`.
 The Gateway then packs these together into an `ecosystem.skill_completed` method and routes it back to the parent Agent.
 
 ## 4. Artifact and Capsule Protocol

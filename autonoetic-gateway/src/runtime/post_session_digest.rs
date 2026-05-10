@@ -284,8 +284,45 @@ async fn run_post_session_digest_inner(
         .parent()
         .ok_or_else(|| anyhow::anyhow!("gateway_dir has no parent (expected agents/.gateway)"))?;
     let system = load_digest_skill_body(agents_dir)?;
+
+    let mut governance_lines = Vec::new();
+    let approvals = store.list_all_approvals_for_session(session_id).unwrap_or_default();
+    if !approvals.is_empty() {
+        governance_lines.push(format!("Approvals ({} total):", approvals.len()));
+        for a in &approvals {
+            let decision = match &a.decision_reason {
+                Some(d) => format!(" — {d}"),
+                None => String::new(),
+            };
+            governance_lines.push(format!(
+                "  [{:?}] {} ({}) by {}{}",
+                a.status, a.request_id, a.action.kind(), a.agent_id, decision
+            ));
+        }
+    }
+    let interactions = store.list_user_interactions_for_session_trace(session_id).unwrap_or_default();
+    if !interactions.is_empty() {
+        governance_lines.push(format!("User interactions ({} total):", interactions.len()));
+        for i in &interactions {
+            let answer = match (&i.answer_option_id, &i.answer_text) {
+                (Some(opt), _) => format!(" → option: {opt}"),
+                (_, Some(txt)) => format!(" → {txt}"),
+                _ => String::new(),
+            };
+            governance_lines.push(format!(
+                "  [{:?}] {} (kind: {}): {}{}",
+                i.status, i.interaction_id, i.kind, i.question, answer
+            ));
+        }
+    }
+    let governance_block = if governance_lines.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n## Governance events (approvals + user interactions)\n\n{}", governance_lines.join("\n"))
+    };
+
     let user = format!(
-        "Session id (full): {session_id}\nSource agent: {source_agent_id}\n\n## Live digest (markdown)\n\n{live_digest}\n\n## Execution traces (successes + failures summary)\n\n{trace_block}\n\nRespond with ONLY a single JSON object as specified in your instructions."
+        "Session id (full): {session_id}\nSource agent: {source_agent_id}\n\n## Live digest (markdown)\n\n{live_digest}\n\n## Execution traces (successes + failures summary)\n\n{trace_block}{governance_block}\n\nRespond with ONLY a single JSON object as specified in your instructions."
     );
 
     let mut req = CompletionRequest::simple(
