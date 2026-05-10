@@ -222,9 +222,6 @@ impl GatewayStore {
         tags: &[&str],
         limit: usize,
     ) -> Result<Vec<MemoryObject>> {
-        let conn = self.conn.lock().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-
         let tag_clauses: Vec<String> = tags
             .iter()
             .enumerate()
@@ -246,19 +243,27 @@ impl GatewayStore {
             tag_clauses.join(" OR ")
         );
 
-        let mut stmt = conn.prepare(&sql)?;
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        param_values.push(Box::new(now));
-        param_values.push(Box::new(limit as i64));
-        for tag in tags {
-            param_values.push(Box::new(tag.to_string()));
-        }
-        let refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+        let ids: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut stmt = conn.prepare(&sql)?;
+            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            param_values.push(Box::new(now));
+            param_values.push(Box::new(limit as i64));
+            for tag in tags {
+                param_values.push(Box::new(tag.to_string()));
+            }
+            let refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+            let mut rows = stmt.query(refs.as_slice())?;
+            let mut ids = Vec::new();
+            while let Some(row) = rows.next()? {
+                ids.push(row.get(0)?);
+            }
+            ids
+        };
 
-        let mut rows = stmt.query(refs.as_slice())?;
         let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
+        for id in ids {
             if let Some(obj) = self.memory_get_unrestricted(&id)? {
                 out.push(obj);
             }

@@ -678,6 +678,7 @@ impl AgentExecutor {
     /// Run the agent loop until completion or guard trip.
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let user_context = self.build_user_context_snippet();
+        let memory_context = self.build_memory_context_snippet();
         let mut system_instructions = compose_system_instructions_full(
             &self.instructions,
             &self.manifest,
@@ -688,6 +689,10 @@ impl AgentExecutor {
             user_context.as_deref(),
             self.persona.as_deref(),
         );
+        if let Some(ref snippet) = memory_context {
+            system_instructions.push_str("\n\n");
+            system_instructions.push_str(snippet);
+        }
         if let Some(tail) = self.build_state_attestation_tail()? {
             system_instructions.push_str("\n\n");
             system_instructions.push_str(&tail);
@@ -1122,6 +1127,7 @@ impl AgentExecutor {
 
             // Update system message — ensure exactly one system message at position 0
             let user_context = self.build_user_context_snippet();
+            let memory_context = self.build_memory_context_snippet();
             let mut system_instructions = compose_system_instructions_full(
                 &self.instructions,
                 &self.manifest,
@@ -1132,6 +1138,10 @@ impl AgentExecutor {
                 user_context.as_deref(),
                 self.persona.as_deref(),
             );
+            if let Some(ref snippet) = memory_context {
+                system_instructions.push_str("\n\n");
+                system_instructions.push_str(snippet);
+            }
             if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
                 system_instructions.push_str("\n\n");
                 system_instructions.push_str(&notice);

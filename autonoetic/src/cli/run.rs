@@ -161,10 +161,27 @@ pub async fn handle_run(
         }
     });
 
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let gateway_config = autonoetic_gateway::config::load_config(&config_path)?;
+    let gateway_port = gateway_config.port;
+    let ready = wait_for_gateway_ready(gateway_port, std::time::Duration::from_secs(30)).await;
+    if !ready {
+        eprintln!("Warning: gateway did not become ready within timeout. Chat may fail to connect.");
+    }
 
     let result = super::chat::handle_chat(&config_path, &chat_args).await;
 
     gateway_handle.abort();
     result
+}
+
+async fn wait_for_gateway_ready(port: u16, timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let addr = format!("127.0.0.1:{port}");
+    while tokio::time::Instant::now() < deadline {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
 }

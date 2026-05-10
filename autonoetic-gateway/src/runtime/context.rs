@@ -366,6 +366,15 @@ impl AgentExecutor {
         render_user_context_snippet(&profile, &binding.scope)
     }
 
+    /// Build memory context snippet from Tier-2 global memories for session continuity.
+    pub(crate) fn build_memory_context_snippet(&self) -> Option<String> {
+        let store = self.gateway_store.as_ref()?;
+        let config = self.config.as_ref()?;
+        let agent_id = &self.manifest.agent.id;
+        let limit = config.profile.memory_priming_limit();
+        build_memory_context_snippet(store, agent_id, limit)
+    }
+
     /// Compose, sign, and render the R++1 state-attestation tail for the
     /// current turn. Returns:
     ///   - `Ok(Some(tail))` whenever the gateway has a directory to keep

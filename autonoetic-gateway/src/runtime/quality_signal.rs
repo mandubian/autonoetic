@@ -54,7 +54,8 @@ pub async fn maybe_emit_quality_signal(
         }
     };
 
-    let memory_id = format!("qs-{}-{}", &session_id[..session_id.len().min(16)], &uuid::Uuid::new_v4().to_string()[..8]);
+    let session_prefix: String = session_id.chars().take(16).collect();
+    let memory_id = format!("qs-{}-{}", session_prefix, &uuid::Uuid::new_v4().to_string()[..8]);
     let content = serde_json::to_string_pretty(&signal).unwrap_or_default();
 
     let mut obj = MemoryObject::new(

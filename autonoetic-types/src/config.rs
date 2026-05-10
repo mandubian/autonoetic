@@ -201,8 +201,8 @@ impl Default for DigestAgentConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoLearningConfig {
     /// Master switch for the auto-learning pipeline. When false, post-session
-    /// digest and periodic memory curation are both disabled regardless of their
-    /// individual settings. Default: true.
+    /// digest, quality signals, and periodic memory curation are all disabled
+    /// regardless of their individual settings. Default: true.
     #[serde(default = "default_auto_learning_enabled")]
     pub enabled: bool,
 

@@ -1070,7 +1070,7 @@ fn handle_slash_command_submission(
             true
         }
         SlashCommand::Why(request_id) => {
-            let explanation = format_why_explanation(gateway_store, request_id.as_deref());
+            let explanation = format_why_explanation(gateway_store, config, &app.session_id, request_id.as_deref());
             app.add_message(MessageRole::System, explanation);
             true
         }
@@ -1139,6 +1139,8 @@ fn handle_slash_command_submission(
 
 fn format_why_explanation(
     gateway_store: Option<&GatewayStore>,
+    config: &GatewayConfig,
+    session_id: &str,
     request_id: Option<&str>,
 ) -> String {
     let Some(store) = gateway_store else {
@@ -1188,9 +1190,9 @@ fn format_why_explanation(
         }
     } else {
         let pending = match autonoetic_gateway::scheduler::approval::pending_approval_requests_for_session(
-            &autonoetic_types::config::GatewayConfig::default(),
+            config,
             Some(store),
-            "",
+            session_id,
         ) {
             Ok(p) => p,
             Err(_) => Vec::new(),
