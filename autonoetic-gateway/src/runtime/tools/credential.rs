@@ -736,7 +736,7 @@ fn extract_host(url: &str) -> anyhow::Result<String> {
 
 enum SkillUrlKind {
     Remote { url: String, host: String },
-    Local { filename: String },
+    Local { path_hint: String },
 }
 
 fn classify_skill_url(raw: &str) -> SkillUrlKind {
@@ -750,8 +750,9 @@ fn classify_skill_url(raw: &str) -> SkillUrlKind {
             host,
         }
     } else {
-        let filename = raw.to_string();
-        SkillUrlKind::Local { filename }
+        SkillUrlKind::Local {
+            path_hint: raw.to_string(),
+        }
     }
 }
 
@@ -761,20 +762,44 @@ fn skills_dir(gateway_dir: &Path) -> PathBuf {
 
 fn validate_local_skill_path(
     gateway_dir: &Path,
-    filename: &str,
+    path_hint: &str,
 ) -> anyhow::Result<PathBuf> {
     let base = skills_dir(gateway_dir);
-    if !filename.ends_with(".md") {
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.clone());
+    let candidate = if path_hint.starts_with("file://") {
+        let url = url::Url::parse(path_hint)
+            .map_err(|e| anyhow::anyhow!("invalid file:// skill_url: {}", e))?;
+        url.to_file_path()
+            .map_err(|_| anyhow::anyhow!("file:// skill_url must point to a local filesystem path"))?
+    } else {
+        let normalized = path_hint.trim_start_matches("./");
+        let normalized = normalized.strip_prefix("skills/").unwrap_or(normalized);
+        if !normalized.ends_with(".md") {
+            anyhow::bail!(
+                "local skill_url must be a .md file in the gateway skills/ directory"
+            );
+        }
+        let path = PathBuf::from(normalized);
+        if path.is_absolute() {
+            anyhow::bail!(
+                "absolute local skill_url paths are not allowed; use a path relative to gateway skills/ or a file:// URL under that directory"
+            );
+        }
+        base.join(path)
+    };
+    if candidate.extension().and_then(|ext| ext.to_str()) != Some("md") {
         anyhow::bail!(
             "local skill_url must be a .md file in the gateway skills/ directory"
         );
     }
-    let candidate = base.join(filename);
-    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.clone());
     let canonical_target = match std::fs::canonicalize(&candidate) {
         Ok(p) => p,
         Err(_) => {
-            let resolved = canonical_base.join(filename);
+            let resolved = if candidate.is_absolute() {
+                candidate.clone()
+            } else {
+                canonical_base.join(&candidate)
+            };
             if !resolved.starts_with(&canonical_base) {
                 anyhow::bail!(
                     "skill_url path escapes the gateway skills/ directory"
@@ -782,7 +807,7 @@ fn validate_local_skill_path(
             }
             anyhow::bail!(
                 "skill file not found in gateway skills/ directory: {}",
-                filename
+                path_hint
             );
         }
     };
@@ -1333,7 +1358,8 @@ impl NativeTool for CredentialSetupTool {
                 Provide `skill_url` to ingest a skill.md spec and let the gateway \
                 execute all onboarding steps server-side — secrets are never returned to the LLM. \
                 skill_url accepts an HTTPS URL (fetched remotely, subject to approval) or a \
-                bare filename (e.g. 'github.md') resolved from the gateway skills/ directory. \
+                gateway-local .md path such as 'github.md' / 'skills/github.md'; \
+                file:// URLs are accepted only when they resolve under the gateway skills/ directory. \
                 When a user_input step is reached the tool returns with `suspended_for_user_input: true` \
                 and a `question`. Call `user.ask` with that question, then call `credential.setup` \
                 again with `credential_id` + `resume_vars: { var_name: answer }` to continue. \
@@ -1343,7 +1369,7 @@ impl NativeTool for CredentialSetupTool {
                 "properties": {
                     "skill_url": {
                         "type": "string",
-                        "description": "HTTPS URL to a skill.md (fetched remotely) or a bare .md filename resolved from the gateway skills/ directory. When set, service/steps are extracted from the spec."
+                        "description": "HTTPS URL to a skill.md (fetched remotely) or a gateway-local .md path such as 'github.md' / 'skills/github.md'. file:// URLs are accepted only when they resolve under the gateway skills/ directory. When set, service/steps are extracted from the spec."
                     },
                     "service": {
                         "type": "string",
@@ -1699,14 +1725,14 @@ impl NativeTool for CredentialSetupTool {
                     let base_url = extract_base_url(&url);
                     (content, url_host, Some(base_url))
                 }
-                SkillUrlKind::Local { filename } => {
+                SkillUrlKind::Local { path_hint } => {
                     let gateway_dir = _gateway_dir.ok_or_else(|| {
                         anyhow::anyhow!(
                             "local skill_url requires a gateway directory; \
                              place the .md file in {{agents_dir}}/.gateway/skills/"
                         )
                     })?;
-                    let path = validate_local_skill_path(gateway_dir, &filename)?;
+                    let path = validate_local_skill_path(gateway_dir, &path_hint)?;
                     let content = std::fs::read_to_string(&path).map_err(|e| {
                         anyhow::anyhow!(
                             "failed to read skill file from gateway skills/ directory: {}",
@@ -2448,5 +2474,35 @@ fn extract_base_url(url: &str) -> String {
         base
     } else {
         url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{skills_dir, validate_local_skill_path};
+
+    #[test]
+    fn validate_local_skill_path_accepts_skills_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path();
+        let skill_path = skills_dir(gateway_dir).join("moltbook").join("SKILL.md");
+        std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+        std::fs::write(&skill_path, "---\n---\n").unwrap();
+
+        let resolved = validate_local_skill_path(gateway_dir, "skills/moltbook/SKILL.md").unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(skill_path).unwrap());
+    }
+
+    #[test]
+    fn validate_local_skill_path_accepts_file_url_inside_skills_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path();
+        let skill_path = skills_dir(gateway_dir).join("moltbook.md");
+        std::fs::create_dir_all(skills_dir(gateway_dir)).unwrap();
+        std::fs::write(&skill_path, "---\n---\n").unwrap();
+        let file_url = url::Url::from_file_path(&skill_path).unwrap().to_string();
+
+        let resolved = validate_local_skill_path(gateway_dir, &file_url).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(skill_path).unwrap());
     }
 }

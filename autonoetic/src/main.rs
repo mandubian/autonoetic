@@ -57,8 +57,21 @@ async fn main() -> anyhow::Result<()> {
         // (it gets dropped when main returns, which flushes remaining logs)
         std::mem::forget(_guard);
     } else if is_chat || is_run {
-        let config = autonoetic_gateway::config::load_config(&config_path)?;
-        let log_dir = config.agents_dir.join(".gateway").join("logs");
+        // When the YAML is missing, `load_config` returns defaults whose `agents_dir` is `./agents`
+        // (cwd-relative). `autonoetic run` then creates `{config_dir}/config.yaml` with
+        // `agents_dir: {config_dir}/agents` — so logging would otherwise land in the wrong tree until
+        // the file exists. Match that layout when the config file is absent.
+        let log_dir = if config_path.exists() {
+            let config = autonoetic_gateway::config::load_config(&config_path)?;
+            config.agents_dir.join(".gateway").join("logs")
+        } else {
+            config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("agents")
+                .join(".gateway")
+                .join("logs")
+        };
         std::fs::create_dir_all(&log_dir)?;
         let filename_prefix = if is_run {
             "run"

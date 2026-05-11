@@ -1460,7 +1460,8 @@ fn signal_resume_key(signal_session_id: &str, request_id: &str) -> String {
 }
 
 /// Dedup with [`merge_gateway_store_pending_approvals`]: both emit a transcript card for the same
-/// `apr-*`. Returns false when this `approval_request_id` was already announced (store card wins).
+/// `apr-*`. Returns false when this `approval_request_id` was already announced (rich store card
+/// wins — `check_signals` merges pending approvals before processing workflow events).
 fn should_show_workflow_awaiting_approval_card(
     app: &mut App,
     event: &autonoetic_types::workflow::WorkflowEventRecord,
@@ -1646,6 +1647,15 @@ fn format_workflow_event_card(
                     format!("🔔 [{}] {}: {}", ts_short, agent_id, result_summary),
                     MessageRole::AgentOutput,
                 ))
+            } else if !result_summary.is_empty() {
+                let preview = clamp_chat_field(result_summary);
+                Some((
+                    format!(
+                        "✅ [{}] Task completed: {}{}\n   Result: {}",
+                        ts_short, task, agent_suffix, preview
+                    ),
+                    MessageRole::Signal,
+                ))
             } else {
                 Some((
                     format!("✅ [{}] Task completed: {}{}", ts_short, task, agent_suffix),
@@ -1653,10 +1663,19 @@ fn format_workflow_event_card(
                 ))
             }
         }
-        "task.failed" => Some((
-            format!("❌ [{}] Task failed: {}{}", ts_short, task, agent_suffix),
-            MessageRole::Signal,
-        )),
+        "task.failed" => {
+            let detail = event
+                .payload
+                .get("result_summary")
+                .and_then(|v| v.as_str())
+                .or_else(|| event.payload.get("reason").and_then(|v| v.as_str()))
+                .filter(|s| !s.is_empty());
+            let mut line = format!("❌ [{}] Task failed: {}{}", ts_short, task, agent_suffix);
+            if let Some(d) = detail {
+                line.push_str(&format!("\n   {}", clamp_chat_field(d)));
+            }
+            Some((line, MessageRole::Signal))
+        }
         "task.cancelled" => Some((
             format!("🚫 [{}] Task cancelled: {}{}", ts_short, task, agent_suffix),
             MessageRole::Signal,
@@ -4294,6 +4313,17 @@ async fn check_signals(
 
     tracing::debug!(target: "chat", session_id = %session_id, root_session_id = %root_session_id, "check_signals: starting");
 
+    // Pending-approval cards from the gateway store include the full `ScheduledAction` (e.g.
+    // sandbox command). Workflow `task.awaiting_approval` uses the same `announced_store_approval_ids`
+    // set for dedup — if workflow runs first, it "wins" with a one-line card and the rich store
+    // card is skipped. Merge store-backed approvals before workflow events so operators see what
+    // they are approving.
+    if let Some(st) = store {
+        if merge_gateway_store_pending_approvals(app, config, st, session_id) {
+            processed_any = true;
+        }
+    }
+
     let previous_overview = app.session_overview.clone();
     app.session_overview.root_session_id = snapshot.overview.root_session_id.clone();
     app.session_overview.workflow = snapshot.overview.workflow.clone();
@@ -4497,9 +4527,6 @@ async fn check_signals(
 
     if let Some(store) = store {
         refresh_policy_causal_pane(app, store, &root_session_id);
-        if merge_gateway_store_pending_approvals(app, config, store, session_id) {
-            processed_any = true;
-        }
         refresh_gate_history(app, store);
     }
 
@@ -4716,6 +4743,22 @@ mod tests {
         let line = format_workflow_event_card(&event).map(|(s, _)| s).expect("event should render");
         assert!(line.contains("Approval granted"));
         assert!(line.contains("resuming: task-42"));
+    }
+
+    #[test]
+    fn test_format_workflow_event_card_task_completed_includes_result_summary() {
+        let event = workflow_event(
+            "task.completed",
+            Some("task-42"),
+            serde_json::json!({
+                "status": "succeeded",
+                "result_summary": "exit=1 stdout=ERR registering agent"
+            }),
+        );
+        let line = format_workflow_event_card(&event).map(|(s, _)| s).expect("event should render");
+        assert!(line.contains("Task completed: task-42"));
+        assert!(line.contains("Result:"));
+        assert!(line.contains("exit=1"));
     }
 
     #[test]

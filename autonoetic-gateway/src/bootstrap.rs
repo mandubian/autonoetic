@@ -412,16 +412,14 @@ fn merge_preset_into_skill(skill_text: &str, preset: &LlmPreset) -> Option<Strin
                 modified = true;
             }
 
-            // Fill-missing for these (agent-specific or optional)
-            let base_url_key = yaml_str("base_url");
-            let has_base_url = map.get(&base_url_key).map_or(false, |v| !v.is_null());
-            if !has_base_url {
-                if let Some(ref base_url) = preset.base_url {
-                    map.insert(base_url_key, serde_yaml::to_value(base_url).ok()?);
-                    modified = true;
-                }
+            // base_url: always override (infrastructure-level, like provider/model)
+            if let Some(ref base_url) = preset.base_url {
+                let base_url_key = yaml_str("base_url");
+                map.insert(base_url_key, serde_yaml::to_value(base_url).ok()?);
+                modified = true;
             }
 
+            // Fill-missing for these (agent-specific or optional)
             let chat_only_key = yaml_str("chat_only");
             let has_chat_only = map.get(&chat_only_key).map_or(false, |v| !v.is_null());
             if !has_chat_only {

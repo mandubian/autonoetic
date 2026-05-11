@@ -111,6 +111,11 @@ pub fn resolve_llm_config(
         }
     }
 
+    // 3.5. Default preset from config (covers unmapped agents)
+    if let Some(preset) = config.llm_presets.get("default") {
+        return preset_to_config("default", preset, &config.llm_presets);
+    }
+
     // 4. Hardcoded defaults per template (backward compatible)
     match template.unwrap_or("generic") {
         "planner" => LlmTemplateConfig {
@@ -962,8 +967,29 @@ pub fn handle_agent_bootstrap(
     Ok(())
 }
 
+/// First YAML frontmatter slice (between the opening `---` and the next `---` line).
+fn skill_frontmatter_for_llm_patch(content: &str) -> Option<&str> {
+    let s = content.trim_start();
+    if !s.starts_with("---") {
+        return None;
+    }
+    let mut rest = s.get(3..)?;
+    if rest.starts_with('\r') {
+        rest = rest.get(1..)?;
+    }
+    rest = rest.strip_prefix('\n')?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+fn skill_frontmatter_declares_base_url(content: &str) -> bool {
+    skill_frontmatter_for_llm_patch(content)
+        .map(|fm| fm.contains("base_url:"))
+        .unwrap_or(false)
+}
+
 /// Apply LLM preset from config to a SKILL.md frontmatter
-fn apply_llm_preset_to_skill(
+pub(crate) fn apply_llm_preset_to_skill(
     content: &str,
     config: &GatewayConfig,
     agent_id: &str,
@@ -981,8 +1007,13 @@ fn apply_llm_preset_to_skill(
     {
         // Even if model/provider match, check chat_only, base_url, and api_key_env
         let chat_only_match = !llm.chat_only || content.contains("chat_only");
-        let base_url_match =
-            llm.base_url.is_none() || llm.base_url.as_ref().map_or(true, |u| content.contains(u));
+        // If the preset omits base_url, SKILL must not keep a stale proxy (e.g. localhost:8080);
+        // otherwise `refresh_models` / bootstrap would skip patching while the runtime still
+        // pointed at the old URL.
+        let base_url_match = match &llm.base_url {
+            None => !skill_frontmatter_declares_base_url(content),
+            Some(url) => content.contains(url),
+        };
         let api_key_env_match = llm.api_key_env.is_none()
             || llm
                 .api_key_env
@@ -1044,6 +1075,8 @@ fn apply_llm_preset_to_skill(
                 }
             }
         }
+    } else if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\s*\n"#).ok() {
+        updated = re.replace_all(&updated, "").to_string();
     }
 
     // Handle api_key_env
@@ -2392,6 +2425,49 @@ Use tools when needed.
         assert_eq!(llm.provider, "openai");
         assert_eq!(llm.model, "gpt-4o-mini");
         assert_eq!(llm.temperature, 0.0);
+    }
+
+    #[test]
+    fn test_apply_llm_preset_strips_stale_base_url_when_preset_has_none() {
+        let mut config = GatewayConfig::default();
+        config.llm_presets.insert(
+            "default".to_string(),
+            autonoetic_types::config::LlmPreset {
+                provider: Some("openrouter".to_string()),
+                model: Some("z-ai/glm-5-turbo".to_string()),
+                temperature: Some(0.2),
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                api_key_env: None,
+                thinking: None,
+                routing: None,
+            },
+        );
+
+        let skill = r#"---
+metadata:
+  autonoetic:
+    agent:
+      id: "specialized_builder.default"
+    llm_config:
+      provider: "openrouter"
+      model: "z-ai/glm-5-turbo"
+      temperature: 0.2
+      base_url: "http://localhost:8080/v1/chat/completions"
+---
+"#;
+
+        let updated =
+            apply_llm_preset_to_skill(skill, &config, "specialized_builder.default")
+                .expect("should remove stale base_url");
+        assert!(!updated.contains("localhost:8080"));
+        assert!(!updated.contains("base_url:"));
     }
 
     #[test]

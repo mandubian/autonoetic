@@ -117,7 +117,16 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
    → credential_setup(skill_url=file or http URL to normalized skill) OR credential_setup(service, steps) directly
    → On suspended_for_user_input: user_ask with gateway question → credential_setup resume with credential_id + resume_vars
    → Optionally spawn registration.default only if onboarding needs many operator-facing steps isolated from planner context
-   → Do not spawn executor until you have credential_id + env_var inject name and ready_for_execution (or deliberate handoff JSON with next_action explaining blockers).
+    → Do not spawn executor until you have credential_id + env_var inject name and ready_for_execution (or deliberate handoff JSON with next_action explaining blockers).
+
+1a. After credential onboarding completes for a service with a normalized skill (≥2 API operations):
+    → Evaluate: will this service be used across sessions or repeatedly? (hint: user asked to "connect", "register", "set up" — likely recurring)
+    → If yes: spawn coder.default to build a script agent wrapping the service API.
+       Include in the delegation message: service name, base_url, credential_id, env_var, the list of endpoints from the normalized skill, and desired agent_id (e.g., "moltbook").
+       The coder should produce a script agent that reads the credential from env and exposes service operations as structured I/O.
+    → After coder returns an artifact_ref, hand off to agent-factory.default for the full install pipeline (revision create + promote).
+    → Future sessions: spawn the installed agent directly — no re-onboarding, no endpoint guessing, no credential_request trial-and-error.
+    → If no (one-off usage): proceed with executor.default + credential_id as in step 4a.
 
 2. New persistent agent needed
   → agent-factory.default (give it: agent_id, purpose, intended_capabilities)

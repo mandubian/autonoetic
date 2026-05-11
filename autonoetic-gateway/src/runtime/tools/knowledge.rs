@@ -84,7 +84,7 @@ impl NativeTool for KnowledgeStoreTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Store a durable fact in the knowledge base with provenance. Default visibility is session: any agent in the same session can read it; use private to restrict to yourself, or global for all agents. Use retention for TTL: stable (default), ephemeral (~1 hour), 1d, or 30d. To widen visibility later, call knowledge.store again with the same id. IMPORTANT: 'content' must be a plain string — never a JSON object. If you want to store structured data, serialize it to a JSON string first (e.g., JSON.stringify or serde_json::to_string).".to_string(),
+            description: "Store a durable fact in the knowledge base with provenance. Default visibility is global: all agents across sessions can read it; use session to restrict to the same session, or private to restrict to yourself. Use retention for TTL: stable (default), ephemeral (~1 hour), 1d, or 30d. To widen visibility later, call knowledge.store again with the same id. IMPORTANT: 'content' must be a plain string — never a JSON object. If you want to store structured data, serialize it to a JSON string first (e.g., JSON.stringify or serde_json::to_string).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -94,7 +94,7 @@ impl NativeTool for KnowledgeStoreTool {
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags for searchability" },
                     "confidence": { "type": "number", "description": "Confidence level (0.0 to 1.0)", "default": 1.0 },
                     "retention": { "type": "string", "description": "Lifetime: stable (no expiry), ephemeral (~1 hour), 1d, 30d", "default": "stable" },
-                    "visibility": { "type": "string", "description": "Who can read: session (default, same session), private (writer/owner only), global (all agents)", "default": "session" }
+                    "visibility": { "type": "string", "description": "Who can read: global (default, all agents across sessions), session (same session only), private (writer/owner only)", "default": "global" }
                 },
                 "required": ["id", "content"],
                 "additionalProperties": false
@@ -141,7 +141,7 @@ impl NativeTool for KnowledgeStoreTool {
             "stable".to_string()
         }
         fn default_visibility() -> String {
-            "session".to_string()
+            "global".to_string()
         }
 
         let args: Args = serde_json::from_str(arguments_json)

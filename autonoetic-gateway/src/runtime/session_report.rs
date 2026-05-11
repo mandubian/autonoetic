@@ -15,6 +15,13 @@ use std::sync::{LazyLock, Mutex};
 
 static SESSION_REPORT_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+fn update_latest_session_symlink(gateway_dir: &Path, session_dir_name: &str) {
+    let sessions_dir = gateway_dir.join("sessions");
+    let latest_link = sessions_dir.join("latest");
+    let _ = std::fs::remove_file(&latest_link);
+    let _ = std::os::unix::fs::symlink(session_dir_name, &latest_link);
+}
+
 const MAX_EVENTS: usize = 400;
 const MAX_RECENT_EVENTS_PER_AGENT: usize = 12;
 const LARGE_PAYLOAD_THRESHOLD: usize = 500;
@@ -197,6 +204,7 @@ impl SessionReportWriter {
         let base = base_session_id(session_id);
         let dir = gateway_dir.join("sessions").join(base);
         std::fs::create_dir_all(&dir)?;
+        update_latest_session_symlink(gateway_dir, base);
         let report_data_dir = dir.join("report-data");
         std::fs::create_dir_all(&report_data_dir)?;
         let payload_counter = std::fs::read_dir(&report_data_dir)

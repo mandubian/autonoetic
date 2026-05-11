@@ -1,4 +1,5 @@
 use autonoetic_gateway::policy::PolicyEngine;
+use autonoetic_gateway::runtime::memory::Tier2Memory;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::approval::approve_request;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -1267,6 +1268,76 @@ POST /v1/register
 }
 
 #[test]
+fn test_skill_normalize_auto_registers_discovery_record() {
+    let manifest = test_manifest_with_id(
+        "planner.default",
+        vec![Capability::WriteAccess {
+            scopes: vec!["skills/*".to_string()],
+        }],
+    );
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agent_dir = temp.path().join("agents").join("planner.default");
+    std::fs::create_dir_all(&agent_dir).expect("agent workspace should create");
+
+    let md = r#"## Example API
+
+Use this to register:
+
+POST /v1/register
+{
+  "username": "alice"
+}
+"#;
+
+    let args = serde_json::json!({
+        "intent": "normalize and register discovery",
+        "content": md,
+        "service": "examplesvc",
+        "source_url": "https://api.example.com/docs"
+    });
+
+    let registry = default_registry();
+    let result = registry
+        .execute(
+            "skill_normalize",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(temp.path()),
+            &args.to_string(),
+            Some("sess-1"),
+            Some("turn-1"),
+            None,
+            None,
+            None,
+        )
+        .expect("skill_normalize should succeed");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("skill_normalize result should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        parsed.get("discovery_record_registered"),
+        Some(&serde_json::json!(true))
+    );
+
+    let mem = Tier2Memory::open_sqlite(temp.path(), "planner.default")
+        .expect("memory should open on gateway dir");
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime should initialize");
+    let recalled = rt
+        .block_on(mem.recall("registration:examplesvc"))
+        .expect("discovery record should be present");
+    assert_eq!(recalled.scope, "skills");
+    assert!(matches!(
+        recalled.visibility,
+        autonoetic_types::memory::MemoryVisibility::Global
+    ));
+    assert!(recalled.content.contains("\"service\":\"examplesvc\""));
+    assert!(recalled.content.contains("\"skill_path\":\"skills/examplesvc/SKILL.md\""));
+}
+
+#[test]
 fn test_skill_normalize_moltbook_fixture_generates_expected_steps() {
     let manifest = test_manifest(vec![Capability::WriteAccess {
         scopes: vec!["skills/*".to_string()],
@@ -1326,6 +1397,109 @@ fn test_skill_normalize_moltbook_fixture_generates_expected_steps() {
     assert!(written.contains("/api/setup-heartbeat"));
     assert!(written.contains("/api/post-to-feed"));
     assert!(written.contains("/status"));
+}
+
+#[test]
+fn test_skill_normalize_sole_url_in_content_fetches_and_normalizes() {
+    let md = "## Example API\n\nPOST /v1/ping\n{\"x\":1}\n";
+    let (base_url, handle) = spawn_one_shot_http_server("200 OK", "text/markdown", md.to_string());
+    let fetch_url = format!("{}/skill.md", base_url.trim_end_matches('/'));
+
+    let manifest = test_manifest(vec![
+        Capability::WriteAccess {
+            scopes: vec!["skills/*".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agent_dir = temp.path().join("agents").join("planner.default");
+    std::fs::create_dir_all(&agent_dir).expect("agent workspace should create");
+
+    let args = serde_json::json!({
+        "intent": "normalize from URL mistakenly passed as content",
+        "content": fetch_url,
+        "service": "urlskill"
+    });
+
+    let registry = default_registry();
+    let result = registry
+        .execute(
+            "skill_normalize",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("skill_normalize should succeed after fetch");
+
+    let _ = handle.join();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("skill_normalize result should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(true)));
+    let rel = parsed
+        .get("skill_path")
+        .and_then(|v| v.as_str())
+        .expect("skill_path");
+    assert_eq!(rel, "skills/urlskill/SKILL.md");
+    let written = std::fs::read_to_string(agent_dir.join(rel)).expect("normalized file should exist");
+    assert!(written.contains("autonoetic:"));
+    assert!(written.contains("/v1/ping"));
+}
+
+#[test]
+fn test_skill_normalize_sole_url_requires_network_access() {
+    let manifest = test_manifest(vec![Capability::WriteAccess {
+        scopes: vec!["skills/*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agent_dir = temp.path().join("agents").join("planner.default");
+    std::fs::create_dir_all(&agent_dir).expect("agent workspace should create");
+
+    let args = serde_json::json!({
+        "intent": "try URL-only content without NetworkAccess",
+        "content": "http://127.0.0.1:65530/missing.md",
+        "service": "noop"
+    });
+
+    let registry = default_registry();
+    let result = registry
+        .execute(
+            "skill_normalize",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("skill_normalize should return JSON error");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("skill_normalize result should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(false)));
+    let err = parsed
+        .get("error")
+        .and_then(|v| v.as_str())
+        .expect("error string");
+    assert!(
+        err.contains("NetworkAccess"),
+        "expected policy hint, got: {err}"
+    );
 }
 
 #[test]

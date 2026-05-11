@@ -6,9 +6,12 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
-use crate::runtime::tools::{extract_host, NativeTool, NativeToolRegistry};
+use crate::runtime::tools::{
+    block_on_memory, extract_host, tier2_memory_for_native_tool, NativeTool, NativeToolRegistry,
+};
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::capability::Capability;
+use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
 use gray_matter::Matter;
 use regex::Regex;
 use serde::Deserialize;
@@ -353,6 +356,64 @@ fn inject_as_for_service(service: &str) -> String {
     }
 }
 
+/// When `content` is a single non-empty line that is only an `http://` or `https://` URL, the
+/// planner likely meant "fetch this" rather than "treat this string as markdown". We resolve
+/// it here (subject to [`PolicyEngine::can_connect_net`]) so `skill_normalize` does not fail
+/// with "No HTTP API endpoints could be extracted" on the URL text itself.
+fn sole_http_url_content(content: &str) -> Option<String> {
+    let t = content.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = t
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() != 1 {
+        return None;
+    }
+    let line = lines[0];
+    if !line.starts_with("http://") && !line.starts_with("https://") {
+        return None;
+    }
+    if line.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let parsed = url::Url::parse(line).ok()?;
+    if parsed.host_str()?.is_empty() {
+        return None;
+    }
+    Some(line.to_string())
+}
+
+fn fetch_markdown_for_skill_normalize(
+    policy: &PolicyEngine,
+    url: &str,
+) -> Result<String, String> {
+    let host = extract_host(url).map_err(|e| e.to_string())?;
+    if !policy.can_connect_net(&host).is_allowed() {
+        return Err(format!(
+            "skill_normalize received only a URL in `content`, but NetworkAccess does not allow host '{}' (rule R-1.5). \
+Fetch the document with a network-capable step and pass the markdown body in `content`, or add this host to NetworkAccess.",
+            host
+        ));
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(url).send().map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        return Err(format!(
+            "HTTP {} while fetching skill markdown from {}",
+            status, url
+        ));
+    }
+    resp.text().map_err(|e| e.to_string())
+}
+
 fn extract_base_and_hosts(source_url: Option<&str>) -> (Option<String>, Vec<String>) {
     let Some(raw) = source_url else {
         return (None, Vec::new());
@@ -509,6 +570,80 @@ fn validate_rel_store_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn write_skill_to_gateway_dir(gateway_dir: Option<&Path>, rel: &str, content: &str) {
+    if let Some(gw) = gateway_dir {
+        let gw_path = gw.join(rel);
+        if let Some(parent) = gw_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&gw_path, content);
+    }
+}
+
+fn write_skill_discovery_record(
+    gateway_dir: Option<&Path>,
+    gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    manifest: &AgentManifest,
+    session_id: Option<&str>,
+    turn_id: Option<&str>,
+    service: &str,
+    skill_path: &str,
+    steps_count: usize,
+    base_url: Option<&str>,
+    source_url: Option<&str>,
+) -> anyhow::Result<bool> {
+    let Some(gw_dir) = gateway_dir else {
+        return Ok(false);
+    };
+
+    let sid = session_id.unwrap_or(&manifest.agent.id);
+    let source_ref = match turn_id {
+        Some(tid) => format!("session:{}:turn:{}", sid, tid),
+        None => format!("session:{}", sid),
+    };
+
+    let mem = tier2_memory_for_native_tool(gw_dir, gateway_store, &manifest.agent.id, session_id)?;
+
+    let id = format!("registration:{}", service_slug(service));
+    let content = serde_json::json!({
+        "service": service,
+        "skill_path": skill_path,
+        "base_url": base_url,
+        "steps_count": steps_count,
+        "source_url": source_url,
+    })
+    .to_string();
+
+    let mut memory = MemoryObject::new(
+        id,
+        "skills".to_string(),
+        manifest.agent.id.clone(),
+        manifest.agent.id.clone(),
+        source_ref,
+        content,
+    );
+    memory.visibility = MemoryVisibility::Global;
+    memory.confidence = Some(1.0);
+    memory.tags = vec![
+        "source:skill_normalize".to_string(),
+        format!("service:{}", service_slug(service)),
+        "type:normalized_skill".to_string(),
+    ];
+
+    if let Some(sid) = session_id {
+        if let Some(store) = gateway_store {
+            if let Ok(Some(binding)) = store.get_session_agent_binding(sid) {
+                memory.revision_id = Some(binding.revision_id.clone());
+                memory.binding_session_id = Some(binding.session_id.clone());
+                memory.alias_ref = binding.alias_id.clone();
+            }
+        }
+    }
+
+    block_on_memory(mem.save_memory(&memory))?;
+    Ok(true)
+}
+
 impl NativeTool for SkillNormalizeTool {
     fn name(&self) -> &'static str {
         "skill_normalize"
@@ -532,7 +667,7 @@ impl NativeTool for SkillNormalizeTool {
                     },
                     "content": {
                         "type": "string",
-                        "description": "Full markdown text of the external skill/API spec."
+                        "description": "Full markdown text of the external skill/API spec. If this value is a single line containing only an http(s) URL, the gateway fetches it (requires NetworkAccess for that host, rule R-1.5) and normalizes the response body."
                     },
                     "service": {
                         "type": "string",
@@ -565,15 +700,15 @@ impl NativeTool for SkillNormalizeTool {
 
     fn execute(
         &self,
-        _manifest: &AgentManifest,
+        manifest: &AgentManifest,
         policy: &PolicyEngine,
         agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
-        _turn_id: Option<&str>,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: SkillNormalizeArgs = serde_json::from_str(arguments_json)
@@ -584,6 +719,32 @@ impl NativeTool for SkillNormalizeTool {
 
         let slug = service_slug(&args.service);
         anyhow::ensure!(!slug.is_empty(), "service must yield a non-empty slug");
+
+        let mut markdown = args.content.clone();
+        let mut source_url = args.source_url.clone();
+        if let Some(url) = sole_http_url_content(&markdown) {
+            match fetch_markdown_for_skill_normalize(policy, &url) {
+                Ok(body) => {
+                    markdown = body;
+                    if source_url.is_none() {
+                        source_url = Some(url);
+                    }
+                }
+                Err(msg) => {
+                    let error_type = if msg.contains("NetworkAccess") {
+                        "policy"
+                    } else {
+                        "fetch"
+                    };
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": error_type,
+                        "error": msg,
+                    })
+                    .to_string());
+                }
+            }
+        }
 
         let rel = args
             .store_path
@@ -602,25 +763,52 @@ impl NativeTool for SkillNormalizeTool {
             .to_string());
         }
 
-        if autonoetic_onboarding_present(&args.content) {
+        if autonoetic_onboarding_present(&markdown) {
             let out_path = agent_dir.join(&rel);
             std::fs::create_dir_all(out_path.parent().unwrap())?;
-            std::fs::write(&out_path, &args.content)?;
+            std::fs::write(&out_path, &markdown)?;
+            write_skill_to_gateway_dir(gateway_dir, &rel, &markdown);
+            let discovery_record_registered =
+                match write_skill_discovery_record(
+                    gateway_dir,
+                    gateway_store.as_ref(),
+                    manifest,
+                    session_id,
+                    turn_id,
+                    &args.service,
+                    &rel,
+                    0,
+                    None,
+                    source_url.as_deref(),
+                ) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "skill_normalize",
+                            service = %args.service,
+                            skill_path = %rel,
+                            error = %err,
+                            "Failed to write normalized-skill discovery record"
+                        );
+                        false
+                    }
+                };
             return Ok(serde_json::json!({
                 "ok": true,
                 "skill_path": rel,
                 "already_normalized": true,
+                "discovery_record_registered": discovery_record_registered,
                 "message": "Content already contains autonoetic.onboarding steps; file written as-is.",
             })
             .to_string());
         }
 
-        let (base_url, mut allowed_hosts) = extract_base_and_hosts(args.source_url.as_deref());
+        let (base_url, mut allowed_hosts) = extract_base_and_hosts(source_url.as_deref());
         if allowed_hosts.is_empty() {
             allowed_hosts.push("localhost".to_string());
         }
 
-        let (step_values, fragments) = extract_api_steps_from_markdown(&args.content);
+        let (step_values, fragments) = extract_api_steps_from_markdown(&markdown);
         if step_values.is_empty() {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -648,7 +836,7 @@ impl NativeTool for SkillNormalizeTool {
         };
         let yaml = serde_yaml::to_string(&fm)
             .map_err(|e| anyhow::anyhow!("failed to serialize skill frontmatter: {}", e))?;
-        let document = format!("---\n{yaml}---\n\n{}", args.content);
+        let document = format!("---\n{yaml}---\n\n{}", markdown);
 
         let out_path = agent_dir.join(&rel);
         std::fs::create_dir_all(
@@ -656,7 +844,35 @@ impl NativeTool for SkillNormalizeTool {
                 .parent()
                 .ok_or_else(|| anyhow::anyhow!("invalid store_path"))?,
         )?;
-        std::fs::write(&out_path, document)?;
+        std::fs::write(&out_path, &document)?;
+        write_skill_to_gateway_dir(gateway_dir, &rel, &document);
+
+        let discovery_record_registered = match write_skill_discovery_record(
+            gateway_dir,
+            gateway_store.as_ref(),
+            manifest,
+            session_id,
+            turn_id,
+            &args.service,
+            &rel,
+            steps_count,
+            base_url.as_deref(),
+            source_url.as_deref(),
+        ) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    target: "skill_normalize",
+                    service = %args.service,
+                    skill_path = %rel,
+                    error = %err,
+                    "Failed to write normalized-skill discovery record"
+                );
+                false
+            }
+        };
+
+        let agent_candidate = steps_count >= 2;
 
         Ok(serde_json::json!({
             "ok": true,
@@ -665,7 +881,13 @@ impl NativeTool for SkillNormalizeTool {
             "steps_count": steps_count,
             "base_url": base_url,
             "fragments": fragments,
-            "message": "Wrote Autonoetic SKILL.md; use credential_setup with skill_url pointing at this path or a file:// URL as supported by your deployment.",
+            "discovery_record_registered": discovery_record_registered,
+            "agent_creation_candidate": agent_candidate,
+            "message": if agent_candidate {
+                "Wrote Autonoetic SKILL.md with multiple API operations. Use credential_setup with skill_url for onboarding. Consider spawning coder.default to build a reusable script agent for this service."
+            } else {
+                "Wrote Autonoetic SKILL.md; use credential_setup with skill_url pointing at this path or a file:// URL as supported by your deployment."
+            },
         })
         .to_string())
     }

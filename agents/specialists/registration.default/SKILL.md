@@ -136,8 +136,8 @@ explains what the planner must supply).
    - Call `credential_check` for `service` and confirm the list contains that `credential_id`.
    - If any check fails, set `ready_for_execution: false` and describe the blocker in `next_action`.
 
-5. **Optional discovery record** — If the run succeeded, you may call `knowledge_store` with
-   `id: registration:<service>`, `scope: skills`, string `content` (no secrets), `visibility: global`.
+5. **Discovery indexing** — Normalized skills are indexed automatically by the gateway after
+  successful normalization, so no manual `knowledge_store` write is required here.
 
 6. **Return to the planner** — Single JSON object:
    - `service`, `credential_id`, `env_var`, `ready_for_execution`, `public_data`, `next_action`,

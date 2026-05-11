@@ -62,6 +62,16 @@ llm_preset_mapping:
   evaluator: default
   executor: default
   packager: default
+  architect: default
+  debugger: default
+  registration: default
+  discovery: default
+  specialized_builder: default
+  agent-factory: default
+  memory-curator: default
+  evolution-steward: default
+  evolution-orchestrator: default
+  agent-adapter: default
 "#,
         agents_dir = agents_dir_str,
         provider = provider,
