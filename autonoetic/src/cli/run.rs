@@ -71,6 +71,9 @@ llm_preset_mapping:
 
     std::fs::write(config_path, &config_content)?;
     eprintln!("\n  Config written to {}", config_path.display());
+    if let Some(ref url) = base_url {
+        eprintln!("  Base URL: {}", url);
+    }
 
     prompt_persona(config_dir)?;
 
@@ -171,6 +174,9 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
     if updated != current {
         std::fs::write(config_path, &updated)?;
         eprintln!("  Config updated: provider={}, model={}", provider, model);
+        if let Some(ref url) = base_url {
+            eprintln!("  Base URL: {}", url);
+        }
     } else {
         eprintln!("  Config unchanged: provider={}, model={}", provider, model);
     }
