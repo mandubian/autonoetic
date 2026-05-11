@@ -2147,6 +2147,8 @@ impl NativeTool for AgentRevisionPromoteTool {
             args.required_eval_run_id.as_deref(),
         )?;
 
+        crate::bootstrap::update_latest_symlink(gateway_dir, &args.agent_id, &args.revision_id);
+
         let short_ref = format!("{}@rev_{}", args.agent_id, rev.short_id);
         Ok(serde_json::json!({
             "ok": true,
