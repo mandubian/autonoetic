@@ -447,6 +447,14 @@ impl App {
             .unwrap_or(0)
     }
 
+    fn has_active_work(&self) -> bool {
+        !self.pending.is_empty()
+            || !self.pending_approval_ids.is_empty()
+            || self.session_overview.pending_user_interactions > 0
+            || self.session_overview.workflow.running > 0
+            || self.session_overview.workflow.queued > 0
+    }
+
     fn tick_spinner(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
     }
@@ -2477,14 +2485,30 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         row = row.saturating_add(1);
     }
 
-    // Pending indicator
-    if !app.pending.is_empty() {
-        let pending_text = format!(
-            "{} Working... ({} pending, {}s)",
-            app.spinner(),
-            app.pending.len(),
-            app.oldest_secs()
-        );
+    // Active-work indicator (pending RPCs, approvals, user interactions, workflow tasks)
+    if app.has_active_work() {
+        let pending_text = if !app.pending.is_empty() {
+            format!(
+                "{} Working... ({} pending, {}s)",
+                app.spinner(),
+                app.pending.len(),
+                app.oldest_secs()
+            )
+        } else if !app.pending_approval_ids.is_empty() {
+            format!(
+                "{} Waiting for approval ({} pending)",
+                app.spinner(),
+                app.pending_approval_ids.len()
+            )
+        } else if app.session_overview.pending_user_interactions > 0 {
+            format!(
+                "{} Awaiting your response... ({} pending)",
+                app.spinner(),
+                app.session_overview.pending_user_interactions
+            )
+        } else {
+            format!("{} Working...", app.spinner())
+        };
         let pending_line = Line::from(vec![Span::styled(
             pending_text,
             Style::default()
@@ -2522,6 +2546,66 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         "Gateway: connected"
     } else {
         "Gateway: reconnecting"
+    };
+    let pause_hint = if app.session_paused {
+        "Paused: ON"
+    } else {
+        "Paused: OFF"
+    };
+    let esc_hint = if app.cancel_armed() {
+        "Esc: armed (press again to cancel)"
+    } else {
+        "Esc: pause"
+    };
+    let follow_hint = if app.follow_output {
+        "Follow: ON"
+    } else {
+        "Follow: OFF"
+    };
+    let text = if !app.pending.is_empty() {
+        format!(
+            "{} {} pending | {} | {} | {} | {} | {}",
+            app.spinner(),
+            app.pending.len(),
+            workflow,
+            gateway,
+            pause_hint,
+            esc_hint,
+            follow_hint,
+        )
+    } else if !app.pending_approval_ids.is_empty() {
+        format!(
+            "{} {} approval(s) pending | {} | {} | {} | {} | {}",
+            app.spinner(),
+            app.pending_approval_ids.len(),
+            workflow,
+            gateway,
+            pause_hint,
+            esc_hint,
+            follow_hint,
+        )
+    } else if app.session_overview.pending_user_interactions > 0 {
+        format!(
+            "{} awaiting your response | {} | {} | {} | {} | {}",
+            app.spinner(),
+            workflow,
+            gateway,
+            pause_hint,
+            esc_hint,
+            follow_hint,
+        )
+    } else if app.session_overview.workflow.running > 0 || app.session_overview.workflow.queued > 0 {
+        format!(
+            "{} {} | {} | {} | {} | {}",
+            app.spinner(),
+            workflow,
+            gateway,
+            pause_hint,
+            esc_hint,
+            follow_hint,
+        )
+    } else {
+        format!("{} | {} | {} | {} | {}", workflow, gateway, pause_hint, esc_hint, follow_hint)
     };
     let pause_hint = if app.session_paused {
         "Paused: ON"
