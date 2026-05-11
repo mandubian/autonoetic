@@ -124,8 +124,22 @@ fn prompt_persona(config_dir: &Path) -> anyhow::Result<()> {
 
 fn ensure_bootstrap(config_path: &Path, overwrite: bool) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let agents_populated = config.agents_dir.exists()
-        && config.agents_dir.read_dir()?.next().is_some();
+    let agents_populated = if config.agents_dir.exists() {
+        let mut has_agent = false;
+        if let Ok(entries) = config.agents_dir.read_dir() {
+            for entry in entries.flatten() {
+                if entry.file_type().map_or(false, |t| t.is_dir())
+                    && entry.path().join("SKILL.md").exists()
+                {
+                    has_agent = true;
+                    break;
+                }
+            }
+        }
+        has_agent
+    } else {
+        false
+    };
     if agents_populated && !overwrite {
         return Ok(());
     }
