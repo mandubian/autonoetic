@@ -140,9 +140,10 @@ approval_timeout_secs: 600
 #       - constitutional-observer.default
 
 # ── Chat TUI ──────────────────────────────────────────────────────────
-# Inline approval from the chat interface (Ctrl+A).
+# Inline approval from the chat interface (Ctrl+A). Default: true; set false to
+# require resolving approvals only via `autonoetic gateway approvals` (separate pane / process).
 chat:
-  inline_approvals: true   # Allow Ctrl+A to approve the latest pending approval
+  inline_approvals: true
 
 # ── Approval Levels ───────────────────────────────────────────────────
 # Escalation: require higher authority for sensitive actions.
@@ -240,6 +241,18 @@ code_analysis:
 retention:
   execution_traces_days: 30
   causal_events_days: 90
+
+# ── Resource Reclamation ──────────────────────────────────────────────
+# Idempotent garbage collection for content blobs, old revisions,
+# expired memories, orphaned sessions, and stale scheduled jobs.
+# Disabled by default; enable with caution.
+#reclamation:
+#  enabled: true
+#  min_interval_secs: 86400              # daily at most
+#  content_blob_max_age_days: 90
+#  archived_revision_max_age_days: 180
+#  orphaned_session_max_age_days: 30
+#  stale_job_max_age_days: 60
 
 # ── Post-Session Digest ───────────────────────────────────────────────
 # LLM summarization + memory extraction after sessions complete.

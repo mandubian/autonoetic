@@ -499,7 +499,7 @@ fn read_line_with_prompt(prompt: &str) -> anyhow::Result<String> {
 /// Returns `(provider_name, original_entry_name, model_id)` ready for config generation.
 pub async fn interactive_select(
     client: &reqwest::Client,
-) -> anyhow::Result<(String, String, String)> {
+) -> anyhow::Result<(String, String, String, Option<String>)> {
     let mut stderr = io::stderr();
 
     writeln!(stderr, "\n  Detecting available LLM providers...")?;
@@ -600,8 +600,11 @@ pub async fn interactive_select(
         provider_entry.entry.display
     )?;
 
-    let models = match fetch_models(client, &provider_entry).await {
-        Ok(m) if !m.is_empty() => m,
+    let (models, chat_base_url) = match fetch_models(client, &provider_entry).await {
+        Ok(m) if !m.is_empty() => {
+            let base_url = prompt_base_url_if_local(&provider_entry.entry)?;
+            (m, base_url)
+        }
         Ok(_) => {
             writeln!(stderr, "  No models returned. You can enter a model ID manually.")?;
             let model = read_line_with_prompt("  Model ID: ")?;
@@ -609,19 +612,88 @@ pub async fn interactive_select(
                 anyhow::bail!("Model ID cannot be empty");
             }
             let name = provider_entry.entry.name.to_string();
-            return Ok((name.clone(), name, model));
+            let base_url = prompt_base_url_if_local(&provider_entry.entry)?;
+            return Ok((name.clone(), name, model, base_url));
         }
-        Err(e) => {
-            writeln!(
-                stderr,
-                "  Could not fetch models ({e}). You can enter a model ID manually."
-            )?;
-            let model = read_line_with_prompt("  Model ID: ")?;
-            if model.is_empty() {
-                anyhow::bail!("Model ID cannot be empty");
+        Err(first_err) => {
+            if let ProviderKind::Local { models_url } = &provider_entry.entry.kind {
+                let default_base = models_url
+                    .trim_end_matches("/models")
+                    .trim_end_matches("/tags");
+                writeln!(
+                    stderr,
+                    "  Could not fetch models ({first_err})."
+                )?;
+                writeln!(
+                    stderr,
+                    "  Default base URL: {}. Enter a different host/port to retry.",
+                    default_base
+                )?;
+                let custom = read_line_with_prompt(&format!(
+                    "  Base URL (Enter for {}): ", default_base
+                ))?;
+                let retry_base = if custom.trim().is_empty() {
+                    default_base.to_string()
+                } else {
+                    let trimmed = custom.trim().trim_end_matches('/');
+                    trimmed.to_string()
+                };
+                let retry_models_url = if provider_entry.entry.name == "ollama" {
+                    format!("{}/api/tags", retry_base)
+                } else {
+                    format!("{}/models", retry_base)
+                };
+                let retry_entry = ProviderEntry {
+                    name: provider_entry.entry.name,
+                    display: provider_entry.entry.display,
+                    kind: ProviderKind::Local { models_url: Box::leak(retry_models_url.into_boxed_str()) },
+                };
+                let retry_provider = DetectedProvider {
+                    entry: retry_entry,
+                    source: provider_entry.source.clone(),
+                };
+                match fetch_models(client, &retry_provider).await {
+                    Ok(m) if !m.is_empty() => {
+                        let chat_url = format!("{}/chat/completions", retry_base);
+                        eprintln!("  Found {} model(s).", m.len());
+                        (m, Some(chat_url))
+                    }
+                    Ok(_) => {
+                        writeln!(stderr, "  Still no models. Enter a model ID manually.")?;
+                        let model = read_line_with_prompt("  Model ID: ")?;
+                        if model.is_empty() {
+                            anyhow::bail!("Model ID cannot be empty");
+                        }
+                        let chat_url = format!("{}/chat/completions", retry_base);
+                        let name = provider_entry.entry.name.to_string();
+                        return Ok((name.clone(), name, model, Some(chat_url)));
+                    }
+                    Err(e2) => {
+                        writeln!(
+                            stderr,
+                            "  Retry also failed ({e2}). Enter a model ID manually."
+                        )?;
+                        let model = read_line_with_prompt("  Model ID: ")?;
+                        if model.is_empty() {
+                            anyhow::bail!("Model ID cannot be empty");
+                        }
+                        let chat_url = format!("{}/chat/completions", retry_base);
+                        let name = provider_entry.entry.name.to_string();
+                        return Ok((name.clone(), name, model, Some(chat_url)));
+                    }
+                }
+            } else {
+                writeln!(
+                    stderr,
+                    "  Could not fetch models ({first_err}). You can enter a model ID manually."
+                )?;
+                let model = read_line_with_prompt("  Model ID: ")?;
+                if model.is_empty() {
+                    anyhow::bail!("Model ID cannot be empty");
+                }
+                let name = provider_entry.entry.name.to_string();
+                return Ok((name.clone(), name, model, None));
             }
-            let name = provider_entry.entry.name.to_string();
-            return Ok((name.clone(), name, model));
         }
     };
 
@@ -645,13 +717,32 @@ pub async fn interactive_select(
         }
     };
 
-    let provider_name = if provider_entry.entry.name == "llamacpp" {
-        "openai".to_string()
-    } else {
-        provider_entry.entry.name.to_string()
-    };
+    let provider_name = provider_entry.entry.name.to_string();
 
-    Ok((provider_name, provider_entry.entry.name.to_string(), model_id))
+    Ok((provider_name, provider_entry.entry.name.to_string(), model_id, chat_base_url))
+}
+
+fn prompt_base_url_if_local(entry: &ProviderEntry) -> anyhow::Result<Option<String>> {
+    if let ProviderKind::Local { models_url } = &entry.kind {
+        let default_base = models_url
+            .trim_end_matches("/models")
+            .trim_end_matches("/tags");
+        let default_chat = format!("{}/chat/completions", default_base);
+        let mut stderr = io::stderr();
+        writeln!(
+            stderr,
+            "\n  Base URL for chat completions (Enter for {}):",
+            default_chat
+        )?;
+        let input = read_line_with_prompt("  URL: ")?;
+        if input.trim().is_empty() {
+            Ok(Some(default_chat))
+        } else {
+            Ok(Some(input.trim().to_string()))
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 fn display_model_menu(models: &[ModelInfo]) -> anyhow::Result<()> {
@@ -708,7 +799,7 @@ fn display_model_menu(models: &[ModelInfo]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn manual_entry() -> anyhow::Result<(String, String, String)> {
+fn manual_entry() -> anyhow::Result<(String, String, String, Option<String>)> {
     let mut stderr = io::stderr();
     writeln!(
         stderr,
@@ -725,13 +816,16 @@ fn manual_entry() -> anyhow::Result<(String, String, String)> {
     }
 
     let original = provider.clone();
-    let effective_provider = if provider == "llamacpp" || provider == "llama.cpp" {
-        "openai".to_string()
+    let is_local = ["ollama", "lmstudio", "vllm", "llamacpp", "llama.cpp"].contains(&original.as_str());
+
+    let base_url = if is_local {
+        let url = read_line_with_prompt("  Base URL (e.g. http://host:port/v1/chat/completions): ")?;
+        if url.trim().is_empty() { None } else { Some(url.trim().to_string()) }
     } else {
-        provider
+        None
     };
 
-    Ok((effective_provider, original, model))
+    Ok((original.clone(), original, model, base_url))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

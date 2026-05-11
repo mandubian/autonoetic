@@ -6,9 +6,10 @@
 //!
 //! Phase B (Automated Registration):
 //! - credential.setup: Multi-step server-side credential registration flow
-//!   Extended with `skill_url` to ingest a remote skill.md onboarding spec,
-//!   `user_input` step support (gateway returns early, agent calls user.ask),
-//!   and `resume_vars` to continue after user input is collected.
+//!   Extended with `skill_url` to ingest a skill.md onboarding spec (HTTPS URL
+//!   or local filename from gateway skills/ directory), `user_input` step support
+//!   (gateway returns early, agent calls user.ask), and `resume_vars` to continue
+//!   after user input is collected.
 
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
@@ -427,6 +428,7 @@ impl NativeTool for CredentialRequestTool {
                         summary: format!("Credential request to {}", url_host),
                         approval_ref: None,
                         pre_validated: false,
+                        turn_id: None,
                     },
                 )?;
                 match gate_result {
@@ -517,6 +519,7 @@ impl NativeTool for CredentialRequestTool {
                     summary: format!("Credential request to {}", url_host),
                     approval_ref: None,
                     pre_validated: false,
+                    turn_id: None,
                 },
             )?;
             match gate_result {
@@ -729,6 +732,82 @@ impl NativeTool for CredentialRequestTool {
 fn extract_host(url: &str) -> anyhow::Result<String> {
     let parsed = url::Url::parse(url)?;
     Ok(parsed.host_str().unwrap_or("").to_string())
+}
+
+enum SkillUrlKind {
+    Remote { url: String, host: String },
+    Local { filename: String },
+}
+
+fn classify_skill_url(raw: &str) -> SkillUrlKind {
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        let host = url::Url::parse(raw)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .unwrap_or_default();
+        SkillUrlKind::Remote {
+            url: raw.to_string(),
+            host,
+        }
+    } else {
+        let filename = raw.to_string();
+        SkillUrlKind::Local { filename }
+    }
+}
+
+fn skills_dir(gateway_dir: &Path) -> PathBuf {
+    gateway_dir.join("skills")
+}
+
+fn validate_local_skill_path(
+    gateway_dir: &Path,
+    filename: &str,
+) -> anyhow::Result<PathBuf> {
+    let base = skills_dir(gateway_dir);
+    if !filename.ends_with(".md") {
+        anyhow::bail!(
+            "local skill_url must be a .md file in the gateway skills/ directory"
+        );
+    }
+    let candidate = base.join(filename);
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.clone());
+    let canonical_target = match std::fs::canonicalize(&candidate) {
+        Ok(p) => p,
+        Err(_) => {
+            let resolved = canonical_base.join(filename);
+            if !resolved.starts_with(&canonical_base) {
+                anyhow::bail!(
+                    "skill_url path escapes the gateway skills/ directory"
+                );
+            }
+            anyhow::bail!(
+                "skill file not found in gateway skills/ directory: {}",
+                filename
+            );
+        }
+    };
+    if !canonical_target.starts_with(&canonical_base) {
+        anyhow::bail!("skill_url path escapes the gateway skills/ directory");
+    }
+    let metadata = std::fs::symlink_metadata(&canonical_target)?;
+    if metadata.file_type().is_symlink() {
+        let link_target = std::fs::read_link(&canonical_target)?;
+        let resolved_link = if link_target.is_absolute() {
+            link_target
+        } else {
+            canonical_target.parent().unwrap_or(&canonical_base).join(link_target)
+        };
+        let canonical_link = match std::fs::canonicalize(&resolved_link) {
+            Ok(p) => p,
+            Err(_) => {
+                anyhow::bail!("symlink in skills/ directory points to invalid target");
+            }
+        };
+        if !canonical_link.starts_with(&canonical_base) {
+            anyhow::bail!("symlink in skills/ directory escapes the gateway skills/ directory");
+        }
+    }
+    Ok(canonical_target)
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,8 +1330,10 @@ impl NativeTool for CredentialSetupTool {
         ToolDefinition {
             name: "credential_setup".to_string(),
             description: "Register a new credential through a multi-step setup flow. \
-                Provide `skill_url` to ingest a remote skill.md spec and let the gateway \
+                Provide `skill_url` to ingest a skill.md spec and let the gateway \
                 execute all onboarding steps server-side — secrets are never returned to the LLM. \
+                skill_url accepts an HTTPS URL (fetched remotely, subject to approval) or a \
+                bare filename (e.g. 'github.md') resolved from the gateway skills/ directory. \
                 When a user_input step is reached the tool returns with `suspended_for_user_input: true` \
                 and a `question`. Call `user.ask` with that question, then call `credential.setup` \
                 again with `credential_id` + `resume_vars: { var_name: answer }` to continue. \
@@ -1262,7 +1343,7 @@ impl NativeTool for CredentialSetupTool {
                 "properties": {
                     "skill_url": {
                         "type": "string",
-                        "description": "URL to a skill.md whose autonoetic.onboarding section drives registration. When set, service/steps are extracted from the spec."
+                        "description": "HTTPS URL to a skill.md (fetched remotely) or a bare .md filename resolved from the gateway skills/ directory. When set, service/steps are extracted from the spec."
                     },
                     "service": {
                         "type": "string",
@@ -1472,145 +1553,170 @@ impl NativeTool for CredentialSetupTool {
         // ------------------------------------------------------------------
         // Path 3: fresh start — may use skill_url or explicit service/steps
         // ------------------------------------------------------------------
-        let (service, steps, inject_as, allowed_hosts, base_url) = if let Some(ref url) =
+        let (service, steps, inject_as, allowed_hosts, base_url) = if let Some(ref raw_url) =
             args.skill_url
         {
-            // Policy-check the skill_url host.
-            let url_host = extract_host(url)?;
-            let skill_url_is_approved = approved_setup_remote_url.as_deref()
-                .map(|u| extract_host(u).unwrap_or_default() == url_host)
-                .unwrap_or(false);
-            if !skill_url_is_approved {
-                let policy_violation = crate::runtime::network_policy::enforce_remote_target_policy(
-                    manifest,
-                    _agent_dir,
-                    &url_host,
-                    Some(url),
-                    DeclarationRequirement::Required,
-                ).err().map(|v| v.error_type.to_string())
-                .or_else(|| {
-                    if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
-                        Some("network_access_denied".to_string())
-                    } else {
-                        None
-                    }
-                });
+            let (content, url_host, base_url) = match classify_skill_url(raw_url) {
+                SkillUrlKind::Remote { url, host } => {
+                    let url_host = host;
+                    let url = url;
 
-                if let Some(violation_type) = policy_violation {
-                    let action = ScheduledAction::CredentialRequest {
-                        credential_id: args.credential_id.clone().unwrap_or_default(),
-                        url: url.clone(),
-                        method: Some("GET".to_string()),
-                        headers: None,
-                        body: None,
-                        inject_secret_as: None,
-                        payload: Some(json!({
-                            "host": url_host.clone(),
-                            "retry_field": "approval_ref",
-                            "source_tool": "credential_setup",
-                            "setup_phase": "skill_url",
-                            "policy_violation": violation_type,
-                        })),
-                    };
-                    let reason = format!(
-                        "Fetching skill.md from {} requires approval (policy: {})",
-                        url_host, violation_type
-                    );
-                    let gate = crate::runtime::human_gate::GateService::new(store.clone());
-                    let gate_result = gate.check(
-                        crate::runtime::human_gate::GateRequest {
-                            kind: crate::runtime::human_gate::GateKind::Approval {
-                                action: action.clone(),
-                                targets: vec![url_host.clone()],
-                                match_strategy: crate::runtime::human_gate::MatchStrategy::HostLevel,
-                            },
+                    let skill_url_is_approved = approved_setup_remote_url.as_deref()
+                        .map(|u| extract_host(u).unwrap_or_default() == url_host)
+                        .unwrap_or(false);
+                    if !skill_url_is_approved {
+                        let policy_violation = crate::runtime::network_policy::enforce_remote_target_policy(
                             manifest,
-                            session_id: _session_id,
-                            run_context: _run_context,
-                            config: _config,
-                            reason: reason.clone(),
-                            summary: format!("Fetch skill.md from {}", url_host),
-                            approval_ref: None,
-                            pre_validated: false,
-                        },
-                    )?;
-                    match gate_result {
-                        crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                        crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
-                            return Ok(json!({
-                                "ok": false,
-                                "approval_required": true,
-                                "approval_already_pending": true,
-                                "request_id": gate_id,
-                                "suspended": true,
-                                "reason": reason,
-                                "repair_hint": "Wait for the existing approval to be resolved.",
-                                "approval": {
-                                    "kind": "credential_setup_remote_access",
-                                    "summary": format!("Fetch skill.md from {}", url_host),
-                                    "retry_field": "approval_ref"
-                                }
-                            }).to_string());
-                        }
-                        crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
-                            return Ok(json!({
-                                "ok": false,
-                                "error_type": violation_type,
-                                "message": format!(
-                                    "Execution suspended pending operator approval ({}). Retry credential.setup with approval_ref after approval.",
-                                    gate_id
-                                ),
-                                "repair_hint": "Wait for approval and retry credential.setup with the same skill_url plus approval_ref.",
-                                "approval_required": true,
-                                "request_id": gate_id,
-                                "suspended": true,
-                                "reason": reason,
-                                "approval": {
-                                    "kind": "credential_setup_remote_access",
-                                    "summary": format!("Fetch skill.md from {}", url_host),
-                                    "reason": format!("Remote target policy: {} for {}", violation_type, url_host),
-                                    "retry_field": "approval_ref"
-                                }
-                            }).to_string());
-                        }
-                        other => {
-                            tracing::warn!(
-                                target: "credential",
-                                gate_result = ?other,
-                                "Unexpected gate result for credential_setup skill_url gate"
+                            _agent_dir,
+                            &url_host,
+                            Some(&url),
+                            DeclarationRequirement::Required,
+                        ).err().map(|v| v.error_type.to_string())
+                        .or_else(|| {
+                            if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
+                                Some("network_access_denied".to_string())
+                            } else {
+                                None
+                            }
+                        });
+
+                        if let Some(violation_type) = policy_violation {
+                            let action = ScheduledAction::CredentialRequest {
+                                credential_id: args.credential_id.clone().unwrap_or_default(),
+                                url: url.clone(),
+                                method: Some("GET".to_string()),
+                                headers: None,
+                                body: None,
+                                inject_secret_as: None,
+                                payload: Some(json!({
+                                    "host": url_host.clone(),
+                                    "retry_field": "approval_ref",
+                                    "source_tool": "credential_setup",
+                                    "setup_phase": "skill_url",
+                                    "policy_violation": violation_type,
+                                })),
+                            };
+                            let reason = format!(
+                                "Fetching skill.md from {} requires approval (policy: {})",
+                                url_host, violation_type
                             );
+                            let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                            let gate_result = gate.check(
+                                crate::runtime::human_gate::GateRequest {
+                                    kind: crate::runtime::human_gate::GateKind::Approval {
+                                        action: action.clone(),
+                                        targets: vec![url_host.clone()],
+                                        match_strategy: crate::runtime::human_gate::MatchStrategy::HostLevel,
+                                    },
+                                    manifest,
+                                    session_id: _session_id,
+                                    run_context: _run_context,
+                                    config: _config,
+                                    reason: reason.clone(),
+                                    summary: format!("Fetch skill.md from {}", url_host),
+                                    approval_ref: None,
+                                    pre_validated: false,
+                        turn_id: None,
+                                },
+                            )?;
+                            match gate_result {
+                                crate::runtime::human_gate::GateResult::Cleared { .. } => {}
+                                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                                    return Ok(json!({
+                                        "ok": false,
+                                        "approval_required": true,
+                                        "approval_already_pending": true,
+                                        "request_id": gate_id,
+                                        "suspended": true,
+                                        "reason": reason,
+                                        "repair_hint": "Wait for the existing approval to be resolved.",
+                                        "approval": {
+                                            "kind": "credential_setup_remote_access",
+                                            "summary": format!("Fetch skill.md from {}", url_host),
+                                            "retry_field": "approval_ref"
+                                        }
+                                    }).to_string());
+                                }
+                                crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                                    return Ok(json!({
+                                        "ok": false,
+                                        "error_type": violation_type,
+                                        "message": format!(
+                                            "Execution suspended pending operator approval ({}). Retry credential.setup with approval_ref after approval.",
+                                            gate_id
+                                        ),
+                                        "repair_hint": "Wait for approval and retry credential.setup with the same skill_url plus approval_ref.",
+                                        "approval_required": true,
+                                        "request_id": gate_id,
+                                        "suspended": true,
+                                        "reason": reason,
+                                        "approval": {
+                                            "kind": "credential_setup_remote_access",
+                                            "summary": format!("Fetch skill.md from {}", url_host),
+                                            "reason": format!("Remote target policy: {} for {}", violation_type, url_host),
+                                            "retry_field": "approval_ref"
+                                        }
+                                    }).to_string());
+                                }
+                                other => {
+                                    tracing::warn!(
+                                        target: "credential",
+                                        gate_result = ?other,
+                                        "Unexpected gate result for credential_setup skill_url gate"
+                                    );
+                                }
+                            }
                         }
                     }
-                }
-            }
 
-            // Fetch and parse the skill.md.
-            let url_clone = url.clone();
-            let (http_status, content) =
-                blocking_http_request(move || -> anyhow::Result<(u16, String)> {
-                    let client = reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(15))
-                        .build()?;
-                    let resp = client.get(url_clone.as_str()).send()?;
-                    let status = resp.status().as_u16();
-                    if !resp.status().is_success() {
-                        let _ = resp.text()?;
-                        return Ok((status, String::new()));
+                    let url_clone = url.clone();
+                    let (http_status, content) =
+                        blocking_http_request(move || -> anyhow::Result<(u16, String)> {
+                            let client = reqwest::blocking::Client::builder()
+                                .timeout(std::time::Duration::from_secs(15))
+                                .build()?;
+                            let resp = client.get(url_clone.as_str()).send()?;
+                            let status = resp.status().as_u16();
+                            if !resp.status().is_success() {
+                                let _ = resp.text()?;
+                                return Ok((status, String::new()));
+                            }
+                            let content = resp.text()?;
+                            Ok((status, content))
+                        })?;
+
+                    if !(200..300).contains(&(http_status as i32)) {
+                        return Ok(autonoetic_types::tool_error::ToolError::execution(
+                            format!(
+                                "Failed to fetch skill.md from {}: HTTP {}",
+                                url, http_status
+                            ),
+                            Some("Verify the skill_url is correct and accessible.".to_string()),
+                        )
+                        .to_error_response());
                     }
-                    let content = resp.text()?;
-                    Ok((status, content))
-                })?;
 
-            if !(200..300).contains(&(http_status as i32)) {
-                return Ok(autonoetic_types::tool_error::ToolError::execution(
-                    format!(
-                        "Failed to fetch skill.md from {}: HTTP {}",
-                        url, http_status
-                    ),
-                    Some("Verify the skill_url is correct and accessible.".to_string()),
-                )
-                .to_error_response());
-            }
+                    let base_url = extract_base_url(&url);
+                    (content, url_host, Some(base_url))
+                }
+                SkillUrlKind::Local { filename } => {
+                    let gateway_dir = _gateway_dir.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "local skill_url requires a gateway directory; \
+                             place the .md file in {{agents_dir}}/.gateway/skills/"
+                        )
+                    })?;
+                    let path = validate_local_skill_path(gateway_dir, &filename)?;
+                    let content = std::fs::read_to_string(&path).map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to read skill file from gateway skills/ directory: {}",
+                            e
+                        )
+                    })?;
+                    let base_url = None;
+                    (content, String::new(), base_url)
+                }
+            };
 
             let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
             let parsed = match matter.parse::<SkillMdFrontmatter>(&content) {
@@ -1638,7 +1744,8 @@ impl NativeTool for CredentialSetupTool {
                 credential: None,
                 onboarding: None,
             });
-            let base_url = autonoetic.base_url.unwrap_or_else(|| extract_base_url(url));
+            let resolved_base_url = base_url
+                .or_else(|| autonoetic.base_url.clone());
             let cred_spec = autonoetic.credential.unwrap_or(SkillCredentialSpec {
                 service: None,
                 inject_as: None,
@@ -1652,12 +1759,12 @@ impl NativeTool for CredentialSetupTool {
             let allowed_hosts = cred_spec
                 .allowed_hosts
                 .or_else(|| args.allowed_hosts.clone())
-                .unwrap_or_else(|| vec![url_host.clone()]);
+                .unwrap_or_else(|| if url_host.is_empty() { vec![] } else { vec![url_host.clone()] });
 
             let raw_steps = autonoetic.onboarding.map(|o| o.steps).unwrap_or_default();
             let mut steps: Vec<CredentialSetupStep> = Vec::with_capacity(raw_steps.len());
             for raw in raw_steps {
-                match raw.into_credential_step(&base_url) {
+                match raw.into_credential_step(resolved_base_url.as_deref().unwrap_or("")) {
                     Ok(s) => steps.push(s),
                     Err(e) => {
                         return Ok(autonoetic_types::tool_error::ToolError::validation(
@@ -1672,7 +1779,7 @@ impl NativeTool for CredentialSetupTool {
                 }
             }
 
-            (service, steps, inject_as, allowed_hosts, Some(base_url))
+            (service, steps, inject_as, allowed_hosts, resolved_base_url)
         } else {
             // Explicit service + steps.
             let service = match args.service {
@@ -1777,6 +1884,7 @@ impl NativeTool for CredentialSetupTool {
                                 summary: format!("Credential setup API call to {}", display_host),
                                 approval_ref: None,
                                 pre_validated: false,
+                        turn_id: None,
                             },
                         )?;
                         match gate_result {

@@ -806,6 +806,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
 
+    /// Resource reclamation (garbage collection) settings.
+    /// Idempotent sweep for content blobs, old revisions, expired memories,
+    /// orphaned sessions, and stale scheduled jobs.
+    #[serde(default)]
+    pub reclamation: ReclamationConfig,
+
     /// Response validation gate configuration.
     /// When enabled, the gateway validates agent outputs against declared constraints
     /// in agent metadata before returning SpawnResult to the caller.
@@ -1102,12 +1108,25 @@ fn default_system_agent_enabled() -> bool {
 }
 
 /// Chat TUI configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatConfig {
     /// Allow inline approval of pending requests from the chat TUI (Ctrl+A).
-    /// Disabled by default — the approval channel may be separated from chat.
-    #[serde(default)]
+    /// Defaults to true for interactive local use; set `false` to require
+    /// `autonoetic gateway approvals …` outside the chat pane.
+    #[serde(default = "default_chat_inline_approvals")]
     pub inline_approvals: bool,
+}
+
+fn default_chat_inline_approvals() -> bool {
+    true
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            inline_approvals: default_chat_inline_approvals(),
+        }
+    }
 }
 
 /// Approval level / escalation configuration.
@@ -1169,6 +1188,73 @@ fn default_retention_execution_traces_days() -> u32 {
 fn default_retention_causal_events_days() -> u32 {
     90
 }
+
+/// Configuration for resource reclamation (garbage collection).
+///
+/// The reclamation sweep runs on a configurable schedule and reclaims:
+/// - Content blobs with zero remaining name references
+/// - Memories past their `expires_at` deadline
+/// - Archived agent revisions older than N days
+/// - Orphaned sessions not resumed within N days
+/// - Stale scheduled jobs whose root session has been closed for > N days
+///
+/// The sweep is idempotent, conservative (only deletes provably unreferenced data),
+/// and every deletion is recorded in the causal event chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReclamationConfig {
+    /// Enable the reclamation sweep. Default: false (opt-in).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Minimum interval (seconds) between sweeps. Default: 86400 (24h).
+    #[serde(default = "default_reclamation_interval_secs")]
+    pub min_interval_secs: u64,
+
+    /// Delete content blobs with zero remaining name references after N days.
+    /// 0 = skip this category. Default: 90.
+    #[serde(default = "default_reclamation_content_blob_days")]
+    pub content_blob_max_age_days: u64,
+
+    /// Delete memories whose `expires_at` has passed.
+    /// Always runs if `expires_at` is set on memories (column-level, not config-level).
+    /// This is a safety switch: 0 = skip. Default: 0 (skip).
+    #[serde(default)]
+    pub expired_memory_retention_days: u64,
+
+    /// Delete archived agent revisions older than N days. 0 = skip. Default: 180.
+    #[serde(default = "default_reclamation_archived_revision_days")]
+    pub archived_revision_max_age_days: u64,
+
+    /// Mark sessions as closed if they are still `active` and their last activity
+    /// is older than N days. 0 = skip. Default: 30.
+    #[serde(default = "default_reclamation_orphaned_session_days")]
+    pub orphaned_session_max_age_days: u64,
+
+    /// Cancel `active` scheduled jobs whose root session has been closed for
+    /// more than N days. 0 = skip. Default: 60.
+    #[serde(default = "default_reclamation_stale_job_days")]
+    pub stale_job_max_age_days: u64,
+}
+
+impl Default for ReclamationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_interval_secs: 86400,
+            content_blob_max_age_days: 90,
+            expired_memory_retention_days: 0,
+            archived_revision_max_age_days: 180,
+            orphaned_session_max_age_days: 30,
+            stale_job_max_age_days: 60,
+        }
+    }
+}
+
+fn default_reclamation_interval_secs() -> u64 { 86400 }
+fn default_reclamation_content_blob_days() -> u64 { 90 }
+fn default_reclamation_archived_revision_days() -> u64 { 180 }
+fn default_reclamation_orphaned_session_days() -> u64 { 30 }
+fn default_reclamation_stale_job_days() -> u64 { 60 }
 
 /// Configuration for the response validation gate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1663,6 +1749,7 @@ impl Default for GatewayConfig {
             evidence_mode: default_evidence_mode(),
             digest_agent: DigestAgentConfig::default(),
             retention: RetentionConfig::default(),
+            reclamation: ReclamationConfig::default(),
             response_validation: ResponseValidationConfig::default(),
             sandbox: SandboxConfig::default(),
             max_session_turns: default_max_session_turns(),

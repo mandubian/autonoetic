@@ -1583,6 +1583,7 @@ impl NativeTool for SandboxExecTool {
                                 summary: summary.clone(),
                                 approval_ref: None,
                                 pre_validated: false,
+                                turn_id: None,
                             },
                         )?;
                         match gate_result {
@@ -1950,6 +1951,7 @@ impl NativeTool for SandboxExecTool {
                                         summary: summary.clone(),
                                         approval_ref: None,
                                         pre_validated: false,
+                                turn_id: None,
                                     },
                                 )?;
                                 match gate_result {

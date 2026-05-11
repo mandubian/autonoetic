@@ -20,13 +20,15 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| dirs_or_default().join("config.yaml"));
 
     // `tracing_subscriber::fmt` defaults to stdout; the chat TUI also uses stdout (ratatui), so
-    // INFO lines (e.g. gateway `approval` events) corrupt the alternate screen. Chat therefore
-    // logs only to a rolling file under {agents_dir}/.gateway/logs/. Other commands log to stderr.
+    // INFO lines (e.g. gateway events) corrupt the alternate screen. `chat` and `run` therefore
+    // log only to a rolling file under {agents_dir}/.gateway/logs/. `gateway start` still mirrors
+    // to stderr (daemon/long-running server). Other commands log to stderr.
     let is_gateway_start = matches!(
         &cli.command,
         Commands::Gateway(args) if matches!(args.command, cli::common::GatewayCommands::Start { .. })
     );
     let is_chat = matches!(&cli.command, Commands::Chat(_));
+    let is_run = matches!(&cli.command, Commands::Run(_));
 
     if is_gateway_start {
         let config = autonoetic_gateway::config::load_config(&config_path)?;
@@ -54,14 +56,19 @@ async fn main() -> anyhow::Result<()> {
         // Keep the guard alive for the process lifetime
         // (it gets dropped when main returns, which flushes remaining logs)
         std::mem::forget(_guard);
-    } else if is_chat {
+    } else if is_chat || is_run {
         let config = autonoetic_gateway::config::load_config(&config_path)?;
         let log_dir = config.agents_dir.join(".gateway").join("logs");
         std::fs::create_dir_all(&log_dir)?;
+        let filename_prefix = if is_run {
+            "run"
+        } else {
+            "chat-cli"
+        };
         let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
             .max_log_files(5)
-            .filename_prefix("chat-cli")
+            .filename_prefix(filename_prefix)
             .filename_suffix("log")
             .build(&log_dir)
             .map_err(|e| anyhow::anyhow!("Failed to create log appender: {}", e))?;
@@ -178,8 +185,11 @@ async fn main() -> anyhow::Result<()> {
             cli::common::AgentCommands::List => {
                 cli::agent::handle_agent_list(&config_path).await?;
             }
-            cli::common::AgentCommands::Bootstrap { from, overwrite } => {
+            cli::common::AgentCommands::Bootstrap { from, overwrite, refresh_models } => {
                 cli::agent::handle_agent_bootstrap(&config_path, from.as_deref(), *overwrite)?;
+                if *refresh_models {
+                    cli::run::refresh_models(&config_path).await?;
+                }
             }
             cli::common::AgentCommands::Alias { command } => {
                 cli::agent::handle_agent_alias(&config_path, command)?;

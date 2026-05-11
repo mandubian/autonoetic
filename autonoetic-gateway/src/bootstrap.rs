@@ -245,7 +245,16 @@ fn bootstrap_agent_inner(
         None,
     )?;
 
+    update_latest_symlink(gateway_dir, agent_id, &revision_id);
+
     Ok(true)
+}
+
+pub fn update_latest_symlink(gateway_dir: &Path, agent_id: &str, revision_id: &str) {
+    let agent_rev_dir = gateway_dir.join("revisions").join("agents").join(agent_id);
+    let latest_link = agent_rev_dir.join("latest");
+    let _ = std::fs::remove_file(&latest_link);
+    let _ = std::os::unix::fs::symlink(revision_id, &latest_link);
 }
 
 fn collect_files(base: &Path, current: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {

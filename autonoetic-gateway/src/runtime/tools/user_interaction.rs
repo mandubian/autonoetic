@@ -119,9 +119,8 @@ impl NativeTool for UserAskTool {
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
-        use autonoetic_types::background::{
-            UserInteraction, UserInteractionKind, UserInteractionOption,
-        };
+        use autonoetic_types::background::UserInteractionOption;
+        use crate::runtime::human_gate::{GateKind, GateRequest, GateResult, GateService};
 
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -180,38 +179,24 @@ impl NativeTool for UserAskTool {
             let pending_approvals = store
                 .get_pending_approvals_for_root(&root_session_id)
                 .unwrap_or_default();
-            let session_blocking_approvals: Vec<_> = pending_approvals
-                .iter()
-                .filter(|r| {
-                    !matches!(
-                        r.action,
-                        autonoetic_types::background::ScheduledAction::SandboxExec { .. }
-                    )
-                })
-                .collect();
-            if !session_blocking_approvals.is_empty() {
+            let pending_interactions = store
+                .get_pending_interactions_for_root_session(&root_session_id)
+                .unwrap_or_default();
+            if !pending_approvals.is_empty() || !pending_interactions.is_empty() {
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "conflict",
-                    "message": "user.ask is not available while approvals are pending. Use workflow.wait to handle pending approvals.",
-                    "repair_hint": "Resolve or wait for pending approvals, then retry user.ask.",
-                    "error": "user.ask is not available while approvals are pending. Use workflow.wait to handle pending approvals."
+                    "message": "user.ask is not available while gates are pending (approvals, interactions, or escalations). Resolve pending gates before retrying.",
+                    "repair_hint": "Resolve or wait for pending gates, then retry user.ask.",
+                    "error": "user.ask is not available while gates are pending. Resolve pending gates before retrying."
                 }).to_string());
             }
         }
 
-        let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-
-        let kind = match args.kind.as_str() {
-            "decision" => UserInteractionKind::Decision,
-            "proposal" => UserInteractionKind::Proposal,
-            "confirmation" => UserInteractionKind::Confirmation,
-            _ => UserInteractionKind::Clarification,
-        };
-        let kind_str = match kind {
-            UserInteractionKind::Decision => "decision",
-            UserInteractionKind::Proposal => "proposal",
-            UserInteractionKind::Confirmation => "confirmation",
+        let kind_str = match args.kind.as_str() {
+            "decision" => "decision",
+            "proposal" => "proposal",
+            "confirmation" => "confirmation",
             _ => "clarification",
         };
 
@@ -227,120 +212,124 @@ impl NativeTool for UserAskTool {
             })
             .collect();
 
-        let now = chrono::Utc::now().to_rfc3339();
-
-        let (workflow_id, task_id, checkpoint_turn_id) = match _run_context {
-            Some(ctx) => (
-                ctx.workflow_id.clone(),
-                ctx.task_id.clone(),
-                turn_id.map(|t| t.to_string()),
-            ),
-            None => (None, None, turn_id.map(|t| t.to_string())),
-        };
-
-        let interaction = UserInteraction {
-            interaction_id: interaction_id.clone(),
-            session_id: sid.to_string(),
-            root_session_id,
-            agent_id: _manifest.agent.id.clone(),
-            turn_id: turn_id.unwrap_or("unknown").to_string(),
-            kind,
-            question: args.question,
-            context: args.context,
-            options,
-            allow_freeform: args.allow_freeform,
-            status: UserInteractionStatus::Pending,
-            answer_option_id: None,
-            answer_text: None,
-            answered_by: None,
-            created_at: now,
-            answered_at: None,
-            expires_at: None,
-            workflow_id,
-            task_id,
-            checkpoint_turn_id,
-        };
-
-        if let Some(store) = gateway_store {
-            store.create_user_interaction(&interaction)?;
-            tracing::info!(
-                target: "user_interaction",
-                interaction_id = %interaction_id,
-                session_id = %sid,
-                "User interaction created; agent will suspend"
-            );
-            if let Some(ctx) = _run_context {
-                if let Some(w) = &ctx.live_digest {
-                    let opts_summary = if interaction.options.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            interaction
-                                .options
-                                .iter()
-                                .map(|o| format!("{}: {}", o.id, o.label))
-                                .collect::<Vec<_>>()
-                                .join("; "),
-                        )
-                    };
-                    if let Ok(mut g) = w.lock() {
-                        let _ = g.record_user_ask_pending(
-                            &interaction.question,
-                            opts_summary.as_deref(),
-                        );
-                    }
-                }
-                if let Some(w) = &ctx.live_report {
-                    if let Ok(mut g) = w.lock() {
-                        let _ = g.record_interaction_pending(
-                            &interaction_id,
-                            kind_str,
-                            &interaction.question,
-                        );
-                    }
-                }
-            }
-            if let Some(ctx) = _run_context {
-                let _ = store.create_live_digest_event(
-                    &crate::scheduler::gateway_store::LiveDigestEventRecord {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        root_session_id: ctx.root_session_id.clone(),
-                        source_session_id: ctx.session_id.clone(),
-                        turn_id: turn_id.map(|s| s.to_string()),
-                        source_agent_id: Some(_manifest.agent.id.clone()),
-                        source_node_id: std::env::var("AUTONOETIC_NODE_ID")
-                            .unwrap_or_else(|_| "gateway".to_string()),
-                        event_type: "user.ask.pending".to_string(),
-                        payload: Some(
-                            serde_json::json!({
-                                "interaction_id": interaction_id.clone(),
-                                "question": crate::log_redaction::redact_text_for_logs(&interaction.question),
-                                "options_count": interaction.options.len(),
-                            })
-                            .to_string(),
-                        ),
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                    },
-                );
-            }
+        let question_for_side_effects = args.question.clone();
+        let opts_summary = if options.is_empty() {
+            None
         } else {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "resource",
-                "message": "Gateway store not available; user.ask requires persistent store",
-                "repair_hint": "Configure GatewayStore for this runtime before calling user.ask.",
-                "error": "Gateway store not available; user.ask requires persistent store"
-            })
-            .to_string());
-        }
+            Some(
+                options
+                    .iter()
+                    .map(|o| format!("{}: {}", o.id, o.label))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        };
+        let options_count = options.len();
 
-        serde_json::to_string(&serde_json::json!({
-            "ok": true,
-            "interaction_required": true,
-            "interaction_id": interaction_id,
-            "status": "awaiting_user"
-        }))
-        .map_err(Into::into)
+        let store = match gateway_store {
+            Some(ref s) => s.clone(),
+            None => {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "resource",
+                    "message": "Gateway store not available; user.ask requires persistent store",
+                    "repair_hint": "Configure GatewayStore for this runtime before calling user.ask.",
+                    "error": "Gateway store not available; user.ask requires persistent store"
+                })
+                .to_string());
+            }
+        };
+
+        let gate = GateService::new(store.clone());
+        let gate_result = gate.check(GateRequest {
+            kind: GateKind::UserInput {
+                question: args.question,
+                kind: args.kind,
+                options: if options.is_empty() {
+                    None
+                } else {
+                    Some(options)
+                },
+                allow_freeform: args.allow_freeform,
+                context: args.context,
+            },
+            manifest: _manifest,
+            session_id: Some(sid),
+            run_context: _run_context,
+            config: _config,
+            reason: "user question".to_string(),
+            summary: "user question".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            turn_id,
+        })?;
+
+        match gate_result {
+            GateResult::AlreadyPending { gate_id, .. } => {
+                Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "conflict",
+                    "message": "A user interaction is already pending for this session.",
+                    "repair_hint": "Wait for the existing interaction to be answered, then retry.",
+                    "error": "A user interaction is already pending for this session.",
+                    "interaction_id": gate_id,
+                })
+                .to_string())
+            }
+            GateResult::Suspended {
+                gate_id,
+                response_json,
+                ..
+            } => {
+                if let Some(ctx) = _run_context {
+                    if let Some(w) = &ctx.live_digest {
+                        if let Ok(mut g) = w.lock() {
+                            let _ = g.record_user_ask_pending(
+                                &question_for_side_effects,
+                                opts_summary.as_deref(),
+                            );
+                        }
+                    }
+                    if let Some(w) = &ctx.live_report {
+                        if let Ok(mut g) = w.lock() {
+                            let _ = g.record_interaction_pending(
+                                &gate_id,
+                                kind_str,
+                                &question_for_side_effects,
+                            );
+                        }
+                    }
+                    let _ = store.create_live_digest_event(
+                        &crate::scheduler::gateway_store::LiveDigestEventRecord {
+                            event_id: uuid::Uuid::new_v4().to_string(),
+                            root_session_id: ctx.root_session_id.clone(),
+                            source_session_id: ctx.session_id.clone(),
+                            turn_id: turn_id.map(|s| s.to_string()),
+                            source_agent_id: Some(_manifest.agent.id.clone()),
+                            source_node_id: std::env::var("AUTONOETIC_NODE_ID")
+                                .unwrap_or_else(|_| "gateway".to_string()),
+                            event_type: "user.ask.pending".to_string(),
+                            payload: Some(
+                                serde_json::json!({
+                                    "interaction_id": gate_id,
+                                    "question": crate::log_redaction::redact_text_for_logs(&question_for_side_effects),
+                                    "options_count": options_count,
+                                })
+                                .to_string(),
+                            ),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    );
+                }
+                Ok(response_json)
+            }
+            _ => Ok(serde_json::json!({
+                "ok": false,
+                "error_type": "unexpected",
+                "message": "Unexpected gate result for UserInput",
+            })
+            .to_string()),
+        }
     }
 }
 

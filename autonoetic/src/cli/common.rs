@@ -171,6 +171,15 @@ pub struct RunArgs {
     /// Stable conversation/session identifier.
     #[arg(long)]
     pub session_id: Option<String>,
+    /// Re-copy bundled reference agents from the Autonoetic repo and re-bootstrap gateway revisions
+    /// (equivalent to `autonoetic agent bootstrap --overwrite`). Use after upgrading the binary or when
+    /// reference bundles changed (e.g. new `runtime.lock` or manifest fields).
+    #[arg(long)]
+    pub overwrite: bool,
+    /// Interactively select a new provider/model, update config, patch agent
+    /// SKILL.md files, and create new revisions. Old revisions are preserved.
+    #[arg(long)]
+    pub refresh_models: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +538,10 @@ pub enum AgentCommands {
         /// Overwrite existing target agent directories
         #[arg(long)]
         overwrite: bool,
+        /// Interactively select a new provider/model, update config, patch agent
+        /// SKILL.md files, and create new revisions. Old revisions are preserved.
+        #[arg(long)]
+        refresh_models: bool,
     },
     /// Inspect mutable alias bindings and active revisions
     Alias {
