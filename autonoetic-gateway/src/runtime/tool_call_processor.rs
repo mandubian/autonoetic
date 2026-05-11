@@ -389,6 +389,7 @@ impl<'a> ToolCallProcessor<'a> {
             "tool_id": tc.id,
             "error_type": error.error_type,
             "message": error.message,
+            "reason": error.message,
             "repair_hint": error.repair_hint,
             "enforced_rules": error.enforced_rules,
             "recoverable": error.is_recoverable(),
