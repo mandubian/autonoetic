@@ -105,8 +105,8 @@ fn r_2_14_user_ask_refused_when_pending_approval_exists() -> anyhow::Result<()> 
     assert_eq!(response["error_type"], "conflict");
     let message = response["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("pending approvals"),
-        "expected pending-approval block message, got: {message}"
+        message.contains("gates are pending"),
+        "expected pending-gates block message, got: {message}"
     );
 
     Ok(())

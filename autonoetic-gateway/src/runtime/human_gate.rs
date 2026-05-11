@@ -43,6 +43,7 @@ pub enum GateKind {
         kind: String,
         options: Option<Vec<UserInteractionOption>>,
         allow_freeform: bool,
+        context: Option<String>,
     },
     /// Operator escalation (guidance needed).
     Escalation {
@@ -74,6 +75,8 @@ pub struct GateRequest<'a> {
     /// Tool-specific cache hit (e.g. `ApprovedExecCache`).  When `true` the
     /// gate short-circuits to `GateResult::Cleared`.
     pub pre_validated: bool,
+    /// Current turn ID (used for UserInput checkpoint tracking).
+    pub turn_id: Option<&'a str>,
 }
 
 /// Unified result returned by `GateService::check`.
@@ -286,6 +289,7 @@ impl GateService {
             ref kind,
             ref options,
             ref allow_freeform,
+            ref context,
         } = req.kind
         else {
             unreachable!()
@@ -314,10 +318,10 @@ impl GateService {
             session_id: sid.to_string(),
             root_session_id: root_session_id.unwrap_or_default(),
             agent_id: req.manifest.agent.id.clone(),
-            turn_id: String::new(),
+            turn_id: req.turn_id.unwrap_or("unknown").to_string(),
             kind: parse_interaction_kind(kind),
             question: question.clone(),
-            context: None,
+            context: context.clone(),
             options: options.clone().unwrap_or_default(),
             allow_freeform: *allow_freeform,
             status: UserInteractionStatus::Pending,
@@ -329,7 +333,7 @@ impl GateService {
             expires_at: None,
             workflow_id,
             task_id,
-            checkpoint_turn_id: None,
+            checkpoint_turn_id: req.turn_id.map(|t| t.to_string()),
         };
 
         self.store.create_user_interaction(&interaction)?;
@@ -945,6 +949,7 @@ mod tests {
             summary: "test summary".to_string(),
             approval_ref: None,
             pre_validated: true,
+            turn_id: None,
         };
 
         let result = svc.check(req)?;
@@ -977,6 +982,7 @@ mod tests {
             summary: "Fetch API from localhost".to_string(),
             approval_ref: None,
             pre_validated: false,
+            turn_id: None,
         };
 
         let result = svc.check(req)?;
@@ -1021,6 +1027,7 @@ mod tests {
             summary: "first".to_string(),
             approval_ref: None,
             pre_validated: false,
+            turn_id: None,
         };
         let result1 = svc.check(req1)?;
         let gate_id_1 = match &result1 {
@@ -1043,6 +1050,7 @@ mod tests {
             summary: "second".to_string(),
             approval_ref: None,
             pre_validated: false,
+            turn_id: None,
         };
         let result2 = svc.check(req2)?;
         assert!(result2.enforced_rules().contains(&"R-2.3"));
@@ -1106,6 +1114,7 @@ mod tests {
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
+            turn_id: None,
         };
         let result = svc.check(req)?;
         assert!(result.enforced_rules().contains(&"R-2.6"));
@@ -1168,6 +1177,7 @@ mod tests {
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
+            turn_id: None,
         };
         let result = svc.check(req)?;
         // Should NOT clear — wrong agent.
@@ -1218,6 +1228,7 @@ mod tests {
             summary: "Fetch data".to_string(),
             approval_ref: None,
             pre_validated: false,
+            turn_id: None,
         };
 
         let result = svc.check(req)?;
