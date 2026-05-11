@@ -183,6 +183,12 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
 
     let config = autonoetic_gateway::config::load_config(config_path)?;
 
+    let resolved = super::agent::resolve_llm_config(&config, Some("planner"), None, None, None);
+    eprintln!(
+        "  Resolved preset: provider={}, model={}, base_url={:?}",
+        resolved.provider, resolved.model, resolved.base_url
+    );
+
     let mut patched = 0usize;
     let mut unchanged = 0usize;
     for entry in std::fs::read_dir(&config.agents_dir)? {
