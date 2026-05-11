@@ -2581,9 +2581,18 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         if !before.is_empty() {
             spans.push(Span::raw(before.to_string()));
         }
-        spans.push(Span::styled(" ", Style::default().bg(Color::White)));
-        if !after.is_empty() {
-            spans.push(Span::raw(after.to_string()));
+        if after.is_empty() {
+            spans.push(Span::styled(" ", Style::default().bg(Color::White)));
+        } else {
+            let c = after.chars().next().unwrap();
+            let c_len = c.len_utf8();
+            spans.push(Span::styled(
+                c.to_string(),
+                Style::default().fg(Color::Black).bg(Color::White),
+            ));
+            if c_len < after.len() {
+                spans.push(Span::raw(after[c_len..].to_string()));
+            }
         }
     }
 

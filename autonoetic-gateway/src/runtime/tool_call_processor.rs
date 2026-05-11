@@ -348,10 +348,16 @@ impl<'a> ToolCallProcessor<'a> {
                 self.run_context.as_ref(),
             )?
         } else {
+            let agent_like_hint = if tc.name.contains('.') {
+                " This looks like an agent ID, not a tool name. Use agent_spawn with {\"agent_id\": \"...\", \"message\": \"...\"}."
+            } else {
+                ""
+            };
             return Err(anyhow::Error::from(
                  autonoetic_types::tool_error::tagged::Tagged::resource(anyhow::anyhow!(
-                     "Unknown tool '{}'. Verify the tool name against the available tools list and retry with the correct name.",
-                     tc.name
+                     "Unknown tool '{}'. Verify the tool name against the available tools list and retry with the correct name.{}",
+                     tc.name,
+                     agent_like_hint
                  )),
              ));
         };
