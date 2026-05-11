@@ -4665,20 +4665,32 @@ fn copy_selection_to_clipboard(app: &mut App) {
         }
         let line = &lines[row];
 
+        let col_to_byte = |col: usize| -> usize {
+            let mut col_pos = 0usize;
+            for (i, c) in line.char_indices() {
+                let c_w = UnicodeWidthStr::width(c.to_string().as_str());
+                if col_pos + c_w > col {
+                    return i;
+                }
+                col_pos += c_w;
+            }
+            line.len()
+        };
+
         if row == top_row && row == bot_row {
             // Single line selection
-            let col_s = top_col.min(line.len());
-            let col_e = bot_col.min(line.len());
+            let col_s = col_to_byte(top_col);
+            let col_e = col_to_byte(bot_col);
             if col_e > col_s {
                 selected.push(line[col_s..col_e].to_string());
             }
         } else if row == top_row {
             // First line of multi-line selection
-            let col_s = top_col.min(line.len());
+            let col_s = col_to_byte(top_col);
             selected.push(line[col_s..].to_string());
         } else if row == bot_row {
             // Last line of multi-line selection
-            let col_e = bot_col.min(line.len());
+            let col_e = col_to_byte(bot_col);
             selected.push(line[..col_e].to_string());
         } else {
             // Middle line
